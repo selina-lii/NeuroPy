@@ -1,3 +1,4 @@
+import typing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -167,7 +168,7 @@ class Hswa:
             ax1.fill_between([start, end], [-6, -6], [45, 45], alpha=0.3)
             ax1.axis("off")
 
-        deltabandlfp = filt.filter_delta(lfp, ax=0)
+        deltabandlfp = signal_process.filter_sig.delta(lfp, ax=0)
         deltabandlfp = deltabandlfp + np.linspace(40, 0, lfp.shape[1])
         ax2 = fig.add_subplot(gs[1, :])
         ax2.plot(eegt, deltabandlfp, "#444040", linewidth=0.8)
@@ -296,7 +297,10 @@ class Ripple:
             zscsignal.append(zsc_chan)
 
             broadband = signal_process.filter_sig.bandpass(eeg[i, :], lf=2, hf=50)
-            sharpWv_sig += stats.zscore(np.abs(signal_process.hilbertfast(broadband)))
+            zsc_broadband = stats.zscore(np.abs(signal_process.hilbertfast(broadband)))
+            sharpWv_sig += signal_process.filter_sig.bandpass(
+                zsc_broadband, lf=2, hf=50
+            )
         zscsignal = np.asarray(zscsignal)
 
         # ---------setting noisy period zero --------
@@ -408,13 +412,12 @@ class Ripple:
         np.save(self.files.ripples, ripples)
         print(f"{self.files.ripples} created")
         self._load()
+        return ripples
 
     def export2Neuroscope(self):
         with self.files.neuroscope.open("w") as a:
             for event in self.events.itertuples():
-                a.write(
-                    f"{event.start*1000} start\n{event.peakSharpWave*1000} peakSW\n{event.end*1000} end\n"
-                )
+                a.write(f"{event.start*1000} start\n{event.end*1000} end\n")
 
     def plot(self):
         """Gives a comprehensive view of the detection process with some statistics and examples"""
@@ -438,7 +441,7 @@ class Ripple:
         nripples = len(peakpower)
 
         fig = plt.figure(1, figsize=(6, 10))
-        gs = GridSpec(3, 10, figure=fig)
+        gs = gridspec.GridSpec(3, 10, figure=fig)
         fig.subplots_adjust(hspace=0.5)
 
         ripple_to_plot = list(range(5)) + list(range(nripples - 5, nripples))
@@ -580,7 +583,7 @@ class Spindle:
         hilbertfast = lambda x: sg.hilbert(x, fftpack.next_fast_len(len(x)))[: len(x)]
         avgSpindle = np.zeros(lfpCA1.shape[1])
         for i in range(lfpCA1.shape[1]):
-            spindleband = filt.filter_spindle(lfpCA1[:, i])
+            spindleband = signal_process.filter_sig.spindle(lfpCA1[:, i])
             amplitude_envelope = np.abs(hilbertfast(spindleband))
             avgSpindle[i] = np.mean(amplitude_envelope)
 
@@ -759,7 +762,7 @@ class Spindle:
         nspindles = len(peakpower)
 
         fig = plt.figure(1, figsize=(6, 10))
-        gs = GridSpec(3, 10, figure=fig)
+        gs = gridspec.GridSpec(3, 10, figure=fig)
         fig.subplots_adjust(hspace=0.5)
 
         spindles_to_plot = list(range(5)) + list(range(nspindles - 5, nspindles))
@@ -768,7 +771,7 @@ class Spindle:
             start = int(frames[spindle, 0])
             end = int(frames[spindle, 1])
             lfp = stats.zscore(eegdata[start:end, :])
-            ripplebandlfp = filt.filter_spindle(lfp, ax=0)
+            ripplebandlfp = signal_process.filter_sig.spindle(lfp, ax=0)
             # lfp = (lfp.T - np.median(lfp, axis=1)).T
             lfp = lfp + np.linspace(40, 0, lfp.shape[1])
             ripplebandlfp = ripplebandlfp + np.linspace(40, 0, lfp.shape[1])
@@ -1156,7 +1159,6 @@ class Theta:
         csd : dataclass,
             a dataclass return from signal_process module
         """
-        eegSrate = self._obj.lfpSrate
         lfp_period = self._obj.geteeg(chans=chans, timeRange=period)
         lfp_period = signal_process.filter_sig.bandpass(lfp_period, lf=5, hf=12)
 
@@ -1181,9 +1183,7 @@ class Theta:
 
         _, ycoord = self._obj.probemap.get(chans=chans)
 
-        csd = signal_process.Csd(
-            lfp=avg_theta, coords=ycoord, chan_label=chans, fs=eegSrate
-        )
+        csd = signal_process.Csd(lfp=avg_theta, coords=ycoord, chan_label=chans)
         csd.classic()
 
         return csd

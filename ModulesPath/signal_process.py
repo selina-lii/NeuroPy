@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import matplotlib.pyplot as plt
-from matplotlib.pyplot import axis
 import numpy as np
 import scipy.ndimage as filtSig
 import scipy.signal as sg
@@ -531,20 +530,19 @@ class Csd:
     lfp: np.array
     coords: np.array
     chan_label: np.array = None
-    fs: int = 1250
 
     def classic(self):
         coords = self.coords.copy()
-        nframes = self.lfp.shape[1]
+        time = np.linspace(0, 1, self.lfp.shape[1])
         csd = -(self.lfp[:-2, :] - 2 * self.lfp[1:-1, :] + self.lfp[2:, :])
-        self.csdmap = stats.zscore(csd, axis=None)
-        self.csd_coords = coords[1:-1]
-        self.time = np.linspace(-1, 1, nframes) * (nframes / self.fs)
+        self.csdmap = csd
+        self.coords = coords[1:-1]
+        self.time = time
 
     def icsd(self, lfp, coords):
         pass
 
-    def plot(self, ax=None, smooth=3, plotLFP=False, **kwargs):
+    def plot(self, ax=None, smooth=3, **kwargs):
 
         if smooth is not None:
             csdmap = gaussian_filter(self.csdmap, sigma=smooth)
@@ -557,16 +555,31 @@ class Csd:
             _, gs = figure.draw(grid=[1, 1])
             ax = plt.subplot(gs[0])
 
-        ax.pcolormesh(self.time, self.csd_coords, csdmap, **kwargs)
+        ax.pcolormesh(
+            self.time,
+            np.arange(len(self.coords) + 1, 1, -1),
+            stats.zscore(csdmap, axis=None),
+            **kwargs,
+        )
         ax.set_title("Current source density map")
         ax.set_ylabel("y Coordinates")
-        ax.set_xlabel("Time (s)")
-        ax.spines["left"].set_visible(False)
-        ax.tick_params(axis="y", which="both", length=0)
+        ax.set_xlabel("Normalized time")
+        ax.set_ylim([0, len(self.coords) + 2])
 
-        if plotLFP:
-            lfp = stats.zscore(self.lfp, axis=None) * np.mean(np.diff(self.coords)) / 2
-            plt.plot(self.time, lfp.T + self.coords, "gray")
+        lfp = self.lfp[1:-1] - np.min(self.lfp[1:-1])
+        lfp = (lfp / np.max(lfp)) * 60
+        # lfp = np.flipud(lfp)
+        # axlfp = axmap.twinx()
+        # axmap.plot(self.time, lfp.T + self.coords, "k", lw=1)
+        # axmap.set_ylim(bottom=0)
+
+        # if self.chan_label is not None:
+        #     ax[1].scatter(np.ones(len(self.chan_label[1:-1])), self.coords)
+
+        #     for i, txt in enumerate(self.chan_label[1:-1]):
+        #         ax[1].annotate(str(txt), (1, self.coords[i]))
+
+        #     ax[1].axis("off")
 
 
 def mtspect(signal, nperseg, noverlap, fs=1250):

@@ -48,10 +48,10 @@ class Recinfo:
         self.session = sessionname(filePrefix)
         self.files = files(filePrefix)
         self.recfiles = recfiles(filePrefix)
+        self.probemap = Probemap(self)
 
         if self.files.basics.is_file():
             self._intialize()
-        self.probemap = Probemap(self)
 
     def _intialize(self):
 
@@ -67,49 +67,42 @@ class Recinfo:
 
         self.goodchans = np.setdiff1d(self.channels, self.badchans, assume_unique=True)
         self.goodchangrp = [
-            list(np.setdiff1d(_, self.badchans, assume_unique=True).astype(int))
-            for _ in self.channelgroups
+            list(np.setdiff1d(_, self.badchans).astype(int)) for _ in self.channelgroups
         ]
 
-    @property
-    def metadata(self):
-        metadatafile = Path(str(self.files.filePrefix) + "_metadata.csv")
-        if metadatafile.is_file():
-            metadata = pd.read_csv(metadatafile)
-
-        else:
-            val = input("Do you want to create metadata, Yes or No: ")
-            if val in ["Y", "y", "yes", "Yes", "YES"]:
-
-                def show_entry_fields():
-                    print("First Name: %s\nLast Name: %s" % (e1.get(), e2.get()))
-
-                master = tk.Tk()
-                tk.Label(master, text="First Name").grid(row=0)
-                tk.Label(master, text="Last Name").grid(row=1)
-
-                e1 = tk.Entry(master)
-                e2 = tk.Entry(master)
-
-                e1.grid(row=0, column=1)
-                e2.grid(row=1, column=1)
-
-                tk.Button(master, text="Quit", command=master.quit).grid(
-                    row=3, column=0, sticky=tk.W, pady=4
-                )
-                tk.Button(master, text="Show", command=show_entry_fields).grid(
-                    row=3, column=1, sticky=tk.W, pady=4
-                )
-
-                tk.mainloop()
-
-        return metadata
-
-    def __str__(self) -> str:
-        return f"Name: {self.session.name} with {self.nChans} channels"
-
-    # def __repr__(self) -> str:
-    #     return "I am an animal"
+    # @property
+    # def metadata(self):
+    #     metadatafile = Path(str(self.files.filePrefix) + "_metadata.csv")
+    #     if metadatafile.is_file():
+    #         metadata = pd.read_csv(metadatafile)
+    #
+    #     else:
+    #         val = input("Do you want to create metadata, Yes or No: ")
+    #         if val in ["Y", "y", "yes", "Yes", "YES"]:
+    #
+    #             def show_entry_fields():
+    #                 print("First Name: %s\nLast Name: %s" % (e1.get(), e2.get()))
+    #
+    #             master = tk.Tk()
+    #             tk.Label(master, text="First Name").grid(row=0)
+    #             tk.Label(master, text="Last Name").grid(row=1)
+    #
+    #             e1 = tk.Entry(master)
+    #             e2 = tk.Entry(master)
+    #
+    #             e1.grid(row=0, column=1)
+    #             e2.grid(row=1, column=1)
+    #
+    #             tk.Button(master, text="Quit", command=master.quit).grid(
+    #                 row=3, column=0, sticky=tk.W, pady=4
+    #             )
+    #             tk.Button(master, text="Show", command=show_entry_fields).grid(
+    #                 row=3, column=1, sticky=tk.W, pady=4
+    #             )
+    #
+    #             tk.mainloop()
+    #
+    #     return metadata
 
     def makerecinfo(self):
         """Reads recording parameter from xml file"""
@@ -211,14 +204,31 @@ class files:
     def __init__(self, filePrefix):
         self.filePrefix = filePrefix
         self.probe = filePrefix.with_suffix(".probe.npy")
+        self.spikes = Path(str(filePrefix) + "_spikes.npy")
         self.basics = Path(str(filePrefix) + "_basics.npy")
         self.position = Path(str(filePrefix) + "_position.npy")
         self.epochs = Path(str(filePrefix) + "_epochs.npy")
         self.spindle_evt = Path(str(filePrefix) + "_spindles.npy")
         self.spindlelfp = Path(str(filePrefix) + "_BestSpindleChan.npy")
+        self.theta_evt = Path(str(filePrefix) + "_thetaevents.npy")
+        self.sessionepoch = Path(str(filePrefix) + "_epochs.npy")
         self.hwsa_ripple = Path(str(filePrefix) + "_hswa_ripple.npy")
         self.slow_wave = Path(str(filePrefix) + "_hswa.npy")
+        self.corr_emg = Path(str(filePrefix) + "_emg.npy")
         self.spectrogram = Path(str(filePrefix) + "_sxx.npy")
+        self.stateparams = Path(str(filePrefix) + "_stateparams.pkl")
+        self.states = Path(str(filePrefix) + "_states.pkl")
+
+
+# TODO auto file loading functionality
+class loadfile:
+    def __init__(self, filename):
+        self.name = filename
+
+    def load(self):
+
+        if self.name.suffix == ".pkl":
+            pd.read_pickle(self.name)
 
 
 class recfiles:
@@ -249,9 +259,6 @@ class Probemap:
             data = np.load(self._obj.files.probe, allow_pickle=True).item()
             self.x = data["x"]
             self.y = data["y"]
-            self.coords = pd.DataFrame(
-                {"chan": self._obj.channels, "x": self.x, "y": self.y}
-            )
 
     def create(self, probetype="diagbio"):
         changroup = self._obj.channelgroups
@@ -298,10 +305,14 @@ class Probemap:
 
         if isinstance(chans, int):
             chans = [chans]
+        channels_indx = [
+            _ for _ in range(self._obj.nChans) if self._obj.channels[_] in chans
+        ]
 
-        reqchans = self.coords[self.coords.chan.isin(chans)]
+        xcoord = [self.x[_] for _ in channels_indx]
+        ycoord = [self.y[_] for _ in channels_indx]
 
-        return reqchans.x.values, reqchans.y.values
+        return xcoord, ycoord
 
     def plot(self, chans=None, ax=None, colors=None):
 

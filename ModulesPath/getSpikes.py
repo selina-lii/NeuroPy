@@ -43,6 +43,7 @@ class Spikes:
 
         self.stability = Stability(basepath)
         # self.dynamics = firingDynamics(basepath)
+
         filePrefix = self._obj.files.filePrefix
 
         @dataclass
@@ -52,7 +53,7 @@ class Spikes:
 
         self.files = files()
 
-        filename = self.files.spikes
+        filename = self._obj.files.spikes
         if filename.is_file():
             spikes = np.load(filename, allow_pickle=True).item()
             self.times = spikes["times"]
@@ -268,8 +269,13 @@ class Spikes:
             spktime = np.load(clufolder / "spike_times.npy")
             cluID = np.load(clufolder / "spike_clusters.npy")
             cluinfo = pd.read_csv(clufolder / "cluster_info.tsv", delimiter="\t")
-            goodCellsID = cluinfo.id[cluinfo["q"] < 10].tolist()
-            info = cluinfo.loc[cluinfo["q"] < 10]
+            if 'q' in cluinfo.keys():
+                goodCellsID = cluinfo.id[cluinfo["q"] < 10].tolist()
+                info = cluinfo.loc[cluinfo["q"] < 10]
+            else:
+                print('No labels q found in phy data - using good for now, be sure to label with :l q n')
+                goodCellsID = cluinfo.id[(cluinfo['group'] == 'good')].tolist()
+                info = cluinfo.loc[(cluinfo['group'] == 'good')]
             peakchan = info["ch"]
             shankID = [
                 sh + 1
