@@ -7,88 +7,32 @@ import linecache
 from datetime import datetime, timedelta
 from pathlib import Path
 from parsePath import Recinfo
-from mathutil import contiguous_regions
-
-
-def getSampleRate(fileName):
-    """Get Sample rate from csv header file - not set at 120Hz"""
-    toprow = pd.read_csv(fileName, nrows=1, header=None)
-    capture_FR = np.asarray(
-        toprow[np.where(toprow == "Capture Frame Rate")[1][0] + 1][0], dtype=float
-    )
-    export_FR = np.asarray(
-        toprow[np.where(toprow == "Export Frame Rate")[1][0] + 1][0], dtype=float
-    )
-
-    if capture_FR != export_FR:
-        print("Careful! capture FR does NOT match export FR. Using export only.")
-
-    return export_FR
-
-
-def getnframes(fileName):
-    """Get nframes from csv header file"""
-    toprow = pd.read_csv(fileName, nrows=1, header=None)
-    nframes_take = np.asarray(
-        toprow[np.where(toprow == "Total Frames in Take")[1][0] + 1][0], dtype=float
-    )
-    nframes_export = np.asarray(
-        toprow[np.where(toprow == "Total Exported Frames")[1][0] + 1][0], dtype=float
-    )
-
-    if nframes_take != nframes_export:
-        print(
-            "CAREFUL! # frames in take does not match # frames exported. Using # frames exported for analysis!"
-        )
-
-    return int(nframes_export)
-
-
-def getunits(fileName):
-    """determine if position data is in centimeters or meters"""
-    toprow = pd.read_csv(fileName, nrows=1, header=None)
-    units = toprow[np.where(toprow == "Length Units")[1][0] + 1][0]
-
-    return units
 
 
 def posfromCSV(fileName):
     """Import position data from OptiTrack CSV file"""
-    posdata = pd.read_csv(fileName, header=[2, 4, 5])
-    x0 = np.asarray(posdata["RigidBody", "Position", "X"])
-    y0 = np.asarray(posdata["RigidBody", "Position", "Y"])
-    z0 = np.asarray(posdata["RigidBody", "Position", "Z"])
-    t = np.asarray(
-        posdata.loc[:, ["Time (Seconds)" in _ for _ in posdata.keys()]]
-    ).reshape(-1)
-
-    xfill, yfill, zfill = interp_missing_pos(x0, y0, z0, t)
-
-    # Now convert to centimeters
-    units = getunits(fileName)
-    if units.lower() == 'centimeters':
-        x, y, z = xfill, yfill, zfill
-    elif units.lower() == 'meters':
-        x, y, z = xfill*100, yfill*100, zfill*100
-    else:
-        raise Exception('position data needs to be exported in either centimeters or meters')
-
-    return x, y, z, t
 
 
-def interp_missing_pos(x, y, z, t):
-    """Interpolate missing data points"""
-    xgood, ygood, zgood = x, y, z
-    idnan = contiguous_regions(np.isnan(x))  # identify missing data points
+def startfromCSV(fileName):
+    """Get start time from OptiTrack CSV file"""
+    toprow = pd.read_csv(fileName, nrows=1, header=None)
+    start_time = toprow[np.where(toprow == 'Capture Start Time')[1][0] + 1][0]
 
-    for ids in idnan:
-        missing_ids = range(ids[0], ids[-1])
-        bracket_ids = ids + [-1, 0]
-        xgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], x[bracket_ids])
-        ygood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], y[bracket_ids])
-        zgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], z[bracket_ids])
+    tbegin = datetime.strptime(start_time, "%Y-%m-%d %H.%M.%S.%f %p")
 
-    return xgood, ygood, zgood
+    return tbegin
+
+
+def SRfromCSV(fileName):
+    toprow = pd.read_csv(fileName, nrows=1, header=None)
+    capture_FR = np.asarray(toprow[np.where(toprow == 'Capture Frame Rate')[1][0] + 1][0], dtype=float)
+    export_FR = np.asarray(toprow[np.where(toprow == 'Export Frame Rate')[1][0] + 1][0], dtype=float)
+
+    if capture_FR != export_FR:
+        print('Careful! capture FR does NOT match export FR. Using export only.')
+
+    return export_FR
+
 
 def posfromFBX(fileName):
     fileName = str(fileName)
@@ -101,7 +45,6 @@ def posfromFBX(fileName):
             m = "".join(line)
 
             if "KeyCount" in m:
-                print('Line 87 break at i = ' + str(i))
                 track_begin = i + 2
                 line_frame = linecache.getline(fileName, i + 2).strip().split(" ")
                 total_frames = int(line_frame[1]) - 1
@@ -133,14 +76,13 @@ def posfromFBX(fileName):
         for line in f:
 
             if "KeyCount" in line:
-                print('Line 119 break at i = ' + str(i))
                 break
-            # else:
-            #     next(f)
+            else:
+                next(f)
 
         pos1 = []
         for i, line in enumerate(f):
-            # print(i)
+            # print(line)
             if len(ypos) > total_frames:
                 break
 
@@ -161,10 +103,10 @@ def posfromFBX(fileName):
         for line in f:
 
             if "KeyCount" in line:
-                print('Line 147 break at i = ' + str(i))
                 break
-            # else:
-            #     next(f)
+            else:
+                next(f)
+
         pos1 = []
 
         for i, line in enumerate(f):
@@ -210,37 +152,26 @@ def getStartTime(fileName):
 
 
 class ExtractPosition:
-    def __init__(self, basepath, tracking_sf=4):
+    # NRK todo: add in function to get sample rate from .csv file
+    tracking_sRate = 120  # position sample rate
+
+    def __init__(self, basepath):
         """initiates position class
 
         Arguments:
             obj {class instance} -- should have the following attributes
-                :param: obj.sessinfo.files.position --> filename for storing the positions
-                :param: tracking_sf: accounts for any mismatch between calibration wand size (125mm) and the size used in OptiTrack.
-                Prior to late 2020, we used a 500mm wand length in Motive (Calibration Box: Wanding->OptiWand->Wand Length)
-                by accident, so the default is 4.
+                obj.sessinfo.files.position --> filename for storing the positions
         """
         if isinstance(basepath, Recinfo):
             self._obj = basepath
         else:
             self._obj = Recinfo(basepath)
 
-        # Sample rate can vary, so grab it from csv header
-        self.tracking_sRate = getSampleRate(
-            sorted((self._obj.basePath / "position").glob("*.csv"))[0]
-        )
-        self.tracking_sf = 4
-
-        self.import_posfile(tracking_sf)
-
-
-    def import_posfile(self, tracking_sf):
         posfile = self._obj.files.position
         if os.path.exists(posfile):
             posInfo = self._load(posfile).item()
-            self.x = posInfo["x"] / tracking_sf
-            self.y = posInfo["y"] / tracking_sf
-            self.z = posInfo["z"] / tracking_sf
+            self.x = posInfo["x"] / 4  # in seconds
+            self.y = posInfo["y"] / 4  # in seconds
             self.t = posInfo["time"]  # in seconds
             self.datetime = posInfo["datetime"]  # in seconds
             self.speed = np.sqrt(np.diff(self.x) ** 2 + np.diff(self.y) ** 2) / (
@@ -251,7 +182,6 @@ class ExtractPosition:
                     "time": self.t[1:],
                     "x": self.x[1:],
                     "y": self.y[1:],
-                    "z": self.z[1:],
                     "speed": self.speed,
                     "datetime": self.datetime[1:],
                 }
@@ -259,7 +189,6 @@ class ExtractPosition:
 
         else:
             print("Position file does not exist....Run .getPosition to generate.")
-
 
     def _load(self, posfile):
         return np.load(posfile, allow_pickle=True)
@@ -269,24 +198,17 @@ class ExtractPosition:
 
     def getPosition(self):
         sRate = self._obj.sampfreq  # .dat file sampling frequency
-        lfpsRate = self._obj.lfpsRate  # .eeg file sampling frequency
         basePath = Path(self._obj.basePath)
-        metadata = self._obj.loadmetadata()
+        metadata = self._obj.metadata
 
         nfiles = metadata.count()["StartTime"]
 
         # ------- collecting timepoints related to .dat file  --------
         data_time = []
         for i, file_time in enumerate(metadata["StartTime"][:nfiles]):
-            # NRK todo: read tbegin directly from OpenEphys experiment xml file.
             tbegin = datetime.strptime(file_time, "%Y-%m-%d_%H-%M-%S")
             nframes = metadata["nFrames"][i]
-            if not np.isnan(nframes):
-                duration = pd.Timedelta(nframes / sRate, unit="sec")
-            else:
-                nframes = self._obj.getNframesEEG
-                duration = pd.Timedelta(nframes / lfpsRate, unit="sec")
-
+            duration = pd.Timedelta(nframes / sRate, unit="sec")
             tend = tbegin + duration
             trange = pd.date_range(
                 start=tbegin,
@@ -329,32 +251,21 @@ class ExtractPosition:
         posfiles = posfiles[filesort_ind]
 
         postime, posx, posy, posz = [], [], [], []
-
         for file in posfiles:
             print(file)
-            tbegin = getStartTime(file)
-            try:  # First try to load everything from CSV directly
-                x, y, z, trelative = posfromCSV(file)
-                assert len(x) > 0  # Make sure you aren't just importing the header, if so engage except below
-                trange = tbegin + pd.to_timedelta(trelative, unit='s')
-                postime.extend(trange)
 
-            except (
-                FileNotFoundError,
-                KeyError,
-                pd.errors.ParserError,
-            ):  # Get data from FBX file if not in CSV
+            fileinfo = pd.read_csv(file, header=None, nrows=1)
+            # required values are in column 11 and 13 of .csv file
+            tbegin = datetime.strptime(fileinfo.iloc[0][11], "%Y-%m-%d %I.%M.%S.%f %p")
+            nframes = fileinfo.iloc[0][13]
+            duration = pd.Timedelta(nframes / self.tracking_sRate, unit="sec")
+            tend = tbegin + duration
+            trange = pd.date_range(start=tbegin, end=tend, periods=nframes)
 
-                # Get time ranges for position files
-                nframes_pos = getnframes(file)
-                duration = pd.Timedelta(nframes_pos / self.tracking_sRate, unit="sec")
-                tend = tbegin + duration
-                trange = pd.date_range(start=tbegin, end=tend, periods=nframes_pos)
+            # NRK todo: add try/except statement to use .csv file if there, otherwise use FBX file.
+            x, y, z = posfromFBX(file.with_suffix(".fbx"))
 
-                # NRK todo: add try/except statement to use .csv file if there, otherwise use FBX file.
-                x, y, z = posfromFBX(file.with_suffix(".fbx"))
-
-                postime.extend(trange)
+            postime.extend(trange)
             posx.extend(x)
             posy.extend(y)
             posz.extend(z)
@@ -368,21 +279,17 @@ class ExtractPosition:
         xdata = np.interp(data_time, postime, posx)
         ydata = np.interp(data_time, postime, posy)
         zdata = np.interp(data_time, postime, posz)
-        time = np.linspace(0, len(xdata) / self.tracking_sRate, len(xdata))
+        time = np.linspace(0, len(xdata) / 120, len(xdata))
 
         posVar = {
             "x": xdata,
             "y": zdata,  # as in optitrack the z coordinates gives the y information
-            "z": ydata,  # keep this data in case you are interested in rearing activity...
             "time": time,
             "datetime": data_time,
             "trackingsRate": self.tracking_sRate,
         }
 
         np.save(self._obj.files.position, posVar)
-
-        # Low load this immediately into existence
-        self.import_posfile(self.tracking_sf)
 
     def plot(self):
 
@@ -401,8 +308,3 @@ class ExtractPosition:
         with filename.open("w") as f:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
-
-if __name__ == "__main__":
-    xf, yf, zf = posfromFBX(
-        '/data/Working/Opto/Jackie671/Jackie_3well_Day4/Jackie_UTRACK_combined/position/Take 2020-10-08 11.33.02 AM.fbx')
-pass
