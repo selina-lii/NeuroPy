@@ -40,6 +40,8 @@ class Spikes:
         else:
             self._obj = Recinfo(basepath)
 
+        self._obj.epochs = behavior_epochs(self._obj)  # load in behavioral epochs!
+
         self.stability = Stability(basepath)
         # self.dynamics = firingDynamics(basepath)
         filePrefix = self._obj.files.filePrefix
@@ -78,11 +80,10 @@ class Spikes:
             print("instantenous file does not exist ")
 
     def gen_instfiring(self):
-        epochs = behavior_epochs(self._obj)
         spkall = np.concatenate(self.times)
 
-        pre = epochs.pre
-        post = epochs.post
+        pre = self._obj.epochs.pre
+        post = self._obj.epochs.post
         if pre is None and post is not None:
             bins = np.arange(pre[0], post[1], 0.001)
         else:
@@ -217,6 +218,24 @@ class Spikes:
         ax.set_ylim([1, len(spikes)])
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Units")
+
+    def ccg_spike_assemble(self, clus_use):
+        """Assemble an array of sorted spike times and cluIDs for the input cluster ids the list clus_use """
+        spikes_all, clus_all = [], []
+        [
+            (
+                spikes_all.append(self.times[idc]),
+                clus_all.append(np.ones_like(self.times[idc]) * idc),
+            )
+            for idc in clus_use
+        ]
+        spikes_all, clus_all = np.concatenate(spikes_all), np.concatenate(clus_all)
+        spikes_sorted, clus_sorted = (
+            spikes_all[spikes_all.argsort()],
+            clus_all[spikes_all.argsort()],
+        )
+
+        return spikes_sorted, clus_sorted
 
     def removeDoubleSpikes(self):
         pass
