@@ -43,12 +43,6 @@ class Recinfo:
             if file.endswith(".xml"):
                 xmlfile = self.basePath / file
                 filePrefix = xmlfile.with_suffix("")
-            elif file.endswith(".eeg"):
-                eegfile = self.basePath / file
-                filePrefix = eegfile.with_suffix("")
-            elif file.endswith(".dat"):
-                datfile = self.basePath / file
-                filePrefix = datfile.with_suffix("")
 
         self.session = sessionname(filePrefix)
         self.files = files(filePrefix)
@@ -65,7 +59,7 @@ class Recinfo:
         self.sampfreq = myinfo["sRate"]
         self.channels = myinfo["channels"]
         self.nChans = myinfo["nChans"]
-        self.lfpSrate = myinfo["lfpSrate"]
+        self.lfpsRate = myinfo["lfpsRate"]
         self.channelgroups = myinfo["channelgroups"]
         self.badchans = myinfo["badchans"]
         self.nShanks = myinfo["nShanks"]
@@ -76,56 +70,15 @@ class Recinfo:
             list(np.setdiff1d(_, self.badchans, assume_unique=True).astype(int))
             for _ in self.channelgroups
         ]
-        if "skulleeg" in myinfo:
-            self.skulleeg = myinfo["skulleeg"]
-
-        if "emgChans" in myinfo:
-            self.emgChans = myinfo["emgChans"]
-
-        if "motionChans" in myinfo:
-            self.motionChans = myinfo["motionChans"]
 
     def __str__(self) -> str:
-        return f"Name: {self.session.name} \nChannels: {self.nChans}\nSampling Freq: {self.sampfreq}\nlfp Srate (downsampled): {self.lfpSrate}\n# bad channels: {len(self.badchans)}\nmotion channels: {self.motionChans}\nemg channels: {self.emgChans}\nskull eeg: {self.skulleeg}"
+        return f"Name: {self.session.name} with {self.nChans} channels"
 
-    def generate_xml(self, settingsPath):
-        """Generates .xml for the data using openephys's settings.xml"""
-        myroot = ET.parse(settingsPath).getroot()
+    # def __repr__(self) -> str:
+    #     return "I am an animal"
 
-        chanmap = []
-        for elem in myroot[1][1][-1]:
-            if "Mapping" in elem.attrib:
-                chanmap.append(elem.attrib["Mapping"])
-
-        neuroscope_xmltree = ET.parse(self.files.filePrefix.with_suffix(".xml"))
-        neuroscope_xmlroot = neuroscope_xmltree.getroot()
-
-        for i, chan in enumerate(neuroscope_xmlroot[2][0][0].iter("channel")):
-            chan.text = str(int(chanmap[i]) - 1)
-
-        neuroscope_xmltree.write(self.files.filePrefix.with_suffix(".xml"))
-
-    def makerecinfo(self, nShanks=None, skulleeg=None, emg=None, motion=None):
-        """Uses .xml file to parse anatomical groups
-
-        Parameters
-        ----------
-        nShanks : [int], optional
-            number of shanks, if None then this equals to number of anatomical grps
-        skulleeg : list, optional
-            any channels recorded from the skull, by default None
-        emg : list, optional
-            emg channels, by default None
-        motion : list, optional
-            channels recording accelerometer data or velocity, by default None
-        """
-
-        if skulleeg is None:
-            skulleeg = []
-        if emg is None:
-            emg = []
-        if motion is None:
-            motion = []
+    def makerecinfo(self):
+        """Reads recording parameter from xml file"""
 
         myroot = ET.parse(self.recfiles.xmlfile).getroot()
 
@@ -135,48 +88,37 @@ class Recinfo:
                 for z in y.findall("group"):
                     chan_group = []
                     for chan in z.findall("channel"):
-                        if int(chan.text) not in skulleeg + emg + motion:
-                            chan_session.append(int(chan.text))
-                            if int(chan.attrib["skip"]) == 1:
-                                badchans.append(int(chan.text))
+                        chan_session.append(int(chan.text))
+                        if int(chan.attrib["skip"]) == 1:
+                            badchans.append(int(chan.text))
 
-                            chan_group.append(int(chan.text))
-                    if chan_group:
-                        channelgroups.append(chan_group)
+                        chan_group.append(int(chan.text))
+                    channelgroups.append(chan_group)
 
         sampfreq = nChans = None
         for sf in myroot.findall("acquisitionSystem"):
             sampfreq = int(sf.find("samplingRate").text)
             nChans = int(sf.find("nChannels").text)
 
-        lfpSrate = None
+        lfpsRate = None
         for val in myroot.findall("fieldPotentials"):
-            lfpSrate = int(val.find("lfpSamplingRate").text)
+            lfpsRate = int(val.find("lfpSamplingRate").text)
 
         auxchans = np.setdiff1d(np.arange(nChans), np.concatenate(channelgroups))
         if auxchans.size == 0:
             auxchans = None
-
-        if nShanks is None:
-            nShanks = len(channelgroups)
-
-        if motion is not None:
-            pass
 
         basics = {
             "sRate": sampfreq,
             "channels": chan_session,
             "nChans": nChans,
             "channelgroups": channelgroups,
-            "nShanks": nShanks,
+            "nShanks": len(channelgroups),
             "subname": self.session.subname,
             "sessionName": self.session.sessionName,
-            "lfpSrate": lfpSrate,
+            "lfpsRate": lfpsRate,
             "badchans": badchans,
             "auxchans": auxchans,
-            "skulleeg": skulleeg,
-            "emgChans": emg,
-            "motionChans": motion,
         }
 
         np.save(self.files.basics, basics)
@@ -193,6 +135,12 @@ class Recinfo:
 
         return len(data) / nChans
 
+    @property
+    def getNframesEEG(self):
+        nframes = len(self.geteeg(chans=0))
+
+        return nframes
+
     def geteeg(self, chans, timeRange=None, frames=None):
         """Returns eeg signal for given channels and timeperiod or selected frames
 
@@ -205,7 +153,7 @@ class Recinfo:
             eeg: [array of channels x timepoints]
         """
         eegfile = self.recfiles.eegfile
-        eegSrate = self.lfpSrate
+        eegSrate = self.lfpsRate
         nChans = self.nChans
 
         eeg = np.memmap(eegfile, dtype="int16", mode="r")
@@ -229,6 +177,12 @@ class Recinfo:
             eeg, fs=self.lfpSrate, nperseg=2 * self.lfpSrate, noverlap=self.lfpSrate
         )
         return f, pxx
+
+    def loadmetadata(self):
+        metadatafile = Path(str(self.files.filePrefix) + "_metadata.csv")
+        metadata = pd.read_csv(metadatafile)
+
+        return metadata
 
 
 class files:
