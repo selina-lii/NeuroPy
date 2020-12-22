@@ -8,11 +8,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from parsePath import Recinfo
 from mathutil import contiguous_regions
-import xml.etree.ElementTree as ET
+import Python3.SettingsXML as sxml
 import re
 from glob import glob
-from dataclasses import dataclass
-import csv
 
 
 def getSampleRate(fileName):
@@ -59,37 +57,13 @@ def getunits(fileName):
 
 def posfromCSV(fileName):
     """Import position data from OptiTrack CSV file"""
-
-    # ---- auto select which columns have rigid body position -------
-    pos_columns = rigidbody_columns = None
-    with open(fileName, newline="") as csvfile:
-        reader = csv.reader(csvfile, delimiter=",")
-        line_count = 0
-        for row in reader:
-            if "Rigid Body" in row or "RigidBody" in row:
-                rigidbody_columns = np.where(np.array(row) == "Rigid Body")[0]
-
-            if "Position" in row:
-                pos_columns = np.where(np.array(row) == "Position")[0]
-                break
-            line_count += 1
-
-    rigidbody_pos_columns = np.intersect1d(pos_columns, rigidbody_columns)
-
-    # second column is time so append that
-    read_columns = np.append(1, rigidbody_pos_columns)
-
-    posdata = pd.read_csv(
-        fileName,
-        skiprows=line_count + 1,
-        skip_blank_lines=False,
-        usecols=read_columns,
-    )
-
-    t = np.asarray(posdata.iloc[:, 0])
-    x0 = np.asarray(posdata.iloc[:, 1])
-    y0 = np.asarray(posdata.iloc[:, 2])
-    z0 = np.asarray(posdata.iloc[:, 3])
+    posdata = pd.read_csv(fileName, header=[2, 4, 5])
+    x0 = np.asarray(posdata["RigidBody", "Position", "X"])
+    y0 = np.asarray(posdata["RigidBody", "Position", "Y"])
+    z0 = np.asarray(posdata["RigidBody", "Position", "Z"])
+    t = np.asarray(
+        posdata.loc[:, ["Time (Seconds)" in _ for _ in posdata.keys()]]
+    ).reshape(-1)
 
     xfill, yfill, zfill = interp_missing_pos(x0, y0, z0, t)
 
@@ -133,7 +107,7 @@ def posfromFBX(fileName):
             m = "".join(line)
 
             if "KeyCount" in m:
-                # print("break at i = " + str(i))
+                print("Line 87 break at i = " + str(i))
                 track_begin = i + 2
                 line_frame = linecache.getline(fileName, i + 2).strip().split(" ")
                 total_frames = int(line_frame[1]) - 1
@@ -165,10 +139,9 @@ def posfromFBX(fileName):
         for line in f:
 
             if "KeyCount" in line:
-                # print("break at i = " + str(i))
+                print("Line 119 break at i = " + str(i))
                 break
-            # else:  # NRK note: this errors out unpredictably on my computer. Is it necessary? doesn't the for break
-            # automatically move onto the next line of code once you reach a "KeyCount" in the line being read?
+            # else:
             #     next(f)
 
         pos1 = []
@@ -194,7 +167,7 @@ def posfromFBX(fileName):
         for line in f:
 
             if "KeyCount" in line:
-                # print("break at i = " + str(i))
+                print("Line 147 break at i = " + str(i))
                 break
             # else:
             #     next(f)
@@ -238,12 +211,12 @@ def getStartTime(fileName):
             row1[i + 1] for i in range(len(row1)) if row1[i] == "Capture Start Time"
         ]
     # print(StartTime)
-    tbegin = datetime.strptime(StartTime[0], "%Y-%m-%d %I.%M.%S.%f %p")
+    tbegin = datetime.strptime(StartTime[0], "%Y-%m-%d %H.%M.%S.%f %p")
     return tbegin
 
 
 class ExtractPosition:
-    def __init__(self, basepath):
+    def __init__(self, basepath, tracking_sf=4):
         """initiates position class
 
         Arguments:
@@ -258,25 +231,23 @@ class ExtractPosition:
         else:
             self._obj = Recinfo(basepath)
 
-        # ------- defining file names ---------
-        filePrefix = self._obj.files.filePrefix
+        # Sample rate can vary, so grab it from csv header
+        self.tracking_sRate = getSampleRate(
+            sorted((self._obj.basePath / "position").glob("*.csv"))[0]
+        )
+        self.tracking_sf = 4
 
-        @dataclass
-        class files:
-            position: str = Path(str(filePrefix) + "_position.npy")
+        self.import_posfile(tracking_sf)
 
-        self.files = files()
-        self._load()
-
-    def _load(self):
-        if (f := self.files.position).is_file():
-            posInfo = np.load(f, allow_pickle=True).item()
-            self.x = posInfo["x"]
-            self.y = posInfo["y"]
-            self.z = posInfo["z"]
+    def import_posfile(self, tracking_sf):
+        posfile = self._obj.files.position
+        if os.path.exists(posfile):
+            posInfo = self._load(posfile).item()
+            self.x = posInfo["x"] / tracking_sf
+            self.y = posInfo["y"] / tracking_sf
+            self.z = posInfo["z"] / tracking_sf
             self.t = posInfo["time"]  # in seconds
             self.datetime = posInfo["datetime"]  # in seconds
-            self.tracking_sRate = posInfo["trackingsRate"]
             self.speed = np.sqrt(np.diff(self.x) ** 2 + np.diff(self.y) ** 2) / (
                 1 / self.tracking_sRate
             )
@@ -291,20 +262,18 @@ class ExtractPosition:
                 }
             )
 
+        else:
+            print("Position file does not exist....Run .getPosition to generate.")
+
+    def _load(self, posfile):
+        return np.load(posfile, allow_pickle=True)
+
     def __getitem__(self, epochs):
         pass
 
-    def getPosition(self, method="from_metadata", scale=1.0):
-        """get position data from files. All position related files should be in 'position' folder within basepath
-
-        Parameters
-        ----------
-        method : str, optional
-            [description], by default "from_metadata"
-        scale : float, optional
-            scale the extracted coordinates, by default 1.0
-        """
+    def getPosition(self, method="from_metadata"):
         sRate = self._obj.sampfreq  # .dat file sampling frequency
+        lfpsRate = self._obj.lfpsRate  # .eeg file sampling frequency
         basePath = Path(self._obj.basePath)
         metadata = self._obj.loadmetadata()
 
@@ -313,9 +282,6 @@ class ExtractPosition:
         # ------- collecting timepoints related to .dat file  --------
         data_time = []
         # transfer start times from the settings*.xml file and nframes in .dat file to each row of the metadata file
-        tracking_sRate = getSampleRate(
-            sorted((self._obj.basePath / "position").glob("*.csv"))[0]
-        )
         durations = []
         if method == "from_metadata":
             for i, file_time in enumerate(metadata["StartTime"][:nfiles]):
@@ -326,7 +292,7 @@ class ExtractPosition:
                 trange = pd.date_range(
                     start=tbegin,
                     end=tend,
-                    periods=int(duration.total_seconds() * tracking_sRate),
+                    periods=int(duration.total_seconds() * self.tracking_sRate),
                 )
                 data_time.extend(trange)
 
@@ -340,7 +306,7 @@ class ExtractPosition:
                 trange = pd.date_range(
                     start=tbegin,
                     end=tend,
-                    periods=int(duration.total_seconds() * tracking_sRate),
+                    periods=int(duration.total_seconds() * self.tracking_sRate),
                 )
                 data_time.extend(trange)
         data_time = pd.to_datetime(data_time)
@@ -360,6 +326,9 @@ class ExtractPosition:
             ]
 
             data_time = np.delete(data_time, del_index)
+            # data_time = data_time.indexer_between_time(
+            #     pd.Timestamp(tnoisy_end), pd.Timestamp(tnoisy_begin)
+            # )
 
         # ------- collecting timepoints related to position tracking ------
         posFolder = basePath / "position"
@@ -394,39 +363,41 @@ class ExtractPosition:
 
                 # Get time ranges for position files
                 nframes_pos = getnframes(file)
-                duration = pd.Timedelta(nframes_pos / tracking_sRate, unit="sec")
+                duration = pd.Timedelta(nframes_pos / self.tracking_sRate, unit="sec")
                 tend = tbegin + duration
                 trange = pd.date_range(start=tbegin, end=tend, periods=nframes_pos)
 
+                # NRK todo: add try/except statement to use .csv file if there, otherwise use FBX file.
                 x, y, z = posfromFBX(file.with_suffix(".fbx"))
 
                 postime.extend(trange)
             posx.extend(x)
             posy.extend(y)
             posz.extend(z)
+
         postime = pd.to_datetime(postime[: len(posx)])
         posx = np.asarray(posx)
         posy = np.asarray(posy)
         posz = np.asarray(posz)
 
         # -------- interpolating positions for recorded data ------------
-        xdata = np.interp(data_time, postime, posx) / scale
-        ydata = np.interp(data_time, postime, posy) / scale
-        zdata = np.interp(data_time, postime, posz) / scale
-        time = np.linspace(0, len(xdata) / tracking_sRate, len(xdata))
+        xdata = np.interp(data_time, postime, posx)
+        ydata = np.interp(data_time, postime, posy)
+        zdata = np.interp(data_time, postime, posz)
+        time = np.linspace(0, len(xdata) / self.tracking_sRate, len(xdata))
         posVar = {
             "x": xdata,
-            "y": zdata,
-            "z": ydata,  # keep this data in case you are interested in rearing activity
+            "y": zdata,  # as in optitrack the z coordinates gives the y information
+            "z": ydata,  # keep this data in case you are interested in rearing activity...
             "time": time,
             "datetime": data_time,
-            "trackingsRate": tracking_sRate,
+            "trackingsRate": self.tracking_sRate,
         }
 
         np.save(self._obj.files.position, posVar)
 
-        # now load this immediately into existence
-        self._load()
+        # Low load this immediately into existence
+        self.import_posfile(self.tracking_sf)
 
     def plot(self):
 
@@ -445,12 +416,6 @@ class ExtractPosition:
         with filename.open("w") as f:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
-
-    def theta_vs_speed(self):
-        pass
-
-    def ripple_location(self):
-        pass
 
 
 def timestamps_from_oe(rec_folder, data_type="continuous"):
@@ -476,18 +441,12 @@ def timestamps_from_oe(rec_folder, data_type="continuous"):
 
     # Loop through and establish timeframes for each file
     times_abs = []
-    for time, set_, sync_file in zip(time_files, set_files, sync_files):
-        # load data
-        timedata = np.load(time)
-        myroot = ET.parse(set_).getroot()
-        setdict = {}
-        for elem in myroot[0]:
-            setdict[elem.tag] = elem.text
-        # setdict = XML2Dict(set_)
+    for time, set, sync_file in zip(time_files, set_files, sync_files):
+        timedata, setdict = np.load(time), sxml.XML2Dict(set)  # load in data
         SRuse, sync_start = get_sync_info(sync_file)
 
         # Identify absolute start times of each file...
-        tbegin = datetime.strptime(setdict["DATE"], "%d %b %Y %H:%M:%S")
+        tbegin = datetime.strptime(setdict["INFO"]["DATE"], "%d %b %Y %H:%M:%S")
         tstamps = tbegin + pd.to_timedelta((timedata - sync_start) / SRuse, unit="sec")
         if len(times_abs) > 0 and tstamps[0] < times_abs[-1][-1]:
             raise Exception("Timestamps out of order - check directory structure!")
