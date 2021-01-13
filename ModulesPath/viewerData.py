@@ -39,7 +39,7 @@ class SessView:
             self._obj = Recinfo(basepath)
 
     def specgram(
-        self, chan=None, period=None, window=10, overlap=2, ax=None, plotChan=False
+        self, chan=None, period=None, window=4, overlap=2, ax=None, plotChan=False
     ):
         """Generating spectrogram plot for given channel
 
@@ -70,14 +70,14 @@ class SessView:
 
         sxx = spec.sxx / np.max(spec.sxx)
         sxx = gaussian_filter(sxx, sigma=2)
-        std_sxx = np.std(sxx)
+        vmax = np.max(sxx) / 4
 
         if ax is None:
             _, ax = plt.subplots(1, 1)
 
         # ---------- plotting ----------------
-        def plotspec(n_std, cmap, freq):
-            ax.pcolorfast(spec.time, spec.freq, sxx, cmap=cmap, vmax=n_std * std_sxx)
+        def plotspec(val, cmap, freq):
+            ax.pcolorfast(spec.time, spec.freq, sxx, cmap=cmap, vmax=val)
             ax.set_ylim(freq)
 
         ax.text(
@@ -99,12 +99,12 @@ class SessView:
         # ---- updating plotting values for interaction ------------
         widgets.interact(
             plotspec,
-            n_std=widgets.FloatSlider(
-                value=2,
-                min=0.1,
-                max=5,
-                step=0.1,
-                description="Clim :",
+            val=widgets.FloatSlider(
+                value=vmax,
+                min=vmax / 10,
+                max=4 * vmax,
+                step=0.001,
+                description="Spec. Clim:",
             ),
             cmap=widgets.Dropdown(
                 options=["Spectral_r", "copper", "hot_r"],

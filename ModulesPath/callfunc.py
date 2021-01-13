@@ -48,9 +48,7 @@ class processData:
 
 # test
 if __name__ == "__main__":
-    sess2 = processData(
-        "/data/Working/Opto/Jackie671/Jackie_3well_Day4/Jackie_UTRACK_combined"
-    )
+    sess2 = processData('/data/Working/Opto/Jackie671/Jackie_3well_Day4/Jackie_UTRACK_combined')
     sess2.recinfo.geteeg(sess2.recinfo.goodchans)
 
 pass
