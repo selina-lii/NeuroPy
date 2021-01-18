@@ -48,10 +48,9 @@ class processData:
 
 # test
 if __name__ == "__main__":
-    sess = processData(
-        r"C:\Users\Nat\Documents\UM\Working\Opto\Jackie671\Jackie_3well_day4\Jackie_UTRACK_combined"
+    sess2 = processData(
+        "/data/Working/Opto/Jackie671/Jackie_3well_Day4/Jackie_UTRACK_combined"
     )
-    sess.placefield.pf1d.compute(track_name="MAZE")
-    sess.placefield.pf1d.phase_precession(9)
+    sess2.recinfo.geteeg(sess2.recinfo.goodchans)
 
 pass
