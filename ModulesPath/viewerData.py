@@ -50,7 +50,7 @@ class SessView:
         period : [type], optional
             plot only for this duration in the session, by default None
         window : [float, seconds], optional
-            window binning size for spectrogram, by default 10
+            window binning size for spectrogram, by default 4
         overlap : [float, seconds], optional
             overlap between windows, by default 2
         ax : [obj], optional
@@ -102,7 +102,7 @@ class SessView:
             n_std=widgets.FloatSlider(
                 value=2,
                 min=0.1,
-                max=30,
+                max=5,
                 step=0.1,
                 description="Clim :",
             ),

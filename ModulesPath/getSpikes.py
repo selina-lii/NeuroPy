@@ -11,8 +11,6 @@ from parsePath import Recinfo
 from behavior import behavior_epochs
 from ccg import correlograms
 from plotUtil import pretty_plot
-from scipy.ndimage import gaussian_filter
-from sklearn.cluster import KMeans
 
 
 class Spikes:
@@ -54,7 +52,6 @@ class Spikes:
             instfiring: str = Path(str(filePrefix) + "_instfiring.pkl")
 
         self.files = files()
-        self.corr = Correlation(self._obj)
 
         filename = self.files.spikes
         if filename.is_file():
@@ -67,8 +64,6 @@ class Spikes:
         if "allspikes" in spikes:
             self.alltimes = spikes["allspikes"]
             self.cluID = spikes["allcluIDs"]
-        if "templates" in spikes:
-            self.templates = spikes["templates"]
         self.info = spikes["info"].reset_index()
         self.pyrid = np.where(self.info.q < 4)[0]
         self.pyr = [self.times[_] for _ in self.pyrid]
@@ -76,14 +71,6 @@ class Spikes:
         self.intneur = [self.times[_] for _ in self.intneurid]
         self.muaid = np.where(self.info.q == 6)[0]
         self.mua = [self.times[_] for _ in self.muaid]
-
-        if "celltype" in self.info:
-            self.pyrid = np.where(self.info.celltype == "pyr")[0]
-            self.pyr = [self.times[_] for _ in self.pyrid]
-            self.intneurid = np.where(self.info.celltype == "intneur")[0]
-            self.intneur = [self.times[_] for _ in self.intneurid]
-            self.muaid = np.where(self.info.celltype == "mua")[0]
-            self.mua = [self.times[_] for _ in self.muaid]
 
     @property
     def instfiring(self):
@@ -119,10 +106,6 @@ class Spikes:
         gaussian = A * np.exp(-(t_gauss ** 2) / (2 * sigma ** 2))
 
         return gaussian
-
-    def firing_rate(self, spikes, period):
-        duration = np.diff(period)
-        return np.asarray([np.histogram(_, bins=period)[0] for _ in spikes]) / duration
 
     def plot_raster(
         self,
@@ -226,128 +209,6 @@ class Spikes:
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Units")
 
-    def get_acg(self, spikes=None, bin_size=0.001, window_size=0.05):
-        """Get autocorrelogram
-
-        Parameters
-        ----------
-        spikes : [type], optional
-            [description], by default None
-        bin_size : float, optional
-            [description], by default 0.001
-        window_size : float, optional
-            [description], by default 0.05
-        """
-
-        if isinstance(spikes, np.ndarray):
-            spikes = [spikes]
-        nCells = len(spikes)
-
-        correlo = []
-        for cell in spikes:
-            cell_id = np.zeros(len(cell)).astype(int)
-            correlo.append(
-                correlograms(
-                    cell,
-                    cell_id,
-                    sample_rate=self._obj.sampfreq,
-                    bin_size=bin_size,
-                    window_size=window_size,
-                ).squeeze()
-            )
-
-        return correlo
-
-    def label_celltype(self):
-        """Auto label cell type"""
-        spikes = self.times
-        self.info["celltype"] = None
-        ccgs = self.get_acg(spikes=spikes, bin_size=0.001, window_size=0.05)
-        ccg_width = ccgs[0].shape[-1]
-        ccg_center_ind = int(ccg_width / 2)
-
-        # -- calculate burstiness (mean duration of right ccg)------
-        ccg_right = [_[ccg_center_ind + 1 :] for _ in ccgs]
-        burstiness = np.asarray([len(ccg) / np.sum(ccg) for ccg in ccg_right])
-
-        # --- calculate frate ------------
-        recording_dur = self._obj.getNframesEEG / self._obj.lfpSrate
-        frate = np.asarray([len(cell) / recording_dur for cell in spikes])
-
-        # ------ calculate peak ratio of waveform ----------
-        templates = self.templates
-        waveform = np.asarray(
-            [cell[np.argmax(np.ptp(cell, axis=1)), :] for cell in templates]
-        )
-        n_t = waveform.shape[1]  # waveform width
-        center = np.int(n_t / 2)
-        left_peak = np.max(waveform[:, :center], axis=1)
-        right_peak = np.max(waveform[:, center + 1 :], axis=1)
-        peak_ratio = left_peak / right_peak
-
-        # ---- refractory contamination ----------
-        isi = [np.diff(_) for _ in spikes]
-        isi_bin = np.arange(0, 0.1, 0.001)
-        isi_hist = np.asarray([np.histogram(_, bins=isi_bin)[0] for _ in isi])
-        n_spikes_ref = np.sum(isi_hist[:, :2], axis=1) + 1e-16
-        ref_period_ratio = (np.max(isi_hist, axis=1) / n_spikes_ref) * 100
-        mua_cells = np.where(ref_period_ratio < 300)[0]
-        good_cells = np.where(ref_period_ratio >= 300)[0]
-
-        self.info.loc[mua_cells, "celltype"] = "mua"
-
-        param1 = frate[good_cells]
-        param2 = burstiness[good_cells]  # np.log10(sum_peak / sum_refractory)
-        param3 = peak_ratio[good_cells]
-
-        features = np.vstack((param1, param2, param3)).T
-        kmeans = KMeans(n_clusters=2).fit(features)
-        y_means = kmeans.predict(features)
-
-        interneuron_label = np.argmax(kmeans.cluster_centers_[:, 0])
-        intneur_id = np.where(y_means == interneuron_label)[0]
-        pyr_id = np.where(y_means != interneuron_label)[0]
-        self.info.loc[good_cells[intneur_id], "celltype"] = "intneur"
-        self.info.loc[good_cells[pyr_id], "celltype"] = "pyr"
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(
-            frate[mua_cells],
-            burstiness[mua_cells],
-            peak_ratio[mua_cells],
-            c="#b4b2b1",
-            s=50,
-            label="mua",
-        )
-
-        ax.scatter(
-            param1[pyr_id],
-            param2[pyr_id],
-            param3[pyr_id],
-            c="#ef440b",
-            s=50,
-            label="pyr",
-        )
-
-        ax.scatter(
-            param1[intneur_id],
-            param2[intneur_id],
-            param3[intneur_id],
-            c="#3a924d",
-            s=50,
-            label="int",
-        )
-        ax.legend()
-        ax.set_xlabel("Firing rate (Hz)")
-        ax.set_ylabel("Burstiness")
-        ax.set_zlabel("Peak ratio")
-
-        data = np.load(self.files.spikes, allow_pickle=True).item()
-        data["info"] = self.info
-
-        np.save(self.files.spikes, data)
-
     def plot_ccg(self, clus_use, type="all", bin_size=0.001, window_size=0.05, ax=None):
 
         """Plot CCG for clusters in clus_use (list, max length = 2). Supply only one cluster in clus_use for ACG only.
@@ -402,9 +263,8 @@ class Spikes:
     def removeDoubleSpikes(self):
         pass
 
-    def from_Phy(self, folder, fileformat="diff_folder", save_allspikes=False):
-        """Gets spike times from Phy (https://github.com/cortex-lab/phy) compatible files.
-        If shanks are in separate folder, then folder should have subfolders with names Shank1, Shank2, Shank3 and so on.
+    def from_Phy(self, folder=None, fileformat="diff_folder", save_allspikes=False):
+        """Gets spike times from Phy (https://github.com/cortex-lab/phy) compatible files
 
         Parameters
         ----------
@@ -416,38 +276,34 @@ class Spikes:
         spktimes = None
         spkinfo = None
 
-        clufolder = Path(folder)
         if fileformat == "diff_folder":
             nShanks = self._obj.nShanks
             sRate = self._obj.sampfreq
-            spkall, info, shankID, template_waveforms = [], [], [], []
+            name = self._obj.session.name
+            day = self._obj.session.day
+            basePath = self._obj.basePath
+            clubasePath = Path(basePath, "spykcirc")
+            spkall, info, shankID = [], [], []
             for shank in range(1, nShanks + 1):
-                shank_folder = clufolder / f"Shank{shank}"
-                print(shank_folder)
-                if shank_folder.is_dir():
-                    spktime = np.load(shank_folder / "spike_times.npy")
-                    cluID = np.load(shank_folder / "spike_clusters.npy")
-                    spk_templates_id = np.load(shank_folder / "spike_templates.npy")
-                    spk_templates = np.load(shank_folder / "templates.npy")
-                    cluinfo = pd.read_csv(
-                        shank_folder / "cluster_info.tsv", delimiter="\t"
-                    )
-                    goodCellsID = cluinfo.id[cluinfo["q"] < 10].tolist()
-                    info.append(cluinfo.loc[cluinfo["q"] < 10])
-                    shankID.extend(shank * np.ones(len(goodCellsID)))
 
-                    for i in range(len(goodCellsID)):
-                        clu_spike_location = np.where(cluID == goodCellsID[i])[0]
-                        spkframes = spktime[clu_spike_location]
-                        cell_template_id, counts = np.unique(
-                            spk_templates_id[clu_spike_location], return_counts=True
-                        )
-                        spkall.append(spkframes / sRate)
-                        template_waveforms.append(
-                            spk_templates[cell_template_id[np.argmax(counts)]]
-                            .squeeze()
-                            .T
-                        )
+                clufolder = Path(
+                    clubasePath,
+                    name + day + "Shank" + str(shank),
+                    name + day + "Shank" + str(shank) + ".GUI",
+                )
+
+                # datFile = np.memmap(file + "Shank" + str(i) + ".dat", dtype="int16")
+                # datFiledur = len(datFile) / (16 * sRate)
+                spktime = np.load(clufolder / "spike_times.npy")
+                cluID = np.load(clufolder / "spike_clusters.npy")
+                cluinfo = pd.read_csv(clufolder / "cluster_info.tsv", delimiter="\t")
+                goodCellsID = cluinfo.id[cluinfo["q"] < 10].tolist()
+                info.append(cluinfo.loc[cluinfo["q"] < 10])
+                shankID.extend(shank * np.ones(len(goodCellsID)))
+
+                for i in range(len(goodCellsID)):
+                    clu_spike_location = spktime[np.where(cluID == goodCellsID[i])[0]]
+                    spkall.append(clu_spike_location / sRate)
 
             spkinfo = pd.concat(info, ignore_index=True)
             spkinfo["shank"] = shankID
@@ -456,12 +312,18 @@ class Spikes:
         if fileformat == "same_folder":
             nShanks = self._obj.nShanks
             sRate = self._obj.sampfreq
+            subname = self._obj.session.subname
+            basePath = self._obj.basePath
             changroup = self._obj.channelgroups
+            clubasePath = Path(basePath, "spykcirc")
 
+            clufolder = Path(
+                clubasePath,
+                subname,
+                subname + ".GUI",
+            )
             spktime = np.load(clufolder / "spike_times.npy")
             cluID = np.load(clufolder / "spike_clusters.npy")
-            spk_templates_id = np.load(clufolder / "spike_templates.npy")
-            spk_templates = np.load(clufolder / "templates.npy")
             cluinfo = pd.read_csv(clufolder / "cluster_info.tsv", delimiter="\t")
             if "q" in cluinfo.keys():
                 goodCellsID = cluinfo.id[cluinfo["q"] < 10].tolist()
@@ -480,17 +342,10 @@ class Spikes:
                 if chan in grp
             ]
 
-            spkall, template_waveforms = [], []
+            spkall = []
             for i in range(len(goodCellsID)):
-                clu_spike_location = np.where(cluID == goodCellsID[i])[0]
-                spkframes = spktime[clu_spike_location]
-                cell_template_id, counts = np.unique(
-                    spk_templates_id[clu_spike_location], return_counts=True
-                )
-                spkall.append(spkframes / sRate)
-                template_waveforms.append(
-                    spk_templates[cell_template_id[np.argmax(counts)]].squeeze().T
-                )
+                clu_spike_location = spktime[np.where(cluID == goodCellsID[i])[0]]
+                spkall.append(clu_spike_location / sRate)
 
             info["shank"] = shankID
             spkinfo = info
@@ -503,14 +358,9 @@ class Spikes:
                 "info": spkinfo,
                 "allspikes": spktime,
                 "allcluIDs": cluID,
-                "templates": template_waveforms,
             }
         else:
-            spikes_ = {
-                "times": spktimes,
-                "info": spkinfo,
-                "templates": template_waveforms,
-            }
+            spikes_ = {"times": spktimes, "info": spkinfo}
         filename = self.files.spikes
 
         np.save(filename, spikes_)
@@ -569,29 +419,42 @@ class Stability:
         self.bins = data["bins"]
         self.thresh = data["thresh"]
 
-    def firingRate(self, periods, thresh=0.3):
+    def firingRate(self, bins=None, thresh=0.3):
 
         spikes = Spikes(self._obj)
         spks = spikes.times
         nCells = len(spks)
 
+        # ---- goes to default mode of PRE-POST stability --------
+        if bins is None:
+            pre = self._obj.epochs.pre
+            pre = self._obj.utils.getinterval(period=pre, nbins=3)
+
+            post = self._obj.epochs.post
+            post = self._obj.utils.getinterval(period=post, nbins=5)
+            total_dur = self._obj.epochs.totalduration
+            mean_frate = self._obj.spikes.info.fr
+            bins = pre + post
+            nbins = len(bins)
+
         # --- number of spikes in each bin ------
-        bin_dur = np.asarray([np.diff(window) for window in periods]).squeeze()
+        bin_dur = np.asarray([np.diff(window) for window in bins]).squeeze()
         total_dur = np.sum(bin_dur)
-        nspks_period = np.asarray(
-            [np.histogram(cell, bins=np.concatenate(periods))[0][::2] for cell in spks]
+        nspks_bin = np.asarray(
+            [np.histogram(cell, bins=np.concatenate(bins))[0][::2] for cell in spks]
         )
-        assert nspks_period.shape[0] == nCells
+        assert nspks_bin.shape[0] == nCells
 
-        total_spks = np.sum(nspks_period, axis=1)
+        total_spks = np.sum(nspks_bin, axis=1)
 
-        nperiods = len(periods)
-        mean_frate = total_spks / total_dur
+        if bins is not None:
+            nbins = len(bins)
+            mean_frate = total_spks / total_dur
 
         # --- calculate meanfr in each bin and the fraction of meanfr over all bins
-        frate_period = nspks_period / np.tile(bin_dur, (nCells, 1))
-        fraction = frate_period / mean_frate.reshape(-1, 1)
-        assert frate_period.shape == fraction.shape
+        frate_bin = nspks_bin / np.tile(bin_dur, (nCells, 1))
+        fraction = frate_bin / mean_frate.reshape(-1, 1)
+        assert frate_bin.shape == fraction.shape
 
         isStable = np.where(fraction >= thresh, 1, 0)
         spkinfo = spikes.info[["q", "shank"]].copy()
@@ -600,14 +463,11 @@ class Stability:
         stbl = {
             "stableinfo": spkinfo,
             "isStable": isStable,
-            "bins": periods,
+            "bins": bins,
             "thresh": thresh,
         }
         np.save(self.files.stability, stbl)
         self._load()
-
-    def waveform_similarity(self):
-        pass
 
     def refPeriodViolation(self):
 
@@ -634,104 +494,15 @@ class Stability:
         pass
 
 
-class Correlation:
-    """Class for calculating pairwise correlations
+# class firingDynamics:
+#     def __init__(self, obj):
+#         self._obj = obj
 
-    Attributes
-    ----------
-    corr : matrix
-        correlation between time windows across a period of time
-    time : array
-        time points
-    """
+#     def fRate(self):
+#         pass
 
-    def __init__(self, basepath):
-        if isinstance(basepath, Recinfo):
-            self._obj = basepath
-        else:
-            self._obj = Recinfo(basepath)
+#     def plotfrate(self):
+#         pass
 
-    def across_time_window(self, spikes, period, window=300, binsize=0.25, **kwargs):
-        """Correlation of pairwise correlation across a period by dividing into window size epochs
-
-        Parameters
-        ----------
-        period: array like
-            time period where the pairwise correlations are calculated, in seconds
-        window : int, optional
-            dividing the period into this size window, by default 900
-        binsize : float, optional
-            [description], by default 0.25
-        """
-
-        # spikes = Spikes(self._obj)
-
-        # # ----- choosing cells ----------------
-        # spks = spikes.times
-        # stability = spikes.stability.info
-        # stable_pyr = np.where((stability.q < 4) & (stability.stable == 1))[0]
-        # print(f"Calculating EV for {len(stable_pyr)} stable cells")
-        # spks = [spks[_] for _ in stable_pyr]
-
-        epochs = np.arange(period[0], period[1], window)
-
-        pair_corr_epoch = []
-        for i in range(len(epochs) - 1):
-            epoch_bins = np.arange(epochs[i], epochs[i + 1], binsize)
-            spkcnt = np.asarray([np.histogram(x, bins=epoch_bins)[0] for x in spikes])
-            epoch_corr = np.corrcoef(spkcnt)
-            pair_corr_epoch.append(epoch_corr[np.tril_indices_from(epoch_corr, k=-1)])
-        pair_corr_epoch = np.asarray(pair_corr_epoch)
-
-        # masking nan values in the array
-        pair_corr_epoch = np.ma.array(pair_corr_epoch, mask=np.isnan(pair_corr_epoch))
-        self.corr = np.ma.corrcoef(pair_corr_epoch)  # correlation across windows
-        self.time = epochs[:-1] + window / 2
-
-    def pairwise(self, spikes, period, binsize=0.25):
-        """Calculates pairwise correlation between given spikes within given period
-
-        Parameters
-        ----------
-        spikes : list
-            list of spike times
-        period : list
-            time period within which it is calculated , in seconds
-        binsize : float, optional
-            binning of the time period, by default 0.25 seconds
-
-        Returns
-        -------
-        N-pairs
-            pairwise correlations
-        """
-        bins = np.arange(period[0], period[1], binsize)
-        spk_cnts = np.asarray([np.histogram(cell, bins=bins)[0] for cell in spikes])
-        corr = np.corrcoef(spk_cnts)
-        return corr[np.tril_indices_from(corr, k=-1)]
-
-    def plot_across_time(self, ax=None, tstart=0, smooth=None, cmap="Spectral_r"):
-        """Plots heatmap of correlation matrix calculated in self.across_time_window()
-
-        Parameters
-        ----------
-        ax : [type], optional
-            axis to plot into, by default None
-        tstart : int, optional
-            if you want to start the time axis at some other time points, by default 0
-        cmap : str, optional
-            colormap used for heatmap, by default "Spectral_r"
-        """
-
-        corr_mat = self.corr.copy()
-        np.fill_diagonal(corr_mat, 0)
-
-        if smooth is not None:
-            corr_mat = gaussian_filter(corr_mat, sigma=smooth)
-
-        if ax is None:
-            _, ax = plt.subplots()
-
-        ax.pcolormesh(self.time - tstart, self.time - tstart, corr_mat, cmap=cmap)
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Time")
+#     def plotRaster(self):
+#         pass
