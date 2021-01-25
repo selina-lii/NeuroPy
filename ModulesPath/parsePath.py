@@ -181,7 +181,9 @@ class Recinfo:
         for val in myroot.findall("fieldPotentials"):
             lfpSrate = int(val.find("lfpSamplingRate").text)
 
-        auxchans = np.setdiff1d(np.arange(nChans), np.concatenate(channelgroups))
+        auxchans = np.setdiff1d(
+            np.arange(nChans), np.concatenate(channelgroups + skulleeg + emg + motion)
+        )
         if auxchans.size == 0:
             auxchans = None
 
@@ -234,14 +236,14 @@ class Recinfo:
         return nframes
 
     def geteeg(self, chans, timeRange=None):
-        """Returns eeg signal for given channels and timeperiod or selected frames
+        """Returns eeg signal for given channels. If multiple channels provided then it is list of lfps.
 
         Args:
             chans (list/array): channels required, index should in order of binary file
             timeRange (list, optional): In seconds and must have length 2.
 
         Returns:
-            eeg: [array of channels x timepoints]
+            eeg: memmap, or list of memmaps
         """
         eegfile = self.recfiles.eegfile
         eegSrate = self.lfpSrate
@@ -264,15 +266,12 @@ class Recinfo:
             eeg = np.memmap(eegfile, dtype="int16", mode="r")
             eeg = np.memmap.reshape(eeg, (nChans, len(eeg) // nChans), order="F")
 
-        # NRK comment: this dumps eeg_ to a list which then does not work with ltpEvent.theta.detectBestChan -> _getAUC
-        # line 899: there is no .ndim property for a list.
-        # eeg_ = []
-        # if isinstance(chans, (list, np.ndarray)):
-        #     for chan in chans:
-        #         eeg_.append(eeg[chan, :])
-        # else:
-        #     eeg_ = eeg[chans, :]
-        eeg_ = eeg.take(chans, axis=0)  # pull out good channels but leave as memmap.
+        eeg_ = []
+        if isinstance(chans, (list, np.ndarray)):
+            for chan in chans:
+                eeg_.append(eeg[chan, :])
+        else:
+            eeg_ = eeg[chans, :]
 
         return eeg_
 
@@ -297,10 +296,7 @@ class files:
         self.basics = Path(str(filePrefix) + "_basics.npy")
         self.position = Path(str(filePrefix) + "_position.npy")
         self.epochs = Path(str(filePrefix) + "_epochs.npy")
-        self.hwsa_ripple = Path(str(filePrefix) + "_hswa_ripple.npy")
-        self.slow_wave = Path(str(filePrefix) + "_hswa.npy")
         self.spectrogram = Path(str(filePrefix) + "_sxx.npy")
-        self.isomap_trajectory = Path(str(filePrefix) + "_ISOMAP_trajectory.npy")
 
 
 class recfiles:
