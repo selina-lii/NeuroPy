@@ -54,8 +54,6 @@ class pf1d:
             placemap: str = filePrefix.with_suffix(".pf1d.npy")
 
         self.files = files()
-        self.thresh = []
-        self.no_thresh = []
 
     # def _load(self):
     #     if (f := self.files.placemap) :
@@ -240,9 +238,7 @@ class pf1d:
             ax.plot(bin_cntr, ratemaps[cell], color=color, alpha=0.2)
             ax.set_xlabel("Position (cm)")
             ax.set_ylabel("Normalized frate")
-            ax.set_title(
-                " ".join(filter(None, ("Cell", str(cell), self.run_dir.capitalize())))
-            )
+            ax.set_title(" ".join(filter(None, ("Cell", str(cell), self.run_dir))))
             if normalize:
                 ax.set_ylim([0, 1])
             axphase.scatter(position[cell], phases[cell], c="k", s=0.6)
@@ -317,6 +313,7 @@ class pf1d:
         ratemaps = mapinfo["ratemaps"]
         nCells = len(ratemaps)
         bin_cntr = self.bin[:-1] + np.diff(self.bin).mean() / 2
+        bin_cntr = (bin_cntr - np.min(bin_cntr)) / np.ptp(bin_cntr)
 
         if ax is None:
             _, gs = Fig().draw(grid=(1, 1), size=(4.5, 11))
@@ -333,7 +330,7 @@ class pf1d:
         else:
             sort_ind = np.arange(len(ratemaps))
         for cellid, cell in enumerate(sort_ind):
-            color = cmap(cellid / nCells)
+            color = cmap(cellid / len(sort_ind))
 
             ax.fill_between(
                 bin_cntr,
@@ -351,15 +348,13 @@ class pf1d:
                 alpha=0.7,
             )
 
-        ax.set_yticks(list(range(nCells)))
+        ax.set_yticks(list(range(len(sort_ind))))
         ax.set_yticklabels(list(sort_ind))
         ax.set_xlabel("Position")
         ax.spines["left"].set_visible(False)
-        ax.set_xlim([np.min(bin_cntr), np.max(bin_cntr)])
+        ax.set_xlim([0, 1])
         ax.tick_params("y", length=0)
-        ax.set_ylim([0, nCells])
-        if self.run_dir is not None:
-            ax.set_title(self.run_dir.capitalize() + " Runs only")
+        ax.set_ylim([0, len(sort_ind)])
 
         return ax
 
@@ -386,9 +381,7 @@ class pf1d:
                 ax.clear()
             ax.plot(self.x, self.t, color="gray", alpha=0.6)
             ax.plot(mapinfo["pos"][cell], mapinfo["spikes"][cell], ".", color="#ff5f5c")
-            ax.set_title(
-                " ".join(filter(None, ("Cell", str(cell), self.run_dir.capitalize())))
-            )
+            ax.set_title(f"Cell {cell}")
             ax.invert_yaxis()
             ax.set_xlabel("Position (cm)")
             ax.set_ylabel("Time (s)")
