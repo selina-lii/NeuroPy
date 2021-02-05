@@ -1,6 +1,7 @@
 from artifactDetect import findartifact
 from behavior import behavior_epochs
 from decoders import DecodeBehav
+from eventCorr import event_event
 from getPosition import ExtractPosition
 from getSpikes import Spikes
 from lfpEvent import Hswa, Ripple, Spindle, Theta, Gamma
@@ -34,10 +35,12 @@ class processData:
         self.ripple = Ripple(self.recinfo)
         self.placefield = pf(self.recinfo)
         self.replay = Replay(self.recinfo)
-        self.decode = DecodeBehav(self.placefield.pf1d, self.placefield.pf2d)
+        self.decode = DecodeBehav(self.recinfo)
         self.localsleep = LocalSleep(self.recinfo)
         self.viewdata = SessView(self.recinfo)
         self.pbe = PBE(self.recinfo)
+
+        self.eventpsth = event_event()
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.recinfo.session.sessionName})"
@@ -45,9 +48,10 @@ class processData:
 
 # test
 if __name__ == "__main__":
-    sess2 = processData(
-        "/data/Working/Opto/Jackie671/Jackie_3well_Day4/Jackie_UTRACK_combined"
+    sess = processData(
+        r"C:\Users\Nat\Documents\UM\Working\Opto\Jackie671\Jackie_3well_day4\Jackie_UTRACK_combined"
     )
-    sess2.recinfo.geteeg(sess2.recinfo.goodchans)
+    sess.placefield.pf1d.compute(track_name="MAZE")
+    sess.placefield.pf1d.phase_precession(9)
 
 pass
