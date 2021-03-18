@@ -324,7 +324,7 @@ class CellAssemblyICA:
         else:
             self._obj = Recinfo(basepath)
 
-    def getAssemblies(self, period, spikes=None, bnsz=0.25):
+    def getAssemblies(self, x):
         """extracting statisticaly independent components from significant eigenvectors as detected using Marcenko-Pasteur distributionvinput = Matrix  (m x n) where 'm' are the number of cells and 'n' time bins ICA weights thus extracted have highiest weight positive (as done in Gido M. van de Ven et al. 2016) V = ICA weights for each neuron in the coactivation (weight having the highiest value is kept positive) M1 =  originally extracted neuron weights
 
         Arguments:
@@ -333,24 +333,17 @@ class CellAssemblyICA:
         Returns:
             [type] -- [Independent assemblies]
         """
-        if spikes is None:
-            spikes = Spikes(self._obj).pyr
 
-        template_bin = np.arange(period[0], period[1], bnsz)
-        template = np.asarray(
-            [np.histogram(cell, bins=template_bin)[0] for cell in spikes]
-        )
-
-        zsc_template = stats.zscore(template, axis=1)
+        zsc_x = stats.zscore(x, axis=1)
 
         # corrmat = (zsc_x @ zsc_x.T) / x.shape[1]
-        corrmat = np.corrcoef(zsc_template)
+        corrmat = np.corrcoef(zsc_x)
 
-        lambda_max = (1 + np.sqrt(1 / (template.shape[1] / template.shape[0]))) ** 2
+        lambda_max = (1 + np.sqrt(1 / (x.shape[1] / x.shape[0]))) ** 2
         eig_val, eig_mat = np.linalg.eigh(corrmat)
         get_sigeigval = np.where(eig_val > lambda_max)[0]
         n_sigComp = len(get_sigeigval)
-        pca_fit = PCA(n_components=n_sigComp, whiten=False).fit_transform(zsc_template)
+        pca_fit = PCA(n_components=n_sigComp, whiten=False).fit_transform(zsc_x)
 
         ica_decomp = FastICA(n_components=None, whiten=False).fit(pca_fit)
         W = ica_decomp.components_
@@ -362,15 +355,21 @@ class CellAssemblyICA:
         V /= np.sqrt(np.sum(V ** 2, axis=0))  # making sum of squares=1
 
         self.vectors = V
-        self.spikes = spikes
         return self.vectors
 
-    def getActivation(self, period, binsize=0.250):
+    def getActivation(self, template, match, spks=None, binsize=0.250):
 
-        V = self.vectors
-        spks = self.spikes
+        if spks is None:
+            spks = self._obj.spikes.pyr
 
-        match_bin = np.arange(period[0], period[1], binsize)
+        template_bin = np.arange(template[0], template[1], binsize)
+        template = np.asarray(
+            [np.histogram(cell, bins=template_bin)[0] for cell in spks]
+        )
+
+        V = self.getAssemblies(template)
+
+        match_bin = np.arange(match[0], match[1], binsize)
         match = np.asarray([np.histogram(cell, bins=match_bin)[0] for cell in spks])
 
         activation = []
@@ -388,24 +387,27 @@ class CellAssemblyICA:
 
         return self.activation, self.match_bin
 
-    def plotActivation(self):
+    def plotActivation(self, ax=None):
         activation = self.activation
         vectors = self.vectors
         nvec = activation.shape[0]
-        nCells = vectors.shape[0]
         t = self.match_bin[1:]
 
-        fig = plt.figure(num=None, figsize=(10, 15))
-        gs = gridspec.GridSpec(nvec, 6, figure=fig)
-        fig.subplots_adjust(hspace=0.3)
+        if ax is None:
+            plt.clf()
+            fig = plt.figure(1, figsize=(10, 15))
+            gs = gridspec.GridSpec(nvec, 6, figure=fig)
+            fig.subplots_adjust(hspace=0.3)
+
+        else:
+            gs = gridspec.GridSpecFromSubplotSpec(7, 6, ax, wspace=0.1)
 
         for vec in range(nvec):
             axact = plt.subplot(gs[vec, 3:])
             axact.plot(t / 3600, activation[vec, :])
 
             axvec = plt.subplot(gs[vec, :2])
-            # axvec.stem(vectors[:, vec], markerfmt="C2o")
-            axvec.vlines(np.arange(nCells), ymin=0, ymax=vectors[:, vec])
+            axvec.stem(vectors[:, vec], markerfmt="C2o")
             if vec == nvec - 1:
                 axact.set_xlabel("Time")
                 axact.set_ylabel("Activation \n strength")
