@@ -397,9 +397,7 @@ class pf2d:
         else:
             self._obj = Recinfo(basepath)
 
-    def compute(
-        self, period, spikes=None, gridbin=10, speed_thresh=5, peak_frate=1, smooth=2
-    ):
+    def compute(self, period, gridbin=10, speed_thresh=5, smooth=2):
         """Calculates 2D placefields
 
         Parameters
@@ -417,16 +415,13 @@ class pf2d:
             [description]
         """
         assert len(period) == 2, "period should have length 2"
+        spikes = Spikes(self._obj)
         position = ExtractPosition(self._obj)
         # ------ Cell selection ---------
-        if spikes is None:
-            spike_info = Spikes(self._obj)
-            spikes = spike_info.pyr
-            cell_ids = spike_info.pyrid
-        else:
-            cell_ids = np.arange(len(spikes))
-
-        nCells = len(spikes)
+        spkAll = spikes.pyr
+        # spkinfo = self._obj.spikes.info
+        # pyrid = np.where(spkinfo.q < 4)[0]
+        # spkAll = [spkAll[_] for _ in pyrid]
 
         # ----- Position---------
         xcoord = position.x
@@ -448,7 +443,7 @@ class pf2d:
 
         speed = np.sqrt(diff_posx ** 2 + diff_posy ** 2) / (1 / trackingRate)
         speed = gaussian_filter1d(speed, sigma=smooth)
-
+        print(np.ptp(speed))
         dt = t[1] - t[0]
         running = np.where(speed / dt > speed_thresh)[0]
 
@@ -483,42 +478,42 @@ class pf2d:
 
             return maps, spk_pos, spk_t
 
-        # --- occupancy map calculation -----------
-        # NRK todo: might need to normalize occupancy so sum adds up to 1
-        occupancy = np.histogram2d(x_thresh, y_thresh, bins=(x_grid, y_grid))[0]
+        occupancy = np.histogram2d(x, y, bins=(x_grid, y_grid))[0]
         occupancy = occupancy / trackingRate + 10e-16  # converting to seconds
-        occupancy = gaussian_filter(occupancy, sigma=2)
+        occupancy = gaussian_filter(occupancy, sigma=smooth)
 
         maps, spk_pos, spk_t = make_pfs(
-            t, x, y, spikes, occupancy, speed_thresh, period, x_grid, y_grid
+            t, x, y, spkAll, occupancy, 0, period, x_grid, y_grid
         )
 
-        # ---- cells with peak frate abouve thresh ------
-        good_cells_indx = [
-            cell_indx
-            for cell_indx in range(nCells)
-            if np.max(maps[cell_indx]) > peak_frate
-        ]
+        run_occupancy = np.histogram2d(x_thresh, y_thresh, bins=(x_grid, y_grid))[0]
+        run_occupancy = run_occupancy / trackingRate + 10e-16  # converting to seconds
+        run_occupancy = gaussian_filter(
+            run_occupancy, sigma=2
+        )  # NRK todo: might need to normalize this so that total occupancy adds up to 1 here...
 
-        get_elem = lambda list_: [list_[_] for _ in good_cells_indx]
+        run_maps, run_spk_pos, run_spk_t = make_pfs(
+            t, x, y, spkAll, run_occupancy, speed_thresh, period, x_grid, y_grid
+        )
 
-        self.spk_pos = get_elem(spk_pos)
-        self.spk_t = get_elem(spk_t)
-        self.ratemaps = get_elem(maps)
-        self.cell_ids = cell_ids[good_cells_indx]
-        self.occupancy = occupancy
+        # NRK todo: might be nicer to make spk_pos, spk_t, maps, and occupancy into two separate dicts: no thresh, speed_thresh
+        self.spk_pos = spk_pos
+        self.spk_t = spk_t
+        self.maps = maps
+        self.run_spk_pos = run_spk_pos
+        self.run_spk_t = run_spk_t
+        self.run_maps = run_maps
         self.speed = speed
         self.x = x
         self.y = y
         self.t = t
+        self.occupancy = occupancy
+        self.run_occupancy = run_occupancy
         self.xgrid = x_grid
         self.ygrid = y_grid
-        self.gridbin = gridbin
         self.speed_thresh = speed_thresh
-        self.period = period
-        self.peak_frate = peak_frate
 
-    def plotMap(self, subplots=(7, 4), fignum=None):
+    def plotMap(self, speed_thresh=False, subplots=(7, 4), fignum=None):
         """Plots heatmaps of placefields with peak firing rate
 
         Parameters
@@ -531,7 +526,11 @@ class pf2d:
             figure number to start from, by default None
         """
 
-        map_use, thresh = self.ratemaps, self.speed_thresh
+        map_use = thresh = None
+        if speed_thresh:
+            map_use, thresh = self.run_maps, self.speed_thresh
+        elif not speed_thresh:
+            map_use, thresh = self.maps, 0
 
         nCells = len(map_use)
         nfigures = nCells // np.prod(subplots) + 1
@@ -562,14 +561,12 @@ class pf2d:
                 self.xgrid,
                 self.ygrid,
                 np.rot90(np.fliplr(pfmap)) / np.max(pfmap),
-                cmap="jet",
+                cmap="Spectral_r",
                 vmin=0,
             )  # rot90(flipud... is necessary to match plotRaw configuration.
             # max_frate =
             ax1.axis("off")
-            ax1.set_title(
-                f"Cell {self.cell_ids[cell]} \n{round(np.nanmax(pfmap),2)} Hz"
-            )
+            ax1.set_title(f"{round(np.nanmax(pfmap),2)} Hz")
 
             # cbar_ax = fig.add_axes([0.9, 0.3, 0.01, 0.3])
             # cbar = fig.colorbar(im, cax=cbar_ax)
@@ -577,6 +574,7 @@ class pf2d:
 
     def plotRaw(
         self,
+        speed_thresh=False,
         subplots=(10, 8),
         fignum=None,
         alpha=0.5,
@@ -594,7 +592,10 @@ class pf2d:
             ), "Number of axes must match number of clusters to plot"
             fig = ax[0].get_figure()
 
-        spk_pos_use = self.spk_pos
+        if not speed_thresh:
+            spk_pos_use = self.spk_pos
+        elif speed_thresh:
+            spk_pos_use = self.run_spk_pos
 
         if clus_use is not None:
             spk_pos_tmp = spk_pos_use
@@ -614,9 +615,14 @@ class pf2d:
                 info = self._obj.spikes.info.iloc[cell]
                 ax1.set_title("Cell " + str(info["id"]))
 
-        fig.suptitle(
-            f"Place maps for cells with their peak firing rate (frate thresh={self.peak_frate},speed_thresh={self.speed_thresh})"
-        )
+        if speed_thresh:
+            fig.suptitle(
+                "Place maps for cells with their peak firing rate (with speed threshold)"
+            )
+        elif not speed_thresh:
+            fig.suptitle(
+                "Place maps for cells with their peak firing rate (no speed threshold)"
+            )
 
     def plotRaw_v_time(self, cellind, speed_thresh=False, alpha=0.5, ax=None):
         if ax is None:
