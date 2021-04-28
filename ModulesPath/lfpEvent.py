@@ -247,6 +247,7 @@ class Ripple:
 
         filename = self.files.bestRippleChans
         np.save(filename, bestripplechans)
+        self._load()  # load variables immediately into existence
 
     def detect(
         self,
@@ -455,8 +456,13 @@ class Ripple:
 
         # ----- plotting channels used for detection --------
         ax = fig.add_subplot(gs[0, 1:4])
-        self._obj.probemap.plot(self.bestchans, ax=ax)
-        ax.set_title("selected channel")
+        try:
+            self._obj.probemap.plot(self.bestchans, ax=ax)
+            ax.set_title("selected channel")
+        except AttributeError:
+            print(
+                "No probemap provided - provide to visualize ripple channel location!"
+            )
 
         # ---- peaknormalized power distribution plot ---------
         ax = fig.add_subplot(gs[0, 5])
@@ -508,25 +514,6 @@ class Ripple:
         ax.tick_params(axis="both", length=0)
 
         return ax
-
-    def plot_ripples(self, period, ax):
-        """Plot ripples between this period on a given axis
-
-        Parameters
-        ----------
-        period : list
-            list of length 2, in seconds
-        ax : axis object
-            axis
-        """
-
-        events = self.events[
-            (self.events.start > period[0]) & (self.events.start < period[1])
-        ]
-
-        for epoch in events.itertuples():
-            color = "#ff928a"
-            ax.axvspan(epoch.start, epoch.end, facecolor=color, alpha=0.7)
 
 
 class Spindle:
@@ -1056,20 +1043,16 @@ class Theta:
         hil_theta = signal_process.hilbertfast(thetalfp)
         theta_angle = np.angle(hil_theta, deg=True) + 180  # range from 0-360 degree
 
+        angle_bin = np.arange(0, 360 - binsize, slideby)
         if slideby is None:
             slideby = binsize
-
-        # --- sliding windows--------
-        angle_bin = np.arange(0, 361)
-        slide_angles = np.lib.stride_tricks.sliding_window_view(angle_bin, binsize)[
-            ::slideby, :
-        ]
-        angle_centers = np.mean(slide_angles, axis=1)
+            angle_bin = np.arange(0, 360, slideby)
+        angle_centers = angle_bin + binsize / 2
 
         y_at_phase = []
-        for phase in slide_angles:
+        for phase in angle_bin:
             y_at_phase.append(
-                y[np.where((theta_angle >= phase[0]) & (theta_angle <= phase[-1]))[0]]
+                y[np.where((theta_angle >= phase) & (theta_angle < phase + binsize))[0]]
             )
 
         return y_at_phase, angle_bin, angle_centers
