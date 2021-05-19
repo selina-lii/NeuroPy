@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from datetime import datetime
-from fileinput import filename
 from pathlib import Path
 
 import matplotlib.gridspec as gridspec
@@ -16,7 +15,6 @@ from parsePath import Recinfo
 from joblib import Parallel, delayed
 from behavior import behavior_epochs
 from artifactDetect import findartifact
-from ModulesPath.core.epoch import Epoch
 
 
 class Hswa:
@@ -197,8 +195,6 @@ class Ripple:
 
         self.files = files()
         self._load()
-        # super().__init__(filename=filePrefix.with_suffix(".ripples.npy"))
-        # self.load()
 
     def _load(self):
         if (f := self.files.ripples).is_file():
@@ -386,7 +382,7 @@ class Ripple:
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
 
         ripples = {
-            "epochs": ripples.reset_index(drop=True),
+            "events": ripples.reset_index(drop=True),
             "Info": {"Date": dt_string},
             "DetectionParams": {
                 "lowThres": lowthreshold,
