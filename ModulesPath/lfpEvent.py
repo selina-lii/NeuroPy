@@ -8,15 +8,13 @@ import numpy as np
 import pandas as pd
 import scipy.signal as sg
 import scipy.stats as stats
-from joblib import Parallel, delayed
 from scipy import fftpack
-
-from . import mathutil
-from . import signal_process
-from .artifactDetect import findartifact
-from .behavior import behavior_epochs
-from .core.epoch import Epoch
-from .parsePath import Recinfo
+import mathutil
+import signal_process
+from parsePath import Recinfo
+from joblib import Parallel, delayed
+from behavior import behavior_epochs
+from artifactDetect import findartifact
 
 
 class Hswa:
@@ -178,7 +176,7 @@ class Hswa:
         fig.suptitle(f"Delta wave detection of {subname}")
 
 
-class Ripple(Epoch):
+class Ripple:
     def __init__(self, basepath):
 
         if isinstance(basepath, Recinfo):
@@ -186,17 +184,70 @@ class Ripple(Epoch):
         else:
             self._obj = Recinfo(basepath)
 
+        # ------- defining file names ---------
         filePrefix = self._obj.files.filePrefix
-        filename = filePrefix.with_suffix(".ripples.npy")
-        super().__init__(filename=filename)
-        self.load()
 
-    @property
-    def bestchans(self):
-        if "channels" in self.metadata:
-            return self.metadata["channels"]
-        else:
-            return None
+        @dataclass
+        class files:
+            ripples: Path = filePrefix.with_suffix(".ripples.npy")
+            bestRippleChans: Path = filePrefix.with_suffix(".BestRippleChans.npy")
+            neuroscope: Path = filePrefix.with_suffix(".evt.rpl")
+
+        self.files = files()
+        self._load()
+
+    def _load(self):
+        if (f := self.files.ripples).is_file():
+
+            ripple_evt = np.load(f, allow_pickle=True).item()
+            self.events: pd.DataFrame = ripple_evt["events"]
+            self.params = ripple_evt["DetectionParams"]
+
+        if (f := self.files.bestRippleChans).is_file():
+            data = np.load(f, allow_pickle=True).item()
+            self.bestchans = data["channels"]
+
+    def channels(self, viewselection=1):
+        """Channels which represent high ripple power in each shank"""
+        duration = 1 * 60 * 60  # 1 hour chunk of lfp in seconds
+        nShanks = self._obj.nShanks
+
+        lfpCA1 = self._obj.geteeg(chans=self._obj.goodchans, timeRange=[0, duration])
+        goodChans = self._obj.goodchans  # keeps order
+
+        # --- filter and hilbert amplitude for each channel --------
+        avgRipple = np.zeros(len(lfpCA1))
+        for i, lfp in enumerate(lfpCA1):
+            rippleband = signal_process.filter_sig.ripple(lfp)
+            amplitude_envelope = np.abs(signal_process.hilbertfast(rippleband))
+            avgRipple[i] = np.mean(amplitude_envelope, axis=0)
+
+        rippleamp_chan = dict(zip(goodChans, avgRipple))
+
+        rplchan_shank, metricAmp = [], []
+        for shank in range(nShanks):
+            goodChans_shank = np.asarray(self._obj.goodchangrp[shank])
+
+            if goodChans_shank.size != 0:
+                avgrpl_shank = np.asarray(
+                    [rippleamp_chan[chan] for chan in goodChans_shank]
+                )
+                chan_max = goodChans_shank[np.argmax(avgrpl_shank)]
+                rplchan_shank.append(chan_max)
+                metricAmp.append(np.max(avgrpl_shank))
+
+        rplchan_shank = np.asarray(rplchan_shank)
+        metricAmp = np.asarray(metricAmp)
+        sort_chan = np.argsort(metricAmp)
+        # --- the reason metricAmp was used to allow using other metrics such as median
+        bestripplechans = {
+            "channels": rplchan_shank[sort_chan],
+            "metricAmp": metricAmp[sort_chan],
+        }
+
+        filename = self.files.bestRippleChans
+        np.save(filename, bestripplechans)
+        self._load()  # load variables immediately into existence
 
     def detect(
         self,
@@ -221,50 +272,11 @@ class Ripple(Epoch):
         chans : list
             channels used for ripple detection, if None then chooses best chans
         """
-
+        # TODO chnage raw amplitude threshold to something statistical
         SampFreq = self._obj.lfpSrate
+
         if chans is None:
-            # ---- selecting channels which represent high ripple power in each shank ----
-            recording_duration = self._obj.duration
-            duration = np.min((3600, recording_duration))  # 1 hour
-            nShanks = self._obj.nShanks
-
-            lfpCA1 = self._obj.geteeg(
-                chans=self._obj.goodchans, timeRange=[0, duration]
-            )
-            goodChans = self._obj.goodchans  # keeps order
-
-            # --- filter and hilbert amplitude for each channel --------
-            avgRipple = np.zeros(len(lfpCA1))
-            for i, lfp in enumerate(lfpCA1):
-                rippleband = signal_process.filter_sig.ripple(lfp)
-                amplitude_envelope = np.abs(signal_process.hilbertfast(rippleband))
-                avgRipple[i] = np.mean(amplitude_envelope, axis=0)
-
-            rippleamp_chan = dict(zip(goodChans, avgRipple))
-
-            rplchan_shank, metricAmp = [], []
-            for shank in range(nShanks):
-                goodChans_shank = np.asarray(self._obj.goodchangrp[shank])
-
-                if goodChans_shank.size != 0:
-                    avgrpl_shank = np.asarray(
-                        [rippleamp_chan[chan] for chan in goodChans_shank]
-                    )
-                    chan_max = goodChans_shank[np.argmax(avgrpl_shank)]
-                    rplchan_shank.append(chan_max)
-                    metricAmp.append(np.max(avgrpl_shank))
-
-            rplchan_shank = np.asarray(rplchan_shank)
-            metricAmp = np.asarray(metricAmp)
-            sort_chan = np.argsort(metricAmp)
-            # --- the reason metricAmp was used to allow using other metrics such as median
-            # bestripplechans = {
-            #     "channels": rplchan_shank[sort_chan],
-            #     "metricAmp": metricAmp[sort_chan],
-            # }
-
-            bestchans = rplchan_shank[sort_chan]
+            bestchans = self.bestchans
         else:
             bestchans = chans
 
@@ -342,7 +354,7 @@ class Ripple(Epoch):
         ripples = pd.DataFrame(
             {
                 "start": thirdPass[:, 0],
-                "stop": thirdPass[:, 1],
+                "end": thirdPass[:, 1],
                 "peakNormalizedPower": peakNormalizedPower,
                 "peakSharpWave": np.asarray(peakSharpWave),
                 "peaktime": np.asarray(peaktime),
@@ -364,16 +376,14 @@ class Ripple(Epoch):
         print(f"{len(ripples)} ripples reamining after deleting very long ripples")
 
         # ----- converting to all time stamps to seconds --------
-        ripples[["start", "stop", "peakSharpWave", "peaktime"]] /= SampFreq  # seconds
+        ripples[["start", "end", "peakSharpWave", "peaktime"]] /= SampFreq  # seconds
 
         now = datetime.now()
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
 
-        epochs = ripples.reset_index(drop=True)
-        epochs["label"] = ""
-        metadata = {
-            "channels": bestchans,
-            "data": {"Date": dt_string},
+        ripples = {
+            "events": ripples.reset_index(drop=True),
+            "Info": {"Date": dt_string},
             "DetectionParams": {
                 "lowThres": lowthreshold,
                 "highThresh": highthreshold,
@@ -386,11 +396,16 @@ class Ripple(Epoch):
             },
         }
 
+        np.save(self.files.ripples, ripples)
+        print(f"{self.files.ripples} created")
+        self._load()
 
-        self.epochs = epochs
-        self.metadata = metadata
-        self.save()
-        self.load()
+    def export2Neuroscope(self):
+        with self.files.neuroscope.open("w") as a:
+            for event in self.events.itertuples():
+                a.write(
+                    f"{event.start*1000} start\n{event.peakSharpWave*1000} peakSW\n{event.end*1000} end\n"
+                )
 
     def plot_summary(self, random=False, shank_id=None):
         """Plots 10 of detected ripples across two randomly selected shanks with their filtered lfp
