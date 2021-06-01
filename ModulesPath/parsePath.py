@@ -102,6 +102,7 @@ class Recinfo:
             for attrib, val in myinfo.items():  # alternative list(epochs)
                 setattr(self, attrib, val)  # .lower() will be removed
 
+        if self.channels and self.badchans and self.channelgroups:
             self.goodchans = np.setdiff1d(
                 self.channels, self.badchans, assume_unique=True
             )
@@ -235,10 +236,6 @@ class Recinfo:
         nframes = len(self.geteeg(chans=0))
 
         return nframes
-
-    @property
-    def duration(self):
-        return self.getNframesEEG / self.lfpSrate
 
     def geteeg(self, chans, timeRange=None):
         """Returns eeg signal for given channels. If multiple channels provided then it is list of lfps.

@@ -1,17 +1,16 @@
-import random
-
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import pingouin as pg
-import scipy.stats as stats
-from scipy.ndimage import gaussian_filter
-from sklearn.decomposition import PCA, FastICA
 
-from .getSpikes import Spikes
-from .mathutil import getICA_Assembly, parcorr_mult
-from .parsePath import Recinfo
+from sklearn.decomposition import FastICA, PCA
+import matplotlib.pyplot as plt
+import pandas as pd
+from mathutil import parcorr_mult, getICA_Assembly
+import scipy.stats as stats
+import matplotlib.gridspec as gridspec
+from parsePath import Recinfo
+from getSpikes import Spikes
+from scipy.ndimage import gaussian_filter
+import random
+import pingouin as pg
 
 
 class Replay:
