@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import time
+from importlib_metadata import metadata
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -8,13 +10,16 @@ import numpy as np
 import pandas as pd
 import scipy.signal as sg
 import scipy.stats as stats
-from scipy import fftpack
-import mathutil
-import signal_process
-from parsePath import Recinfo
 from joblib import Parallel, delayed
-from behavior import behavior_epochs
-from artifactDetect import findartifact
+from scipy import fftpack
+
+from ModulesPath.core import Oscillation
+
+from . import mathutil, signal_process
+from .artifactDetect import findartifact
+from .behavior import behavior_epochs
+from .core.epoch import Epoch
+from .parsePath import Recinfo
 
 
 class Hswa:
@@ -176,7 +181,7 @@ class Hswa:
         fig.suptitle(f"Delta wave detection of {subname}")
 
 
-class Ripple:
+class Ripple(Epoch):
     def __init__(self, basepath):
 
         if isinstance(basepath, Recinfo):
@@ -184,70 +189,17 @@ class Ripple:
         else:
             self._obj = Recinfo(basepath)
 
-        # ------- defining file names ---------
         filePrefix = self._obj.files.filePrefix
+        filename = filePrefix.with_suffix(".ripples.npy")
+        super().__init__(filename=filename)
+        self.load()
 
-        @dataclass
-        class files:
-            ripples: Path = filePrefix.with_suffix(".ripples.npy")
-            bestRippleChans: Path = filePrefix.with_suffix(".BestRippleChans.npy")
-            neuroscope: Path = filePrefix.with_suffix(".evt.rpl")
-
-        self.files = files()
-        self._load()
-
-    def _load(self):
-        if (f := self.files.ripples).is_file():
-
-            ripple_evt = np.load(f, allow_pickle=True).item()
-            self.events: pd.DataFrame = ripple_evt["events"]
-            self.params = ripple_evt["DetectionParams"]
-
-        if (f := self.files.bestRippleChans).is_file():
-            data = np.load(f, allow_pickle=True).item()
-            self.bestchans = data["channels"]
-
-    def channels(self, viewselection=1):
-        """Channels which represent high ripple power in each shank"""
-        duration = 1 * 60 * 60  # 1 hour chunk of lfp in seconds
-        nShanks = self._obj.nShanks
-
-        lfpCA1 = self._obj.geteeg(chans=self._obj.goodchans, timeRange=[0, duration])
-        goodChans = self._obj.goodchans  # keeps order
-
-        # --- filter and hilbert amplitude for each channel --------
-        avgRipple = np.zeros(len(lfpCA1))
-        for i, lfp in enumerate(lfpCA1):
-            rippleband = signal_process.filter_sig.ripple(lfp)
-            amplitude_envelope = np.abs(signal_process.hilbertfast(rippleband))
-            avgRipple[i] = np.mean(amplitude_envelope, axis=0)
-
-        rippleamp_chan = dict(zip(goodChans, avgRipple))
-
-        rplchan_shank, metricAmp = [], []
-        for shank in range(nShanks):
-            goodChans_shank = np.asarray(self._obj.goodchangrp[shank])
-
-            if goodChans_shank.size != 0:
-                avgrpl_shank = np.asarray(
-                    [rippleamp_chan[chan] for chan in goodChans_shank]
-                )
-                chan_max = goodChans_shank[np.argmax(avgrpl_shank)]
-                rplchan_shank.append(chan_max)
-                metricAmp.append(np.max(avgrpl_shank))
-
-        rplchan_shank = np.asarray(rplchan_shank)
-        metricAmp = np.asarray(metricAmp)
-        sort_chan = np.argsort(metricAmp)
-        # --- the reason metricAmp was used to allow using other metrics such as median
-        bestripplechans = {
-            "channels": rplchan_shank[sort_chan],
-            "metricAmp": metricAmp[sort_chan],
-        }
-
-        filename = self.files.bestRippleChans
-        np.save(filename, bestripplechans)
-        self._load()  # load variables immediately into existence
+    @property
+    def bestchans(self):
+        if "channels" in self.metadata:
+            return self.metadata["channels"]
+        else:
+            return None
 
     def detect(
         self,
@@ -272,11 +224,50 @@ class Ripple:
         chans : list
             channels used for ripple detection, if None then chooses best chans
         """
-        # TODO chnage raw amplitude threshold to something statistical
-        SampFreq = self._obj.lfpSrate
 
+        SampFreq = self._obj.lfpSrate
         if chans is None:
-            bestchans = self.bestchans
+            # ---- selecting channels which represent high ripple power in each shank ----
+            recording_duration = self._obj.duration
+            duration = np.min((3600, recording_duration))  # 1 hour
+            nShanks = self._obj.nShanks
+
+            lfpCA1 = self._obj.geteeg(
+                chans=self._obj.goodchans, timeRange=[0, duration]
+            )
+            goodChans = self._obj.goodchans  # keeps order
+
+            # --- filter and hilbert amplitude for each channel --------
+            avgRipple = np.zeros(len(lfpCA1))
+            for i, lfp in enumerate(lfpCA1):
+                rippleband = signal_process.filter_sig.ripple(lfp)
+                amplitude_envelope = np.abs(signal_process.hilbertfast(rippleband))
+                avgRipple[i] = np.mean(amplitude_envelope, axis=0)
+
+            rippleamp_chan = dict(zip(goodChans, avgRipple))
+
+            rplchan_shank, metricAmp = [], []
+            for shank in range(nShanks):
+                goodChans_shank = np.asarray(self._obj.goodchangrp[shank])
+
+                if goodChans_shank.size != 0:
+                    avgrpl_shank = np.asarray(
+                        [rippleamp_chan[chan] for chan in goodChans_shank]
+                    )
+                    chan_max = goodChans_shank[np.argmax(avgrpl_shank)]
+                    rplchan_shank.append(chan_max)
+                    metricAmp.append(np.max(avgrpl_shank))
+
+            rplchan_shank = np.asarray(rplchan_shank)
+            metricAmp = np.asarray(metricAmp)
+            sort_chan = np.argsort(metricAmp)
+            # --- the reason metricAmp was used to allow using other metrics such as median
+            # bestripplechans = {
+            #     "channels": rplchan_shank[sort_chan],
+            #     "metricAmp": metricAmp[sort_chan],
+            # }
+
+            bestchans = rplchan_shank[sort_chan]
         else:
             bestchans = chans
 
@@ -354,7 +345,7 @@ class Ripple:
         ripples = pd.DataFrame(
             {
                 "start": thirdPass[:, 0],
-                "end": thirdPass[:, 1],
+                "stop": thirdPass[:, 1],
                 "peakNormalizedPower": peakNormalizedPower,
                 "peakSharpWave": np.asarray(peakSharpWave),
                 "peaktime": np.asarray(peaktime),
@@ -376,14 +367,16 @@ class Ripple:
         print(f"{len(ripples)} ripples reamining after deleting very long ripples")
 
         # ----- converting to all time stamps to seconds --------
-        ripples[["start", "end", "peakSharpWave", "peaktime"]] /= SampFreq  # seconds
+        ripples[["start", "stop", "peakSharpWave", "peaktime"]] /= SampFreq  # seconds
 
         now = datetime.now()
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
 
-        ripples = {
-            "events": ripples.reset_index(drop=True),
-            "Info": {"Date": dt_string},
+        epochs = ripples.reset_index(drop=True)
+        epochs["label"] = ""
+        metadata = {
+            "channels": bestchans,
+            "data": {"Date": dt_string},
             "DetectionParams": {
                 "lowThres": lowthreshold,
                 "highThresh": highthreshold,
@@ -396,16 +389,10 @@ class Ripple:
             },
         }
 
-        np.save(self.files.ripples, ripples)
-        print(f"{self.files.ripples} created")
-        self._load()
-
-    def export2Neuroscope(self):
-        with self.files.neuroscope.open("w") as a:
-            for event in self.events.itertuples():
-                a.write(
-                    f"{event.start*1000} start\n{event.peakSharpWave*1000} peakSW\n{event.end*1000} end\n"
-                )
+        self.epochs = epochs
+        self.metadata = metadata
+        self.save()
+        self.load()
 
     def plot_summary(self, random=False, shank_id=None):
         """Plots 10 of detected ripples across two randomly selected shanks with their filtered lfp
@@ -535,7 +522,7 @@ class Ripple:
             ax.axvspan(epoch.start, epoch.end, facecolor=color, alpha=0.7)
 
 
-class Spindle:
+class Spindle(Oscillation, Epoch):
     lowthresholdFactor = 1.5
     highthresholdFactor = 4
     minSpindleDuration = 350
@@ -548,235 +535,54 @@ class Spindle:
         else:
             self._obj = Recinfo(basepath)
 
+        freq_band = (9, 18)
+
         # ------- defining file names ---------
         filePrefix = self._obj.files.filePrefix
+        filename = filePrefix.with_suffix(".spindles.npy")
+        super().__init__(freq_band=freq_band, fs=self._obj.lfpSrate, filename=filename)
+        self.load()
 
-        @dataclass
-        class files:
-            events: Path = filePrefix.with_suffix(".spindles.npy")
-            bestChan: Path = filePrefix.with_suffix(".BestSpindleChan.npy")
-            neuroscope: Path = filePrefix.with_suffix(".evt.spn")
+    def detect(
+        self,
+        chans=None,
+        thresh=(1, 5),
+        midur=0.4,
+        maxdur=1,
+        mergedist=0.05,
+        ignore_epochs=None,
+        plot=True,
+    ):
 
-        self.files = files()
-        self._load()
+        if chans is None:
+            changrps = self._obj.goodchangrp
 
-    def _load(self):
-        if (f := self.files.events).is_file():
-            spindle_evt = np.load(f, allow_pickle=True).item()
-            self.time = spindle_evt["times"]
-            self.peakpower = spindle_evt["peakPower"]
-            self.peaktime = spindle_evt["peaktime"]
+            selected_chans = []
+            for changrp in changrps:
+                lfps = self._obj.geteeg(chans=changrp, timeRange=[0, 3600])
+                desc_order = super().get_best_channels(lfps=lfps)
+                selected_chans.append(changrp[desc_order[0]])
+        else:
+            selected_chans = chans
 
-    def best_chan_lfp(self):
-        """Returns just best of best channels of each shank or returns all best channels of shanks
+        lfps = self._obj.geteeg(chans=selected_chans)
 
-        Returns:
-            [type] -- [description]
-        """
-        lfpsrate = self._obj.lfpSrate
-
-        lfpinfo = np.load(self._obj.files.spindlelfp, allow_pickle=True).item()
-        chan = np.asarray(lfpinfo["channel"])
-        lfp = np.asarray(lfpinfo["lfp"])
-        coords = lfpinfo["coords"]
-
-        return lfp, chan, coords
-
-    def channels(self, viewselection=1):
-        """Channel which represent high spindle power during nrem across all channels"""
-        sampleRate = self._obj.recinfo.lfpSrate
-        duration = 1 * 60 * 60  # chunk of lfp in seconds
-        nyq = 0.5 * sampleRate  # Nyquist frequency
-        nChans = self._obj.nChans
-        badchans = self._obj.badchans
-        allchans = self._obj.channels
-        changrp = self._obj.channelgroups
-        nShanks = self._obj.nShanks
-        probemap = self._obj.probemap()
-        brainChannels = [item for sublist in changrp[:nShanks] for item in sublist]
-        dict_probemap = dict(zip(brainChannels, zip(probemap[0], probemap[1])))
-
-        states = self._obj.brainstates.states
-        states = states.loc[states["name"] == "nrem", ["start", "end"]]
-        nremframes = (np.asarray(states.values.tolist()) * sampleRate).astype(int)
-        reqframes = []
-        for (start, end) in nremframes:
-            reqframes.extend(np.arange(start, end))
-
-        reqframes = np.asarray(reqframes)
-
-        fileName = self._obj.sessinfo.recfiles.eegfile
-        lfpAll = np.memmap(fileName, dtype="int16", mode="r")
-        lfpAll = np.memmap.reshape(lfpAll, (int(len(lfpAll) / nChans), nChans))
-        lfpCA1 = lfpAll[reqframes, :]
-
-        # exclude badchannels
-        lfpCA1 = np.delete(lfpCA1, badchans, 1)
-        goodChans = np.setdiff1d(allchans, badchans, assume_unique=True)  # keeps order
-
-        # filter and hilbet amplitude for each channel
-        hilbertfast = lambda x: sg.hilbert(x, fftpack.next_fast_len(len(x)))[: len(x)]
-        avgSpindle = np.zeros(lfpCA1.shape[1])
-        for i in range(lfpCA1.shape[1]):
-            spindleband = signal_process.filter_sig.spindle(lfpCA1[:, i])
-            amplitude_envelope = np.abs(hilbertfast(spindleband))
-            avgSpindle[i] = np.mean(amplitude_envelope)
-
-        spindleamp_chan = dict(zip(goodChans, avgSpindle))
-
-        # plt.plot(probemap[0], probemap[1], ".", color="#bfc0c0")
-        bestchan = goodChans[np.argmax(avgSpindle)]
-        lfp = lfpAll[:, np.argmax(avgSpindle)]
-        coords = dict_probemap[bestchan]
-
-        # the reason metricAmp name was used to allow using other metrics such median
-        bestspindlechan = dict(
-            zip(
-                ["channel", "lfp", "coords"],
-                [bestchan, lfp, coords],
-            )
+        epochs, metadata = super().detect(
+            lfps=lfps,
+            thresh=thresh,
+            mindur=midur,
+            maxdur=maxdur,
+            mergedist=mergedist,
+            ignore_times=ignore_epochs,
         )
 
-        filename = self._obj.sessinfo.files.spindlelfp
-        np.save(filename, bestspindlechan)
+        metadata["channels"] = selected_chans
+        self.epochs = epochs
+        self.metadata = metadata
+        self.save()
 
-    def detect(self):
-        """ripples lfp nchans x time
-
-        Returns:
-            [type] -- [description]
-        """
-        sampleRate = self._obj.recinfo.lfpSrate
-        lowFreq = 9
-        highFreq = 18
-
-        spindlelfp, _, _ = self.best_chan_lfp()
-        signal = np.asarray(spindlelfp, dtype=np.float)
-
-        yf = signal_process.filter_sig.bandpass(signal, lf=8, hf=16, ax=-1)
-        hilbertfast = lambda x: sg.hilbert(x, fftpack.next_fast_len(len(x)))[: len(x)]
-        amplitude_envelope = np.abs(hilbertfast(yf))
-        zscsignal = stats.zscore(amplitude_envelope, axis=-1)
-
-        # delete ripples in noisy period
-        deadfile = (self._obj.sessinfo.files.filePrefix).with_suffix(".dead")
-        if deadfile.is_file():
-            with deadfile.open("r") as f:
-                noisy = []
-                for line in f:
-                    epc = line.split(" ")
-                    epc = [float(_) for _ in epc]
-                    noisy.append(epc)
-                noisy = np.asarray(noisy)
-                noisy = ((noisy / 1000) * sampleRate).astype(int)
-
-            for noisy_ind in range(noisy.shape[0]):
-                st = noisy[noisy_ind, 0]
-                en = noisy[noisy_ind, 1]
-                numnoisy = en - st
-                zscsignal[st:en] = np.zeros((numnoisy))
-
-        # hilbert transform --> binarize by > than lowthreshold
-        ThreshSignal = np.diff(np.where(zscsignal > self.lowthresholdFactor, 1, 0))
-        start_spindle = np.where(ThreshSignal == 1)[0]
-        stop_spindle = np.where(ThreshSignal == -1)[0]
-
-        if start_spindle[0] > stop_spindle[0]:
-            stop_spindle = stop_spindle[1:]
-        if start_spindle[-1] > stop_spindle[-1]:
-            start_spindle = start_spindle[:-1]
-
-        firstPass = np.vstack((start_spindle, stop_spindle)).T
-        print(f"{len(firstPass)} spindles detected initially")
-
-        # ===== merging close spindles =========
-        minInterspindleSamples = self.mergeDistance / 1000 * sampleRate
-        secondPass = []
-        spindle = firstPass[0]
-        for i in range(1, len(firstPass)):
-            if firstPass[i, 0] - spindle[1] < minInterspindleSamples:
-                # Merging spindles
-                spindle = [spindle[0], firstPass[i, 1]]
-            else:
-                secondPass.append(spindle)
-                spindle = firstPass[i]
-        secondPass.append(spindle)
-        secondPass = np.asarray(secondPass)
-        print(f"{len(secondPass)} spindles remaining after merging")
-
-        # =======delete spindles with less than threshold power
-        thirdPass = []
-        peakNormalizedPower, peaktime = [], []
-        for i in range(0, len(secondPass)):
-            maxValue = max(zscsignal[secondPass[i, 0] : secondPass[i, 1]])
-            if maxValue >= self.highthresholdFactor:
-                thirdPass.append(secondPass[i])
-                peakNormalizedPower.append(maxValue)
-                peaktime.append(
-                    [
-                        secondPass[i, 0]
-                        + np.argmax(zscsignal[secondPass[i, 0] : secondPass[i, 1]])
-                    ]
-                )
-
-        thirdPass = np.asarray(thirdPass)
-        spindle_duration = np.diff(thirdPass, axis=1) / sampleRate * 1000
-        print(f"{len(thirdPass)} spindles remaining after deleting weak spindles")
-
-        # delete very short spindles
-        shortspindles = np.where(spindle_duration < self.minSpindleDuration)[0]
-        fourthPass = np.delete(thirdPass, shortspindles, 0)
-        peakNormalizedPower = np.delete(peakNormalizedPower, shortspindles)
-        spindle_duration = np.delete(spindle_duration, shortspindles)
-        peaktime = np.delete(peaktime, shortspindles)
-        print(f"{len(fourthPass)} spindles remaining after deleting short spindles")
-
-        # delete spindles in non-nrem periods
-        states = self._obj.brainstates.states
-        states = states.loc[states["name"] == "nrem", ["start", "end"]]
-        nremframes = (np.asarray(states.values.tolist()) * sampleRate).astype(int)
-        reqframes = []
-        for (start, end) in nremframes:
-            reqframes.extend(np.arange(start, end))
-        reqframes = np.asarray(reqframes)
-
-        outside_spindles = []
-        for ind, (start, _) in enumerate(fourthPass):
-            if start not in reqframes:
-                outside_spindles.extend([ind])
-        outside_spindles = np.asarray(outside_spindles)
-
-        fifthPass = np.delete(fourthPass, outside_spindles, 0)
-        peakNormalizedPower = np.delete(peakNormalizedPower, outside_spindles)
-        spindle_duration = np.delete(spindle_duration, outside_spindles)
-        peaktime = np.delete(peaktime, outside_spindles)
-
-        print(f"{len(fifthPass)} spindles finally kept after excluding outside nrem")
-
-        now = datetime.now()
-        dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
-
-        spindles = dict()
-        spindles["times"] = fifthPass / sampleRate
-        spindles["peakPower"] = peakNormalizedPower
-        spindles["peaktime"] = peaktime / sampleRate
-        spindles["DetectionParams"] = {
-            "lowThres": self.lowthresholdFactor,
-            "highThresh": self.highthresholdFactor,
-            "lowFreq": lowFreq,
-            "highFreq": highFreq,
-            "minDuration": self.minSpindleDuration,
-        }
-        spindles["Info"] = {"Date": dt_string}
-
-        # return spindles
-
-        np.save(self._obj.sessinfo.files.spindle_evt, spindles)
-        print(f"{self._obj.sessinfo.files.spindle_evt.name} created")
-
-    def plot(self):
+    def plot_stats(self):
         """Gives a comprehensive view of the detection process with some statistics and examples"""
-        _, spindlechan, coord = self.best_chan_lfp()
         eegSrate = self._obj.lfpSrate
         probemap = self._obj.probemap()
         nChans = self._obj.nChans
@@ -857,13 +663,6 @@ class Spindle:
 
         subname = self._obj.sessinfo.session.subname
         fig.suptitle(f"Spindle detection of {subname}")
-
-    def export2Neuroscope(self):
-        times = self.time * 1000  # convert to ms
-        file_neuroscope = self._obj.sessinfo.files.filePrefix.with_suffix(".evt.spn")
-        with file_neuroscope.open("w") as a:
-            for beg, stop in times:
-                a.write(f"{beg} start\n{stop} end\n")
 
 
 class Theta:
