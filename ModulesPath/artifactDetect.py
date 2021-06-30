@@ -1,14 +1,13 @@
+from dataclasses import dataclass
 from pathlib import Path
-import pandas as pd
 
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as stat
-from .parsePath import Recinfo
-from .core import Epoch
+from parsePath import Recinfo
 
 
-class Artifact(Epoch):
+class findartifact:
     """Detects noisy periods using downsampled data
 
     Attributes
@@ -29,29 +28,37 @@ class Artifact(Epoch):
         else:
             self._obj = Recinfo(obj)
 
+        self.time = None
+
         # ----- defining file names ---------
         filePrefix = self._obj.files.filePrefix
-        filename = filePrefix.with_suffix(".artifact.npy")
-        super().__init__(filename=filename)
 
-        # # ----- loading files --------
-        # if self.files.artifact.is_file():
-        #     self._load()
-        # elif Path(self.files.dead).is_file():
-        #     with self.files.dead.open("r") as f:
-        #         noisy = []
-        #         for line in f:
-        #             epc = line.split(" ")
-        #             epc = [float(_) for _ in epc]
-        #             noisy.append(epc)
-        #         noisy = np.asarray(noisy) / 1000
-        #         self.time = noisy  # in seconds
+        @dataclass
+        class files:
+            dead: str = filePrefix.with_suffix(".dead")
+            artifact: str = filePrefix.with_suffix(".artifact.npy")
+            neuroscope: str = filePrefix.with_suffix(".evt.art")
 
-    # def _load(self):
-    #     data = np.load(self.files.artifact, allow_pickle=True).item()
-    #     self.threshold = data["threshold"]
-    #     self.chan = data["channel"]
-    #     self.time = data["time"]
+        self.files = files()
+
+        # ----- loading files --------
+        if self.files.artifact.is_file():
+            self._load()
+        elif Path(self.files.dead).is_file():
+            with self.files.dead.open("r") as f:
+                noisy = []
+                for line in f:
+                    epc = line.split(" ")
+                    epc = [float(_) for _ in epc]
+                    noisy.append(epc)
+                noisy = np.asarray(noisy) / 1000
+                self.time = noisy  # in seconds
+
+    def _load(self):
+        data = np.load(self.files.artifact, allow_pickle=True).item()
+        self.threshold = data["threshold"]
+        self.chan = data["channel"]
+        self.time = data["time"]
 
     def removefrom(self, lfp, timepoints):
         """Deletes detected artifacts from the 'lfp'
@@ -87,7 +94,7 @@ class Artifact(Epoch):
         noisy_frames = noisy_frames[noisy_frames < self._obj.getNframesEEG]
         return noisy_frames
 
-    def detect(self, chans=None, thresh=5, method="zscore"):
+    def usingZscore(self, chans=None, thresh=5):
         """
         calculating periods to exclude for analysis using simple z-score measure
         """
@@ -125,24 +132,23 @@ class Artifact(Epoch):
 
         artifact_s = np.asarray(secondPass) / eegSrate  # seconds
 
-        epochs = pd.DataFrame(
-            {"start": artifact_s[:, 0], "stop": artifact_s[:, 1], "label": ""}
-        )
-        metadata = {"channels": chans, "thresh": thresh}
-        self.epochs, self.metadata = epochs, metadata
-        self.save()
+        data = {"channel": chans, "time": artifact_s, "threshold": thresh}
+        np.save(self.files.artifact, data)
 
-    # def export2neuroscope(self):
-    #     # --- converting to required time units for export ------
-    #     artifact_ms = self.time * 1000  # ms
+        self._load()
+        return zsc
 
-    #     # --- writing to file for neuroscope and spyking circus ----
-    #     file_neuroscope = self.files.neuroscope
-    #     with file_neuroscope.open("w") as file:
-    #         for beg, stop in artifact_ms:
-    #             file.write(f"{beg} start\n{stop} end\n")
+    def export2neuroscope(self):
+        # --- converting to required time units for export ------
+        artifact_ms = self.time * 1000  # ms
 
-    def to_spyking_circus(self):
+        # --- writing to file for neuroscope and spyking circus ----
+        file_neuroscope = self.files.neuroscope
+        with file_neuroscope.open("w") as file:
+            for beg, stop in artifact_ms:
+                file.write(f"{beg} start\n{stop} end\n")
+
+    def export2circus(self):
         # --- converting to required time units for export ------
         artifact_ms = self.time * 1000  # ms
 
@@ -176,3 +182,66 @@ class Artifact(Epoch):
         ax.set_ylabel("Absolute zscore")
 
         ax.legend(["zsc-lfp", "threshold", "art-start", "art-end"])
+
+    def createCleanDat(self):
+
+        # for shankID in range(3, 9):
+        #     print(shankID)
+
+        #     DatFileOG = (
+        #         folderPath
+        #         + "Shank"
+        #         + str(shankID)
+        #         + "/RatJDay2_Shank"
+        #         + str(shankID)
+        #         + ".dat"
+        #     )
+        #     DestFolder = (
+        #         folderPath
+        #         + "Shank"
+        #         + str(shankID)
+        #         + "/RatJDay2_Shank"
+        #         + str(shankID)
+        #         + "_denoised.dat"
+        #     )
+
+        #     nChans = 8
+        #     SampFreq = 30000
+
+        #     b = []
+        #     for i in range(len(Data_start)):
+
+        #         start_time = Data_start[i]
+        #         end_time = Data_end[i]
+
+        #         duration = end_time - start_time  # in seconds
+        #         b.append(
+        #             np.memmap(
+        #                 DatFileOG,
+        #                 dtype="int16",
+        #                 mode="r",
+        #                 offset=2 * nChans * int(SampFreq * start_time),
+        #                 shape=(nChans * int(SampFreq * duration)),
+        #             )
+        #         )
+
+        #     c = np.memmap(
+        #         DestFolder, dtype="int16", mode="w+", shape=sum([len(x) for x in b])
+        #     )
+
+        #     del c
+        #     d = np.memmap(
+        #         DestFolder, dtype="int16", mode="r+", shape=sum([len(x) for x in b])
+        #     )
+
+        #     sizeb = [0]
+        #     sizeb.extend([len(x) for x in b])
+        #     sizeb = np.cumsum(sizeb)
+
+        #     for i in range(len(b)):
+
+        #         d[sizeb[i] : sizeb[i + 1]] = b[i]
+        #         # d[len(b[i]) : len(b1) + len(b2)] = b2
+        #     del d
+        #     del b
+        pass

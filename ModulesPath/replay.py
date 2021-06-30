@@ -1,42 +1,38 @@
-import random
-
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import pingouin as pg
-import scipy.stats as stats
-from scipy.ndimage import gaussian_filter
-from sklearn.decomposition import PCA, FastICA
 
-from .mathutil import getICA_Assembly, parcorr_mult
-from .parsePath import Recinfo
-from .core import Neurons
+from sklearn.decomposition import FastICA, PCA
+import matplotlib.pyplot as plt
+import pandas as pd
+from mathutil import parcorr_mult, getICA_Assembly
+import scipy.stats as stats
+import matplotlib.gridspec as gridspec
+from parsePath import Recinfo
+from getSpikes import Spikes
+from scipy.ndimage import gaussian_filter
+import random
+import pingouin as pg
 
 
 class Replay:
-    def __init__(self, basepath, neurons):
-        self.expvar = ExplainedVariance(basepath, neurons)
-        self.assemblyICA = CellAssemblyICA(basepath, neurons)
+    def __init__(self, basepath):
+        self.expvar = ExplainedVariance(basepath)
+        self.assemblyICA = CellAssemblyICA(basepath)
 
 
 class ExplainedVariance:
     colors = {"ev": "#4a4a4a", "rev": "#05d69e"}  # colors of each curve
 
-    def __init__(self, basepath, neurons: Neurons):
+    def __init__(self, basepath):
         if isinstance(basepath, Recinfo):
             self._obj = basepath
         else:
             self._obj = Recinfo(basepath)
-
-        self._neurons = neurons
 
     def compute(
         self,
         template,
         match,
         control,
-        cell_ids,
         binSize=0.250,
         window=900,
         slideby=None,
@@ -64,20 +60,18 @@ class ExplainedVariance:
         2) Tastsuno et al. 2007
         """
 
-        spks = self._neurons.get_spiketrains(cell_ids)
-        shnkId = self._neurons.get_shankids(cell_ids)
-
+        spikes = Spikes(self._obj)
         if slideby is None:
             slideby = window
 
         # ----- choosing cells ----------------
-        # spks = spikes.times
-        # stability = spikes.stability.info
-        # stable_cells = np.where(stability.stable == 1)[0]
-        # pyr_id = spikes.pyrid
-        # stable_pyr = np.intersect1d(pyr_id, stable_cells, assume_unique=True)
-        # print(f"Calculating EV for {len(stable_pyr)} stable cells")
-        # spks = [spks[_] for _ in stable_pyr]
+        spks = spikes.times
+        stability = spikes.stability.info
+        stable_cells = np.where(stability.stable == 1)[0]
+        pyr_id = spikes.pyrid
+        stable_pyr = np.intersect1d(pyr_id, stable_cells, assume_unique=True)
+        print(f"Calculating EV for {len(stable_pyr)} stable cells")
+        spks = [spks[_] for _ in stable_pyr]
 
         # ------- windowing the time periods ----------
         nbins_window = int(window / binSize)
@@ -117,8 +111,8 @@ class ExplainedVariance:
         match_corr, self.t_match = cal_corr(period=match)
 
         # ----- indices for cross shanks correlation -------
-        # shnkId = np.asarray(spikes.info.shank)
-        # shnkId = shnkId[stable_pyr]
+        shnkId = np.asarray(spikes.info.shank)
+        shnkId = shnkId[stable_pyr]
         assert len(shnkId) == len(spks)
 
         selected_pairs = np.tril_indices(len(spks), k=-1)
@@ -323,14 +317,12 @@ class ExplainedVariance:
 
 
 class CellAssemblyICA:
-    def __init__(self, basepath, neurons: Neurons):
+    def __init__(self, basepath):
 
         if isinstance(basepath, Recinfo):
             self._obj = basepath
         else:
             self._obj = Recinfo(basepath)
-
-        self._neurons = neurons
 
     def getAssemblies(self, cell_ids, period, bnsz=0.25):
         """extracting statisticaly independent components from significant eigenvectors as detected using Marcenko-Pasteur distributionvinput = Matrix  (m x n) where 'm' are the number of cells and 'n' time bins ICA weights thus extracted have highiest weight positive (as done in Gido M. van de Ven et al. 2016) V = ICA weights for each neuron in the coactivation (weight having the highiest value is kept positive) M1 =  originally extracted neuron weights
@@ -342,7 +334,7 @@ class CellAssemblyICA:
             [type] -- [Independent assemblies]
         """
 
-        spikes = self._neurons.get_spiketrains(cell_ids)
+        spikes = Spikes(self._obj).get_cells(cell_ids)
 
         template_bin = np.arange(period[0], period[1], bnsz)
         template = np.asarray(

@@ -24,14 +24,13 @@ We will parse .xml file to create .basics.npy where all info related to recordin
 ```python
 sess.recinfo.makerecinfo(nShanks=[6,8], skulleeg=15, motion=[192,193,194])
 ```
-## **Create Experimental Paradigm**
-Typically an experimental paradigm includes multiple epochs such as sleeping in homecage and then running on a maze. You can define these using the following snippet.
+## **Create Epochs**
+Typically a sessions multiple epochs such sleeping in homecage and then running on a maze. You can define these using the following.
 ```python
-import pandas as pd
 #all are defined in seconds
-epochs = pd.Dataframe({'start':[0,2000,3000],'stop':[2000,3000,6000],'label':['pre','maze','post']})
-sess.paradigm.add_epochs(epochs)
-print(sess.paradigm)
+epoch_dict = {'pre':[0,2000],'maze':[2000,3000],'post':[3000,6000]}
+sess.epochs.make_epochs(new_epochs=epoch_dict)
+print(sess.epochs)
 ```
 
 ## **Detecting artifact timepoints**
@@ -43,8 +42,8 @@ This creates `.artifact.npy` in the basepath folder containing start and end of 
 You can use `sess.artifact` to create an ascii file of timestamps to be used by `spykng-circus` or `neuroscope`.
 
 ```python
-sess.artifact.to_neuroscope()
-sess.artifact.to_spyking_circus()
+sess.artifact.export2circus()
+sess.artifact.export2neuroscope()
 ```
 ## **Create probemap for the electrodes**
 Probemaps can be created by specifying `xypitch`, which is a tuple where first element is distance between electrodes along `x-axis` and seconds element distance along `y-axis`  

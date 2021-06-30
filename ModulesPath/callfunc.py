@@ -1,34 +1,44 @@
-from .parsePath import Recinfo
-from .viewerData import SessView
+from artifactDetect import findartifact
+from behavior import behavior_epochs
+from decoders import DecodeBehav
+from getPosition import ExtractPosition
+from getSpikes import Spikes
+from lfpEvent import Hswa, Ripple, Spindle, Theta, Gamma
+from parsePath import Recinfo
+from pfPlot import pf
+from replay import Replay
+from sessionUtil import SessionUtil
+from sleepDetect import SleepScore
+from spkEvent import PBE, LocalSleep
+from viewerData import SessView
+from track import Track
 import pickle
-from . import sessobj
 
 
 class processData:
     def __init__(self, basepath):
+        """Make sure to enter in the tracking scale factor if you have used a properly sized wand to optitrack calibration"""
         self.recinfo = Recinfo(basepath)
 
-        self.artifact = sessobj.Artifact(self.recinfo)
-        self.paradigm = sessobj.Paradigm(self.recinfo)
-        self.position = sessobj.SessPosition(self.recinfo)
-        self.track = sessobj.SessTrack(basepath=self.recinfo, position=self.position)
+        self.position = ExtractPosition(self.recinfo)
+        self.tracks = Track(self.recinfo)
+        self.epochs = behavior_epochs(self.recinfo)
+        self.artifact = findartifact(self.recinfo)
+        self.utils = SessionUtil(self.recinfo)
 
-        self.neurons = sessobj.SessNeurons(self.recinfo)
-        self.brainstates = sessobj.BrainStates(self.recinfo)
-        self.swa = sessobj.Hswa(self.recinfo)
-        self.theta = sessobj.Theta(self.recinfo)
-        self.spindle = sessobj.Spindle(self.recinfo)
-        self.gamma = sessobj.Gamma(self.recinfo)
-        self.ripple = sessobj.Ripple(self.recinfo)
-        self.expvar = sessobj.ExplainedVariance(self.recinfo, self.neurons)
-        self.assembly = sessobj.CellAssembly(self.recinfo, self.neurons)
-        self.pf1d = sessobj.PF1d(self.recinfo)
-        self.pf2d = sessobj.PF2d(self.recinfo)
-        self.decode1D = sessobj.Decode1d(self.pf1d)
-        self.decode2D = sessobj.Decode2d(self.pf2d)
-        self.localsleep = sessobj.LocalSleep(self.recinfo)
+        self.spikes = Spikes(self.recinfo)
+        self.brainstates = SleepScore(self.recinfo)
+        self.swa = Hswa(self.recinfo)
+        self.theta = Theta(self.recinfo)
+        self.spindle = Spindle(self.recinfo)
+        self.gamma = Gamma(self.recinfo)
+        self.ripple = Ripple(self.recinfo)
+        self.placefield = pf(self.recinfo)
+        self.replay = Replay(self.recinfo)
+        self.decode = DecodeBehav(self.placefield.pf1d, self.placefield.pf2d)
+        self.localsleep = LocalSleep(self.recinfo)
         self.viewdata = SessView(self.recinfo)
-        self.pbe = sessobj.Pbe(self.recinfo)
+        self.pbe = PBE(self.recinfo)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.recinfo.session.sessionName})"
@@ -41,8 +51,8 @@ class processData:
             "y": self.position.data["y"],
             "z": self.position.data["z"],
             "datetime": self.position.data["datetime"],
-            "ripple": self.ripple.epochs,
-            "pbe": self.pbe.epochs,
+            "ripple": self.ripple.events,
+            "pbe": self.pbe.events,
             "lfpsRate": self.recinfo.lfpSrate,
             "video_start_time": self.position.video_start_time,
         }

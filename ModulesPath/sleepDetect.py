@@ -9,16 +9,12 @@ import scipy.signal as sg
 import scipy.stats as stats
 from hmmlearn.hmm import GaussianHMM
 from joblib import Parallel, delayed
+from matplotlib.gridspec import GridSpec
 from scipy.ndimage import gaussian_filter
-
-from . import signal_process
-from .parsePath import Recinfo
-from .core import Epoch
-
-try:
-    import ephyviewer
-except:
-    "Ephyviewer is not installed, will need it if you want sleep state editor"
+from dataclasses import dataclass
+from parsePath import Recinfo
+import signal_process
+from artifactDetect import findartifact
 
 
 def hmmfit1d(Data):
@@ -74,15 +70,15 @@ def hmmfit1d(Data):
     return hmmlabels
 
 
-class SleepScore(Epoch):
+class SleepScore:
     # TODO add support for bad time points
+    # colors = ["#6b90d1", "#eb9494", "#b6afaf", "#474343"]
     colors = {
         "nrem": "#6b90d1",
         "rem": "#eb9494",
         "quiet": "#b6afaf",
         "active": "#474343",
     }
-    labels = ["nrem", "rem", "quiet", "active"]
 
     def __init__(self, basepath):
 
@@ -93,9 +89,30 @@ class SleepScore(Epoch):
 
         # ------- defining file names ---------
         filePrefix = self._obj.files.filePrefix
-        filename = filePrefix.with_suffix(".brainstates.npy")
-        super().__init__(filename=filename)
-        self.load()
+
+        @dataclass
+        class files:
+            stateparams: str = filePrefix.with_suffix(".stateparams.pkl")
+            states: str = filePrefix.with_suffix(".states.pkl")
+            emg: Path = filePrefix.with_suffix(".emg.npy")
+
+        self.files = files()
+        self._load()
+
+    def _load(self):
+        if (f := self.files.stateparams).is_file():
+            self.params = pd.read_pickle(f)
+
+        if (f := self.files.states).is_file():
+            self.states = pd.read_pickle(f)
+            # Adding name convention to the states
+            state_number_dict = {
+                1: "nrem",
+                2: "rem",
+                3: "quiet",
+                4: "active",
+            }
+            self.states["name"] = self.states["state"].map(state_number_dict)
 
     @staticmethod
     def _label2states(theta_delta, delta_l, emg_l):
@@ -145,7 +162,7 @@ class SleepScore(Epoch):
 
         duration = statetime.duration
         start = statetime.start
-        end = statetime.stop
+        end = statetime.end
         state = statetime.state
 
         arr = np.zeros((len(start), 4))
@@ -175,7 +192,7 @@ class SleepScore(Epoch):
         statetime = pd.DataFrame(
             {
                 "start": arr[:, 0],
-                "stop": arr[:, 1],
+                "end": arr[:, 1],
                 "duration": arr[:, 2],
                 "state": arr[:, 3],
             }
@@ -198,12 +215,12 @@ class SleepScore(Epoch):
             if True load the emg file in the basepath, by default False
 
         """
-        # artifact = findartifact(self._obj)
+        artifact = findartifact(self._obj)
         sRate = self._obj.lfpSrate
 
         if emgfile:
             print("emg loaded")
-            emg = self.metadata["emg"]
+            emg = np.load(self.files.emg)
         else:
             emg = self._emgfromlfp(window=window, overlap=overlap)
 
@@ -222,49 +239,68 @@ class SleepScore(Epoch):
             lfp, sampfreq=sRate, window=window, overlap=overlap, smooth=10
         )
         time = bands.time
+        delta = bands.delta
         deltaplus = bands.deltaplus
         theta = bands.theta
+        spindle = bands.spindle
+        gamma = bands.gamma
+        ripple = bands.ripple
         theta_deltaplus_ratio = theta / deltaplus
         print(f"spectral properties calculated")
 
-        # if (noisy := artifact.time) is not None:
-        #     noisy_timepoints = []
-        #     for noisy_ind in range(noisy.shape[0]):
-        #         st = noisy[noisy_ind, 0]
-        #         en = noisy[noisy_ind, 1]
-        #         noisy_indices = np.where((time > st) & (time < en))[0]
-        #         noisy_timepoints.extend(noisy_indices)
+        if (noisy := artifact.time).any():
+            noisy_timepoints = []
+            for noisy_ind in range(noisy.shape[0]):
+                st = noisy[noisy_ind, 0]
+                en = noisy[noisy_ind, 1]
+                noisy_indices = np.where((time > st) & (time < en))[0]
+                noisy_timepoints.extend(noisy_indices)
 
-        #     theta_deltaplus_ratio[noisy_timepoints] = np.nan
-        #     emg[noisy_timepoints] = np.nan
-        #     deltaplus[noisy_timepoints] = np.nan
+            theta_deltaplus_ratio[noisy_timepoints] = np.nan
+            emg[noisy_timepoints] = np.nan
+            deltaplus[noisy_timepoints] = np.nan
 
         deltaplus_label = hmmfit1d(deltaplus)
         theta_deltaplus_label = hmmfit1d(theta_deltaplus_ratio)
         emg_label = hmmfit1d(emg)
 
         states = self._label2states(theta_deltaplus_label, deltaplus_label, emg_label)
+
+        print(
+            states.shape, emg.shape, deltaplus_label.shape, theta_deltaplus_label.shape
+        )
         statetime = (self._states2time(states)).astype(int)
+
+        data = pd.DataFrame(
+            {
+                "time": time,
+                "delta": delta,
+                "deltaplus": deltaplus,
+                "theta": theta,
+                "spindle": spindle,
+                "gamma": gamma,
+                "ripple": ripple,
+                "theta_deltaplus_ratio": theta_deltaplus_ratio,
+                "emg": emg,
+                "state": states,
+            }
+        )
 
         statetime = pd.DataFrame(
             {
                 "start": time[statetime[:, 0]],
-                "stop": time[statetime[:, 1]],
+                "end": time[statetime[:, 1]],
                 "duration": time[statetime[:, 1]] - time[statetime[:, 0]],
                 "state": statetime[:, 2],
             }
         )
 
-        epochs = self._removetransient(statetime)
+        statetime_new = self._removetransient(statetime)
 
-        state_to_label = {1: "nrem", 2: "rem", 3: "quiet", 4: "active"}
-        epochs["label"] = epochs["state"].map(state_to_label)
-        epochs.drop("state", axis=1, inplace=True)
+        # data_label = pd.DataFrame({"theta_delta": theta_delta_label, "emg": emg_label})
 
-        self.epochs = epochs
-        self.metadata = {"window": window, "overlap": overlap, "emg": emg}
-        self.save()
-        self.load()
+        data.to_pickle(self.files.stateparams)
+        statetime_new.to_pickle(self.files.states)
 
     def _emgfromlfp(self, window, overlap, n_jobs=8):
         """Calculating emg
@@ -336,6 +372,7 @@ class SleepScore(Epoch):
         )
         emg_lfp = np.asarray(corr_per_frame)
 
+        np.save(self.files.emg, emg_lfp)
         print("emg calculation done")
         return emg_lfp
 
@@ -344,29 +381,69 @@ class SleepScore(Epoch):
         if period is None:
             period = [self.states.iloc[0].start, self.states.iloc[-1].end]
 
-        period_duration = np.diff(period)
+        assert len(period) == 2
+        period_duration = np.diff(period)[0]
+        states = self.states[
+            (self.states.start > period[0]) & (self.states.start < period[1])
+        ][["duration", "name"]]
+        states_duration = states.groupby("name").agg("sum")
 
-        ep = self.epochs.copy()
-        ep = ep[(ep.stop > period[0]) & (ep.start < period[1])].reset_index(drop=True)
+        return states_duration / period_duration
 
-        if ep["start"].iloc[0] < period[0]:
-            ep.at[0, "start"] = period[0]
+    def plot(self):
+        states = self.states
+        params = self.params
+        post = self._obj.epochs.post
+        lfp = self._obj.spindle.best_chan_lfp()[0]
+        spec = signal_process.spectrogramBands(lfp, window=5)
 
-        if ep["stop"].iloc[-1] > period[1]:
-            ep.at[ep.index[-1], "stop"] = period[1]
+        fig = plt.figure(num=None, figsize=(6, 10))
+        gs = GridSpec(4, 4, figure=fig)
+        fig.subplots_adjust(hspace=0.4)
 
-        ep["duration"] = ep.stop - ep.start
+        axhypno = fig.add_subplot(gs[0, :])
+        x = np.asarray(states.start)
+        y = np.zeros(len(x)) + np.asarray(states.state)
+        width = np.asarray(states.duration)
+        height = np.ones(len(x))
+        col = [self.colors[state] for state in states.name]
+        make_boxes(axhypno, x, y, width, height, facecolor=col)
+        axhypno.set_xlim(0, post[1])
+        axhypno.set_ylim(1, 5)
 
-        ep_group = ep.groupby("label").sum().duration / period_duration
+        axspec = fig.add_subplot(gs[1, :], sharex=axhypno)
+        sxx = spec.sxx / np.max(spec.sxx)
+        sxx = gaussian_filter(sxx, sigma=1)
+        vmax = np.max(sxx) / 60
+        specplot = axspec.pcolorfast(
+            spec.time, spec.freq, sxx, cmap="Spectral_r", vmax=vmax
+        )
+        axspec.set_ylim([0, 30])
+        axspec.set_xlim([np.min(spec.time), np.max(spec.time)])
+        axspec.set_xlabel("Time (s)")
+        axspec.set_ylabel("Frequency (s)")
 
-        states_proportion = {"rem": 0.0, "nrem": 0.0, "quiet": 0.0, "active": 0.0}
+        axemg = fig.add_subplot(gs[2, :], sharex=axhypno)
+        axemg.plot(params.time, params.emg)
 
-        for state in ep_group.index.values:
-            states_proportion[state] = ep_group[state]
+        axthdel = fig.add_subplot(gs[3, :], sharex=axhypno)
+        axthdel.plot(params.time, params.theta_deltaplus_ratio)
 
-        return states_proportion
+        # ==== change spectrogram visual properties ========
 
-    def plot_hypnogram(self, ax=None, tstart=0.0, unit="s", collapsed=False):
+        # @widgets.interact(time=(maze[0], maze[1], 10))
+        # def update(time=0.5):
+        #     # tnow = timetoPlot.val
+        #     allplts(time - 5, time + 5)
+        #     specplot.set_clim([0, freq])
+
+        @widgets.interact(norm=(np.min(sxx), np.max(sxx), 0.001))
+        def update(norm=0.5):
+            # tnow = timetoPlot.val
+            # allplts(time - 5, time + 5)
+            specplot.set_clim([0, norm])
+
+    def hypnogram(self, ax=None, tstart=0.0, unit="s", collapsed=False):
         """Plot hypnogram
 
         Parameters
@@ -417,135 +494,16 @@ class SleepScore(Epoch):
                 "active": [0, 1],
             }
 
-        for state in self.epochs.itertuples():
-            if state.label in self.colors.keys():
+        for state in self.states.itertuples():
+            if state.name in self.colors.keys():
                 ax.axvspan(
                     (state.start - tstart) / unit_norm,
-                    (state.stop - tstart) / unit_norm,
-                    ymin=span_[state.label][0],
-                    ymax=span_[state.label][1],
-                    facecolor=self.colors[state.label],
+                    (state.end - tstart) / unit_norm,
+                    ymin=span_[state.name][0],
+                    ymax=span_[state.name][1],
+                    facecolor=self.colors[state.name],
                     alpha=0.7,
                 )
         ax.axis("off")
 
         return ax
-
-    def editor(self, chan, spikes=None):
-        class StatesSource(ephyviewer.WritableEpochSource):
-            def __init__(
-                self,
-                filename,
-                possible_labels,
-                color_labels=None,
-                channel_name="",
-                restrict_to_possible_labels=False,
-            ):
-
-                self.filename = filename
-
-                ephyviewer.WritableEpochSource.__init__(
-                    self,
-                    epoch=None,
-                    possible_labels=possible_labels,
-                    color_labels=color_labels,
-                    channel_name=channel_name,
-                    restrict_to_possible_labels=restrict_to_possible_labels,
-                )
-
-            def load(self):
-                """
-                Returns a dictionary containing the data for an epoch.
-                Data is loaded from the CSV file if it exists; otherwise the superclass
-                implementation in WritableEpochSource.load() is called to create an
-                empty dictionary with the correct keys and types.
-                The method returns a dictionary containing the loaded data in this form:
-                { 'time': np.array, 'duration': np.array, 'label': np.array, 'name': string }
-                """
-
-                if self.filename.is_file():
-                    # if file already exists, load previous epoch
-                    data = pd.read_pickle(self.filename)
-                    state_number_dict = {1: "nrem", 2: "rem", 3: "quiet", 4: "active"}
-                    data["name"] = data["state"].map(state_number_dict)
-
-                    epoch_labels = np.array([f" State{_}" for _ in data["state"]])
-                    epoch = {
-                        "time": data["start"].values,
-                        "duration": data["end"].values - data["start"].values,
-                        "label": epoch_labels,
-                    }
-                else:
-                    # if file does NOT already exist, use superclass method for creating
-                    # an empty dictionary
-                    epoch = super().load()
-
-                return epoch
-
-            def save(self):
-                df = pd.DataFrame()
-                df["start"] = np.round(self.ep_times, 6)  # round to nearest microsecond
-                df["end"] = np.round(self.ep_times, 6) + np.round(
-                    self.ep_durations
-                )  # round to nearest microsecond
-                df["duration"] = np.round(
-                    self.ep_durations, 6
-                )  # round to nearest microsecond
-                state_number_dict = {"nrem": 1, "rem": 2, "quiet": 3, "active": 4}
-                df["name"] = self.ep_labels
-                df["state"] = df["name"].map(state_number_dict)
-                df.sort_values(["time", "duration", "name"], inplace=True)
-                df.to_pickle(self.filename)
-
-        states_source = StatesSource(self.files.states, self.labels)
-        # you must first create a main Qt application (for event loop)
-        # app = ephyviewer.mkQApp()
-
-        sigs = np.asarray(self._obj.geteeg(chans=chan)).reshape(-1, 1)
-        filtered_sig = signal_process.filter_sig.bandpass(
-            sigs, lf=120, hf=150, ax=0, fs=1250
-        )
-        sample_rate = self._obj.lfpSrate
-        t_start = 0.0
-
-        # Create the main window that can contain several viewers
-        win = ephyviewer.MainViewer(debug=True, show_auto_scale=True)
-
-        # create a viewer for signal
-        view1 = ephyviewer.TraceViewer.from_numpy(
-            np.hstack((sigs, filtered_sig)), sample_rate, t_start, "Signals"
-        )
-        view1.params["scale_mode"] = "same_for_all"
-        view1.auto_scale()
-        win.add_view(view1)
-
-        source_sig = ephyviewer.InMemoryAnalogSignalSource(sigs, sample_rate, t_start)
-        # create a viewer for the encoder itself
-        view2 = ephyviewer.EpochEncoder(
-            source=states_source, name="Dev mood states along day"
-        )
-        win.add_view(view2)
-
-        view3 = ephyviewer.TimeFreqViewer(source=source_sig, name="tfr")
-        view3.params["show_axis"] = False
-        view3.params["timefreq", "deltafreq"] = 1
-        win.add_view(view3)
-
-        # ----- spikes --------
-        if spikes is not None:
-            spk_id = np.arange(len(spikes))
-
-            all_spikes = []
-            for i, (t, id_) in enumerate(zip(spikes, spk_id)):
-                all_spikes.append({"time": t, "name": f"Unit {i}"})
-
-            spike_source = ephyviewer.InMemorySpikeSource(all_spikes=all_spikes)
-            view4 = ephyviewer.SpikeTrainViewer(source=spike_source)
-            win.add_view(view4)
-            # show main window and run Qapp
-        # win.show()
-        # return win, app
-
-        # app.exec_()
-
-        return win
