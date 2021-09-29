@@ -11,6 +11,7 @@ from .. import core
 from ..utils.signal_process import ThetaParams
 from .. import plotting
 
+
 class Pf1D:
     def __init__(
         self,
