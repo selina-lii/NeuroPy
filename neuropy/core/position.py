@@ -110,8 +110,9 @@ class Position(DataWriter):
 
     @property
     def speed(self):
-        dt = 1 / self.sampling_rate
-        return np.sqrt(((np.abs(np.diff(self.traces, axis=1))) ** 2).sum(axis=0)) / dt
+        self.speed = np.sqrt(np.diff(self.x) ** 2 + np.diff(self.y) ** 2) / (
+            1 / self.sampling_rate
+        )
 
     def to_dataframe(self):
         return pd.DataFrame(self.to_dict)
