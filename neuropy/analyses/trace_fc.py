@@ -2,7 +2,8 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-import neuropy.io.dlcio as dio
+from parsePath import Recinfo
+import DLC_IO as dio
 from pathlib import Path
 import scipy.ndimage as simage
 import pandas as pd

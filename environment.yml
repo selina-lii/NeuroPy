@@ -12,14 +12,9 @@ dependencies:
     - hmmlearn
     - ipywidgets
     - seaborn
-    - h5py
     - opencv
     - pytables
-    - tqdm
-    # These modules are for importing DeepLabCut data, comment out if you don't need.
-    - easydict
-    - ruamel.yaml
-    - pingouin
+    - pickle
     # - cupy  # uncomment this if you want to run correlograms with a GPU using the ccg_gpu.py module.
     
     # Works well in RedHat8. Note you may have to comment out the following lines and then install manually "pip install scikit-posthocs" in Windows.
