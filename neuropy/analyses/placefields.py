@@ -11,7 +11,6 @@ from .. import core
 from ..utils.signal_process import ThetaParams
 from .. import plotting
 
-
 class Pf1D:
     def __init__(
         self,
@@ -195,7 +194,7 @@ class Pf1D:
         if ax is None:
 
             if subplots is None:
-                _, gs = plotting.Fig().draw(grid=(1, 1), size=(10, 5))
+                _, gs = Fig().draw(grid=(1, 1), size=(10, 5))
                 ax = plt.subplot(gs[0])
                 ax.spines["right"].set_visible(True)
                 axphase = ax.twinx()
@@ -211,7 +210,7 @@ class Pf1D:
                     axphase=widgets.fixed(axphase),
                 )
             else:
-                _, gs = plotting.Fig().draw(grid=subplots, size=(15, 10))
+                _, gs = Fig().draw(grid=subplots, size=(15, 10))
                 for cell in range(nCells):
                     ax = plt.subplot(gs[cell])
                     axphase = ax.twinx()

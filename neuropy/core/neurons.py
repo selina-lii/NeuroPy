@@ -22,9 +22,9 @@ class Neurons(DataWriter):
         shank_ids=None,
         metadata=None,
     ) -> None:
-        super().__init__(metadata=metadata)
+        super().__init__()
 
-        self.spiketrains = np.array(spiketrains, dtype="object")
+        self.spiketrains = spiketrains
         if neuron_ids is None:
             self.neuron_ids = np.arange(len(self.spiketrains))
         else:
@@ -39,9 +39,11 @@ class Neurons(DataWriter):
         self.shank_ids = shank_ids
         self.neuron_type = neuron_type
         self.peak_channels = peak_channels
+        self.instfiring = None
         self._sampling_rate = sampling_rate
         self.t_start = t_start
         self.t_stop = t_stop
+        self.metadata: dict = metadata
 
     def __getitem__(self, i):
         # copy object
@@ -194,11 +196,6 @@ class Neurons(DataWriter):
     def firing_rate(self):
         return self.n_spikes / (self.t_stop - self.t_start)
 
-    def get_above_firing_rate(self, thresh: float):
-        """Return neurons which have firing rate above thresh"""
-        indices = self.firing_rate > thresh
-        return self[indices]
-
     def get_isi(self, bin_size=0.001, n_bins=200):
         """Interspike interval
 
@@ -218,12 +215,6 @@ class Neurons(DataWriter):
         return np.asarray(
             [np.histogram(np.diff(spktrn), bins=bins)[0] for spktrn in self.spiketrains]
         )
-
-    def get_waveform_similarity(self):
-        waveforms = np.reshape(self.waveforms, (self.n_neurons, -1)).astype(float)
-        similarity = np.corrcoef(waveforms)
-        np.fill_diagonal(similarity, 0)
-        return similarity
 
     def get_binned_spiketrains(self, bin_size=0.25):
 
@@ -359,13 +350,13 @@ class BinnedSpiketrain(DataWriter):
             metadata=d["metadata"],
         )
 
-    def get_pairwise_corr(self, pairs_bool=None, return_pair_id=False):
+    def get_pairwise_corr(self, cross_shanks=False, return_pair_id=False):
         """Pairwise correlation between pairs of binned of spiketrains
 
         Parameters
         ----------
-        pairs_bool : 2D bool/logical array, optional
-            Only these pairs are returned, by default None which means all pairs
+        cross_shanks : bool, optional
+            If cross_shanks is true then only pairs from different shanks are returned, by default False
         return_pair_id : bool, optional
             If true pair_ids are returned, by default False
 
@@ -376,22 +367,20 @@ class BinnedSpiketrain(DataWriter):
         """
 
         assert self.n_neurons > 1, "Should have more than 1 neuron"
+
+        shank_ids = self.shank_ids
         corr = np.corrcoef(self.spike_counts)
 
-        if pairs_bool is not None:
-            assert (
-                pairs_bool.shape[0] == pairs_bool.shape[1]
-            ), "pairs_bool should be sqare shpae"
-            assert (
-                pairs_bool.shape[0] == self.n_neurons
-            ), f"pairs_bool should be of {corr.shape} shape"
-            pairs_bool = pairs_bool.astype("bool")
-        else:
-            pairs_bool = np.ones(corr.shape).astype("bool")
+        selected_pairs = np.tril_indices(self.n_neurons, k=-1)
+        if cross_shanks:
+            assert shank_ids is not None, "shank_ids don't exist"
+            selected_pairs = np.nonzero(
+                np.tril(shank_ids.reshape(-1, 1) - shank_ids.reshape(1, -1))
+            )
 
-        pairs_bool = np.tril(pairs_bool, k=-1)
+        corr = corr[selected_pairs]
 
-        return corr[pairs_bool]
+        return corr
 
 
 class Mua(DataWriter):
