@@ -36,14 +36,14 @@ def _detect_freq_band_epochs(
         assert ignore_times.ndim == 2, "ignore_times should be 2 dimensional array"
         noisy_frames = np.concatenate(
             [
-                (np.arange(start * fs, stop * fs)).astype(int)
+                (np.arange(start, stop) * fs).astype(int)
                 for (start, stop) in ignore_times
             ]
         )
 
         zscsignal[:, noisy_frames] = 0
 
-    # ------hilbert transform --> binarize by > then lowthreshold
+    # ------hilbert transform --> binarize by > than lowthreshold
     maxPower = np.max(zscsignal, axis=0)
     ThreshSignal = np.where(zscsignal > lowthresh, 1, 0).sum(axis=0)
     ThreshSignal = np.diff(np.where(ThreshSignal > 0, 1, 0))
@@ -294,7 +294,7 @@ def detect_spindle_epochs(
         )
         selected_chans.append(changrp[np.argmax(hil_stat)])
 
-    print(f"Selected channels for ripples: {selected_chans}")
+    print(f"Selected channels for spindles: {selected_chans}")
 
     traces = signal.time_slice(channel_id=selected_chans).traces
 
