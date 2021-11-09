@@ -106,14 +106,6 @@ class Position(DataWriter):
             sampling_rate=d["sampling_rate"],
             metadata=d["metadata"],
         )
-    
-    @staticmethod
-    def from_file(f):
-        d = DataWriter.from_file(f)
-        if d is not None:
-            return Position.from_dict(d)
-        else:
-            return None
 
     @property
     def speed(self):
