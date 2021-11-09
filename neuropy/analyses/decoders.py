@@ -1,18 +1,13 @@
-from pathlib import Path
-
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from joblib import Parallel, delayed
 from scipy import stats
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
-from scipy.special import factorial
 from tqdm import tqdm
-
+import scipy.signal as sg
+from typing import Union
+from numpy.typing import NDArray
 from .. import core
 from .. import plotting
-from ..utils import mathutil
 
 
 def radon_transform(arr, nlines=10000, dt=1, dx=1, neighbours=1):
@@ -98,66 +93,70 @@ def radon_transform(arr, nlines=10000, dt=1, dx=1, neighbours=1):
     return score, -velocity, intercept
 
 
-def epochs_spkcount(
-    neurons: core.Neurons, epochs: core.Epoch, bin_size=0.01, slideby=None
-):
-    # ---- Binning events and calculating spike counts --------
-    spkcount = []
-    nbins = np.zeros(epochs.n_epochs, dtype="int")
+def wcorr(arr):
+    """weighted correlation"""
+    nx, ny = arr.shape[1], arr.shape[0]
+    y_mat = np.tile(np.arange(ny)[:, np.newaxis], (1, nx))
+    x_mat = np.tile(np.arange(nx), (ny, 1))
+    arr_sum = np.nansum(arr)
+    ey = np.nansum(arr * y_mat) / arr_sum
+    ex = np.nansum(arr * x_mat) / arr_sum
+    cov_xy = np.nansum(arr * (y_mat - ey) * (x_mat - ex)) / arr_sum
+    cov_yy = np.nansum(arr * (y_mat - ey) ** 2) / arr_sum
+    cov_xx = np.nansum(arr * (x_mat - ex) ** 2) / arr_sum
 
-    if slideby is None:
-        slideby = bin_size
-    # ----- little faster but requires epochs to be non-overlapping ------
-    # bins_epochs = []
-    # for i, epoch in enumerate(epochs.to_dataframe().itertuples()):
-    #     bins = np.arange(epoch.start, epoch.stop, bin_size)
-    #     nbins[i] = len(bins) - 1
-    #     bins_epochs.extend(bins)
-    # spkcount = np.asarray(
-    #     [np.histogram(_, bins=bins_epochs)[0] for _ in neurons.spiketrains]
-    # )
+    return cov_xy / np.sqrt(cov_xx * cov_yy)
 
-    # deleting unwanted columns that represent time between events
-    # cumsum_nbins = np.cumsum(nbins)
-    # del_columns = cumsum_nbins[:-1] + np.arange(len(cumsum_nbins) - 1)
-    # spkcount = np.delete(spkcount, del_columns.astype(int), axis=1)
 
-    for i, epoch in enumerate(epochs.to_dataframe().itertuples()):
-        # first dividing in 1ms
-        bins = np.arange(epoch.start, epoch.stop, 0.001)
-        spkcount_ = np.asarray(
-            [np.histogram(_, bins=bins)[0] for _ in neurons.spiketrains]
-        )
+def jump_distance(posteriors, jump_stat="mean", norm=True):
+    """Calculate jump distance for posterior matrices"""
 
-        # if signficant portion at end of epoch is not included then append zeros
-        # if (frac := epoch.duration / bin_size % 1) > 0.7:
-        #     extra_columns = int(100 * (1 - frac))
-        #     spkcount_ = np.hstack(
-        #         (spkcount_, np.zeros((neurons.n_neurons, extra_columns)))
-        #     )
+    if jump_stat == "mean":
+        f = np.mean
+    elif jump_stat == "median":
+        f = np.median
+    elif jump_stat == "max":
+        f = np.max
+    else:
+        raise ValueError("Invalid jump_stat. Valid values: mean, median, max")
 
-        slide_view = np.lib.stride_tricks.sliding_window_view(
-            spkcount_, int(bin_size * 1000), axis=1
-        )[:, :: int(slideby * 1000), :].sum(axis=2)
+    dx = 1 / posteriors[0].shape[0] if norm else 1
+    jd = np.array([f(np.abs(np.diff(np.argmax(_, axis=0)))) for _ in posteriors])
 
-        nbins[i] = slide_view.shape[1]
-        spkcount.append(slide_view)
+    return jd * dx
 
-    return spkcount, nbins
+
+def column_shift(arr, shifts=None):
+    """Circular shift columns independently by a given amount"""
+
+    assert arr.ndim == 2, "only 2d arrays accepted"
+
+    if shifts is None:
+        rng = np.random.default_rng()
+        shifts = rng.integers(-arr.shape[0], arr.shape[0], arr.shape[1])
+
+    assert arr.shape[1] == len(shifts)
+
+    shifts = shifts % arr.shape[0]
+    rows_indx, columns_indx = np.ogrid[: arr.shape[0], : arr.shape[1]]
+
+    rows_indx = rows_indx - shifts[np.newaxis, :]
+
+    return arr[rows_indx, columns_indx]
 
 
 class Decode1d:
-    n_jobs = 8
-
     def __init__(
         self,
         neurons: core.Neurons,
         ratemap: core.Ratemap,
-        epochs: core.Epoch = None,
+        epochs: Union[core.Epoch, None] = None,
         bin_size=0.5,
         slideby=None,
-        decode_margin=15,
-        nlines=5000,
+        # score_method="wcorr",
+        # radon_kw=dict(nlines=5000, decode_margin=15),
+        # jump_distance=False,
+        n_jobs=1,
     ):
         """1D decoding using ratemaps
 
@@ -187,10 +186,17 @@ class Decode1d:
         self.decoded_position = None
         self.epochs = epochs
         self.slideby = slideby
-        self.score = None
-        self.shuffle_score = None
-        self.decode_margin = decode_margin
-        self.nlines = nlines
+        # self.score = None
+        # self.jump_distance
+        # self.shuffle_score: Union[NDArray, None] = None
+        # self.shuffle_jump_distance: Union[NDArray, None] = None
+        # self.score_method = score_method
+        # self.radon_kw = radon_kw
+        self.n_jobs = n_jobs
+
+        # Only available when using 'radon_transform'
+        # self.velocity = None
+        # self.intercept = None
 
         self._estimate()
 
@@ -209,9 +215,13 @@ class Decode1d:
 
         prob = np.zeros((n_positions, n_time_bins))
         for i in range(n_positions):
-            frate = (ratemaps[:, i, np.newaxis]) ** spkcount
-            exp_frate = np.exp(-tau * np.sum(ratemaps[:, i]))
-            prob[i, :] = np.prod(frate, axis=0) * exp_frate
+            # ignore neurons/indx which have zero frate at this location to
+            # avoid having frate product zero
+            valid_indx = ratemaps[:, i] > 0
+            if np.any(valid_indx):
+                frate = (ratemaps[valid_indx, i, np.newaxis]) ** spkcount[valid_indx, :]
+                exp_frate = np.exp(-tau * np.sum(ratemaps[valid_indx, i]))
+                prob[i, :] = np.prod(frate, axis=0) * exp_frate
 
         old_settings = np.seterr(all="ignore")
         prob /= np.sum(prob, axis=0, keepdims=True)
@@ -228,8 +238,8 @@ class Decode1d:
 
         if self.epochs is not None:
 
-            spkcount, nbins = epochs_spkcount(
-                self.neurons, self.epochs, self.bin_size, self.slideby
+            spkcount, nbins = self.neurons.get_spikes_in_epochs(
+                self.epochs, self.bin_size, self.slideby
             )
             posterior = self._decoder(np.hstack(spkcount), tuning_curves)
             decodedPos = bincntr[np.argmax(posterior, axis=0)]
@@ -239,12 +249,10 @@ class Decode1d:
             self.posterior = np.hsplit(posterior, cum_nbins)
             self.spkcount = spkcount
             self.nbins_epochs = nbins
-            self.score, self.velocity, self.intercept = self.score_posterior(
-                self.posterior
-            )
-            self.weighted_correlation = np.asarray(
-                [self._wcorr(p) for p in self.posterior]
-            )
+            # score_results = self._score_posterior(self.posterior)
+            # self.score = score_results[0]
+            # if score_results.shape[0] == 3:
+            #     self.velocity, self.intercept = score_results[1:, :]
 
         else:
             spkcount = self.neurons.get_binned_spiketrains(
@@ -252,96 +260,200 @@ class Decode1d:
             ).spike_counts
 
             self.posterior = self._decoder(spkcount, tuning_curves)
+            # self.decoded_position = bincntr[np.argmax(self.posterior, axis=0)]
             self.decoded_position = bincntr[np.argmax(self.posterior, axis=0)]
             self.score = None
 
-    def calculate_shuffle_score(self, n_iter=100, method="neuron_id"):
-        """Shuffling and decoding epochs"""
+    def _get_jd(self, posteriors, jump_stat="mean"):
+        """Calculate jump distance for posterior matrices"""
 
-        # print(f"Using {kind} shuffle")
+        if jump_stat == "mean":
+            f = np.mean
+        elif jump_stat == "median":
+            f = np.median
+        elif jump_stat == "max":
+            f = np.max
+        else:
+            raise ValueError("Invalid jump_stat. Valid values: mean, median, max")
 
-        if method == "neuron_id":
-            score = []
-            for i in tqdm(range(n_iter)):
-                shuffled_tc = self.ratemap.tuning_curves.copy()
-                np.random.default_rng().shuffle(shuffled_tc)
-                post_ = self._decoder(np.hstack(self.spkcount), shuffled_tc)
-                cum_nbins = np.cumsum(self.nbins_epochs)[:-1]
-                score.append(self.score_posterior(np.hsplit(post_, cum_nbins))[0])
-            score = np.asarray(score)
-        if method == "time_bin":
+        dx = 1 / posteriors[0].shape[0]
+        jd = np.array([f(np.abs(np.diff(np.argmax(_, axis=0)))) for _ in posteriors])
 
-            def col_shuffle(mat):
-                shift = np.random.randint(1, mat.shape[1], mat.shape[1])
-                direction = np.random.choice([-1, 1], size=mat.shape[1])
-                shift = shift * direction
+        return jd * dx
 
-                mat = np.array([np.roll(mat[:, i], sh) for i, sh in enumerate(shift)])
-                return mat.T
+    def get_trajectory_length(self, max_jump=40, min_distance=None, posteriors=None):
+        if posteriors is None:
+            assert self.posterior is not None, "No posteriors found"
+            posteriors = self.posterior
 
-            score = []
-            for i in tqdm(range(n_iter)):
-                evt_shuff = [col_shuffle(arr) for arr in self.posterior]
-                score.append(self._score_events(evt_shuff)[0])
-        if method == "position_bin":
-            pass
+        for p in posteriors:
+            max_loc = np.argmax(p, axis=0)
+            dist = np.abs(np.diff(max_loc))
+            dist_logical = np.where(dist < 40, 1, 0)
+            pad_dist = np.pad(dist_logical, (1, 1), "constant", constant_values=(0, 0))
+            peaks_dict = sg.find_peaks(pad_dist, height=1, width=3, plateau_size=3)[1]
+            lengths = peaks_dict["plateau_sizes"] + 1
 
-        # score = np.concatenate(score)
-        self.shuffle_score = np.array(score)
+            traj_length = 0
+            traj_dist = 0
 
-    def score_posterior(self, p):
-        """Scoring of epochs
+        return traj_length, traj_dist
 
-        Returns
-        -------
-        [type]
-            [description]
+    def get_wcorr(self, jump_stat=None, posteriors=None):
+        if posteriors is None:
+            assert self.posterior is not None, "No posteriors found"
+            posteriors = self.posterior
 
-        References
-        ----------
-        1) Kloosterman et al. 2012
-        """
-        neighbours = int(self.decode_margin / self.ratemap.xbin_size)
+        scores = Parallel(n_jobs=self.n_jobs)(delayed(wcorr)(_) for _ in posteriors)
+        scores = np.array(scores)
+
+        if jump_stat is not None:
+            return scores, self._get_jd(posteriors, jump_stat)
+        else:
+            return scores
+
+    def get_radon_transform(
+        self, nlines=5000, margin=16, jump_stat=None, posteriors=None
+    ):
+        if posteriors is None:
+            assert self.posterior is not None, "No posteriors found"
+            posteriors = self.posterior
+
+        neighbours = int(margin / self.ratemap.xbin_size)
+
         results = Parallel(n_jobs=self.n_jobs)(
             delayed(radon_transform)(
                 epoch,
-                nlines=self.nlines,
+                nlines=nlines,
                 dt=self.bin_size,
                 dx=self.pos_bin_size,
                 neighbours=neighbours,
             )
-            for epoch in p
+            for epoch in posteriors
         )
         score, velocity, intercept = np.asarray(results).T
 
-        return score, velocity, intercept
+        if jump_stat is not None:
+            return score, velocity, intercept, self._get_jd(posteriors, jump_stat)
+        else:
+            return score, velocity, intercept
 
-    def _wcorr(self, pmat):
-        nt, nx = pmat.shape[1], pmat.shape[0]
-        x_mat = np.tile(np.arange(nx)[:, np.newaxis], (1, nt))
-        t_mat = np.tile(np.arange(nt), (nx, 1))
-        pmat_sum = np.nansum(pmat)
-        ex = np.nansum(pmat * x_mat) / pmat_sum
-        et = np.nansum(pmat * t_mat) / pmat_sum
-        cov_xt = np.nansum(pmat * (x_mat - ex) * (t_mat - et)) / pmat_sum
-        cov_xx = np.nansum(pmat * (x_mat - ex) ** 2) / pmat_sum
-        cov_tt = np.nansum(pmat * (t_mat - et) ** 2) / pmat_sum
+    def get_shuffled_wcorr(self, n_iter, method="neuron_id", **kwargs):
+        return self._shuffler(self.get_wcorr, n_iter=n_iter, method=method, **kwargs)
 
-        return cov_xt / np.sqrt(cov_tt * cov_xx)
+    def get_shuffled_radon_transform(self, n_iter, method="neuron_id", **kwargs):
+        return self._shuffler(
+            self.get_radon_transform, n_iter=n_iter, method=method, **kwargs
+        )
+
+    def _shuffler(self, func, n_iter, method, **kwargs):
+        assert callable(func), "scoring function is not callable"
+
+        cum_nbins = np.cumsum(self.nbins_epochs)[:-1]
+        stacked_posterior = np.hstack(self.posterior)
+        spkcount = np.hstack(self.spkcount)
+
+        score = []
+        for i in tqdm(range(n_iter)):
+            if method == "neuron_id":
+                shuffled_tc = self.ratemap.tuning_curves.copy()
+                np.random.default_rng().shuffle(shuffled_tc)
+                shuffle_posteriors = np.hsplit(
+                    self._decoder(spkcount, shuffled_tc), cum_nbins
+                )
+
+            if method == "column_cycle":
+                shuffle_posteriors = np.hsplit(
+                    column_shift(stacked_posterior), cum_nbins
+                )
+
+            score.append(func(posteriors=shuffle_posteriors, **kwargs))
+
+        return np.array(score)
 
     @property
     def p_value(self):
         """Monte Carlo p-value"""
-        shuff_score = self.shuffle_score
-        n_iter = shuff_score.shape[0]
-        diff_score = shuff_score - self.score[np.newaxis, :]
-        chance = np.where(diff_score > 0, 1, 0).sum(axis=0)
-        return (chance + 1) / (n_iter + 1)
+        if self.score_method == "radon_transorm":
+            shuff_score = self.shuffle_score
+            n_iter = shuff_score.shape[0]
+            diff_score = shuff_score - self.score[np.newaxis, :]
+            chance = np.where(diff_score > 0, 1, 0).sum(axis=0)
+            return (chance + 1) / (n_iter + 1)
+        if self.score_method == "wcorr":
+            pass
 
-    def plot_in_bokeh(self):
-        pass
+    @property
+    def percentile_score(self):
 
-    def plot_summary(self, prob_cmap="hot", count_cmap="binary", lc="#00E676"):
+        return np.array(
+            [
+                stats.percentileofscore(
+                    self.shuffle_score[:, i], self.score[i], kind="strict"
+                )
+                for i in range(self.epochs.n_epochs)
+            ]
+        )
+
+    @property
+    def sequence_score(self):
+        if self.score_method == "wcorr":
+            abs_score = np.abs(self.score)
+            abs_shuffle_score = np.abs(self.shuffle_score)
+            mean_shuffle_score = abs_shuffle_score.mean(axis=0)
+            std_shuffle_score = abs_shuffle_score.std(axis=0)
+            return (abs_score - mean_shuffle_score) / std_shuffle_score
+
+    def plot_summary(self, **kwargs):
+        if self.score_method == "radon_transform":
+            self._plot_radon_transform(**kwargs)
+        if self.score_method == "wcorr":
+            self._plot_wcorr(**kwargs)
+
+    def _plot_wcorr(self, prob_cmap="hot", count_cmap="binary"):
+        n_posteriors = len(self.posterior)
+        posterior_ind = np.random.default_rng().integers(0, n_posteriors, 5)
+        arrs = [self.posterior[i] for i in posterior_ind]
+
+        _, axs = plt.subplots(3, 5, sharey="row", sharex="col", figsize=[11, 8])
+
+        zsc_tuning = stats.zscore(self.ratemap.tuning_curves, axis=1)
+        sort_ind = np.argsort(np.argmax(zsc_tuning, axis=1))
+        n_neurons = self.neurons.n_neurons
+
+        for i, arr in enumerate(arrs):
+
+            t_start = self.epochs[posterior_ind[i]].flatten()[0]
+            score = self.score[posterior_ind[i]]
+
+            arr = np.apply_along_axis(
+                np.convolve, axis=0, arr=arr, v=np.ones(2 * 2 + 1)
+            )
+            t = np.arange(arr.shape[1]) * self.bin_size + t_start
+            pos = np.arange(arr.shape[0]) * 2
+
+            axs[0, i].pcolormesh(t, pos, arr, cmap=prob_cmap)
+            axs[0, i].set_ylim([pos.min(), pos.max()])
+            axs[0, i].set_title(f"#{posterior_ind[i]},\ns={np.round(score,2)}")
+
+            axs[1, i].pcolormesh(
+                t,
+                np.arange(n_neurons),
+                self.spkcount[posterior_ind[i]],
+                cmap=count_cmap,
+            )
+            plotting.plot_raster(
+                self.neurons[sort_ind].time_slice(t_start=t[0], t_stop=t[-1]),
+                ax=axs[2, i],
+                color="k",
+            )
+            if i == 0:
+                axs[0, i].set_ylabel("Position (cm)")
+                axs[1, i].set_ylabel("Neurons")
+            if i > 0:
+                axs[2, i].set_ylabel("")
+
+    def _plot_radon_transform(self, prob_cmap="hot", count_cmap="binary", lc="#00E676"):
         n_posteriors = len(self.posterior)
         posterior_ind = np.random.default_rng().integers(0, n_posteriors, 5)
         arrs = [self.posterior[i] for i in posterior_ind]

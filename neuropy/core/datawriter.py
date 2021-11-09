@@ -1,5 +1,6 @@
 import numpy as np
 from pathlib import Path
+import datetime
 
 
 class DataWriter:
@@ -28,7 +29,6 @@ class DataWriter:
 
     @staticmethod
     def from_file(f):
-        f = Path(f) if isinstance(f, str) else f
         if f.is_file():
             d = np.load(f, allow_pickle=True).item()
             return d
@@ -51,3 +51,28 @@ class DataWriter:
         data = self.to_dict()
         np.save(fp, data)
         print(f"{fp} saved")
+
+    def save_with_date(self, fp):
+
+        assert isinstance(fp, (str, Path)), "filename is invalid"
+        date_suffix = "." + datetime.date.today().strftime("%d-%m-%y")
+        fname = fp.name + date_suffix
+        data = self.to_dict()
+        fp = fp.with_name(fname)
+        np.save(fp, data)
+        print(f"{fp} saved")
+
+    def _time_slice_params(self, t1=None, t2=None):
+
+        if t1 is None:
+            t1 = self.t_start
+
+        if t2 is None:
+            t2 = self.t_stop
+
+        assert t2 > t1, "t2 must be greater than t1"
+
+        if hasattr(self, "time"):
+            return (self.time >= t1) & (self.time <= t2)
+        else:
+            return t1, t2
