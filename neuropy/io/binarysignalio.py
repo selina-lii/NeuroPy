@@ -1,6 +1,4 @@
 import numpy as np
-import pandas as pd
-
 from ..core import Signal
 from pathlib import Path
 
@@ -20,12 +18,6 @@ class BinarysignalIO:
         self.dtype = dtype
         self.source_file = filename
 
-    def __str__(self) -> str:
-        return (
-            f"duration: {self.duration:.2f} seconds \n"
-            f"duration: {self.duration/3600:.2f} hours \n"
-        )
-
     @property
     def duration(self):
         return self._raw_traces.shape[1] / self.sampling_rate
@@ -33,20 +25,6 @@ class BinarysignalIO:
     @property
     def n_frames(self):
         return self._raw_traces.shape[1]
-
-    def infer_start_time(self, stat_modify_time):
-        """Infers the start time based on modify time for file obtained from "stat" command, which should correspond
-        to when the file was saved/recording stopped.
-        :param stat_modify_time: str copied and pasted from running "$ stat filename",
-        e.g. "2021-08-03 11:57:37.224000000"
-        :return:
-        """
-        mod_datetime = pd.to_datetime(
-            stat_modify_time
-        )  # convert modify time to datetime
-        start_time = mod_datetime - pd.to_timedelta(self.duration, unit="sec")
-
-        return start_time
 
     def get_signal(self, channel_indx=None, t_start=None, t_stop=None):
 
