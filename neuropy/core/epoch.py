@@ -34,6 +34,9 @@ class Epoch(DataWriter):
     def get_unique_labels(self):
         return np.unique(self.labels)
 
+    def is_labels_unique(self):
+        return len(np.unique(self.labels)) == len(self)
+
     @property
     def to_dict(self):
         d = {"epochs": self._data, "metadata": self.metadata}
@@ -77,6 +80,9 @@ class Epoch(DataWriter):
         else:
             return np.vstack((self.starts[slice_], self.stops[slice_])).T
 
+    def __len__(self):
+        return self.n_epochs
+
     def time_slice(self, t_start, t_stop):
         # TODO time_slice should also include partial epochs
         # falling in between the timepoints
@@ -108,6 +114,7 @@ class Epoch(DataWriter):
             return None
 
     def fill_blank(self, method="from_left"):
+
         ep_starts = self.epochs["start"].values
         ep_stops = self.epochs["stop"].values
         ep_durations = self.epochs["duration"].values
@@ -138,6 +145,7 @@ class Epoch(DataWriter):
         self.epochs["duration"] = ep_durations
 
     def delete_in_between(self, t1, t2):
+
         epochs_df = self.to_dataframe()[["start", "stop", "label"]]
         # delete epochs if they are within t1, t2
         epochs_df = epochs_df[~((epochs_df["start"] >= t1) & (epochs_df["stop"] <= t2))]

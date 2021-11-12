@@ -45,7 +45,7 @@ class Pf1D:
         position_srate = position.sampling_rate
         x = position.x
         speed = position.speed
-        speed = gaussian_filter1d(speed, sigma=20)
+        speed = gaussian_filter1d(speed, sigma=10)
         t = position.time
         t_start = position.t_start
         t_stop = position.t_stop
@@ -106,8 +106,9 @@ class Pf1D:
             occupancy = gaussian_filter1d(occupancy, sigma=smooth)
 
             for cell in spks:
-                spk_spd = np.interp(cell, t, speed)
-                spk_x = np.interp(cell, t, x)
+                cell_ = cell.astype("float")
+                spk_spd = np.interp(cell_, t, speed)
+                spk_x = np.interp(cell_, t, x)
 
                 # speed threshold
                 spd_ind = np.where(spk_spd > speed_thresh)[0]
@@ -219,12 +220,13 @@ class Pf1D:
 
         return ax
 
-    def plot_ratemaps(self, ax=None, pad=2, normalize=False, sortby=None, cmap="tab20b"):
-        # returns: ax , sort_ind, colors
-        return plotting.plot_ratemap(self.ratemap, normalize_tuning_curve=True)
+    def plot_ratemaps(
+        self, ax=None, pad=2, normalize=False, sortby=None, cmap="tab20b"
+    ):
+        return plotting.plot_ratemaps()
 
     def plot_raw(self, ax=None, subplots=(8, 9)):
-        return plotting.plot_raw(ax=ax, subplots=subplots)
+        return plotting.plot_raw_ratemaps()
 
 
 class PF1d:

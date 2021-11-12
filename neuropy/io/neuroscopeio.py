@@ -13,7 +13,6 @@ class NeuroscopeIO:
         self.channel_groups = None
         self.discarded_channels = None
         self._parse_xml_file()
-        self._good_channels()
 
     def _parse_xml_file(self):
 
@@ -55,21 +54,8 @@ class NeuroscopeIO:
         self.discarded_channels = discarded_channels
         self.skipped_channels = np.array(skipped_channels)
 
-    def _good_channels(self):
-        good_chan = []
-        for n in range(self.n_channels):
-            if n not in self.discarded_channels and n not in self.skipped_channels:
-                good_chan.append(n)
-
-        self.good_channels = np.array(good_chan)
-
     def __str__(self) -> str:
-        return (
-            f"filename: {self.source_file} \n"
-            f"# channels: {self.n_channels}\n"
-            f"sampling rate: {self.dat_sampling_rate}\n"
-            f"lfp Srate (downsampled): {self.eeg_sampling_rate}\n"
-        )
+        return f"filename: {self.source_file} \n# channels: {self.n_channels}\nsampling rate: {self.dat_sampling_rate}\nlfp Srate (downsampled): {self.eeg_sampling_rate}"
 
     def set_datetime(self, datetime_epoch):
         """Often a resulting recording file is creating after concatenating different blocks.
@@ -103,7 +89,7 @@ class NeuroscopeIO:
 
         with file_clu.open("w") as f_clu, file_res.open("w") as f_res:
             for item in clu_id:
-                f_clu.write(f"{item}\n")
+                f_clu.write(f"{int(item)}\n")
             for frame in spk_frame:
                 f_res.write(f"{frame}\n")
 
@@ -113,14 +99,18 @@ class NeuroscopeIO:
                 a.write(f"{event.start*1000} start\n{event.stop*1000} stop\n")
 
     def write_position(self, position: core.Position):
+        """Writes core.Position object to neuroscope compatible format
+
+        Parameters
+        ----------
+        position : core.Position
+        """
         # neuroscope only displays positive values so translating the coordinates
         x, y = position.x, position.y
-        x = self.x + abs(min(self.x))
-        y = self.y + abs(min(self.y))
-        print(max(x))
-        print(max(y))
+        x = x + abs(min(x))
+        y = y + abs(min(y))
 
-        filename = self._obj.files.filePrefix.with_suffix(".pos")
+        filename = self.source_file.with_suffix(".pos")
         with filename.open("w") as f:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
