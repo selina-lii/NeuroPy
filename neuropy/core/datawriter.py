@@ -1,17 +1,16 @@
 import numpy as np
+import pathlib
 from pathlib import Path
 
-
 class DataWriter:
-    def __init__(self, metadata: dict = None) -> None:
+    def __init__(self, metadata=None) -> None:
 
         self._filename = None
 
         if metadata is not None:
             assert isinstance(metadata, dict), "Only dictionary accepted as metadata"
-            self._metadata: dict = metadata
-        else:
-            self._metadata: dict = {}
+
+        self._metadata: dict = metadata
 
     @property
     def filename(self):
@@ -40,8 +39,20 @@ class DataWriter:
     @staticmethod
     def from_file(f):
         if f.is_file():
-            d = np.load(f, allow_pickle=True).item()
-            return d
+            try:
+                d = np.load(f, allow_pickle=True).item()
+                return d
+            except NotImplementedError:
+                print("Issue with pickled POSIX_PATH on windows for path {}, falling back to non-pickled version...".format(f))
+                temp = pathlib.PosixPath
+                # pathlib.PosixPath = pathlib.WindowsPath # Bad hack
+                pathlib.PosixPath = pathlib.PurePosixPath # Bad hack
+                d = np.load(f, allow_pickle=True).item()
+                # d['filename']
+                # print("Post hack decode: {}\n".format(d))
+                return d
+            
+            return None
         else:
             return None
 
@@ -49,7 +60,6 @@ class DataWriter:
         return NotImplementedError
 
     def save(self):
-
         data = self.to_dict()
         if self.filename is not None:
             assert isinstance(self.filename, Path)
