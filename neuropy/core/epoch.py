@@ -34,6 +34,9 @@ class Epoch(DataWriter):
     def get_unique_labels(self):
         return np.unique(self.labels)
 
+    def is_labels_unique(self):
+        return len(np.unique(self.labels)) == len(self)
+
     @property
     def to_dict(self):
         d = {"epochs": self._data, "metadata": self.metadata}
@@ -44,15 +47,16 @@ class Epoch(DataWriter):
         df["duration"] = self.durations
         return df
 
-    @property
-    def metadata(self):
-        return self._metadata
+    def add_column(self, name: str, arr: np.ndarray):
+        data = self.to_dataframe()
+        data[name] = arr
+        return Epoch(epochs=data, metadata=self.metadata)
 
-    @metadata.setter
-    def metadata(self, metadata):
-        """metadata compatibility"""
-
-        self._metadata = metadata
+    def add_dataframe(self, df: pd.DataFrame):
+        assert isinstance(df, pd.DataFrame), "df should be a pandas dataframe"
+        data = self.to_dataframe()
+        data_new = pd.concat([data, df], axis=1)
+        return Epoch(epochs=data_new, metadata=self.metadata)
 
     def _check_epochs(self, epochs):
         assert isinstance(epochs, pd.DataFrame)
@@ -77,6 +81,9 @@ class Epoch(DataWriter):
         else:
             return np.vstack((self.starts[slice_], self.stops[slice_])).T
 
+    def __len__(self):
+        return self.n_epochs
+
     def time_slice(self, t_start, t_stop):
         # TODO time_slice should also include partial epochs
         # falling in between the timepoints
@@ -100,6 +107,11 @@ class Epoch(DataWriter):
         return Epoch(d["epochs"], metadata=d["metadata"])
 
     @staticmethod
+    def from_array(starts, stops, labels=None):
+        df = pd.DataFrame({"start": starts, "stop": stops, "label": labels})
+        return Epoch(epochs=df)
+
+    @staticmethod
     def from_file(f):
         d = DataWriter.from_file(f)
         if d is not None:
@@ -108,6 +120,7 @@ class Epoch(DataWriter):
             return None
 
     def fill_blank(self, method="from_left"):
+
         ep_starts = self.epochs["start"].values
         ep_stops = self.epochs["stop"].values
         ep_durations = self.epochs["duration"].values
@@ -138,6 +151,7 @@ class Epoch(DataWriter):
         self.epochs["duration"] = ep_durations
 
     def delete_in_between(self, t1, t2):
+
         epochs_df = self.to_dataframe()[["start", "stop", "label"]]
         # delete epochs if they are within t1, t2
         epochs_df = epochs_df[~((epochs_df["start"] >= t1) & (epochs_df["stop"] <= t2))]
@@ -216,11 +230,6 @@ class Epoch(DataWriter):
         mid_times = self.starts + self.durations / 2
         bins = np.arange(t_start, t_stop + binsize, binsize)
         return np.histogram(mid_times, bins=bins)[0]
-
-    def to_neuroscope(self, ext="evt"):
-        with self.filename.with_suffix(f".evt.{ext}").open("w") as a:
-            for event in self.epochs.itertuples():
-                a.write(f"{event.start*1000} start\n{event.stop*1000} end\n")
 
     def as_array(self):
         return self.to_dataframe()[["start", "stop"]].to_numpy()
