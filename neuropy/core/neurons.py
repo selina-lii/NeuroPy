@@ -4,76 +4,8 @@ from scipy.ndimage import gaussian_filter1d
 import scipy.signal as sg
 from .datawriter import DataWriter
 from copy import deepcopy
-from enum import Enum, unique, IntEnum
 
-@unique
-class NeuronType(Enum):
-    PYRAMIDAL = 0
-    CONTAMINATED = 1
-    INTERNEURONS = 2
-    
-    # [name for name, member in NeuronType.__members__.items() if member.name != name]    
-    # longClassNames = ['pyramidal','contaminated','interneurons']
-    # shortClassNames = ['pyr','cont','intr']
-    # classCutoffValues = [0, 4, 7, 9]
-    
-    def describe(self):
-        self.name, self.value
-    
-    @property
-    def shortClassName(self):
-        return NeuronType.shortClassNames()[self.value]
-        
-    @property
-    def longClassName(self):
-        return NeuronType.longClassNames()[self.value]
 
-    # def equals(self, string):
-    #     # return self.name == string
-    #     return ((self.shortClassName == string) or (self.longClassName == string))
-
-    # Static properties
-    @classmethod
-    def longClassNames(cls):
-        return np.array(['pyramidal','contaminated','interneurons'])
-    
-    @classmethod
-    def shortClassNames(cls):
-        return np.array(['pyr','cont','intr'])
-    
-    @classmethod
-    def classCutoffValues(cls):
-        return np.array([0, 4, 7, 9])
-    
-    @classmethod
-    def from_short_string(cls, string_value):
-        itemindex = np.where(cls.shortClassNames()==string_value)
-        return NeuronType(itemindex[0])
-    
-    @classmethod
-    def from_long_string(cls, string_value):
-        itemindex = np.where(cls.longClassNames()==string_value)
-        return NeuronType(itemindex[0])    
-    
-    @classmethod
-    def from_string(cls, string_value):
-        itemindex = np.where(cls.longClassNames()==string_value)
-        if len(itemindex[0]) < 1:
-            # if not found in longClassNames, try shortClassNames
-            itemindex = np.where(cls.shortClassNames()==string_value)
-        return NeuronType(itemindex[0])
-        
-    @classmethod
-    def from_qclu_series(cls, qclu_Series):
-        # qclu_Series: a Pandas Series object, such as qclu_Series=spikes_df['qclu']
-        # example: spikes_df['cell_type'] = pd.cut(x=spikes_df['qclu'], bins=classCutoffValues, labels=classNames)
-        temp_neuronTypeStrings = pd.cut(x=qclu_Series, bins=cls.classCutoffValues(), labels=cls.shortClassNames())
-        temp_neuronTypes = np.array([NeuronType.from_short_string(_) for _ in np.array(temp_neuronTypeStrings)])
-        return temp_neuronTypes
-        
-        
-
-    
 class Neurons(DataWriter):
     """Class to hold a group of spiketrains and their labels, ids etc."""
 
@@ -155,16 +87,17 @@ class Neurons(DataWriter):
         return len(self.spiketrains)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}"
-        # return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}\n neuron_type: {np.unique(self.neuron_type)}"
+        return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}\n neuron_type: {np.unique(self.neuron_type)}"
 
     def time_slice(self, t_start=None, t_stop=None):
+
         t_start, t_stop = self._time_check(t_start, t_stop)
         neurons = deepcopy(self)
         spiketrains = [
             spktrn[(spktrn > t_start) & (spktrn < t_stop)]
             for spktrn in neurons.spiketrains
         ]
+
         return Neurons(
             spiketrains=spiketrains,
             t_stop=t_stop,
@@ -178,17 +111,7 @@ class Neurons(DataWriter):
         )
 
     def get_neuron_type(self, neuron_type):
-        if isinstance(neuron_type, NeuronType):
-            neuron_type = neuron_type
-        elif isinstance(neuron_type, str):
-            neuron_type_str = neuron_type
-            neuron_type = NeuronType.from_string(neuron_type_str) ## Works
-        else:
-            print('error!')
-            return []
-            
-        # indices = self.neuron_type == neuron_type # old
-        indices = self.neuron_type == neuron_type ## Works        
+        indices = self.neuron_type == neuron_type
         return self[indices]
 
     def _check_integrity(self):
@@ -245,6 +168,7 @@ class Neurons(DataWriter):
 
     @staticmethod
     def from_dict(d):
+
         return Neurons(
             d["spiketrains"],
             d["t_stop"],
@@ -258,33 +182,11 @@ class Neurons(DataWriter):
             metadata=d["metadata"],
         )
 
-    @staticmethod
-    def from_file(f):
-        d = DataWriter.from_file(f)
-        if d is not None:
-            return Neurons.from_dict(d)
-        else:
-            return None
-
-
     def add_metadata(self):
         pass
 
     def get_all_spikes(self):
         return np.concatenate(self.spiketrains)
-
-    def get_flattened_spikes(self):
-        # Gets the flattened spikes, sorted in ascending timestamp for all cells. Returns a FlattenedSpiketrains object
-        flattened_spike_identities = np.concatenate([np.full((self.n_spikes[i],), self.neuron_ids[i]) for i in np.arange(self.n_neurons)]) # repeat the neuron_id for each spike that belongs to that neuron
-        flattened_spike_times = np.concatenate(self.spiketrains)
-        # Get the indicies required to sort the flattened_spike_times
-        sorted_indicies = np.argsort(flattened_spike_times)
-        return FlattenedSpiketrains(
-            sorted_indicies,
-            flattened_spike_identities[sorted_indicies],
-            flattened_spike_times[sorted_indicies],
-            t_start=self.t_start
-        )
 
     @property
     def n_spikes(self):
@@ -386,88 +288,6 @@ class Neurons(DataWriter):
     #     """Get peri-stimulus time histograms w.r.t time points in t"""
 
     #     time_diff = [np.histogram(spktrn - t) for spktrn in self.spiketrains]
-
-
-
-
-class FlattenedSpiketrains(DataWriter):
-    """Class to hold flattened spikes for all cells"""
-    # flattened_sort_indicies: allow you to sort any naively flattened array (such as position info) using naively_flattened_variable[self.flattened_sort_indicies]
-    def __init__(
-        self,
-        flattened_sort_indicies: np.ndarray,
-        flattened_spike_identities: np.ndarray,
-        flattened_spike_times: np.ndarray,
-        t_start=0.0,
-        metadata=None,
-    ) -> None:
-        super().__init__(metadata=metadata)
-        self.flattened_sort_indicies = flattened_sort_indicies
-        self.flattened_spike_identities = flattened_spike_identities
-        self.flattened_spike_times = flattened_spike_times
-        self.t_start = t_start
-        self.metadata = metadata
-
-    @property
-    def flattened_sort_indicies(self):
-        return self._flattened_sort_indicies
-
-    @flattened_sort_indicies.setter
-    def flattened_sort_indicies(self, arr):
-        self._flattened_sort_indicies = arr
-
-    @property
-    def flattened_spike_identities(self):
-        return self._flattened_spike_identities
-
-    @flattened_spike_identities.setter
-    def flattened_spike_identities(self, arr):
-        self._flattened_spike_identities = arr
-
-    @property
-    def flattened_spike_times(self):
-        return self._flattened_spike_times
-
-    @flattened_spike_times.setter
-    def flattened_spike_times(self, arr):
-        self._flattened_spike_times = arr
-
-    def add_metadata(self):
-        pass
-
-    def time_slice(self, t_start=None, t_stop=None):
-        # t_start, t_stop = self._time_check(t_start, t_stop)
-        flattened_spiketrains = deepcopy(self)
-        included_indicies = ((flattened_spiketrains.flattened_spike_times > t_start) & (flattened_spiketrains.flattened_spike_times < t_stop))
-        flattened_spike_times = flattened_spiketrains.flattened_spike_times[included_indicies]
-        flattened_spike_identities = flattened_spiketrains.flattened_spike_identities[included_indicies]
-        return FlattenedSpiketrains(
-            flattened_spike_times=flattened_spiketrains.flattened_spike_times[included_indicies],
-            flattened_spike_identities=flattened_spiketrains.flattened_spike_identities[included_indicies],
-            t_start=flattened_spiketrains.t_start,
-            metadata=flattened_spiketrains.metadata,
-        )
-
-
-    def to_dict(self):
-        return {
-            "flattened_sort_indicies": self.flattened_sort_indicies,
-            "flattened_spike_identities": self.flattened_spike_identities,
-            "flattened_spike_times": self.flattened_spike_times,
-            "t_start": self.t_start,
-            "metadata": self.metadata,
-        }
-
-    @staticmethod
-    def from_dict(d):
-        return FlattenedSpiketrains(
-            flattened_sort_indicies=d["flattened_sort_indicies"],
-            flattened_spike_times=d["flattened_spike_times"],
-            flattened_spike_identities=d["flattened_spike_identities"],
-            t_start=d["t_start"],
-            metadata=d["metadata"],
-        )
-
 
 
 class BinnedSpiketrain(DataWriter):
@@ -585,6 +405,10 @@ class BinnedSpiketrain(DataWriter):
         pairs_bool = np.tril(pairs_bool, k=-1)
 
         return corr[pairs_bool]
+
+    @property
+    def firing_rate(self):
+        return self.spike_counts / self.bin_size
 
 
 class Mua(DataWriter):
