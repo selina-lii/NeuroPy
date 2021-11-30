@@ -2,11 +2,108 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 import scipy.signal as sg
+
 from .datawriter import DataWriter
+# from .flattened_spiketrains import FlattenedSpiketrains
+
 from copy import deepcopy
+from enum import Enum, unique, IntEnum
+from neuropy.utils.mixins.time_slicing import StartStopTimesMixin, TimeSlicableObjectProtocol, TimeSlicableIndiciesMixin
+from neuropy.utils.mixins.unit_slicing import NeuronUnitSlicableObjectProtocol
 
 
-class Neurons(DataWriter):
+@unique
+class NeuronType(Enum):
+    PYRAMIDAL = 0
+    CONTAMINATED = 1
+    INTERNEURONS = 2
+    
+    # [name for name, member in NeuronType.__members__.items() if member.name != name]    
+    # longClassNames = ['pyramidal','contaminated','interneurons']
+    # shortClassNames = ['pyr','cont','intr']
+    # classCutoffValues = [0, 4, 7, 9]
+    
+    def describe(self):
+        self.name, self.value
+    
+    @property
+    def shortClassName(self):
+        return NeuronType.shortClassNames()[self.value]
+        
+    @property
+    def longClassName(self):
+        return NeuronType.longClassNames()[self.value]
+
+    # def equals(self, string):
+    #     # return self.name == string
+    #     return ((self.shortClassName == string) or (self.longClassName == string))
+
+    # Static properties
+    @classmethod
+    def longClassNames(cls):
+        return np.array(['pyramidal','contaminated','interneurons'])
+    
+    @classmethod
+    def shortClassNames(cls):
+        return np.array(['pyr','cont','intr'])
+    
+    @classmethod
+    def bapunNpyFileStyleShortClassNames(cls):
+        return np.array(['pyr','mua','inter'])
+    
+    @classmethod
+    def classCutoffValues(cls):
+        return np.array([0, 4, 7, 9])
+    
+    @classmethod
+    def from_short_string(cls, string_value):
+        itemindex = np.where(cls.shortClassNames()==string_value)
+        return NeuronType(itemindex[0])
+    
+    @classmethod
+    def from_long_string(cls, string_value):
+        itemindex = np.where(cls.longClassNames()==string_value)
+        return NeuronType(itemindex[0])    
+    
+    @classmethod
+    def from_string(cls, string_value):
+        itemindex = np.where(cls.longClassNames()==string_value)
+        if len(itemindex[0]) < 1:
+            # if not found in longClassNames, try shortClassNames
+            itemindex = np.where(cls.shortClassNames()==string_value)
+            if len(itemindex[0]) < 1:
+                # if not found in shortClassNames, try bapunNpyFileStyleShortClassNames
+                itemindex = np.where(cls.bapunNpyFileStyleShortClassNames()==string_value)
+        return NeuronType(itemindex[0])
+        
+    @classmethod
+    def from_bapun_npy_style_string(cls, string_value):
+        itemindex = np.where(cls.bapunNpyFileStyleShortClassNames()==string_value)
+        return NeuronType(itemindex[0])
+    
+    
+    @classmethod
+    def from_qclu_series(cls, qclu_Series):
+        # qclu_Series: a Pandas Series object, such as qclu_Series=spikes_df['qclu']
+        # example: spikes_df['cell_type'] = pd.cut(x=spikes_df['qclu'], bins=classCutoffValues, labels=classNames)
+        temp_neuronTypeStrings = pd.cut(x=qclu_Series, bins=cls.classCutoffValues(), labels=cls.shortClassNames())
+        temp_neuronTypes = np.array([NeuronType.from_short_string(_) for _ in np.array(temp_neuronTypeStrings)])
+        return temp_neuronTypes
+        
+    @classmethod
+    def from_any_string_series(cls, neuron_types_strings):
+        # neuron_types_strings: a np.ndarray containing any acceptable style strings, such as: ['mua', 'mua', 'inter', 'pyr', ...]
+        return np.array([NeuronType.from_string(_) for _ in np.array(neuron_types_strings)])
+    
+    
+    @classmethod
+    def from_bapun_npy_style_series(cls, bapun_style_neuron_types):
+        # bapun_style_neuron_types: a np.ndarray containing Bapun-style strings, such as: ['mua', 'mua', 'inter', 'pyr', ...]
+        return np.array([NeuronType.from_bapun_npy_style_string(_) for _ in np.array(bapun_style_neuron_types)])
+        
+
+    
+class Neurons(NeuronUnitSlicableObjectProtocol, StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
     """Class to hold a group of spiketrains and their labels, ids etc."""
 
     def __init__(
@@ -18,7 +115,6 @@ class Neurons(DataWriter):
         neuron_ids=None,
         neuron_type=None,
         waveforms=None,
-        waveforms_amplitude=None,
         peak_channels=None,
         shank_ids=None,
         metadata=None,
@@ -26,6 +122,8 @@ class Neurons(DataWriter):
         super().__init__(metadata=metadata)
 
         self.spiketrains = np.array(spiketrains, dtype="object")
+        self._neuron_ids = None
+        self._reverse_cellID_index_map = None
         if neuron_ids is None:
             self.neuron_ids = np.arange(len(self.spiketrains))
         else:
@@ -36,14 +134,6 @@ class Neurons(DataWriter):
                 waveforms.shape[0] == self.n_neurons
             ), "Waveforms first dimension should match number of neurons"
 
-        if waveforms_amplitude is not None:
-            assert len(waveforms_amplitude) == len(
-                self.spiketrains
-            ), "length should match"
-            self.waveforms_amplitude = waveforms_amplitude
-        else:
-            self.waveforms_amplitude = None
-
         self.waveforms = waveforms
         self.shank_ids = shank_ids
         self.neuron_type = neuron_type
@@ -51,6 +141,59 @@ class Neurons(DataWriter):
         self._sampling_rate = sampling_rate
         self.t_start = t_start
         self.t_stop = t_stop
+
+    @property
+    def neuron_ids(self):
+        """The neuron_ids property."""
+        return self._neuron_ids
+    @neuron_ids.setter
+    def neuron_ids(self, value):
+        """ ensures the indicies are integers and builds the reverse index map upon setting this value """
+        if value is not None:
+            flat_cell_ids = np.array([int(cell_id) for cell_id in value]) # ensures integer indexes for IDs
+            self._reverse_cellID_index_map = Neurons.__build_cellID_reverse_lookup_map(flat_cell_ids)
+            self._neuron_ids = flat_cell_ids
+        else:
+            self._reverse_cellID_index_map = None
+            self._neuron_ids = None
+
+
+    @property
+    def reverse_cellID_index_map(self):
+        """The reverse_cellID_index_map property: Allows reverse indexing into the linear imported array using the original cell ID indicies."""
+        return self._reverse_cellID_index_map
+    
+    @staticmethod
+    def __build_cellID_reverse_lookup_map(cell_ids):
+        # Allows reverse indexing into the linear imported array using the original cell ID indicies
+        flat_cell_ids = np.array([int(cell_id) for cell_id in cell_ids]) # ensures integer indexes for IDs
+        linear_flitered_ids = np.arange(len(flat_cell_ids))
+        return dict(zip(flat_cell_ids, linear_flitered_ids))
+
+
+    @property
+    def neuron_type(self):
+        """The neuron_type property."""
+        return self._neuron_type
+    @neuron_type.setter
+    def neuron_type(self, value):
+        if value is not None:
+            if len(value) > 0:
+                # check to see if the neuron_type is the correct class (should be NeuronType) by checking the first element
+                if isinstance(value[0], NeuronType):
+                    # neuron_type already the correct type (np.array of NeuronType)
+                    pass
+                elif isinstance(value[0], str):
+                    # neuron_type is a raw string type, so it needs to be converted
+                    print('converting neuron_type strings to core.neurons.NeuronType objects...')
+                    neuron_type_str = value
+                    value = NeuronType.from_any_string_series(neuron_type_str) ## Works
+                    print('\t done.')
+                else:
+                    print('ERROR: neuron_type value was of unknown type!')
+                    raise NotImplementedError
+        self._neuron_type = value
+
 
     def __getitem__(self, i):
         # copy object
@@ -64,11 +207,6 @@ class Neurons(DataWriter):
             waveforms = self.waveforms[i]
         else:
             waveforms = self.waveforms
-
-        if self.waveforms_amplitude is not None:
-            waveforms_amplitude = self.waveforms_amplitude[i]
-        else:
-            waveforms_amplitude = self.waveforms_amplitude
 
         if self.peak_channels is not None:
             peak_channels = self.peak_channels[i]
@@ -88,7 +226,6 @@ class Neurons(DataWriter):
             neuron_ids=self.neuron_ids[i],
             neuron_type=neuron_type,
             waveforms=waveforms,
-            waveforms_amplitude=waveforms_amplitude,
             peak_channels=peak_channels,
             shank_ids=shank_ids,
         )
@@ -102,17 +239,16 @@ class Neurons(DataWriter):
         return len(self.spiketrains)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}\n neuron_type: {np.unique(self.neuron_type)}"
+        return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}"
+        # return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}\n neuron_type: {np.unique(self.neuron_type)}"
 
     def time_slice(self, t_start=None, t_stop=None):
-
-        t_start, t_stop = self._time_check(t_start, t_stop)
+        t_start, t_stop = self.safe_start_stop_times(t_start, t_stop)
         neurons = deepcopy(self)
         spiketrains = [
             spktrn[(spktrn > t_start) & (spktrn < t_stop)]
             for spktrn in neurons.spiketrains
         ]
-
         return Neurons(
             spiketrains=spiketrains,
             t_stop=t_stop,
@@ -125,8 +261,19 @@ class Neurons(DataWriter):
             shank_ids=neurons.shank_ids,
         )
 
-    def get_neuron_type(self, neuron_type):
-        indices = self.neuron_type == neuron_type
+    def get_neuron_type(self, query_neuron_type):
+        """ filters self by the specified query_neuron_type, only returning neurons that match. """
+        if isinstance(query_neuron_type, NeuronType):
+            query_neuron_type = query_neuron_type
+        elif isinstance(query_neuron_type, str):
+            query_neuron_type_str = query_neuron_type
+            query_neuron_type = NeuronType.from_string(query_neuron_type_str) ## Works
+        else:
+            print('error!')
+            return []
+            
+        # indices = self.neuron_type == neuron_type # old
+        indices = self.neuron_type == query_neuron_type ## Works        
         return self[indices]
 
     def _check_integrity(self):
@@ -143,28 +290,13 @@ class Neurons(DataWriter):
         #     ]
         # )
 
-    def _time_check(self, t_start, t_stop):
-        if t_start is None:
-            t_start = self.t_start
-
-        if t_stop is None:
-            t_stop = self.t_stop
-
-        return t_start, t_stop
-
     def __str__(self) -> str:
         return f"# neurons = {self.n_neurons}"
 
     def __len__(self):
         return self.n_neurons
 
-    # def load(self):
-    #     data = super().load()
-    #     if data is not None:
-    #         for key in data:
-    #             setattr(self, key, data[key])
-
-    def to_dict(self):
+    def to_dict(self, recurrsively=False):
 
         # self._check_integrity()
 
@@ -176,7 +308,6 @@ class Neurons(DataWriter):
             "neuron_ids": self.neuron_ids,
             "neuron_type": self.neuron_type,
             "waveforms": self.waveforms,
-            "waveforms_amplitude": self.waveforms_amplitude,
             "peak_channels": self.peak_channels,
             "shank_ids": self.shank_ids,
             "metadata": self.metadata,
@@ -184,29 +315,38 @@ class Neurons(DataWriter):
 
     @staticmethod
     def from_dict(d):
-
-        if "waveforms_amplitude" not in d:
-            d["waveforms_amplitude"] = None
-
         return Neurons(
-            spiketrains=d["spiketrains"],
-            t_stop=d["t_stop"],
-            t_start=d["t_start"],
-            sampling_rate=d["sampling_rate"],
-            neuron_ids=d["neuron_ids"],
-            neuron_type=d["neuron_type"],
-            waveforms=d["waveforms"],
-            waveforms_amplitude=d["waveforms_amplitude"],
-            peak_channels=d["peak_channels"],
+            d["spiketrains"],
+            d["t_stop"],
+            d["t_start"],
+            d["sampling_rate"],
+            d["neuron_ids"],
+            d["neuron_type"],
+            d["waveforms"],
+            d["peak_channels"],
             shank_ids=d["shank_ids"],
             metadata=d["metadata"],
         )
+
 
     def add_metadata(self):
         pass
 
     def get_all_spikes(self):
         return np.concatenate(self.spiketrains)
+
+    # def get_flattened_spikes(self):
+    #     # Gets the flattened spikes, sorted in ascending timestamp for all cells. Returns a FlattenedSpiketrains object
+    #     flattened_spike_identities = np.concatenate([np.full((self.n_spikes[i],), self.neuron_ids[i]) for i in np.arange(self.n_neurons)]) # repeat the neuron_id for each spike that belongs to that neuron
+    #     flattened_spike_times = np.concatenate(self.spiketrains)
+    #     # Get the indicies required to sort the flattened_spike_times
+    #     sorted_indicies = np.argsort(flattened_spike_times)
+    #     return FlattenedSpiketrains(
+    #         sorted_indicies,
+    #         flattened_spike_identities[sorted_indicies],
+    #         flattened_spike_times[sorted_indicies],
+    #         t_start=self.t_start
+    #     )
 
     @property
     def n_spikes(self):
@@ -222,6 +362,7 @@ class Neurons(DataWriter):
         indices = self.firing_rate > thresh
         return self[indices]
 
+    # for NeuronUnitSlicableObjectProtocol:
     def get_by_id(self, ids):
         """Returns neurons object with neuron_ids equal to ids"""
         indices = np.isin(self.neuron_ids, ids)
@@ -310,7 +451,8 @@ class Neurons(DataWriter):
     #     time_diff = [np.histogram(spktrn - t) for spktrn in self.spiketrains]
 
 
-class BinnedSpiketrain(DataWriter):
+
+class BinnedSpiketrain(NeuronUnitSlicableObjectProtocol, DataWriter):
     """Class to hold binned spiketrains"""
 
     def __init__(
@@ -369,7 +511,7 @@ class BinnedSpiketrain(DataWriter):
     def time(self):
         return np.arange(self.n_bins) * self.bin_size + self.t_start
 
-    def to_dict(self):
+    def to_dict(self, recurrsively=False):
         return {
             "spike_counts": self.spike_counts,
             "t_start": self.t_start,
@@ -426,11 +568,36 @@ class BinnedSpiketrain(DataWriter):
 
         return corr[pairs_bool]
 
-    @property
-    def firing_rate(self):
-        return self.spike_counts / self.bin_size
+    def __getitem__(self, i):
+        # copy object
+        spike_counts = self.spike_counts[i]
+        if self.peak_channels is not None:
+            peak_channels = self.peak_channels[i]
+        else:
+            peak_channels = self.peak_channels
 
+        if self.shank_ids is not None:
+            shank_ids = self.shank_ids[i]
+        else:
+            shank_ids = self.shank_ids
 
+        return BinnedSpiketrain(
+            spike_counts=spike_counts,
+            bin_size=self.bin_size,
+            t_start=self.t_start,
+            neuron_ids=self.neuron_ids[i],
+            peak_channels=peak_channels,
+            shank_ids=shank_ids,
+        )
+
+    # for NeuronUnitSlicableObjectProtocol:
+    def get_by_id(self, ids):
+        """Returns neurons object with neuron_ids equal to ids"""
+        indices = np.isin(self.neuron_ids, ids)
+        return self[indices]
+    
+    
+    
 class Mua(DataWriter):
     def __init__(
         self,
@@ -508,7 +675,7 @@ class Mua(DataWriter):
 
     #     return gaussian
 
-    def to_dict(self):
+    def to_dict(self, recurrsively=False):
         return {
             "spike_counts": self._spike_counts,
             "t_start": self.t_start,
