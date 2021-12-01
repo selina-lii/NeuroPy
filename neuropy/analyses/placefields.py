@@ -8,227 +8,116 @@ from matplotlib.gridspec import GridSpec
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 from .. import core
-from neuropy.utils.signal_process import ThetaParams
+from ..utils.signal_process import ThetaParams
 from .. import plotting
-from neuropy.utils.mixins.print_helpers import SimplePrintable, OrderedMeta
 
 
-def perform_compute_placefields(active_epoch_session_Neurons, active_epoch_pos, computation_config, active_epoch_placefields1D=None, active_epoch_placefields2D=None, should_force_recompute_placefields=True):
-    """ Computes both 1D and 2D placefields.
-    active_epoch_session_Neurons: 
-    active_epoch_pos: 
-    active_epoch_placefields1D (Pf1D, optional) & active_epoch_placefields2D (Pf2D, optional): allow you to pass already computed Pf1D and Pf2D objects from previous runs and it won't recompute them so long as should_force_recompute_placefields=False, which is useful in interactive Notebooks/scripts
-    Usage:
-        active_epoch_placefields1D, active_epoch_placefields2D = perform_compute_placefields(active_epoch_session_Neurons, active_epoch_pos, active_epoch_placefields1D, active_epoch_placefields2D, active_config.computation_config, should_force_recompute_placefields=True)
-    """
-    ## Linearized (1D) Position Placefields:
-    if ((active_epoch_placefields1D is None) or should_force_recompute_placefields):
-        print('Recomputing active_epoch_placefields...')
-        active_epoch_placefields1D = Pf1D(neurons=active_epoch_session_Neurons, position=active_epoch_pos.linear_pos_obj,
-                                          speed_thresh=computation_config.speed_thresh, grid_bin=computation_config.grid_bin, smooth=computation_config.smooth)
-        print('\t done.')
-    else:
-        print('active_epoch_placefields1D already exists, reusing it')
-
-    ## 2D Position Placemaps:
-    if ((active_epoch_placefields2D is None) or should_force_recompute_placefields):
-        print('Recomputing active_epoch_placefields2D...')
-        active_epoch_placefields2D = Pf2D(neurons=active_epoch_session_Neurons, position=active_epoch_pos,
-                                          speed_thresh=computation_config.speed_thresh, grid_bin=computation_config.grid_bin, smooth=computation_config.smooth)
-        print('\t done.')
-    else:
-        print('active_epoch_placefields2D already exists, reusing it')
-    
-    return active_epoch_placefields1D, active_epoch_placefields2D
-
-
-def plot_all_placefields(active_epoch_placefields1D, active_epoch_placefields2D, active_config):
-    """ 
-    active_epoch_placefields1D: (Pf1D)
-    active_epoch_placefields2D: (Pf2D)
-    active_config:
-    Usage:
-        ax_pf_1D, occupancy_fig, active_pf_2D_figures = plot_all_placefields(active_epoch_placefields1D, active_epoch_placefields2D, active_config)
-    """
-    active_epoch_name = active_config.active_epochs.name
-    ## Linearized (1D) Position Placefields:
-    if active_epoch_placefields1D is not None:
-        ax_pf_1D = active_epoch_placefields1D.plot_ratemaps()
-        active_pf_1D_identifier_string = '1D Placefields - {}'.format(active_epoch_name)
-        plt.title(active_pf_1D_identifier_string)
-        active_pf_1D_output_filename = '{}.pdf'.format(active_pf_1D_identifier_string)
-        active_pf_1D_output_filepath = active_config.plotting_config.active_output_parent_dir.joinpath(active_pf_1D_output_filename)
-        print('Saving 1D Placefield image out to "{}"...'.format(active_pf_1D_output_filepath))
-        plt.savefig(active_pf_1D_output_filepath)
-        print('done.')
-    else:
-        print('plot_all_placefields(...): active_epoch_placefields1D does not exist. Skipping it.')
-        ax_pf_1D = None
-
-    ## 2D Position Placemaps:
-    if active_epoch_placefields2D is not None:
-        active_pf_occupancy_2D_identifier_string = '2D Occupancy - {}'.format(active_epoch_name)
-        occupancy_fig = plt.figure()
-        occupancy_ax = occupancy_fig.gca()
-        im = occupancy_ax.pcolorfast(
-            active_epoch_placefields2D.ratemap.xbin_centers,
-            active_epoch_placefields2D.ratemap.ybin_centers,
-            np.rot90(np.fliplr(active_epoch_placefields2D.occupancy)) / np.max(active_epoch_placefields2D.occupancy),
-            cmap="jet",
-            vmin=0,
-        )  # rot90(flipud... is necessary to match plotRaw configuration.
-        plt.title(active_pf_occupancy_2D_identifier_string)
-        plt.show()
-        # Save ocupancy figure out to disk:
-        active_pf_occupancy_2D_output_filename = '{}.pdf'.format(active_pf_occupancy_2D_identifier_string)
-        active_pf_occupancy_2D_output_filepath = active_config.plotting_config.active_output_parent_dir.joinpath(active_pf_occupancy_2D_output_filename)
-        print('Saving 2D Placefield image out to "{}"...'.format(active_pf_occupancy_2D_output_filepath))
-        occupancy_fig.savefig(active_pf_occupancy_2D_output_filepath)
-        print('\t done.')
-        ## 2D Tuning Curves Figure:
-        active_pf_2D_figures, active_pf_2D_gs = active_epoch_placefields2D.plotMap(subplots=(7, 7),figsize=(10, 10))
-        # active_epoch_placefields2D.plotRaw()
-        active_pf_2D_identifier_string = '2D Placefields - {}'.format(active_epoch_name)
-        # plt.title(active_pf_2D_identifier_string)
-        active_pf_2D_output_filename = '{}.pdf'.format(active_pf_2D_identifier_string)
-        active_pf_2D_output_filepath = active_config.plotting_config.active_output_parent_dir.joinpath(active_pf_2D_output_filename)
-        print('Saving 2D Placefield image out to "{}"...'.format(active_pf_2D_output_filepath))
-        for aFig in active_pf_2D_figures:
-            aFig.savefig(active_pf_2D_output_filepath)
-        print('\t done.')
-    else:
-        print('plot_all_placefields(...): active_epoch_placefields2D does not exist. Skipping it.')
-        occupancy_fig = None
-        active_pf_2D_figures = None
-    
-    return ax_pf_1D, occupancy_fig, active_pf_2D_figures
-
-    
-
-class Pf1D(SimplePrintable):
+class Pf1D(core.Ratemap):
     def __init__(
         self,
         neurons: core.Neurons,
         position: core.Position,
         epochs: core.Epoch = None,
-        frate_thresh=1,
-        speed_thresh=5,
+        frate_thresh=1.0,
+        speed_thresh=3,
         grid_bin=1,
-        smooth=1,
+        sigma=1,
     ):
         """computes 1d place field using linearized coordinates. It always computes two place maps with and
         without speed thresholds.
 
         Parameters
         ----------
-        track_name : str
-            name of track
-        direction : forward, backward or None
-            direction of running, by default None which means direction is ignored
+        neurons : core.Neurons
+            neurons obj containing spiketrains and related info
+        position: core.Position
+            1D position
         grid_bin : int
-            bin size of position bining, by default 5
-        speed_thresh : int
-            speed threshold for calculating place field
+            bin size of position bining, by default 5 cm
+        epochs : core.Epoch,
+            restrict calculation to these epochs, default None
+        frate_thresh : float,
+            peak firing rate should be above this value, default 1 Hz
+        speed_thresh : float
+            speed threshold for calculating place field, by default None
+        sigma : float
+            standard deviation for smoothing occupancy and spikecounts in each position bin, in units of cm, default 1 cm
+
+        NOTE: speed_thresh is ignored if epochs is provided
         """
 
         assert position.ndim == 1, "Only 1 dimensional position are acceptable"
-        spiketrains = neurons.spiketrains
         neuron_ids = neurons.neuron_ids
-        n_neurons = neurons.n_neurons
         position_srate = position.sampling_rate
         x = position.x
         speed = position.speed
-        speed = gaussian_filter1d(speed, sigma=20)
         t = position.time
         t_start = position.t_start
         t_stop = position.t_stop
 
-        xbin = np.arange(min(x), max(x), grid_bin)  # binning of x position
+        smooth_ = lambda f: gaussian_filter1d(
+            f, sigma / grid_bin, axis=-1
+        )  # divide by grid_bin to account for discrete spacing
 
-        spk_pos, spk_t, tuning_curve = [], [], []
+        xbin = np.arange(np.min(x), np.max(x) + grid_bin, grid_bin)
 
-        # ------ if direction then restrict to those epochs --------
         if epochs is not None:
             assert isinstance(epochs, core.Epoch), "epochs should be core.Epoch object"
-            # print(f" using {run_dir} running only")
-            spks = [
+
+            spiketrains = [
                 np.concatenate(
                     [
-                        spktrn[(spktrn > epc.start) & (spktrn < epc.stop)]
+                        spktrn[(spktrn >= epc.start) & (spktrn <= epc.stop)]
                         for epc in epochs.to_dataframe().itertuples()
                     ]
                 )
-                for spktrn in spiketrains
+                for spktrn in neurons.spiketrains
             ]
-            # changing x, speed, time to only run epochs so occupancy map is consistent with that
+            # changing x, speed, time to only run epochs so occupancy map is consistent
             indx = np.concatenate(
                 [
-                    np.where((t > epc.start) & (t < epc.stop))[0]
+                    np.where((t >= epc.start) & (t <= epc.stop))[0]
                     for epc in epochs.to_dataframe().itertuples()
                 ]
             )
-            x = x[indx]
-            speed = speed[indx]
-            t = t[indx]
-            occupancy = np.histogram(x, bins=xbin)[0] / position_srate + 1e-16
-            occupancy = gaussian_filter1d(occupancy, sigma=smooth)
 
-            for cell in spks:
-                spk_spd = np.interp(cell, t, speed)
-                spk_x = np.interp(cell, t, x)
-
-                spk_pos.append(spk_x)
-                spk_t.append(cell)
-
-                # tuning curve calculation
-                tuning_curve.append(
-                    gaussian_filter1d(np.histogram(spk_x, bins=xbin)[0], sigma=smooth)
-                    / occupancy
-                )
-
+            speed_thresh = None
+            print("Note: speed_thresh is ignored when epochs is provided")
         else:
-            # --- speed thresh occupancy----
-
-            spks = [
-                spktrn[(spktrn > t_start) & (spktrn < t_stop)] for spktrn in spiketrains
-            ]
+            spiketrains = neurons.time_slice(t_start, t_stop).spiketrains
             indx = np.where(speed >= speed_thresh)[0]
-            x, speed, t = x[indx], speed[indx], t[indx]
 
-            occupancy = np.histogram(x, bins=xbin)[0] / position_srate + 1e-16
-            occupancy = gaussian_filter1d(occupancy, sigma=smooth)
+        # to avoid interpolation error, speed and position estimation for spiketrains should use time and speed of entire position (not only on threshold crossing time points)
+        x_thresh = x[indx]
 
-            for cell in spks:
-                spk_spd = np.interp(cell, t, speed)
-                spk_x = np.interp(cell, t, x)
+        spk_pos, spk_t, spkcounts = [], [], []
+        for spktrn in spiketrains:
+            spk_spd = np.interp(spktrn, t, speed)
+            spk_x = np.interp(spktrn, t, x)
+            if speed_thresh is not None:
+                indices = np.where(spk_spd >= speed_thresh)[0]
+                spk_x = spk_x[indices]
+                spktrn = spktrn[indices]
 
-                # speed threshold
-                spd_ind = np.where(spk_spd > speed_thresh)[0]
-                spk_pos.append(spk_x[spd_ind])
-                spk_t.append(cell[spd_ind])
+            spk_pos.append(spk_x)
+            spk_t.append(spktrn)
+            spkcounts.append(np.histogram(spk_x, bins=xbin)[0])
 
-                # tuning curve calculation
-                tuning_curve.append(
-                    gaussian_filter1d(np.histogram(spk_x, bins=xbin)[0], sigma=smooth)
-                    / occupancy
-                )
+        spkcounts = smooth_(np.asarray(spkcounts))
+        occupancy = np.histogram(x_thresh, bins=xbin)[0] / position_srate + 1e-16
+        occupancy = smooth_(occupancy)
+        tuning_curve = spkcounts / occupancy.reshape(1, -1)
 
-        # ---- cells with peak frate abouve thresh ------
-        thresh_neurons_indx = [
-            neuron_indx
-            for neuron_indx in range(n_neurons)
-            if np.max(tuning_curve[neuron_indx]) > frate_thresh
-        ]
+        # ---- neurons with peak firing rate above thresh ------
+        frate_thresh_indx = np.where(np.max(tuning_curve, axis=1) >= frate_thresh)[0]
+        tuning_curve = tuning_curve[frate_thresh_indx, :]
+        neuron_ids = neuron_ids[frate_thresh_indx]
+        spk_t = [spk_t[_] for _ in frate_thresh_indx]
+        spk_pos = [spk_pos[_] for _ in frate_thresh_indx]
 
-        get_elem = lambda list_: [list_[_] for _ in thresh_neurons_indx]
-
-        tuning_curve = get_elem(tuning_curve)
-        tuning_curve = np.asarray(tuning_curve)
-        self.ratemap = core.Ratemap(
-            tuning_curve, xbin=xbin, neuron_ids=get_elem(neuron_ids)
-        )
-        self.ratemap_spiketrains = get_elem(spk_t)
-        self.ratemap_spiketrains_pos = get_elem(spk_pos)
+        super().__init__(tuning_curves=tuning_curve, xbin=xbin, neuron_ids=neuron_ids)
+        self.ratemap_spiketrains = spk_t
+        self.ratemap_spiketrains_pos = spk_pos
         self.occupancy = occupancy
         self.frate_thresh = frate_thresh
         self.speed_thresh = speed_thresh
@@ -321,7 +210,7 @@ class Pf1D(SimplePrintable):
 
 
 
-class Pf2D(SimplePrintable):
+class Pf2D:
     def __init__(
         self,
         neurons: core.Neurons,
@@ -636,191 +525,15 @@ class Pf2D(SimplePrintable):
 
 
 
-class PF1d(SimplePrintable):
-    def compute(
-        self,
-        track_name,
-        frate_thresh=1,
-        run_dir=None,
-        grid_bin=5,
-        speed_thresh=0,
-        smooth=1,
-    ):
-        """computes 1d place field using linearized coordinates. It always computes two place maps with and
-        without speed thresholds.
-
-        Parameters
-        ----------
-        track_name : str
-            name of track
-        direction : forward, backward or None
-            direction of running, by default None which means direction is ignored
-        grid_bin : int
-            bin size of position bining, by default 5
-        speed_thresh : int
-            speed threshold for calculating place field
-        """
-
-        tracks = Track(self._obj)
-        assert track_name in tracks.names, f"{track_name} doesn't exist"
-        spikes = Spikes(self._obj)
-        trackingSRate = ExtractPosition(self._obj).tracking_sRate
-
-        maze = tracks.data[track_name]
-        assert (
-            "linear" in maze
-        ), f"Track {track_name} doesn't have linearized coordinates. First run tracks.linearize_position(track_name='{track_name}')"
-
-        x = maze.linear
-        speed = maze.speed
-        t = maze.time
-        period = [np.min(t), np.max(t)]
-        spks = spikes.pyr
-        cell_ids = spikes.pyrid
-        xbin = np.arange(min(x), max(x), grid_bin)  # binning of x position
-        nCells = len(spks)
-
-        spk_pos, spk_t, ratemap = [], [], []
-
-        # ------ if direction then restrict to those epochs --------
-        if run_dir in ["forward", "backward"]:
-            print(f" using {run_dir} running only")
-            run_epochs = tracks.get_laps(track_name)
-            run_epochs = run_epochs[run_epochs["direction"] == run_dir]
-            spks = [
-                np.concatenate(
-                    [
-                        cell[(cell > epc.start) & (cell < epc.end)]
-                        for epc in run_epochs.itertuples()
-                    ]
-                )
-                for cell in spks
-            ]
-            # changing x, speed, time to only run epochs so occupancy map is consistent with that
-            indx = np.concatenate(
-                [
-                    np.where((t > epc.start) & (t < epc.end))[0]
-                    for epc in run_epochs.itertuples()
-                ]
-            )
-            x = x[indx]
-            speed = speed[indx]
-            t = t[indx]
-            occupancy = np.histogram(x, bins=xbin)[0] / trackingSRate + 1e-16
-            occupancy = gaussian_filter1d(occupancy, sigma=smooth)
-
-            for cell in spks:
-                spk_spd = np.interp(cell, t, speed)
-                spk_x = np.interp(cell, t, x)
-
-                spk_pos.append(spk_x)
-                spk_t.append(cell)
-
-                # ratemap calculation
-                ratemap.append(
-                    gaussian_filter1d(np.histogram(spk_x, bins=xbin)[0], sigma=smooth)
-                    / occupancy
-                )
-
+class PF2d:
+    def __init__(self, basepath, **kwargs):
+        if isinstance(basepath, Recinfo):
+            self._obj = basepath
         else:
-            # --- speed thresh occupancy----
-
-            spks = [cell[(cell > period[0]) & (cell < period[1])] for cell in spks]
-            indx = np.where(speed >= speed_thresh)[0]
-            x = x[indx]
-            speed = speed[indx]
-            t = t[indx]
-
-            occupancy = np.histogram(x, bins=xbin)[0] / trackingSRate + 1e-16
-            occupancy = gaussian_filter1d(occupancy, sigma=smooth)
-
-            for cell in spks:
-                spk_spd = np.interp(cell, t, speed)
-                spk_x = np.interp(cell, t, x)
-
-                # speed threshold
-                spd_ind = np.where(spk_spd > speed_thresh)[0]
-                spk_pos.append(spk_x[spd_ind])
-                spk_t.append(cell[spd_ind])
-
-                # ratemap calculation
-                ratemap.append(
-                    gaussian_filter1d(np.histogram(spk_x, bins=xbin)[0], sigma=smooth)
-                    / occupancy
-                )
-
-        # ---- cells with peak frate abouve thresh ------
-        good_cells_indx = [
-            cell_indx
-            for cell_indx in range(nCells)
-            if np.max(ratemap[cell_indx]) > frate_thresh
-        ]
-
-        get_elem = lambda list_: [list_[_] for _ in good_cells_indx]
-
-        self.ratemap = get_elem(ratemap)
-        self.spk_t = get_elem(spk_t)
-        self.spk_pos = get_elem(spk_pos)
-        self.cell_ids = cell_ids[good_cells_indx]
-        self.occupancy = occupancy
-        self.speed = maze.speed
-        self.x = maze.linear
-        self.t = maze.time
-        self.bin = xbin
-        self.track_name = track_name
-        self.period = period
-        self.run_dir = run_dir
-        self.frate_thresh = frate_thresh
-        self.speed_thresh = speed_thresh
-
-    def lap_by_lap(self):
-        """lap by lap place field (very preliminary)
-        NOTE: it can be added to compute step, if instead of taking track_name, a time window is taken as input
-
-
-        Returns
-        -------
-        [type]
-            [description]
-        """
-
-        assert (
-            self.run_dir is not None
-        ), "Please compute using run_dir to forward or backward "
-
-        track = Track(self._obj)
-        track_srate = ExtractPosition(self._obj).tracking_sRate
-        cell_t = self.spk_t
-        cell_pos = self.spk_pos
-        track_data = track.data[self.track_name]
-        laps = track.laps[self.track_name]
-        laps = laps[laps["direction"] == self.run_dir]
-
-        # --- lap by lap occupancy ------
-        occupancy = []
-        for lap in laps.itertuples():
-            lap_pos = track_data[
-                (track_data.time > lap.start) & (track_data.time < lap.end)
-            ].linear
-            occ_ = np.histogram(lap_pos, bins=self.bin)[0] / track_srate + 1e-16
-            occupancy.append(occ_)
-
-        all_cells = []
-        for t, pos in zip(cell_t, cell_pos):
-            lap_ratemap = []
-            for lap in laps.itertuples():
-                ind = np.where((t > lap.start) & (t < lap.end))[0]
-                epoch_pos = pos[ind]
-                lap_ratemap.append(np.histogram(epoch_pos, bins=self.bin)[0])
-            lap_ratemap = np.asarray(lap_ratemap)
-            all_cells.append(lap_ratemap)
-
-        return all_cells
-
-
+            self._obj = Recinfo(basepath)
 
 ## Old:
-class PF2d(SimplePrintable):
+class PF2d:
     # def __init__(self, basepath, **kwargs):
     #     if isinstance(basepath, Recinfo):
     #         self._obj = basepath
