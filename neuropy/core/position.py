@@ -11,7 +11,6 @@ class Position(DataWriter):
     def __init__(
         self,
         traces: np.ndarray,
-        computed_traces: np.ndarray=None,
         t_start=0,
         sampling_rate=120,
         metadata=None,
@@ -22,7 +21,6 @@ class Position(DataWriter):
 
         assert traces.shape[0] <= 3, "Maximum possible dimension of position is 3"
         self.traces = traces
-        self.computed_traces = computed_traces
         self._t_start = t_start
         self._sampling_rate = sampling_rate
         super().__init__(metadata=metadata)
@@ -53,35 +51,6 @@ class Position(DataWriter):
     @z.setter
     def z(self, z):
         self.traces[2] = z
-
-    @property
-    def linear_pos_obj(self):
-        # returns a Position object containing only the linear_pos as its trace. This is used for compatibility with Bapun's Pf1D function 
-        return Position(
-            traces=self.linear_pos,
-            computed_traces=self.linear_pos,
-            t_start=self.t_start,
-            sampling_rate=self.sampling_rate,
-            metadata=self.metadata,
-        )
-
-
-    @property
-    def linear_pos(self):
-        assert self.computed_traces.shape[0] >= 1, "Linear Position data has not yet been computed."
-        return self.computed_traces[0]
-
-    @linear_pos.setter
-    def linear_pos(self, linear_pos):
-        self.computed_traces[0] = linear_pos
-
-    @property
-    def has_linear_pos(self):
-        if (self.computed_traces.shape[0] >= 1):
-            return not np.isnan(self.computed_traces[0]).all() # check if all are nan
-        else:
-            # Linear Position data has not yet been computed.
-            return False
 
     @property
     def t_start(self):
@@ -123,7 +92,6 @@ class Position(DataWriter):
     def to_dict(self):
         data = {
             "traces": self.traces,
-            "computed_traces": self.computed_traces,
             "t_start": self.t_start,
             "sampling_rate": self._sampling_rate,
             "metadata": self.metadata,
@@ -134,19 +102,10 @@ class Position(DataWriter):
     def from_dict(d):
         return Position(
             traces=d["traces"],
-            computed_traces=d.get('computed_traces', np.full([1, d["traces"].shape[1]], np.nan)),
             t_start=d["t_start"],
             sampling_rate=d["sampling_rate"],
             metadata=d["metadata"],
         )
-    
-    @staticmethod
-    def from_file(f):
-        d = DataWriter.from_file(f)
-        if d is not None:
-            return Position.from_dict(d)
-        else:
-            return None
 
     @property
     def speed(self):
@@ -161,7 +120,7 @@ class Position(DataWriter):
         assert isinstance(epochs, Epoch), "epochs must be neuropy.Epoch object"
         pass
 
-    def time_slice_indicies(self, t_start, t_stop):
+    def time_slice(self, t_start, t_stop):
         if t_start is None:
             t_start = self.t_start
 
@@ -170,21 +129,8 @@ class Position(DataWriter):
 
         indices = (self.time >= t_start) & (self.time <= t_stop)
 
-
-    def time_slice(self, t_start, t_stop):
-        if t_start is None:
-            t_start = self.t_start
-        if t_stop is None:
-            t_stop = self.t_stop
-        indices = self.time_slice_indicies(t_start, t_stop)
         return Position(
             traces=self.traces[:, indices],
-            computed_traces=self.computed_traces[:, indices],
             t_start=t_start,
             sampling_rate=self.sampling_rate,
         )
-
-    @classmethod
-    def from_separate_arrays(cls, t, x, y):
-        # TODO: t is unused, and sampling rate isn't set correctly. Also, this class assumes uniform sampling!!
-        return cls(traces=np.vstack((x, y)))

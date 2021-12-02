@@ -59,11 +59,8 @@ def plot_ratemap(
         sort_ind = sortby
     else:
         sort_ind = np.arange(n_neurons)
-
-    colors_array = np.zeros((4, n_neurons))
     for i, neuron_ind in enumerate(sort_ind):
         color = cmap(i / len(sort_ind))
-        colors_array[:, i] = color
 
         ax.fill_between(
             bin_cntr,
@@ -93,7 +90,7 @@ def plot_ratemap(
     # if self.run_dir is not None:
     #     ax.set_title(self.run_dir.capitalize() + " Runs only")
 
-    return ax, sort_ind, colors_array
+    return ax
 
 
 def plot_raw(self, ax=None, subplots=(8, 9)):
