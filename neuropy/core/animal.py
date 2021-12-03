@@ -32,7 +32,7 @@ class Animal(DataWriter):
     def write_csv(self):
         pass
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return {
             "name": self.name,
             "alias": self.alias,
@@ -66,4 +66,3 @@ class Animal(DataWriter):
             brain_region=d["brain_region"],
             metadata=d["metadata"],
         )
-

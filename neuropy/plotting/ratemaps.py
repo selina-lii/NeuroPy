@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
 from .. import core
-from neuropy.utils import mathutil
+from ..utils import mathutil
 from .figure import Fig
 
 
@@ -59,11 +59,8 @@ def plot_ratemap(
         sort_ind = sortby
     else:
         sort_ind = np.arange(n_neurons)
-
-    colors_array = np.zeros((4, n_neurons))
     for i, neuron_ind in enumerate(sort_ind):
         color = cmap(i / len(sort_ind))
-        colors_array[:, i] = color
 
         ax.fill_between(
             bin_cntr,
@@ -71,18 +68,19 @@ def plot_ratemap(
             i * pad + tuning_curves[neuron_ind],
             color=color,
             ec=None,
-            alpha=0.5,
+            alpha=0.7,
             zorder=i + 1,
         )
         ax.plot(
             bin_cntr,
             i * pad + tuning_curves[neuron_ind],
             color=color,
-            alpha=0.7,
+            alpha=1,
+            lw=0.6,
         )
 
     ax.set_yticks(list(range(len(sort_ind))))
-    ax.set_yticklabels(list(sort_ind))
+    ax.set_yticklabels(list(ratemap.neuron_ids[sort_ind]))
     ax.set_xlabel("Position")
     ax.spines["left"].set_visible(False)
     if normalize_xbin:
@@ -92,7 +90,7 @@ def plot_ratemap(
     # if self.run_dir is not None:
     #     ax.set_title(self.run_dir.capitalize() + " Runs only")
 
-    return ax, sort_ind, colors_array
+    return ax
 
 
 def plot_raw(self, ax=None, subplots=(8, 9)):
