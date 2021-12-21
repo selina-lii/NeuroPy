@@ -1,4 +1,3 @@
-from copy import deepcopy
 from dataclasses import dataclass
 
 import ipywidgets as widgets
@@ -7,559 +6,123 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.gridspec import GridSpec
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
-from neuropy.core.epoch import Epoch
-from neuropy.core.neurons import Neurons
-from neuropy.core.position import Position
-from neuropy.core.ratemap import Ratemap
-from neuropy.core.signal import Signal
 
-from neuropy.plotting.figure import pretty_plot
-
-# from .. import core
-# import neuropy.core as core
-from neuropy.utils.signal_process import ThetaParams
+from .. import core
+from ..utils.signal_process import ThetaParams
 from .. import plotting
-from neuropy.utils.mixins.print_helpers import SimplePrintable, OrderedMeta
 
 
-class PlacefieldComputationParameters(SimplePrintable, metaclass=OrderedMeta):
-    """A simple wrapper object for parameters used in placefield calcuations"""
-    decimal_point_character=","
-    param_sep_char='-'
-    variable_names=['speed_thresh', 'grid_bin', 'smooth', 'frate_thresh']
-    variable_inline_names=['speedThresh', 'gridBin', 'smooth', 'frateThresh']
-    variable_inline_names=['speedThresh', 'gridBin', 'smooth', 'frateThresh']
-    
-    def __init__(self, speed_thresh=3, grid_bin=2, smooth=2, frate_thresh=1):
-        self.speed_thresh = speed_thresh
-        if not isinstance(grid_bin, (tuple, list)):
-            grid_bin = (grid_bin, grid_bin) # make it into a 2 element tuple
-
-        self.grid_bin = grid_bin
-        if not isinstance(smooth, (tuple, list)):
-            smooth = (smooth, smooth) # make it into a 2 element tuple
-        self.smooth = smooth
-        self.frate_thresh = frate_thresh
-    
-    
-    @property
-    def grid_bin_1D(self):
-        """The grid_bin_1D property."""
-        return self.grid_bin[0]
-
-    @property
-    def smooth_1D(self):
-        """The smooth_1D property."""
-        return self.smooth[0]
-
-    def str_for_filename(self, is_2D):
-        if is_2D:
-            return '-'.join([f"speedThresh_{self.speed_thresh:.2f}", f"gridBin_{self.grid_bin[0]:.2f}_{self.grid_bin[1]:.2f}", f"smooth_{self.smooth[0]:.2f}_{self.smooth[1]:.2f}", f"frateThresh_{self.frate_thresh:.2f}"])
-            # return "speedThresh_{:.2f}-gridBin_{:.2f}_{:.2f}-smooth_{:.2f}_{:.2f}-frateThresh_{:.2f}".format(self.speed_thresh, self.grid_bin[0], self.grid_bin[1], self.smooth[0], self.smooth[1], self.frate_thresh)
-            # return f"speedThresh_{self.speed_thresh:.2f}-gridBin_{self.grid_bin[0]:.2f}_{self.grid_bin[1]:.2f}-smooth_{self.smooth[0]:.2f}_{self.smooth[1]:.2f}-frateThresh_{self.frate_thresh:.2f}"
-        else:
-            return '-'.join([f"speedThresh_{self.speed_thresh:.2f}", f"gridBin_{self.grid_bin_1D:.2f}", f"smooth_{self.smooth_1D:.2f}", f"frateThresh_{self.frate_thresh:.2f}"])
-            # return f"speedThresh_{self.speed_thresh:.2f}-gridBin_{self.grid_bin_1D:.2f}-smooth_{self.smooth_1D:.2f}-frateThresh_{self.frate_thresh:.2f}"
-        
-    def str_for_display(self, is_2D):
-        """ For rendering in a title, etc """
-        if is_2D:
-            return f"(speedThresh_{self.speed_thresh:.2f}, gridBin_{self.grid_bin[0]:.2f}_{self.grid_bin[1]:.2f}, smooth_{self.smooth[0]:.2f}_{self.smooth[1]:.2f}, frateThresh_{self.frate_thresh:.2f})"
-        else:
-            return f"(speedThresh_{self.speed_thresh:.2f}, gridBin_{self.grid_bin_1D:.2f}, smooth_{self.smooth_1D:.2f}, frateThresh_{self.frate_thresh:.2f})"
-
-
-        
-        
-def perform_compute_placefields(active_session_Neurons, active_pos, computation_config: PlacefieldComputationParameters, active_epoch_placefields1D=None, active_epoch_placefields2D=None, included_epochs=None, should_force_recompute_placefields=True):
-    """ Computes both 1D and 2D placefields.
-    active_epoch_session_Neurons: 
-    active_epoch_pos: a Position object
-    included_epochs: a Epoch object to filter with, only included epochs are included in the PF calculations
-    active_epoch_placefields1D (Pf1D, optional) & active_epoch_placefields2D (Pf2D, optional): allow you to pass already computed Pf1D and Pf2D objects from previous runs and it won't recompute them so long as should_force_recompute_placefields=False, which is useful in interactive Notebooks/scripts
-    Usage:
-        active_epoch_placefields1D, active_epoch_placefields2D = perform_compute_placefields(active_epoch_session_Neurons, active_epoch_pos, active_epoch_placefields1D, active_epoch_placefields2D, active_config.computation_config, should_force_recompute_placefields=True)
-    """
-    ## Linearized (1D) Position Placefields:
-    if ((active_epoch_placefields1D is None) or should_force_recompute_placefields):
-        print('Recomputing active_epoch_placefields...', end=' ')
-        active_epoch_placefields1D = Pf1D(neurons=active_session_Neurons, position=deepcopy(active_pos.linear_pos_obj), epochs=included_epochs,
-                                          speed_thresh=computation_config.speed_thresh, frate_thresh=computation_config.frate_thresh,
-                                          grid_bin=computation_config.grid_bin_1D, smooth=computation_config.smooth_1D)
-        print('\t done.')
-    else:
-        print('active_epoch_placefields1D already exists, reusing it.')
-
-    ## 2D Position Placemaps:
-    if ((active_epoch_placefields2D is None) or should_force_recompute_placefields):
-        print('Recomputing active_epoch_placefields2D...', end=' ')
-        active_epoch_placefields2D = Pf2D(neurons=active_session_Neurons, position=deepcopy(active_pos), epochs=included_epochs,
-                                          speed_thresh=computation_config.speed_thresh, frate_thresh=computation_config.frate_thresh,
-                                          grid_bin=computation_config.grid_bin, smooth=computation_config.smooth)
-        print('\t done.')
-    else:
-        print('active_epoch_placefields2D already exists, reusing it.')
-    
-    return active_epoch_placefields1D, active_epoch_placefields2D
-
-
-def plot_all_placefields(active_placefields1D, active_placefields2D, active_config):
-    """ 
-    active_placefields1D: (Pf1D)
-    active_placefields2D: (Pf2D)
-    active_config:
-    Usage:
-        ax_pf_1D, occupancy_fig, active_pf_2D_figures = plot_all_placefields(active_epoch_placefields1D, active_epoch_placefields2D, active_config)
-    """
-    active_epoch_name = active_config.active_epochs.name
-    common_parent_foldername = active_config.computation_config.str_for_filename(True)
-    
-    ## Linearized (1D) Position Placefields:
-    if active_placefields1D is not None:
-        ax_pf_1D = active_placefields1D.plot_ratemaps()
-        active_pf_1D_identifier_string = '1D Placefields - {}'.format(active_epoch_name)
-        # plt.title(active_pf_1D_identifier_string)
-        # active_pf_1D_output_filename = '{}.pdf'.format(active_pf_1D_identifier_string)
-        # active_pf_1D_output_filepath = active_config.plotting_config.active_output_parent_dir.joinpath(active_pf_1D_output_filename)
-        
-        title_string = ' '.join([active_pf_1D_identifier_string])
-        subtitle_string = ' '.join([f'{active_placefields1D.config.str_for_display(False)}'])
-        
-        plt.gcf().suptitle(title_string, fontsize='14')
-        plt.gca().set_title(subtitle_string, fontsize='10')
-        # plt.title(active_pf_1D_identifier_string, fontsize=22)
-        # common_parent_basename = active_placefields1D.config.str_for_filename(False)
-        common_basename = active_placefields1D.str_for_filename(prefix_string=f'Placefield1D-{active_epoch_name}-')
-        active_pf_1D_output_filepath = active_config.plotting_config.get_figure_save_path(common_parent_foldername, common_basename).with_suffix('.png')
-        print('Saving 1D Placefield image out to "{}"...'.format(active_pf_1D_output_filepath), end='')
-        plt.savefig(active_pf_1D_output_filepath)
-        print('\t done.')
-    else:
-        print('plot_all_placefields(...): active_epoch_placefields1D does not exist. Skipping it.')
-        ax_pf_1D = None
-
-    ## 2D Position Placemaps:
-    if active_placefields2D is not None:
-        active_pf_occupancy_2D_identifier_string = '2D Occupancy - {}'.format(active_epoch_name)        
-        title_string = ' '.join([active_pf_occupancy_2D_identifier_string])
-        subtitle_string = ' '.join([f'{active_placefields2D.config.str_for_display(True)}'])
-        occupancy_fig, occupancy_ax = plot_placefield_occupancy(active_placefields2D)
-        occupancy_fig.suptitle(title_string, fontsize='14')
-        occupancy_ax.set_title(subtitle_string, fontsize='10')
-        
-        # Save ocupancy figure out to disk:
-        common_basename = active_placefields2D.str_for_filename(prefix_string=f'Occupancy -{active_epoch_name}-')
-        active_pf_occupancy_2D_output_filepath = active_config.plotting_config.get_figure_save_path(common_parent_foldername, common_basename).with_suffix('.png')
-        print('Saving 2D Placefield image out to "{}"...'.format(active_pf_occupancy_2D_output_filepath), end='')
-        occupancy_fig.savefig(active_pf_occupancy_2D_output_filepath)
-        print('\t done.')
-        
-        ## 2D Tuning Curves Figure:
-        active_pf_2D_identifier_string = '2D Placefields - {}'.format(active_epoch_name)
-        title_string = ' '.join([active_pf_2D_identifier_string])
-        subtitle_string = ' '.join([f'{active_placefields2D.config.str_for_display(True)}'])
-        
-        active_pf_2D_figures, active_pf_2D_gs = active_placefields2D.plotMap(subplots=(7, 7),figsize=(30, 30))        
-        # occupancy_fig.suptitle(title_string, fontsize='22')
-        # occupancy_ax.set_title(subtitle_string, fontsize='16')        
-        common_basename = active_placefields2D.str_for_filename(prefix_string=f'Placefields-{active_epoch_name}-')
-        active_pf_2D_output_filepath = active_config.plotting_config.get_figure_save_path(common_parent_foldername, common_basename).with_suffix('.png')
-        print('Saving 2D Placefield image out to "{}"...'.format(active_pf_2D_output_filepath), end='')
-        for aFig in active_pf_2D_figures:
-            aFig.savefig(active_pf_2D_output_filepath)
-        print('\t done.')
-    else:
-        print('plot_all_placefields(...): active_epoch_placefields2D does not exist. Skipping it.')
-        occupancy_fig = None
-        active_pf_2D_figures = None
-    
-    return ax_pf_1D, occupancy_fig, active_pf_2D_figures
-
-
-def plot_placefield_occupancy(active_epoch_placefields2D):
-    return plot_occupancy_custom(active_epoch_placefields2D.occupancy, active_epoch_placefields2D.ratemap.xbin_centers, active_epoch_placefields2D.ratemap.ybin_centers, max_normalized=True)
-
-def plot_occupancy_custom(occupancy, xbin, ybin, max_normalized: bool, drop_below_threshold: float=None, fig=None, ax=None):
-    if fig is None:
-        occupancy_fig = plt.figure()
-    else:
-        occupancy_fig = fig
-    
-    if ax is None:
-        occupancy_ax = occupancy_fig.gca()
-    else:
-        occupancy_ax = ax
-        
-    only_visited_occupancy = occupancy
-    # print('only_visited_occupancy: {}'.format(only_visited_occupancy))
-    if drop_below_threshold is not None:
-        only_visited_occupancy[np.where(only_visited_occupancy < drop_below_threshold)] = np.nan
-    if max_normalized:
-        only_visited_occupancy = only_visited_occupancy / np.nanmax(only_visited_occupancy)
-    im = occupancy_ax.pcolorfast(
-        xbin,
-        ybin,
-        np.rot90(np.fliplr(only_visited_occupancy)),
-        cmap="jet", vmin=0.0
-    )  # rot90(flipud... is necessary to match plotRaw configuration.
-    occupancy_ax.set_title('Custom Occupancy')
-    occupancy_cbar = occupancy_fig.colorbar(im, ax=occupancy_ax, location='right')
-    occupancy_cbar.minorticks_on()
-    return occupancy_fig, occupancy_ax
-
-def plot_occupancy_1D(active_epoch_placefields1D, max_normalized, drop_below_threshold=None, fig=None, ax=None):
-    if fig is None:
-        occupancy_fig = plt.figure()
-    else:
-        occupancy_fig = fig
-    
-    if ax is None:
-        occupancy_ax = occupancy_fig.gca()
-    else:
-        occupancy_ax = ax
-
-    only_visited_occupancy = active_epoch_placefields1D.occupancy.copy()
-    # print('only_visited_occupancy: {}'.format(only_visited_occupancy))
-    if drop_below_threshold is not None:
-        only_visited_occupancy[np.where(only_visited_occupancy < drop_below_threshold)] = np.nan
-    
-    if max_normalized:
-        only_visited_occupancy = only_visited_occupancy / np.nanmax(only_visited_occupancy)
-    occupancy_ax.plot(active_epoch_placefields1D.ratemap.xbin_centers, only_visited_occupancy)
-    occupancy_ax.scatter(active_epoch_placefields1D.ratemap.xbin_centers, only_visited_occupancy, color='r')
-    occupancy_ax.set_ylim([0, np.nanmax(only_visited_occupancy)])
-    occupancy_ax.set_title('Occupancy 1D')
-    # plt.show()
-    return occupancy_fig, occupancy_ax
-
-
-
-def _filter_by_frate(tuning_maps, frate_thresh, debug=False):
-    # ---- cells with peak frate abouve thresh ------
-    n_neurons = len(tuning_maps)
-    thresh_neurons_indx = [
-        neuron_indx
-        for neuron_indx in range(n_neurons)
-        if np.nanmax(tuning_maps[neuron_indx]) > frate_thresh
-    ]
-    if debug:
-        print('_filter_by_frate(...):')
-        print('\t frate_thresh: {}'.format(frate_thresh))
-        print('\t n_neurons: {}'.format(n_neurons))
-        print('\t thresh_neurons_indx: {}'.format(thresh_neurons_indx))
-    filter_function = lambda list_: [list_[_] for _ in thresh_neurons_indx]
-    # there is only one tuning_map per neuron that means the thresh_neurons_indx:
-    filtered_tuning_maps = np.asarray(filter_function(tuning_maps))
-    return filtered_tuning_maps, filter_function 
-
-def _bin_pos_nD(x: np.ndarray, y: np.ndarray, num_bins=None, bin_size=None):
-    """ Spatially bins the provided x and y vectors into position bins based on either the specified num_bins or the specified bin_size
-    Usage:
-        ## Binning with Fixed Number of Bins:    
-        xbin, ybin, bin_info = _bin_pos(pos_df.x.to_numpy(), pos_df.y.to_numpy(), bin_size=active_config.computation_config.grid_bin) # bin_size mode
-        print(bin_info)
-        ## Binning with Fixed Bin Sizes:
-        xbin, ybin, bin_info = _bin_pos(pos_df.x.to_numpy(), pos_df.y.to_numpy(), num_bins=num_bins) # num_bins mode
-        print(bin_info)
-    """
-    assert (num_bins is None) or (bin_size is None), 'You cannot constrain both num_bins AND bin_size. Specify only one or the other.'
-    assert (num_bins is not None) or (bin_size is not None), 'You must specify either the num_bins XOR the bin_size.'
-    
-    bin_info_out_dict = dict()
-    
-    if num_bins is not None:
-        ## Binning with Fixed Number of Bins:
-        mode = 'num_bins'
-        if np.isscalar(num_bins):
-            num_bins = [num_bins]
-        
-        xnum_bins = num_bins[0]
-        xbin, xstep = np.linspace(np.nanmin(x), np.nanmax(x), num=xnum_bins, retstep=True)  # binning of x position
-
-        if y is not None:
-            ynum_bins = num_bins[1]
-            ybin, ystep = np.linspace(np.nanmin(y), np.nanmax(y), num=ynum_bins, retstep=True)  # binning of y position       
-            
-    elif bin_size is not None:
-        ## Binning with Fixed Bin Sizes:
-        mode = 'bin_size'
-        if np.isscalar(bin_size):
-            print(f'np.isscalar(bin_size): {bin_size}')
-            bin_size = [bin_size]
-            
-        xstep = bin_size[0]
-        xbin = np.arange(np.nanmin(x), (np.nanmax(x) + xstep), xstep)  # binning of x position
-        xnum_bins = len(xbin)
-
-        if y is not None:
-            ystep = bin_size[1]
-            ybin = np.arange(np.nanmin(y), (np.nanmax(y) + ystep), ystep)  # binning of y position
-            ynum_bins = len(ybin)
-            
-    # print('xbin: {}'.format(xbin))
-    # print('ybin: {}'.format(ybin))
-    bin_info_out_dict = {'mode':mode, 'xstep':xstep, 'xnum_bins':xnum_bins}
-    if y is not None:
-        # if at least 2D output, add the y-axis properties to the info dictionary
-        bin_info_out_dict['ystep'], bin_info_out_dict['ynum_bins']  = ystep, ynum_bins
-    else:
-        ybin = None
-        
-    return xbin, ybin, bin_info_out_dict # {'mode':mode, 'xstep':xstep, 'ystep':ystep, 'xnum_bins':xnum_bins, 'ynum_bins':ynum_bins}
-
-
-# def _bin_pos(x: np.ndarray, y: np.ndarray, num_bins=None, bin_size=None):
-#     """ Spatially bins the provided x and y vectors into position bins based on either the specified num_bins or the specified bin_size
-#     Usage:
-#         ## Binning with Fixed Number of Bins:    
-#         xbin, ybin, bin_info = _bin_pos(pos_df.x.to_numpy(), pos_df.y.to_numpy(), bin_size=active_config.computation_config.grid_bin) # bin_size mode
-#         print(bin_info)
-#         ## Binning with Fixed Bin Sizes:
-#         xbin, ybin, bin_info = _bin_pos(pos_df.x.to_numpy(), pos_df.y.to_numpy(), num_bins=num_bins) # num_bins mode
-#         print(bin_info)
-#     """
-#     assert (num_bins is None) or (bin_size is None), 'You cannot constrain both num_bins AND bin_size. Specify only one or the other.'
-#     assert (num_bins is not None) or (bin_size is not None), 'You must specify either the num_bins XOR the bin_size.'
-#     if num_bins is not None:
-#         ## Binning with Fixed Number of Bins:
-#         mode = 'num_bins'
-#         xnum_bins = num_bins[0]
-#         xbin, xstep = np.linspace(np.nanmin(x), np.nanmax(x), num=xnum_bins, retstep=True)  # binning of x position
-
-#         ynum_bins = num_bins[1]
-#         ybin, ystep = np.linspace(np.nanmin(y), np.nanmax(y), num=ynum_bins, retstep=True)  # binning of y position
-#     elif bin_size is not None:
-#         ## Binning with Fixed Bin Sizes:
-#         mode = 'bin_size'
-
-#         xstep = bin_size[0]
-#         xbin = np.arange(np.nanmin(x), (np.nanmax(x) + xstep), xstep)  # binning of x position
-#         xnum_bins = len(xbin)
-
-#         ystep = bin_size[1]
-#         ybin = np.arange(np.nanmin(y), (np.nanmax(y) + ystep), ystep)  # binning of y position
-#         ynum_bins = len(ybin) 
-#     # print('xbin: {}'.format(xbin))
-#     # print('ybin: {}'.format(ybin))
-#     return xbin, ybin, {'mode':mode, 'xstep':xstep, 'ystep':ystep, 'xnum_bins':xnum_bins, 'ynum_bins':ynum_bins}
-
-## TODO: refactor _bin_pos_1D into a simple wrapper for _bin_pos(...)
-def _bin_pos_1D(x: np.ndarray, num_bins=None, bin_size=None):
-    """ Spatially bins the provided x and y vectors into position bins based on either the specified num_bins or the specified bin_size
-    Usage:
-        ## Binning with Fixed Number of Bins:    
-        xbin, bin_info = _bin_pos_1D(pos_df.x.to_numpy(), bin_size=active_config.computation_config.grid_bin) # bin_size mode
-        print(bin_info)
-        ## Binning with Fixed Bin Sizes:
-        xbin, bin_info = _bin_pos_1D(pos_df.x.to_numpy(), num_bins=num_bins) # num_bins mode
-        print(bin_info)
-    """
-    assert (num_bins is None) or (bin_size is None), 'You cannot constrain both num_bins AND bin_size. Specify only one or the other.'
-    assert (num_bins is not None) or (bin_size is not None), 'You must specify either the num_bins XOR the bin_size.'
-    if num_bins is not None:
-        ## Binning with Fixed Number of Bins:
-        mode = 'num_bins'
-        xnum_bins = num_bins
-        xbin, xstep = np.linspace(np.nanmin(x), np.nanmax(x), num=xnum_bins, retstep=True)  # binning of x position
-    elif bin_size is not None:
-        ## Binning with Fixed Bin Sizes:
-        mode = 'bin_size'
-        xstep = bin_size
-        xbin = np.arange(np.nanmin(x), (np.nanmax(x) + xstep), xstep)  # binning of x position
-        xnum_bins = len(xbin)
-    # print('xbin: {}'.format(xbin))
-    # print('ybin: {}'.format(ybin))
-    return xbin, {'mode':mode, 'xstep':xstep, 'xnum_bins':xnum_bins}
-
-def _normalized_occupancy(raw_occupancy, dt=None, position_srate=None):
-    # raw occupancy is defined in terms of the number of samples that fall into each bin.
-    # if position_srate is not None:
-    #     dt = 1.0 / float(position_srate)
-    #  seconds_occupancy is the number of seconds spent in each bin. This is computed by multiplying the raw occupancy (in # samples) by the duration of each sample.
-    # seconds_occupancy = raw_occupancy * dt  # converting to seconds
-    seconds_occupancy = raw_occupancy / (float(position_srate) + 1e-16) # converting to seconds
-    # seconds_occupancy = occupancy / (position_srate + 1e-16)  # converting to seconds
-    # normalized occupancy gives the ratio of samples that feel in each bin. ALL BINS ADD UP TO ONE.
-    normalized_occupancy = raw_occupancy / np.nansum(raw_occupancy) # the normalized occupancy determines the relative number of samples spent in each bin
-
-    return seconds_occupancy, normalized_occupancy
-
-
-class PfnConfigMixin:
-    def str_for_filename(self, is_2D=True):
-        return self.config.str_for_filename(is_2D)
-
-    
-class PfnDMixin(SimplePrintable):
-    @property
-    def spk_pos(self):
-        return self.ratemap_spiketrains_pos
-    
-    @property
-    def spk_t(self):
-        return self.ratemap_spiketrains
-    
-    @property
-    def cell_ids(self):
-        return self.ratemap.neuron_ids
-    
-
-
-class Pf1D(PfnConfigMixin, PfnDMixin):
-    
-    @staticmethod
-    def _compute_occupancy(x, xbin, position_srate, smooth):
-        # --- occupancy map calculation -----------
-        # NRK todo: might need to normalize occupancy so sum adds up to 1
-        raw_occupancy, xedges = np.histogram(x, bins=xbin)
-        if ((smooth is not None) and (smooth > 0.0)):
-            raw_occupancy = gaussian_filter1d(raw_occupancy, sigma=smooth)
-        # # raw occupancy is defined in terms of the number of samples that fall into each bin.
-        seconds_occupancy, normalized_occupancy = _normalized_occupancy(raw_occupancy, position_srate=position_srate)
-        return seconds_occupancy, xedges
-     
-    @staticmethod   
-    def _compute_tuning_map(spk_x, xbin, occupancy, smooth):
-        tuning_map = np.histogram(spk_x, bins=xbin)[0]
-        if ((smooth is not None) and (smooth > 0.0)):
-            tuning_map = gaussian_filter1d(tuning_map, sigma=smooth)
-        tuning_map = tuning_map / occupancy
-        return tuning_map
-    
-    def str_for_filename(self, prefix_string=''):
-        return '-'.join(['pf1D', f'{prefix_string}{self.config.str_for_filename(False)}'])
-    
-    
+class Pf1D(core.Ratemap):
     def __init__(
         self,
-        neurons: Neurons,
-        position: Position,
-        epochs: Epoch = None,
-        frate_thresh=1,
-        speed_thresh=5,
+        neurons: core.Neurons,
+        position: core.Position,
+        epochs: core.Epoch = None,
+        frate_thresh=1.0,
+        speed_thresh=3,
         grid_bin=1,
-        smooth=1,
+        sigma=1,
     ):
         """computes 1d place field using linearized coordinates. It always computes two place maps with and
         without speed thresholds.
 
         Parameters
         ----------
-        track_name : str
-            name of track
-        direction : forward, backward or None
-            direction of running, by default None which means direction is ignored
+        neurons : core.Neurons
+            neurons obj containing spiketrains and related info
+        position: core.Position
+            1D position
         grid_bin : int
-            bin size of position bining, by default 5
-        speed_thresh : int
-            speed threshold for calculating place field
+            bin size of position bining, by default 5 cm
+        epochs : core.Epoch,
+            restrict calculation to these epochs, default None
+        frate_thresh : float,
+            peak firing rate should be above this value, default 1 Hz
+        speed_thresh : float
+            speed threshold for calculating place field, by default None
+        sigma : float
+            standard deviation for smoothing occupancy and spikecounts in each position bin, in units of cm, default 1 cm
+
+        NOTE: speed_thresh is ignored if epochs is provided
         """
 
         assert position.ndim == 1, "Only 1 dimensional position are acceptable"
-        # save the config that was used to perform the computations
-        self.config = PlacefieldComputationParameters(speed_thresh=speed_thresh, grid_bin=grid_bin, smooth=smooth, frate_thresh=frate_thresh)
-
-        spiketrains = neurons.spiketrains
         neuron_ids = neurons.neuron_ids
-        n_neurons = neurons.n_neurons
         position_srate = position.sampling_rate
-        self.x = position.x
-        self.speed = position.speed
-        if ((smooth is not None) and (smooth > 0.0)):
-            self.speed = gaussian_filter1d(self.speed, sigma=20)
-        self.t = position.time
+        x = position.x
+        speed = position.speed
+        t = position.time
         t_start = position.t_start
         t_stop = position.t_stop
 
-        # xbin = np.arange(min(self.x), max(self.x), grid_bin)  # binning of x position
-        xbin, bin_info = _bin_pos_1D(self.x, bin_size=grid_bin) # bin_size mode
+        smooth_ = lambda f: gaussian_filter1d(
+            f, sigma / grid_bin, axis=-1
+        )  # divide by grid_bin to account for discrete spacing
 
-        spk_pos, spk_t, tuning_curve = [], [], []
+        xbin = np.arange(np.min(x), np.max(x) + grid_bin, grid_bin)
 
-        # ------ if direction then restrict to those epochs --------
         if epochs is not None:
-            assert isinstance(epochs, Epoch), "epochs should be Epoch object"
-            # print(f" using {run_dir} running only")
-            spks = [
+            assert isinstance(epochs, core.Epoch), "epochs should be core.Epoch object"
+
+            spiketrains = [
                 np.concatenate(
                     [
-                        spktrn[(spktrn > epc.start) & (spktrn < epc.stop)]
+                        spktrn[(spktrn >= epc.start) & (spktrn <= epc.stop)]
                         for epc in epochs.to_dataframe().itertuples()
                     ]
                 )
-                for spktrn in spiketrains
+                for spktrn in neurons.spiketrains
             ]
-            # changing x, speed, time to only run epochs so occupancy map is consistent with that
+            # changing x, speed, time to only run epochs so occupancy map is consistent
             indx = np.concatenate(
                 [
-                    np.where((self.t >= epc.start) & (self.t <= epc.stop))[0]
+                    np.where((t >= epc.start) & (t <= epc.stop))[0]
                     for epc in epochs.to_dataframe().itertuples()
                 ]
             )
-            self.x = self.x[indx] # (52121,)
-            self.speed = self.speed[indx] # (52121,)
-            self.t = self.t[indx] # (52121,)
-            
-            
-            occupancy, xedges = Pf1D._compute_occupancy(self.x, xbin, position_srate, smooth)
 
-            for cell in spks:
-                spk_spd = np.interp(cell, self.t, self.speed)
-                spk_x = np.interp(cell, self.t, self.x)
-
-                spk_pos.append(spk_x)
-                spk_t.append(cell)
-
-                # tuning curve calculation
-                tuning_curve.append(Pf1D._compute_tuning_map(spk_x, xbin, occupancy, smooth))
-
+            speed_thresh = None
+            print("Note: speed_thresh is ignored when epochs is provided")
         else:
-            # --- speed thresh occupancy----
+            spiketrains = neurons.time_slice(t_start, t_stop).spiketrains
+            indx = np.where(speed >= speed_thresh)[0]
 
-            spks = [
-                spktrn[(spktrn > t_start) & (spktrn < t_stop)] for spktrn in spiketrains
-            ]
-            indx = np.where(self.speed >= speed_thresh)[0]
-            self.x, self.speed, self.t = self.x[indx], self.speed[indx], self.t[indx]
+        # to avoid interpolation error, speed and position estimation for spiketrains should use time and speed of entire position (not only on threshold crossing time points)
+        x_thresh = x[indx]
 
-            occupancy, xedges = Pf1D._compute_occupancy(self.x, xbin, position_srate, smooth)
-            
-            # occupancy = np.histogram(self.x, bins=xbin)[0] / position_srate + 1e-16
-            # occupancy = gaussian_filter1d(occupancy, sigma=smooth)
+        spk_pos, spk_t, spkcounts = [], [], []
+        for spktrn in spiketrains:
+            spk_spd = np.interp(spktrn, t, speed)
+            spk_x = np.interp(spktrn, t, x)
+            if speed_thresh is not None:
+                indices = np.where(spk_spd >= speed_thresh)[0]
+                spk_x = spk_x[indices]
+                spktrn = spktrn[indices]
 
-            for cell in spks:
-                spk_spd = np.interp(cell, self.t, self.speed)
-                spk_x = np.interp(cell, self.t, self.x)
+            spk_pos.append(spk_x)
+            spk_t.append(spktrn)
+            spkcounts.append(np.histogram(spk_x, bins=xbin)[0])
 
-                # speed threshold
-                spd_ind = np.where(spk_spd > speed_thresh)[0]
-                spk_pos.append(spk_x[spd_ind])
-                spk_t.append(cell[spd_ind])
+        spkcounts = smooth_(np.asarray(spkcounts))
+        occupancy = np.histogram(x_thresh, bins=xbin)[0] / position_srate + 1e-16
+        occupancy = smooth_(occupancy)
+        tuning_curve = spkcounts / occupancy.reshape(1, -1)
 
-                # tuning curve calculation
-                tuning_curve.append(Pf1D._compute_tuning_map(spk_x, xbin, occupancy, smooth))
+        # ---- neurons with peak firing rate above thresh ------
+        frate_thresh_indx = np.where(np.max(tuning_curve, axis=1) >= frate_thresh)[0]
+        tuning_curve = tuning_curve[frate_thresh_indx, :]
+        neuron_ids = neuron_ids[frate_thresh_indx]
+        spk_t = [spk_t[_] for _ in frate_thresh_indx]
+        spk_pos = [spk_pos[_] for _ in frate_thresh_indx]
 
-        # ---- cells with peak frate abouve thresh ------
-        thresh_neurons_indx = [
-            neuron_indx
-            for neuron_indx in range(n_neurons)
-            if np.nanmax(tuning_curve[neuron_indx]) > frate_thresh
-        ]
-
-        get_elem = lambda list_: [list_[_] for _ in thresh_neurons_indx]
-
-        tuning_curve = get_elem(tuning_curve)
-        tuning_curve = np.asarray(tuning_curve)
-        self.ratemap = Ratemap(
-            tuning_curve, xbin=xbin, neuron_ids=get_elem(neuron_ids)
-        )
-        self.ratemap_spiketrains = get_elem(spk_t)
-        self.ratemap_spiketrains_pos = get_elem(spk_pos)
+        super().__init__(tuning_curves=tuning_curve, xbin=xbin, neuron_ids=neuron_ids)
+        self.ratemap_spiketrains = spk_t
+        self.ratemap_spiketrains_pos = spk_pos
         self.occupancy = occupancy
         self.frate_thresh = frate_thresh
         self.speed_thresh = speed_thresh
 
-    def estimate_theta_phases(self, signal: Signal):
+    def estimate_theta_phases(self, signal: core.Signal):
         """Calculates phase of spikes computed for placefields
 
         Parameters
@@ -638,252 +201,154 @@ class Pf1D(PfnConfigMixin, PfnDMixin):
 
         return ax
 
-    def plot_ratemaps(self, ax=None, pad=2, normalize=False, sortby=None, cmap="tab20b"):
-        # returns: ax , sort_ind, colors
-        return plotting.plot_ratemap(self.ratemap, normalize_tuning_curve=True)
+    def plot_ratemaps(
+        self, ax=None, pad=2, normalize=False, sortby=None, cmap="tab20b"
+    ):
+        return plotting.plot_ratemaps()
 
     def plot_raw(self, ax=None, subplots=(8, 9)):
-        return plotting.plot_raw(self.ratemap, self.t, self.x, 'BOTH', ax=ax, subplots=subplots)
-        # return plotting.plot_raw(self, ax=ax, subplots=subplots)
+        return plotting.plot_raw_ratemaps()
 
-    def plotRaw_v_time(self, cellind, speed_thresh=False, alpha=0.5, ax=None):
-        if ax is None:
-            fig, ax = plt.subplots(1, 1, sharex=True)
-            fig.set_size_inches([23, 9.7])
-            
-            
-        if ax is not list:
-            ax = [ax]
 
-        # plot trajectories
-        for a, pos, ylabel in zip(
-            ax, [self.x], ["X position (cm)"]
-        ):
-            a.plot(self.t, pos)
-            a.set_xlabel("Time (seconds)")
-            a.set_ylabel(ylabel)
-            pretty_plot(a)
-
-        # Grab correct spike times/positions
-        if speed_thresh:
-            spk_pos_, spk_t_ = self.run_spk_pos, self.run_spk_t
+class PF2d:
+    def __init__(self, basepath, **kwargs):
+        if isinstance(basepath, Recinfo):
+            self._obj = basepath
         else:
-            spk_pos_, spk_t_ = self.spk_pos, self.spk_t
+            self._obj = Recinfo(basepath)
 
-        # plot spikes on trajectory
-        for a, pos in zip(ax, [spk_pos_[cellind]]):
-            a.plot(spk_t_[cellind], pos, ".", color=[0, 0, 0.8, alpha])
-
-        # Put info on title
-        ax[0].set_title(
-            "Cell "
-            + str(self.cell_ids[cellind])
-            + ":, speed_thresh="
-            + str(self.speed_thresh)
-        )
-        
-
-
-class Pf2D(PfnConfigMixin, PfnDMixin):
-
-    @staticmethod
-    def _compute_occupancy(x, y, xbin, ybin, position_srate, smooth, should_return_raw_occupancy=False):
-        # --- occupancy map calculation -----------
-        # NRK todo: might need to normalize occupancy so sum adds up to 1
-        # Please note that the histogram does not follow the Cartesian convention where x values are on the abscissa and y values on the ordinate axis. Rather, x is histogrammed along the first dimension of the array (vertical), and y along the second dimension of the array (horizontal).
-        raw_occupancy, xedges, yedges = np.histogram2d(x, y, bins=(xbin, ybin))
-        # occupancy = occupancy.T # transpose the occupancy before applying other operations
-        # raw_occupancy = raw_occupancy / position_srate + 10e-16  # converting to seconds
-        if ((smooth is not None) and ((smooth[0] > 0.0) & (smooth[1] > 0.0))): 
-            raw_occupancy = gaussian_filter(raw_occupancy, sigma=(smooth[1], smooth[0])) # 2d gaussian filter
-        # Histogram does not follow Cartesian convention (see Notes),
-        # therefore transpose occupancy for visualization purposes.
-        # raw occupancy is defined in terms of the number of samples that fall into each bin.
-        if should_return_raw_occupancy:
-            return raw_occupancy, xedges, yedges
-        else:   
-            seconds_occupancy, normalized_occupancy = _normalized_occupancy(raw_occupancy, position_srate=position_srate)
-            return seconds_occupancy, xedges, yedges
-
-
-        # return seconds_occupancy, xedges, yedges
-     
-    @staticmethod   
-    def _compute_tuning_map(spk_x, spk_y, xbin, ybin, occupancy, smooth, should_return_raw_tuning_map=False):
-        raw_tuning_map = np.histogram2d(spk_x, spk_y, bins=(xbin, ybin))[0]
-        if ((smooth is not None) and ((smooth[0] > 0.0) & (smooth[1] > 0.0))):
-            raw_tuning_map = gaussian_filter(raw_tuning_map, sigma=(smooth[1], smooth[0])) # need to flip smooth because the x and y are transposed
-        if should_return_raw_tuning_map:
-            return raw_tuning_map
-        else:
-            occupancy_weighted_tuning_map = raw_tuning_map / occupancy
-            return occupancy_weighted_tuning_map
-
-    def str_for_filename(self, prefix_string=''):
-        return '-'.join(['pf2D', f'{prefix_string}{self.config.str_for_filename(True)}'])
-    
-    def str_for_display(self, prefix_string=''):
-        return '-'.join(['pf2D', f'{prefix_string}{self.config.str_for_display(True)}', f'cell_{curr_cell_id:02d}'])
-    
-    
-    def __init__(
-        self,
-        neurons: Neurons,
-        position: Position,
-        epochs: Epoch = None,
-        frate_thresh=1,
-        speed_thresh=5,
-        grid_bin=(1,1),
-        smooth=(1,1),
+    def compute(
+        self, period, spikes=None, gridbin=10, speed_thresh=5, frate_thresh=1, smooth=2
     ):
-        """computes 2d place field using (x,y) coordinates. It always computes two place maps with and
-        without speed thresholds.
+        """Calculates 2D placefields
 
         Parameters
         ----------
-        track_name : str
-            name of track
-        direction : forward, backward or None
-            direction of running, by default None which means direction is ignored
-        grid_bin : int
-            bin size of position bining, by default 5
-        speed_thresh : int
-            speed threshold for calculating place field
+        period : list/array
+            in seconds, time period between which placefields are calculated
+        gridbin : int, optional
+            bin size of grid in centimeters, by default 10
+        speed_thresh : int, optional
+            speed threshold in cm/s, by default 10 cm/s
+
+        Returns
+        -------
+        [type]
+            [description]
         """
-        
-    
-        # save the config that was used to perform the computations
-        self.config = PlacefieldComputationParameters(speed_thresh=speed_thresh, grid_bin=grid_bin, smooth=smooth, frate_thresh=frate_thresh)
-        # assert position.ndim < 2, "Only 2+ dimensional position are acceptable"
-        spiketrains = neurons.spiketrains
-        neuron_ids = neurons.neuron_ids
-        n_neurons = neurons.n_neurons
-        position_srate = position.sampling_rate
-        
-        self.x = position.x
-        self.y = position.y
-        self.t = position.time
-        t_start = position.t_start
-        t_stop = position.t_stop
-
-        ## Binning with Fixed Number of Bins:    
-        xbin, ybin, bin_info = _bin_pos_nD(self.x, self.y, bin_size=grid_bin) # bin_size mode
-        # xbin = np.arange(min(self.x), max(self.x) + grid_bin[0], grid_bin[0])  # binning of x position
-        # ybin = np.arange(min(self.y), max(self.y) + grid_bin[1], grid_bin[1])  # binning of y position
-
-        # plot with:
-            # X, Y = np.meshgrid(xbin, ybin) 
-            # plt.pcolor(X, Y, occupancy)
-            
-        # diff_posx = np.diff(self.x)
-        # diff_posy = np.diff(self.y)
-        # self.speed = np.sqrt(diff_posx ** 2 + diff_posy ** 2) / (1 / position_srate)
-        self.speed = position.speed
-        if ((smooth is not None) and (smooth[0] > 0.0)):
-            self.speed = gaussian_filter1d(self.speed, sigma=smooth[0])
-        
-        spk_pos, spk_t, tuning_maps = [], [], []
-
-        # ------ if direction then restrict to those epochs --------
-        if epochs is not None:
-            assert isinstance(epochs, Epoch), "epochs should be Epoch object"
-            # print(f" using {run_dir} running only")
-            spks = [
-                np.concatenate(
-                    [
-                        spktrn[(spktrn > epc.start) & (spktrn < epc.stop)]
-                        for epc in epochs.to_dataframe().itertuples()
-                    ]
-                )
-                for spktrn in spiketrains
-            ]
-            # changing x, speed, time to only run epochs so occupancy map is consistent with that
-            indx = np.concatenate(
-                [
-                    np.where((self.t > epc.start) & (self.t < epc.stop))[0]
-                    for epc in epochs.to_dataframe().itertuples()
-                ]
-            ) 
-            self.x = self.x[indx]
-            self.y = self.y[indx]
-            self.speed = self.speed[indx]
-            self.t = self.t[indx]
-
-            # --- occupancy map calculation -----------
-            # NRK todo: might need to normalize occupancy so sum adds up to 1
-            # occupancy = np.histogram2d(self.x, self.y, bins=(xbin, ybin))[0]
-            # occupancy = occupancy / position_srate + 10e-16  # converting to seconds
-            # occupancy = gaussian_filter(occupancy, sigma=smooth) # 2d gaussian filter
-            occupancy, xedges, yedges = Pf2D._compute_occupancy(self.x, self.y, xbin, ybin, position_srate, smooth)
-            # plot with:
-            # X, Y = np.meshgrid(xedges, yedges) 
-            # plt.pcolor(X, Y, occupancy)
-            
-            # re-interpolate given the updated spks
-            for cell in spks:
-                spk_spd = np.interp(cell, self.t, self.speed)
-                spk_x = np.interp(cell, self.t, self.x)
-                spk_y = np.interp(cell, self.t, self.y)
-                spk_pos.append([spk_x, spk_y])
-                spk_t.append(cell)
-                # tuning curve calculation:               
-                tuning_maps.append(Pf2D._compute_tuning_map(spk_x, spk_y, xbin, ybin, occupancy, smooth))
-
+        assert len(period) == 2, "period should have length 2"
+        position = ExtractPosition(self._obj)
+        # ------ Cell selection ---------
+        if spikes is None:
+            spike_info = Spikes(self._obj)
+            spikes = spike_info.pyr
+            cell_ids = spike_info.pyrid
         else:
-            # --- speed thresh occupancy----
+            cell_ids = np.arange(len(spikes))
 
-            spks = [
-                spktrn[(spktrn > t_start) & (spktrn < t_stop)] for spktrn in spiketrains
-            ]
-            dt = self.t[1] - self.t[0]
-            indx = np.where(self.speed / dt > speed_thresh)[0]
-            self.x, self.y, self.speed, self.t = self.x[indx], self.y[indx], self.speed[indx], self.t[indx]
-            
-            # --- occupancy map calculation -----------
-            occupancy, xedges, yedges = Pf2D._compute_occupancy(self.x, self.y, xbin, ybin, position_srate, smooth)
-            
-            
-            # re-interpolate here too:
-            for cell in spks:
-                spk_spd = np.interp(cell, self.t, self.speed)
-                spk_x = np.interp(cell, self.t, self.x)
-                spk_y = np.interp(cell, self.t, self.y)
+        nCells = len(spikes)
+
+        # ----- Position---------
+        xcoord = position.x
+        ycoord = position.y
+        time = position.t
+        trackingRate = position.tracking_sRate
+
+        ind_maze = np.where((time > period[0]) & (time < period[1]))
+        x = xcoord[ind_maze]
+        y = ycoord[ind_maze]
+        t = time[ind_maze]
+
+        x_grid = np.arange(min(x), max(x) + gridbin, gridbin)
+        y_grid = np.arange(min(y), max(y) + gridbin, gridbin)
+        # x_, y_ = np.meshgrid(x_grid, y_grid)
+
+        diff_posx = np.diff(x)
+        diff_posy = np.diff(y)
+
+        speed = np.sqrt(diff_posx ** 2 + diff_posy ** 2) / (1 / trackingRate)
+        speed = gaussian_filter1d(speed, sigma=smooth)
+
+        dt = t[1] - t[0]
+        running = np.where(speed / dt > speed_thresh)[0]
+
+        x_thresh = x[running]
+        y_thresh = y[running]
+        t_thresh = t[running]
+
+        def make_pfs(
+            t_, x_, y_, spkAll_, occupancy_, speed_thresh_, maze_, x_grid_, y_grid_
+        ):
+            maps, spk_pos, spk_t = [], [], []
+            for cell in spkAll_:
+                # assemble spikes and position data
+                spk_maze = cell[np.where((cell > maze_[0]) & (cell < maze_[1]))]
+                spk_speed = np.interp(spk_maze, t_[1:], speed)
+                spk_y = np.interp(spk_maze, t_, y_)
+                spk_x = np.interp(spk_maze, t_, x_)
 
                 # speed threshold
-                spd_ind = np.where(spk_spd > speed_thresh)[0]
-                spk_pos.append([spk_x[spd_ind], spk_y[spd_ind]])
-                spk_t.append(cell[spd_ind])
+                spd_ind = np.where(spk_speed > speed_thresh_)
+                # spk_spd = spk_speed[spd_ind]
+                spk_x = spk_x[spd_ind]
+                spk_y = spk_y[spd_ind]
 
-                # tuning curve calculation:
-                tuning_maps.append(Pf2D._compute_tuning_map(spk_x, spk_y, xbin, ybin, occupancy, smooth))
-                
+                # Calculate maps
+                spk_map = np.histogram2d(spk_x, spk_y, bins=(x_grid_, y_grid_))[0]
+                spk_map = gaussian_filter(spk_map, sigma=smooth)
+                maps.append(spk_map / occupancy_)
+
+                spk_t.append(spk_maze[spd_ind])
+                spk_pos.append([spk_x, spk_y])
+
+            return maps, spk_pos, spk_t
+
+        # --- occupancy map calculation -----------
+        # NRK todo: might need to normalize occupancy so sum adds up to 1
+        occupancy = np.histogram2d(x_thresh, y_thresh, bins=(x_grid, y_grid))[0]
+        occupancy = occupancy / trackingRate + 10e-16  # converting to seconds
+        occupancy = gaussian_filter(occupancy, sigma=2)
+
+        maps, spk_pos, spk_t = make_pfs(
+            t, x, y, spikes, occupancy, speed_thresh, period, x_grid, y_grid
+        )
 
         # ---- cells with peak frate abouve thresh ------
-        # thresh_neurons_indx = [
-        #     neuron_indx
-        #     for neuron_indx in range(n_neurons)
-        #     if np.nanmax(tuning_maps[neuron_indx]) > frate_thresh
-        # ]
+        good_cells_indx = [
+            cell_indx
+            for cell_indx in range(nCells)
+            if np.max(maps[cell_indx]) > frate_thresh
+        ]
 
-        # get_elem = lambda list_: [list_[_] for _ in thresh_neurons_indx]
-        # there is only one tuning_map per neuron that means the thresh_neurons_indx:
-        # tuning_maps = get_elem(tuning_maps)
-        # tuning_maps = np.asarray(tuning_maps)
-        
-        filtered_tuning_maps, filter_function = _filter_by_frate(tuning_maps.copy(), frate_thresh)
+        get_elem = lambda list_: [list_[_] for _ in good_cells_indx]
 
-        self.ratemap = Ratemap(
-            filtered_tuning_maps, xbin=xbin, ybin=ybin, neuron_ids=filter_function(neuron_ids)
-        )
-        self.ratemap_spiketrains = filter_function(spk_t)
-        self.ratemap_spiketrains_pos = filter_function(spk_pos)
+        self.spk_pos = get_elem(spk_pos)
+        self.spk_t = get_elem(spk_t)
+        self.ratemaps = get_elem(maps)
+        self.cell_ids = cell_ids[good_cells_indx]
         self.occupancy = occupancy
-        self.frate_thresh = frate_thresh
+        self.speed = speed
+        self.x = x
+        self.y = y
+        self.t = t
+        self.xgrid = x_grid
+        self.ygrid = y_grid
+        self.gridbin = gridbin
         self.speed_thresh = speed_thresh
+        self.period = period
+        self.frate_thresh = frate_thresh
+        self.mesh = np.meshgrid(
+            self.xgrid[:-1] + self.gridbin / 2,
+            self.ygrid[:-1] + self.gridbin / 2,
+        )
+        ngrid_centers_x = self.mesh[0].size
+        ngrid_centers_y = self.mesh[1].size
+        x_center = np.reshape(self.mesh[0], [ngrid_centers_x, 1], order="F")
+        y_center = np.reshape(self.mesh[1], [ngrid_centers_y, 1], order="F")
+        xy_center = np.hstack((x_center, y_center))
+        self.gridcenter = xy_center.T
 
-   
-
-    def plotMap(self, subplots=(10, 8), figsize=(6, 10), fignum=None, enable_spike_overlay=True):
+    def plotMap(self, subplots=(7, 4), fignum=None):
         """Plots heatmaps of placefields with peak firing rate
 
         Parameters
@@ -896,7 +361,7 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
             figure number to start from, by default None
         """
 
-        map_use, thresh = self.ratemap.tuning_curves, self.speed_thresh
+        map_use, thresh = self.ratemaps, self.speed_thresh
 
         nCells = len(map_use)
         nfigures = nCells // np.prod(subplots) + 1
@@ -909,7 +374,7 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
 
         figures, gs = [], []
         for fig_ind in range(nfigures):
-            fig = plt.figure(fignum + fig_ind, figsize=figsize, clear=True)
+            fig = plt.figure(fignum + fig_ind, figsize=(6, 10), clear=True)
             gs.append(GridSpec(subplots[0], subplots[1], figure=fig))
             fig.subplots_adjust(hspace=0.4)
             fig.suptitle(
@@ -919,58 +384,29 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
             )
             figures.append(fig)
 
-        mesh_X, mesh_Y = np.meshgrid(self.ratemap.xbin, self.ratemap.ybin)
-
         for cell, pfmap in enumerate(map_use):
             ind = cell // np.prod(subplots)
             subplot_ind = cell % np.prod(subplots)
-            curr_pfmap = np.array(pfmap)
-            curr_pfmap = np.rot90(np.fliplr(curr_pfmap)) / np.nanmax(curr_pfmap)
-            # curr_pfmap = curr_pfmap / np.nanmax(curr_pfmap) # for when the pfmap already had its transpose taken
             ax1 = figures[ind].add_subplot(gs[ind][subplot_ind])
-            # ax1.pcolormesh(mesh_X, mesh_Y, curr_pfmap, cmap='jet', vmin=0, edgecolors='k', linewidths=0.1)
-            ax1.pcolormesh(mesh_X, mesh_Y, curr_pfmap, cmap='jet', vmin=0)
-            # im = ax1.pcolorfast(
-            #     self.ratemap.xbin,
-            #     self.ratemap.ybin,
-            #     curr_pfmap,
-            #     cmap="jet",
-            #     vmin=0,
-            # )
-            # im = ax1.pcolorfast(
-            #     self.ratemap.xbin,
-            #     self.ratemap.ybin,
-            #     np.rot90(np.fliplr(pfmap)) / np.nanmax(pfmap),
-            #     cmap="jet",
-            #     vmin=0,
-            # )  # rot90(flipud... is necessary to match plotRaw configuration.
-            # im = ax1.pcolor(
-            #     self.ratemap.xbin,
-            #     self.ratemap.ybin,
-            #     np.rot90(np.fliplr(pfmap)) / np.nanmax(pfmap),
-            #     cmap="jet",
-            #     vmin=0,
-            # )
-            
-            # ax1.scatter(self.spk_pos[ind]) # tODO: add spikes
+            im = ax1.pcolorfast(
+                self.xgrid,
+                self.ygrid,
+                np.rot90(np.fliplr(pfmap)) / np.max(pfmap),
+                cmap="jet",
+                vmin=0,
+            )  # rot90(flipud... is necessary to match plotRaw configuration.
             # max_frate =
-            
-            if enable_spike_overlay:
-                ax1.scatter(self.spk_pos[cell][0], self.spk_pos[cell][1], s=1, c='white', alpha=0.3, marker=',')
-                # ax1.scatter(self.spk_pos[cell][1], self.spk_pos[cell][0], s=1, c='white', alpha=0.3, marker=',')
-            
             ax1.axis("off")
             ax1.set_title(
-                f"Cell {self.ratemap.neuron_ids[cell]} \n{round(np.nanmax(pfmap),2)} Hz"
+                f"Cell {self.cell_ids[cell]} \n{round(np.nanmax(pfmap),2)} Hz"
             )
 
             # cbar_ax = fig.add_axes([0.9, 0.3, 0.01, 0.3])
             # cbar = fig.colorbar(im, cax=cbar_ax)
             # cbar.set_label("firing rate (Hz)")
-            
-        return figures, gs
 
-    def plotRaw(self,
+    def plotRaw(
+        self,
         subplots=(10, 8),
         fignum=None,
         alpha=0.5,
@@ -988,8 +424,7 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
             ), "Number of axes must match number of clusters to plot"
             fig = ax[0].get_figure()
 
-        # spk_pos_use = self.spk_pos
-        spk_pos_use = self.ratemap_spiketrains_pos
+        spk_pos_use = self.spk_pos
 
         if clus_use is not None:
             spk_pos_tmp = spk_pos_use
@@ -1002,7 +437,7 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
             else:
                 ax1 = ax[cell]
             ax1.plot(self.x, self.y, color="#d3c5c5")
-            ax1.plot(spk_x, spk_y, '.', markersize=0.8, color=[1, 0, 0, alpha])
+            ax1.plot(spk_x, spk_y, ".r", markersize=0.8, color=[1, 0, 0, alpha])
             ax1.axis("off")
             if label_cells:
                 # Put info on title
@@ -1010,7 +445,7 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
                 ax1.set_title(f"Cell {info}")
 
         fig.suptitle(
-            f"Place maps for cells with their peak firing rate (frate thresh={self.frate_thresh},speed_thresh={self.speed_thresh})"
+            f"Place maps for cells with their peak firing rate (frate thresh={self.peak_frate},speed_thresh={self.speed_thresh})"
         )
 
     def plotRaw_v_time(self, cellind, speed_thresh=False, alpha=0.5, ax=None):
@@ -1035,16 +470,19 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
 
         # plot spikes on trajectory
         for a, pos in zip(ax, spk_pos_[cellind]):
-            a.plot(spk_t_[cellind], pos, ".", color=[0, 0, 0.8, alpha])
+            a.plot(spk_t_[cellind], pos, "r.", color=[1, 0, 0, alpha])
 
         # Put info on title
+        ipbool = self._obj.spikes.pyrid[cellind] == self._obj.spikes.info.index
+        info = self._obj.spikes.info.iloc[ipbool]
         ax[0].set_title(
             "Cell "
-            + str(self.cell_ids[cellind])
-            + ":, speed_thresh="
+            + str(info["id"])
+            + ": q = "
+            + str(info["q"])
+            + ", speed_thresh="
             + str(self.speed_thresh)
         )
-        return fig, ax
 
     def plot_all(self, cellind, speed_thresh=True, alpha=0.4, fig=None):
         if fig is None:
@@ -1064,8 +502,3 @@ class Pf2D(PfnConfigMixin, PfnDMixin):
         self._obj.spikes.plot_ccg(clus_use=[cellind], type="acg", ax=axccg)
 
         return fig_use
-
-
-
-
-
