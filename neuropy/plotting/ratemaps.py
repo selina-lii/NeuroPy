@@ -7,6 +7,10 @@ from .. import core
 from neuropy.utils import mathutil
 from .figure import Fig
 
+## TODO: refactor plot_ratemap_1D and plot_ratemap_2D to a single flat function (if that's appropriate).
+## TODO: refactor plot_ratemap_1D and plot_ratemap_2D to take a **kwargs and apply optional defaults (find previous code where I did that using the | and dict conversion. In my 3D code.
+
+
 # all extracted from the 2D figures
 def plot_ratemap_2D(ratemap: core.Ratemap, computation_config=None, subplots=(10, 8), figsize=(6, 10), fignum=None, enable_spike_overlay=True, should_null_out_occupancy = True):
     """Plots heatmaps of placefields with peak firing rate

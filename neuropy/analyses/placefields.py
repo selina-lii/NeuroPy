@@ -36,7 +36,6 @@ class PlacefieldComputationParameters(SimplePrintable, metaclass=OrderedMeta):
         self.speed_thresh = speed_thresh
         if not isinstance(grid_bin, (tuple, list)):
             grid_bin = (grid_bin, grid_bin) # make it into a 2 element tuple
-
         self.grid_bin = grid_bin
         if not isinstance(smooth, (tuple, list)):
             smooth = (smooth, smooth) # make it into a 2 element tuple
