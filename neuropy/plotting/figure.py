@@ -83,6 +83,24 @@ class Colormap:
 
         return colmap
 
+    def dynamic4(self):
+        white = 255 * np.ones(80).reshape(20, 4)
+        white = white / 255
+        jet = mpl.cm.get_cmap("jet")
+        greys = mpl.cm.get_cmap("Greys")
+
+        colmap = np.vstack(
+            (
+                ListedColormap(greys(np.linspace(0.5, 0.8, 12))).colors,
+                ListedColormap(jet(np.linspace(0, 1, 30))).colors,
+                ListedColormap(greys(np.linspace(0.5, 0.8, 12)[::-1])).colors,
+            )
+        )
+
+        colmap = ListedColormap(colmap)
+
+        return colmap
+
 
 class Fig:
     labelsize = 8
@@ -98,6 +116,8 @@ class Fig:
             mpl.rcParams["ytick.labelsize"] = 8
             mpl.rcParams["axes.spines.top"] = False
             mpl.rcParams["axes.spines.right"] = False
+            mpl.rcParams["xtick.major.width"] = 2
+            mpl.rcParams["ytick.major.width"] = 2
             mpl.rcParams["axes.prop_cycle"] = cycler(
                 "color",
                 [
@@ -166,6 +186,20 @@ class Fig:
             ha="right",
         )
 
+    def legend(self, ax, text, color, fontsize=8, x=0.65, y=0.9):
+        for i, (s, c) in enumerate(zip(text, color)):
+            ax.text(
+                x=x,
+                y=y - i * 0.1,
+                s=s,
+                color=c,
+                transform=ax.transAxes,
+                fontsize=fontsize,
+                fontweight="bold",
+                va="top",
+                ha="left",
+            )
+
     def savefig(self, fname: Path, scriptname=None, fig=None):
 
         if fig is None:
@@ -206,6 +240,11 @@ class Fig:
         for side in sides:
             ax.spines[side].set_linewidth(lw)
 
+    @staticmethod
+    def center_spines(ax):
+        ax.spines["left"].set_position("zero")
+        ax.spines["bottom"].set_position("zero")
+
 
 def pretty_plot(ax, round_ylim=False):
     """Generic function to make plot pretty, bare bones for now, will need updating
@@ -223,35 +262,6 @@ def pretty_plot(ax, round_ylim=False):
     ax.spines["top"].set_visible(False)
 
     return ax
-
-
-
-def debug_print_matplotlib_figure_size(F):
-    """ Prints the current figure size and DPI for a matplotlib figure F. 
-    See https://stackoverflow.com/questions/332289/how-do-you-change-the-size-of-figures-drawn-with-matplotlib 
-    Usage:
-        SizeInches, DPI = debug_print_matplotlib_figure_size(a_fig)
-    """
-    DPI = F.get_dpi()
-    print(f'DPI: {DPI}')
-    SizeInches = F.get_size_inches()
-    print(f'Default size in Inches: {SizeInches}')
-    print('Which should result in a {} x {} Image'.format(DPI*SizeInches[0], DPI*SizeInches[1]))
-    return SizeInches, DPI
-
-def rescale_figure_size(F, scale_multiplier=2.0, debug_print=False):
-    """ Scales up the Matplotlib Figure by a factor of scale_multiplier (in both width and height) without distorting the fonts or line sizes. 
-    Usage:
-        rescale_figure_size(a_fig, scale_multiplier=2.0, debug_print=True)
-    """
-    CurrentSize = F.get_size_inches()
-    F.set_size_inches((CurrentSize[0]*scale_multiplier, CurrentSize[1]*scale_multiplier))
-    if debug_print:
-        RescaledSize = F.get_size_inches()
-        print(f'Size in Inches: {RescaledSize}')
-    return F
-
-
 
 
 # class ScrollPlot:
