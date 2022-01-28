@@ -10,95 +10,14 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.special import factorial
 from tqdm import tqdm
 
+from neuropy.analyses.placefields import Pf2D
+
+# from .placefields import Pf1d, Pf2d
 from .. import core
-from .. import plotting
-from ..utils import mathutil
+from neuropy.utils import mathutil
 
 
-def radon_transform(arr, nlines=10000, dt=1, dx=1, neighbours=1):
-    """Line fitting algorithm primarily used in decoding algorithm, a variant of radon transform, algorithm based on Kloosterman et al. 2012
-
-    Parameters
-    ----------
-    arr : 2d array
-        time axis is represented by columns, position axis is represented by rows
-    dt : float
-        time binsize in seconds, only used for velocity/intercept calculation
-    dx : float
-        position binsize in cm, only used for velocity/intercept calculation
-    neighbours : int,
-        probability in each bin is replaced by sum of itself and these many 'neighbours' column wise, default 1 neighbour
-
-    NOTE: when returning velcoity the sign is flipped to match with position going from bottom to up
-
-    Returns
-    -------
-    score:
-        sum of values (posterior) under the best fit line
-    velocity:
-        speed of replay in cm/s
-    intercept:
-        intercept of best fit line
-
-    References
-    ----------
-    1) Kloosterman et al. 2012
-    """
-    t = np.arange(arr.shape[1])
-    nt = len(t)
-    tmid = (nt + 1) / 2 - 1
-
-    pos = np.arange(arr.shape[0])
-    npos = len(pos)
-    pmid = (npos + 1) / 2 - 1
-
-    # using convolution to sum neighbours
-    arr = np.apply_along_axis(
-        np.convolve, axis=0, arr=arr, v=np.ones(2 * neighbours + 1)
-    )
-
-    # exclude stationary events by choosing phi little below 90 degree
-    # NOTE: angle of line is given by (90-phi), refer Kloosterman 2012
-    phi = np.random.uniform(low=-np.pi / 2, high=np.pi / 2, size=nlines)
-    diag_len = np.sqrt((nt - 1) ** 2 + (npos - 1) ** 2)
-    rho = np.random.uniform(low=-diag_len / 2, high=diag_len / 2, size=nlines)
-
-    rho_mat = np.tile(rho, (nt, 1)).T
-    phi_mat = np.tile(phi, (nt, 1)).T
-    t_mat = np.tile(t, (nlines, 1))
-    posterior = np.zeros((nlines, nt))
-
-    y_line = ((rho_mat - (t_mat - tmid) * np.cos(phi_mat)) / np.sin(phi_mat)) + pmid
-    y_line = np.rint(y_line).astype("int")
-
-    # if line falls outside of array in a given bin, replace that with median posterior value of that bin across all positions
-    t_out = np.where((y_line < 0) | (y_line > npos - 1))
-    t_in = np.where((y_line >= 0) & (y_line <= npos - 1))
-    posterior[t_out] = np.median(arr[:, t_out[1]], axis=0)
-    posterior[t_in] = arr[y_line[t_in], t_in[1]]
-
-    old_settings = np.seterr(all="ignore")
-    posterior_mean = np.nanmean(posterior, axis=1)
-
-    best_line = np.argmax(posterior_mean)
-    score = posterior_mean[best_line]
-    best_phi, best_rho = phi[best_line], rho[best_line]
-    time_mid, pos_mid = nt * dt / 2, npos * dx / 2
-
-    velocity = dx / (dt * np.tan(best_phi))
-    intercept = (
-        (dx * time_mid) / (dt * np.tan(best_phi))
-        + (best_rho / np.sin(best_phi)) * dx
-        + pos_mid
-    )
-    np.seterr(**old_settings)
-
-    return score, -velocity, intercept
-
-
-def epochs_spkcount(
-    neurons: core.Neurons, epochs: core.Epoch, bin_size=0.01, slideby=None
-):
+def epochs_spkcount(neurons: core.Neurons, epochs: core.Epoch, bin_size=0.01, slideby=None):
     # ---- Binning events and calculating spike counts --------
     spkcount = []
     nbins = np.zeros(epochs.n_epochs, dtype="int")
@@ -126,14 +45,6 @@ def epochs_spkcount(
         spkcount_ = np.asarray(
             [np.histogram(_, bins=bins)[0] for _ in neurons.spiketrains]
         )
-
-        # if signficant portion at end of epoch is not included then append zeros
-        # if (frac := epoch.duration / bin_size % 1) > 0.7:
-        #     extra_columns = int(100 * (1 - frac))
-        #     spkcount_ = np.hstack(
-        #         (spkcount_, np.zeros((neurons.n_neurons, extra_columns)))
-        #     )
-
         slide_view = np.lib.stride_tricks.sliding_window_view(
             spkcount_, int(bin_size * 1000), axis=1
         )[:, :: int(slideby * 1000), :].sum(axis=2)
@@ -160,7 +71,6 @@ class Decode1d:
         self.posterior = None
         self.neurons = neurons
         self.bin_size = bin_size
-        self.pos_bin_size = ratemap.xbin_size
         self.decoded_position = None
         self.epochs = epochs
         self.slideby = slideby
@@ -176,24 +86,25 @@ class Decode1d:
         prob = (1 / nspike!)* ((tau * frate)^nspike) * exp(-tau * frate)
         where,
             tau = binsize
-            NOTE: multiplying with (1/n_positions) is not necessary as it gets cancelled out eventually
         ===========================
         """
         tau = self.bin_size
-        n_positions, n_time_bins = ratemaps.shape[1], spkcount.shape[1]
+        nCells = spkcount.shape[0]
+        cell_prob = np.zeros((ratemaps.shape[1], spkcount.shape[1], nCells))
+        for cell in range(nCells):
+            cell_spkcnt = spkcount[cell, :][np.newaxis, :]
+            cell_ratemap = ratemaps[cell, :][:, np.newaxis]
 
-        prob = np.zeros((n_positions, n_time_bins))
-        for i in range(n_positions):
-            frate = (tau * ratemaps[:, i, np.newaxis]) ** spkcount
-            spkcount_factorial = factorial(spkcount)
-            exp_frate = np.exp(-tau * ratemaps[:, i, np.newaxis])
-            prob[i, :] = np.prod((frate / spkcount_factorial) * exp_frate, axis=0)
+            coeff = 1 / (factorial(cell_spkcnt))
+            # broadcasting
+            cell_prob[:, :, cell] = (((tau * cell_ratemap) ** cell_spkcnt) * coeff) * (
+                np.exp(-tau * cell_ratemap)
+            )
 
-        old_settings = np.seterr(all="ignore")
-        prob /= np.sum(prob, axis=0, keepdims=True)
-        np.seterr(**old_settings)
+        posterior = np.prod(cell_prob, axis=2)
+        posterior /= np.sum(posterior, axis=0)
 
-        return prob
+        return posterior
 
     def _estimate(self):
 
@@ -203,10 +114,7 @@ class Decode1d:
         bincntr = self.ratemap.xbin_centers
 
         if self.epochs is not None:
-
-            spkcount, nbins = epochs_spkcount(
-                self.neurons, self.epochs, self.bin_size, self.slideby
-            )
+            spkcount, nbins = epochs_spkcount(self.neurons, self.epochs, self.bin_size, self.slideby)
             posterior = self._decoder(np.hstack(spkcount), tuning_curves)
             decodedPos = bincntr[np.argmax(posterior, axis=0)]
             cum_nbins = np.cumsum(nbins)[:-1]
@@ -215,14 +123,10 @@ class Decode1d:
             self.posterior = np.hsplit(posterior, cum_nbins)
             self.spkcount = spkcount
             self.nbins_epochs = nbins
-            self.score, self.velocity, self.intercept = self.score_posterior(
-                self.posterior
-            )
+            self.score, _ = self.score_posterior(self.posterior)
 
         else:
-            spkcount = self.neurons.get_binned_spiketrains(
-                bin_size=self.bin_size
-            ).spike_counts
+            spkcount = self.neurons.get_binned_spiketrains(bin_size=self.bin_size).spike_counts
 
             self.posterior = self._decoder(spkcount, tuning_curves)
             self.decoded_position = bincntr[np.argmax(self.posterior, axis=0)]
@@ -234,14 +138,17 @@ class Decode1d:
         # print(f"Using {kind} shuffle")
 
         if method == "neuron_id":
-            score = []
-            for i in tqdm(range(n_iter)):
+            posterior, score = [], []
+            for i in range(n_iter):
                 tuning_curves = self.ratemap.tuning_curves.copy()
                 np.random.shuffle(tuning_curves)
                 post_ = self._decoder(np.hstack(self.spkcount), tuning_curves)
-                cum_nbins = np.cumsum(self.nbins_epochs)[:-1]
-                score.append(self.score_posterior(np.hsplit(post_, cum_nbins))[0])
-            score = np.asarray(score)
+                cum_nbins = np.cumsum(self.nbins_epochs)[::-1]
+                posterior.extend(np.hsplit(post_, cum_nbins))
+
+            score = self.score_posterior(posterior)[0]
+            score = score.reshape(n_iter, len(self.spkcount))
+
         if method == "column":
 
             def col_shuffle(mat):
@@ -273,14 +180,12 @@ class Decode1d:
         1) Kloosterman et al. 2012
         """
         results = Parallel(n_jobs=self.n_jobs)(
-            delayed(radon_transform)(
-                epoch, nlines=5000, dt=self.bin_size, dx=self.pos_bin_size, neighbours=2
-            )
-            for epoch in p
+            delayed(mathutil.radon_transform)(epoch) for epoch in p
         )
-        score, velocity, intercept = np.asarray(results).T
+        score = [res[0] for res in results]
+        slope = [res[1] for res in results]
 
-        return score, velocity, intercept
+        return np.asarray(score), np.asarray(slope)
 
     @property
     def p_value(self):
@@ -292,38 +197,6 @@ class Decode1d:
 
     def plot_in_bokeh(self):
         pass
-
-    def plot_summary(self):
-        n_posteriors = len(self.posterior)
-        posterior_ind = np.random.default_rng().integers(0, n_posteriors, 5)
-        arrs = [self.posterior[i] for i in posterior_ind]
-
-        _, axs = plt.subplots(2, 5, sharey="row", sharex="col")
-        zsc_tuning = stats.zscore(self.ratemap.tuning_curves, axis=1)
-        sort_ind = np.argsort(np.argmax(zsc_tuning, axis=1))
-
-        for i, arr in enumerate(arrs):
-
-            t_start = self.epochs[posterior_ind[i]].flatten()[0]
-            velocity, intercept = (
-                self.velocity[posterior_ind[i]],
-                self.intercept[posterior_ind[i]],
-            )
-            arr = np.apply_along_axis(
-                np.convolve, axis=0, arr=arr, v=np.ones(2 * 2 + 1)
-            )
-            t = np.arange(arr.shape[1]) * self.bin_size + t_start
-            pos = np.arange(arr.shape[0]) * 2
-
-            axs[0, i].pcolormesh(t, pos, arr, cmap="hot")
-            axs[0, i].plot(t, velocity * (t - t_start) + intercept, color="w")
-            axs[0, i].set_ylim([pos.min(), pos.max()])
-
-            plotting.plot_raster(
-                self.neurons[sort_ind].time_slice(t_start=t[0], t_stop=t[-1]),
-                ax=axs[1, i],
-                color="k",
-            )
 
     def plot_replay_epochs(self, pval=0.05, speed_thresh=True, cmap="hot"):
         pval_events = self.p_val_events
@@ -391,8 +264,8 @@ class Decode1d:
 
 
 class Decode2d:
-    def __init__(self):
-
+    ## TODO: refactor to no longer use the obsolite PF2d and Spikes classes and instead use the Pf2d class
+    def __init__(self, pf2d_obj: Pf2D):
         assert isinstance(pf2d_obj, PF2d)
         self._obj = pf2d_obj._obj
         self.pf2d = pf2d_obj
