@@ -1,79 +1,117 @@
 import numpy as np
+from neuropy.core.neuron_identities import NeuronIdentitiesDisplayerMixin
+from neuropy.plotting.mixins.ratemap_mixins import RatemapPlottingMixin
+from neuropy.utils import mathutil
 from . import DataWriter
-from scipy import stats
 
 
-class Ratemap(DataWriter):
+class Ratemap(NeuronIdentitiesDisplayerMixin, RatemapPlottingMixin, DataWriter):
     def __init__(
         self,
-        tuning_curves: np.ndarray,
+        tuning_curves,
+        firing_maps=None,
         xbin=None,
         ybin=None,
         occupancy=None,
         neuron_ids=None,
+        neuron_extended_ids=None,
         metadata=None,
     ) -> None:
-        super().__init__(metadata=metadata)
+        super().__init__()
 
-        assert tuning_curves.ndim <= 3, "tuning curves shape should be <= 3"
         self.tuning_curves = np.asarray(tuning_curves)
+        self.firing_maps = np.asarray(firing_maps)
         if neuron_ids is not None:
             assert len(neuron_ids) == self.tuning_curves.shape[0]
-            self.neuron_ids = np.asarray(neuron_ids)
+            self._neuron_ids = neuron_ids
+        if neuron_extended_ids is not None:
+            assert len(neuron_extended_ids) == self.tuning_curves.shape[0]
+            assert len(neuron_extended_ids) == len(self._neuron_ids)
+            # NeuronExtendedIdentityTuple objects
+            self._neuron_extended_ids = neuron_extended_ids   
+        
         self.xbin = xbin
         self.ybin = ybin
         self.occupancy = occupancy
+
+        self.metadata = metadata
 
     @property
     def xbin_centers(self):
         return self.xbin[:-1] + np.diff(self.xbin) / 2
 
     @property
-    def xbin_size(self):
-        return np.diff(self.xbin)[0]
-
-    @property
     def ybin_centers(self):
         return self.ybin[:-1] + np.diff(self.ybin) / 2
+    
+    # NeuronIdentitiesDisplayerMixin requirements
+    @property
+    def neuron_ids(self):
+        """The neuron_ids property."""
+        return self._neuron_ids
+    @neuron_ids.setter
+    def neuron_ids(self, value):
+        self._neuron_ids = value
+       
+       
+    @property
+    def neuron_extended_ids(self):
+        """The neuron_extended_ids property."""
+        return self._neuron_extended_ids
+        # return self.metadata['tuple_neuron_ids']
+    @neuron_extended_ids.setter
+    def neuron_extended_ids(self, value):
+        self._neuron_extended_ids = value
+     
 
     @property
     def n_neurons(self):
         return self.tuning_curves.shape[0]
 
+    @property
     def ndim(self):
         return self.tuning_curves.ndim - 1
+    
+    
+    @property
+    def normalized_tuning_curves(self):
+        return Ratemap.nanmin_nanmax_scaler(self.tuning_curves)
+        # return mathutil.min_max_scaler(self.tuning_curves)
+        # return Ratemap.NormalizeData(self.tuning_curves)
 
-    def get_normalized(self):
-        pass
+    @staticmethod
+    def nan_ptp(a, **kwargs):
+        return np.ptp(a[np.isfinite(a)], **kwargs)
 
-    def get_peak_locations(self, by="index"):
-        sort_ind = np.argmax(stats.zscore(self.tuning_curves, axis=1), axis=1)
-        if by == "index":
-            return sort_ind
-        if by == "position":
-            return self.xbin[sort_ind]
-
-    def get_sort_order(self, by="index"):
-        """Return sorting order tuning curves by position in ascending order
-
+    @staticmethod
+    def nanmin_nanmax_scaler(x, axis=-1, **kwargs):
+        """Scales the values x to lie between 0 and 1 along the specfied axis, ignoring NaNs!
         Parameters
         ----------
-        by : str, optional
-            'index' returns row-index location of tuning_curves, 'neuron_id' returns id of neurons that will sort the location of peaks tuning curves, by default "index"
-
+        x : np.array
+            numpy ndarray
         Returns
         -------
-        [type]
-            [description]
+        np.array
+            scaled array
         """
-        sort_ind = np.argsort(self.get_peak_locations(by="index"))
-        if by == "neuron_id":
-            return self.neuron_ids[sort_ind]
-        if by == "index":
-            return sort_ind
+        return (x - np.nanmin(x, axis=axis, keepdims=True)) / Ratemap.nan_ptp(x, axis=axis, keepdims=True, **kwargs)
+    
+    
+    @staticmethod    
+    def NormalizeData(data):
+        """ Simple alternative to the mathutil.min_max_scalar that doesn't produce so man NaN values. """
+        data[np.isnan(data)] = 0.0 # Set NaN values to 0.0
+        return (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
 
-    def peak_firing_rate(self):
-        return np.max(self.tuning_curves, axis=1)
-
-    def get_field_locations(self):
-        pass
+    
+    def get_sort_indicies(self, sortby=None):
+        curr_tuning_curves = self.normalized_tuning_curves
+        ind = np.unravel_index(np.argsort(curr_tuning_curves, axis=None), curr_tuning_curves.shape)
+        
+        if sortby is None:
+            sort_ind = np.argsort(np.argmax(self.normalized_tuning_curves, axis=1))
+        elif isinstance(sortby, (list, np.ndarray)):
+            sort_ind = sortby
+        else:
+            sort_ind = np.arange(self.n_neurons) 
