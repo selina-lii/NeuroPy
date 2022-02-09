@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from .. import core
 import numpy as np
-from neuropy.utils.colors_util import ColorsUtil
+
 
 def plot_raster(
     neurons: core.Neurons,
@@ -207,5 +207,3 @@ def plot_waveforms(neurons: core.Neurons, sort_order=None, color="#afadac"):
     ax.plot(waves.T, color=color, alpha=0.5)
 
     return ax
-
-

@@ -125,7 +125,7 @@ class NeuroscopeIO:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return {
             "source_file": self.source_file,
             "channel_groups": self.channel_groups,

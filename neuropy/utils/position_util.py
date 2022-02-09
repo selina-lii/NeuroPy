@@ -5,7 +5,7 @@ from sklearn.manifold import Isomap
 from scipy.ndimage import gaussian_filter1d
 
 from .. import core
-from neuropy.utils.mathutil import contiguous_regions, threshPeriods
+from ..utils.mathutil import contiguous_regions, threshPeriods
 
 
 def linearize_position(position: core.Position, sample_sec=3, method="isomap", sigma=2):
@@ -22,17 +22,15 @@ def linearize_position(position: core.Position, sample_sec=3, method="isomap", s
         'PCA' (for straight tracks)
 
     """
-    ## OLD:
-    # xpos = position.x
-    # ypos = position.y
-    # xy_pos = np.vstack((xpos, ypos)).T
-    pos_df = position.to_dataframe()
-    xy_pos = pos_df[['x','y']].to_numpy()
+    xpos = position.x
+    ypos = position.y
+
+    xy_pos = np.vstack((xpos, ypos)).T
     xlinear = None
-    if method.lower() == "pca":
+    if method == "pca":
         pca = PCA(n_components=1)
         xlinear = pca.fit_transform(xy_pos).squeeze()
-    elif method.lower() == "isomap":
+    elif method == "isomap":
         imap = Isomap(n_neighbors=5, n_components=2)
         # downsample points to reduce memory load and time
         pos_ds = xy_pos[0 : -1 : np.round(int(position.sampling_rate) * sample_sec)]
@@ -42,16 +40,11 @@ def linearize_position(position: core.Position, sample_sec=3, method="isomap", s
         if iso_pos.std(axis=0)[0] < iso_pos.std(axis=0)[1]:
             iso_pos[:, [0, 1]] = iso_pos[:, [1, 0]]
         xlinear = iso_pos[:, 0]
-    else:
-        print('ERROR: invalid method name: {}'.format(method))
+
     xlinear = gaussian_filter1d(xlinear, sigma=sigma)
-    
-    return core.Position.from_separate_arrays(position.time, xlinear, lin_pos=xlinear, metadata=position.metadata)
-    # return core.Position(pd.DataFrame({'t':pos_df.time, 'x': xlinear}), metadata=position.metadata)
-    
-    # return core.Position.init(
-    #     traces=xlinear, t_start=position.t_start, sampling_rate=position.sampling_rate
-    # )
+    return core.Position(
+        traces=xlinear, t_start=position.t_start, sampling_rate=position.sampling_rate
+    )
 
 
 def calculate_run_direction(
@@ -83,8 +76,8 @@ def calculate_run_direction(
 
     assert position.ndim == 1, "Run direction only supports one dimensional position"
 
-    trackingsampling_rate = position.time
-    posdata = position.to_dataframe()
+    trackingsampling_rate = self._position.time
+    posdata = self._position.to_dataframe()
 
     posdata = posdata[(posdata.time > period[0]) & (posdata.time < period[1])]
     x = posdata.linear
