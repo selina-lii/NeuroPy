@@ -9,15 +9,15 @@ class Epoch(DataWriter):
 
         self._check_epochs(epochs)
         epochs["label"] = epochs["label"].astype("str")
-        self._epochs = epochs.sort_values(by=["start"])
+        self._data = epochs.sort_values(by=["start"])
 
     @property
     def starts(self):
-        return self._epochs.start.values
+        return self._data.start.values
 
     @property
     def stops(self):
-        return self._epochs.stop.values
+        return self._data.stop.values
 
     @property
     def durations(self):
@@ -29,40 +29,30 @@ class Epoch(DataWriter):
 
     @property
     def labels(self):
-        return self._epochs.label.values
-
-    def set_labels(self, labels):
-        self._epochs["label"] = labels
-        return Epoch(epochs=self._epochs)
-
-    def __add__(self, epochs):
-        assert isinstance(epochs, Epoch), "Can only add two core.Epoch objects"
-        df1 = self._epochs[["start", "stop", "label"]]
-        df2 = epochs._epochs[["start", "stop", "label"]]
-        df_new = pd.concat([df1, df2]).reset_index(drop=True)
-        return Epoch(epochs=df_new)
+        return self._data.label.values
 
     def get_unique_labels(self):
         return np.unique(self.labels)
 
-    def is_labels_unique(self):
-        return len(np.unique(self.labels)) == len(self)
+    @property
+    def to_dict(self):
+        d = {"epochs": self._data, "metadata": self.metadata}
+        return d
 
     def to_dataframe(self):
-        df = self._epochs.copy()
+        df = self._data.copy()
         df["duration"] = self.durations
         return df
 
-    def add_column(self, name: str, arr: np.ndarray):
-        data = self.to_dataframe()
-        data[name] = arr
-        return Epoch(epochs=data, metadata=self.metadata)
+    @property
+    def metadata(self):
+        return self._metadata
 
-    def add_dataframe(self, df: pd.DataFrame):
-        assert isinstance(df, pd.DataFrame), "df should be a pandas dataframe"
-        data = self.to_dataframe()
-        data_new = pd.concat([data, df], axis=1)
-        return Epoch(epochs=data_new, metadata=self.metadata)
+    @metadata.setter
+    def metadata(self, metadata):
+        """metadata compatibility"""
+
+        self._metadata = metadata
 
     def _check_epochs(self, epochs):
         assert isinstance(epochs, pd.DataFrame)
@@ -71,24 +61,21 @@ class Epoch(DataWriter):
         ), "Epoch dataframe should at least have columns with names: start, stop, label"
 
     def __repr__(self) -> str:
-        return f"{len(self.starts)} epochs\nSnippet: \n {self._epochs.head(5)}"
+        return f"{len(self.starts)} epochs"
 
     def __str__(self) -> str:
         pass
 
-    def __getitem__(self, i):
+    def __getitem__(self, slice_):
 
-        if isinstance(i, str):
-            data = self._epochs[self._epochs["label"] == i].copy()
-        elif isinstance(i, slice):
-            data = self._epochs.iloc[i].copy()
+        if isinstance(slice_, str):
+            indices = np.where(self.labels == slice_)[0]
+            if len(indices) > 1:
+                return np.vstack((self.starts[indices], self.stops[indices])).T
+            else:
+                return np.array([self.starts[indices], self.stops[indices]]).squeeze()
         else:
-            data = self._epochs.iloc[[i]].copy()
-
-        return Epoch(epochs=data.reset_index(drop=True))
-
-    def __len__(self):
-        return self.n_epochs
+            return np.vstack((self.starts[slice_], self.stops[slice_])).T
 
     def time_slice(self, t_start, t_stop):
         # TODO time_slice should also include partial epochs
@@ -99,13 +86,18 @@ class Epoch(DataWriter):
 
     def label_slice(self, label):
         assert isinstance(label, str), "label must be string"
-        df = self._epochs[self._epochs["label"] == label].reset_index(drop=True)
+        df = self._data[self._data["label"] == label].reset_index(drop=True)
         return Epoch(epochs=df)
 
+    def to_dict(self):
+        return {
+            "epochs": self._data,
+            "metadata": self._metadata,
+        }
+
     @staticmethod
-    def from_array(starts, stops, labels=None):
-        df = pd.DataFrame({"start": starts, "stop": stops, "label": labels})
-        return Epoch(epochs=df)
+    def from_dict(d: dict):
+        return Epoch(d["epochs"], metadata=d["metadata"])
 
     @staticmethod
     def from_file(f):
@@ -114,16 +106,6 @@ class Epoch(DataWriter):
             return Epoch.from_dict(d)
         else:
             return None
-
-    @property
-    def is_overlapping(self):
-        starts = self.starts
-        stops = self.stops
-
-        return np.all((starts[1:] - stops[:-1]) < 0)
-
-    def itertuples(self):
-        return self.to_dataframe().itertuples()
 
     def fill_blank(self, method="from_left"):
 
@@ -203,7 +185,7 @@ class Epoch(DataWriter):
 
         duration = t_stop - t_start
 
-        ep = self._epochs.copy()
+        ep = self._data.copy()
         ep = ep[(ep.stop > t_start) & (ep.start < t_stop)].reset_index(drop=True)
 
         if ep["start"].iloc[0] < t_start:
@@ -237,12 +219,10 @@ class Epoch(DataWriter):
         bins = np.arange(t_start, t_stop + binsize, binsize)
         return np.histogram(mid_times, bins=bins)[0]
 
-    def as_array(self):
-        """Returns starts and stops as 2d numpy array"""
-        return self.to_dataframe()[["start", "stop"]].to_numpy()
+    def to_neuroscope(self, ext="evt"):
+        with self.filename.with_suffix(f".evt.{ext}").open("w") as a:
+            for event in self.epochs.itertuples():
+                a.write(f"{event.start*1000} start\n{event.stop*1000} end\n")
 
-    def flatten(self):
-        """Returns 1d numpy array of alternating starts and stops
-        NOTE: returned array is monotonically increasing only if epochs are non-overlapping
-        """
-        return self.as_array().flatten("C")
+    def as_array(self):
+        return self.to_dataframe()[["start", "stop"]].to_numpy()

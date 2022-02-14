@@ -5,20 +5,13 @@ from ..utils import mathutil
 from .. import core
 
 
-def detect_off_epochs(mua: core.Mua, ignore_epochs: core.Epoch = None):
-    """Detects OFF periods using multiunit activity. During these epochs neurons stop almost stop firing. These off periods were reported by Vyazovskiy et al. 2011 in cortex for sleep deprived animals.
+def detect_local_sleep_epochs(mua: core.Mua, ignore_epochs: core.Epoch = None):
+    """Detects local OFF events in within period
 
     Parameters
     ----------
-    mua : core.Mua object
-        mua object holds total number of spikes in each bin
-    ignore_epochs: core.Epoch
-        ignore these epochs from getting detected
-
-    References
-    ----------
-    1) Vyazovskiy, V. V., Olcese, U., Hanlon, E. C., Nir, Y., Cirelli, C., & Tononi, G. (2011). Local sleep in awake rats. Nature, 472(7344), 443–447. https://doi.org/10.1038/nature10009
-
+    period : list,array-like
+        period in seconds
 
     """
 
@@ -52,9 +45,8 @@ def detect_off_epochs(mua: core.Mua, ignore_epochs: core.Epoch = None):
     events = pd.DataFrame(
         {
             "start": time[offperiods[:, 0]],
-            "stop": time[offperiods[:, 1]],
-            "duration": duration * mua.bin_size,
-            "label": "",
+            "end": time[offperiods[:, 1]],
+            "duration": duration / 1000,
         }
     )
 

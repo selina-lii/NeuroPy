@@ -3,13 +3,23 @@ from pathlib import Path
 
 
 class DataWriter:
-    def __init__(self, metadata: dict = None) -> None:
+    def __init__(self, metadata=None) -> None:
+
+        self._filename = None
 
         if metadata is not None:
             assert isinstance(metadata, dict), "Only dictionary accepted as metadata"
-            self._metadata: dict = metadata
-        else:
-            self._metadata: dict = {}
+
+        self._metadata: dict = metadata
+
+    @property
+    def filename(self):
+        return self._filename
+
+    @filename.setter
+    def filename(self, f):
+        assert isinstance(f, (str, Path))
+        self._filename = f
 
     @property
     def metadata(self):
@@ -22,9 +32,9 @@ class DataWriter:
             assert isinstance(d, dict), "Only dictionary accepted"
             self._metadata = self._metadata | d
 
-    @classmethod
-    def from_dict(cls, d):
-        return cls(**d)
+    @staticmethod
+    def from_dict(d):
+        return NotImplementedError
 
     @staticmethod
     def from_file(f):
@@ -35,18 +45,22 @@ class DataWriter:
             return None
 
     def to_dict(self):
-        d = dict()
-        attrs = self.__dict__.keys()
-        for k in attrs:
-            if k.startswith("_"):
-                d[k[1:]] = getattr(self, k)
-            else:
-                d[k] = getattr(self, k)
-        return d
+        return NotImplementedError
 
-    def save(self, fp):
+    def save(self):
 
-        assert isinstance(fp, (str, Path)), "filename is invalid"
         data = self.to_dict()
-        np.save(fp, data)
-        print(f"{fp} saved")
+        if self.filename is not None:
+            assert isinstance(self.filename, Path)
+            np.save(self.filename, data)
+            print(f"{self.filename.name} saved")
+        else:
+            print("filename can not be None")
+
+    def delete_file(self):
+        self.filename.unlink()
+
+        print("file removed")
+
+    def create_backup(self):
+        pass
