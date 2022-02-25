@@ -7,7 +7,7 @@ from xml.etree import ElementTree
 import pandas as pd
 
 
-def get_dat_timestamps(basepath: str or Path, sync: bool = True):
+def get_dat_timestamps(basepath: str or Path, sync: bool = False):
     """
     Gets timestamps for each frame in your dat file(s) in a given directory.
     :param basepath: str, path to parent directory, holding your 'experiment' folder(s).
@@ -21,13 +21,28 @@ def get_dat_timestamps(basepath: str or Path, sync: bool = True):
     timestamps = []
     for file in timestamp_files:
         set_file = get_settings_filename(file)  # get settings file name
-        experiment_meta = XML2Dict(basepath / set_file)  # Get meta data
-        start_time = pd.Timestamp(
-            experiment_meta["INFO"]["DATE"]
-        )  # get start time frfom meta-data
+        set_folder = get_set_folder(file)
+        try:
+            experiment_meta = XML2Dict(set_folder / set_file)  # Get meta data
+            start_time = pd.Timestamp(
+                experiment_meta["INFO"]["DATE"]
+            )  # get start time from meta-data
+        except FileNotFoundError:
+            print(
+                "WARNING:"
+                + str(set_folder / set_file)
+                + " not found. Inferring start time from directory structure. PLEASE CHECK!"
+            )
+            # Find folder with timestamps
+            m = re.search(
+                "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}", str(set_folder)
+            )
+            start_time = pd.to_datetime(m.group(0), format="%Y-%m-%d_%H-%M-%S")
+
         SR, sync_frame = parse_sync_file(
             file.parents[2] / "sync_messages.txt"
         )  # Get SR and sync frame info
+        print("start time = " + str(start_time))
         stamps = np.load(file)  # load in timestamps
         timestamps.append(
             (
@@ -121,7 +136,7 @@ def load_all_ttl_events(basepath: str or Path, sync: bool = False, **kwargs):
     return pd.concat(times_list)
 
 
-def load_ttl_events(TTLfolder, zero_timestamps=True, event_names="", sync_info=True):
+def load_ttl_events(TTLfolder, zero_timestamps=True, event_names=""):
     """Loads TTL events for one recording folder and spits out a dictionary.
 
     :param TTLfolder: folder where your TTLevents live, recorded in BINARY format.
@@ -130,7 +145,6 @@ def load_ttl_events(TTLfolder, zero_timestamps=True, event_names="", sync_info=T
     :param event_names: can pass a dictionary to keep track of what each event means, e.g.
     event_names = {1: 'optitrack_start', 2: 'lick'} would tell you channel1 = input from optitrack and
     channel2 = animal lick port activations
-    :param sync_info: True (default), grabs sync related info if TTlfolder is in openephys directory structure
     :return: channel_states, channels, full_words, and timestamps in ndarrays
     """
     TTLfolder = Path(TTLfolder)
@@ -141,37 +155,34 @@ def load_ttl_events(TTLfolder, zero_timestamps=True, event_names="", sync_info=T
         events[varname] = np.load(TTLfolder / (varname + ".npy"))
 
     # Get sync info
-    if sync_info:
-        sync_file = TTLfolder.parents[2] / "sync_messages.txt"
-        SR, record_start = parse_sync_file(sync_file)
-        events["SR"] = SR
+    sync_file = TTLfolder.parents[2] / "sync_messages.txt"
+    SR, record_start = parse_sync_file(sync_file)
+    events["SR"] = SR
 
-        # Zero timestamps
-        if zero_timestamps:
-            events["timestamps"] = events["timestamps"] - record_start
+    # Zero timestamps
+    if zero_timestamps:
+        events["timestamps"] = events["timestamps"] - record_start
 
-        # Grab start time from .xml file and keep it with events just in case
-        settings_file = TTLfolder.parents[4] / get_settings_filename(TTLfolder)
-        try:
-            events["start_time"] = pd.to_datetime(
-                XML2Dict(settings_file)["INFO"]["DATE"]
-            )
-        except FileNotFoundError:
-            print("Settings file: " + str(settings_file) + " NOT FOUND")
+    # Grab start time from .xml file and keep it with events just in case
+    settings_file = TTLfolder.parents[4] / get_settings_filename(TTLfolder)
+    try:
+        events["start_time"] = pd.to_datetime(XML2Dict(settings_file)["INFO"]["DATE"])
+    except FileNotFoundError:
+        print("Settings file: " + str(settings_file) + " NOT FOUND")
 
-            # Find start time using filename
-            p = re.compile(
-                "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-2]+[0-9]+-[0-6]+[0-9]+-[0-6]+[0-9]+"
-            )
-            events["start_time"] = pd.to_datetime(
-                p.search(str(settings_file)).group(0), format="%Y-%m-%d_%H-%M-%S"
-            )
+        # Find start time using filename
+        p = re.compile(
+            "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-2]+[0-9]+-[0-6]+[0-9]+-[0-6]+[0-9]+"
+        )
+        events["start_time"] = pd.to_datetime(
+            p.search(str(settings_file)).group(0), format="%Y-%m-%d_%H-%M-%S"
+        )
 
-            # Print to screen to double check!
-            print(
-                str(events["start_time"])
-                + " loaded from folder structure, be sure to double check!"
-            )
+        # Print to screen to double check!
+        print(
+            str(events["start_time"])
+            + " loaded from folder structure, be sure to double check!"
+        )
 
     # Last add in event_names dict
     events["event_names"] = event_names
@@ -226,6 +237,19 @@ def parse_sync_file(sync_file):
     )
 
     return SR, sync_frame
+
+
+def get_set_folder(child_dir):
+    """Gets the folder where your settings.xml file and experiment folders should live."""
+    child_dir = Path(child_dir)
+    expfolder_id = np.where(
+        [
+            str(child_dir.parents[id]).find("experiment") > -1
+            for id in range(len(child_dir.parts) - 1)
+        ]
+    )[0].max()
+
+    return child_dir.parents[expfolder_id + 1]
 
 
 def get_settings_filename(child_dir):
@@ -514,5 +538,7 @@ def GetRecChs(File):
 
 
 if __name__ == "__main__":
-    basepath = "/data/Working/Opto/Rat694/2021_08_03_1_placestim3"
-    times = load_all_ttl_events(basepath)
+    folder_test = Path(
+        "/data/Working/Opto/Rat694/2021_08_03_1_placestim3/2021-08-03_12-41-20"
+    )
+    dat_times = get_dat_timestamps(folder_test)
