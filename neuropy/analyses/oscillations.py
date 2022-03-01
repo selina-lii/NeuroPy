@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
-from ..utils import mathutil, signal_process
+from neuropy.utils import mathutil, signal_process
 from scipy import stats
-import scipy.signal as sg
 from ..core import Signal, ProbeGroup, Epoch
 
 
@@ -22,15 +21,15 @@ def _detect_freq_band_epochs(
         channels used for epoch detection, if None then chooses best chans
     """
 
-    zscsignal = np.zeros(signals.shape)
+    zscsignal = []
     lf, hf = freq_band
     lowthresh, highthresh = thresh
-    for sig_i, sig in enumerate(signals):
-        yf = signal_process.filter_sig.bandpass(sig, lf=lf, hf=hf, fs=fs)
+    for sig in signals:
+        yf = signal_process.filter_sig.bandpass(sig, lf=lf, hf=hf)
         zsc_chan = stats.zscore(np.abs(signal_process.hilbertfast(yf)))
-        zscsignal[sig_i] = zsc_chan
+        zscsignal.append(zsc_chan)
 
-    # zscsignal = np.asarray(zscsignal)
+    zscsignal = np.asarray(zscsignal)
 
     # ---------setting noisy periods zero --------
     if ignore_times is not None:
@@ -116,7 +115,7 @@ def _detect_freq_band_epochs(
     print(f"{len(epochs)} epochs reamining after deleting very long epochs")
 
     # ----- converting to all time stamps to seconds --------
-    epochs[["start", "stop", "peaktime"]] /= fs  # seconds
+    epochs[["start", "stop", "peakpower", "peaktime"]] /= fs  # seconds
 
     epochs = epochs.reset_index(drop=True)
     epochs["label"] = ""
@@ -135,78 +134,75 @@ def _detect_freq_band_epochs(
 
 
 def detect_hpc_slow_wave_epochs(
-    signal: Signal, freq_band=(0.5, 4), nrem_epochs: Epoch = None
+    signal: Signal,
+    probegroup: ProbeGroup,
+    freq_band=(150, 250),
+    thresh=(1, 5),
+    mindur=0.05,
+    maxdur=0.450,
+    mergedist=0.05,
+    ignore_epochs: Epoch = None,
 ):
-    """Caculate delta events only
+    """Caculate delta events
 
     chan --> filter delta --> identify peaks and troughs within sws epochs only --> identifies a slow wave as trough to peak --> thresholds for 100ms minimum duration
 
     Parameters
     ----------
-    signal : Signal object
-        signal trace to be used for detection
+    chan : int
+        channel to be used for detection
     freq_band : tuple, optional
         frequency band in Hz, by default (0.5, 4)
     """
 
-    assert signal.n_channels == 1, "Signal should have only 1 channel"
+    lfpsRate = self._obj.lfpSrate
+    deltachan = self._obj.geteeg(chans=chan)
 
-    def _get_sw(sig_):
-        # ---- filtering in delta band -----
-        trace = sig_.traces[0]
-        t = sig_.time
-        lf, hf = freq_band
-        delta = signal_process.filter_sig.bandpass(trace, lf=lf, hf=hf)
+    # ---- filtering best ripple channel in delta band
+    t = np.linspace(0, len(deltachan) / lfpsRate, len(deltachan))
+    lf, hf = freq_band
+    delta_sig = signal_process.filter_sig.bandpass(deltachan, lf=lf, hf=hf)
+    delta = stats.zscore(delta_sig)  # normalization w.r.t session
+    delta = -delta  # flipping as this is in sync with cortical slow wave
 
-        # ---- normalize and flip the sign to be consistent with cortical lfp ----
-        delta = -1 * stats.zscore(delta)
+    # ---- finding peaks and trough for delta oscillations
 
-        # ---- finding peaks and trough for delta oscillations
+    up = sg.find_peaks(delta)[0]
+    down = sg.find_peaks(-delta)[0]
 
-        up = sg.find_peaks(delta)[0]
-        down = sg.find_peaks(-delta)[0]
+    if up[0] < down[0]:
+        up = up[1:]
+    if up[-1] > down[-1]:
+        up = up[:-1]
 
-        if up[0] < down[0]:
-            up = up[1:]
-        if up[-1] > down[-1]:
-            up = up[:-1]
+    sigdelta = []
+    for i in range(len(down) - 1):
+        tbeg = t[down[i]]
+        tpeak = t[up[i]]
+        tend = t[down[i + 1]]
+        peakamp = delta[up[i]]
+        endamp = delta[down[i + 1]]
+        # ------ thresholds for selecting delta --------
+        # if (peakamp > 2 and endamp < 0) or (peakamp > 1 and endamp < -1.5):
+        sigdelta.append([peakamp, endamp, tpeak, tbeg, tend])
 
-        sigdelta = []
-        for i in range(len(down) - 1):
-            tbeg = t[down[i]]
-            tpeak = t[up[i]]
-            tend = t[down[i + 1]]
-            peakamp = delta[up[i]]
-            endamp = delta[down[i + 1]]
-            # ------ thresholds for selecting delta --------
-            # if (peakamp > 2 and endamp < 0) or (peakamp > 1 and endamp < -1.5):
-            sigdelta.append([peakamp, endamp, tpeak, tbeg, tend])
+    sigdelta = np.asarray(sigdelta)
+    print(f"{len(sigdelta)} delta detected")
 
-        return np.asarray(sigdelta)
-
-    if nrem_epochs is not None:
-        sw = []
-        for e in nrem_epochs.as_array():
-            sw.append(_get_sw(signal.time_slice(t_start=e[0], t_stop=e[1])))
-        sw = np.vstack(sw)
-    else:
-        sw = _get_sw(signal)
-
-    print(f"{len(sw)} delta waves detected")
-
-    epochs = pd.DataFrame(
+    data = pd.DataFrame(
         {
-            "start": sw[:, 3],
-            "stop": sw[:, 4],
-            "peaktime": sw[:, 2],
-            "peakamp": sw[:, 0],
-            "endamp": sw[:, 1],
-            "label": "sw",
+            "start": sigdelta[:, 3],
+            "end": sigdelta[:, 4],
+            "peaktime": sigdelta[:, 2],
+            "peakamp": sigdelta[:, 0],
+            "endamp": sigdelta[:, 1],
         }
     )
-    params = {"freq_band": freq_band, "channel": signal.channel_id}
+    detection_params = {"freq_band": freq_band, "chan": chan}
+    hipp_slow_wave = {"events": data, "DetectionParams": detection_params}
 
-    return Epoch(epochs=epochs, metadata=params)
+    np.save(self.files.events, hipp_slow_wave)
+    self._load()
 
 
 def detect_ripple_epochs(
@@ -269,66 +265,20 @@ def detect_ripple_epochs(
     return Epoch(epochs=epochs, metadata=metadata)
 
 
-def detect_theta_epochs(
-    signal: Signal,
-    probegroup: ProbeGroup = None,
-    freq_band=(5, 12),
-    thresh=(0, 0.5),
-    mindur=0.25,
-    maxdur=5,
-    mergedist=0.5,
-    ignore_epochs: Epoch = None,
-):
+def detect_theta_epochs():
+    if chans is None:
+        chans = self._obj.goodchans
 
-    if probegroup is None:
-        selected_chan = signal.channel_id
-        traces = signal.traces
-    else:
-        if isinstance(probegroup, np.ndarray):
-            changrps = np.array(probegroup, dtype="object")
-        if isinstance(probegroup, ProbeGroup):
-            changrps = probegroup.get_connected_channels(groupby="shank")
-        channel_ids = np.concatenate(changrps).astype("int")
+    lfps = self._obj.time_slice(chans=chans, period=[0, 3600])
+    hilbert_amplitudes = signal_process.hilbert_ampltiude_stat(lfps)
+    best_chan = chans[np.argmax(hilbert_amplitudes)]
 
-        duration = signal.duration
-        t1, t2 = signal.t_start, signal.t_start + np.min([duration, 3600])
-        signal_slice = signal.time_slice(channel_id=channel_ids, t_start=t1, t_stop=t2)
-        hil_stat = signal_process.hilbert_ampltiude_stat(
-            signal_slice.traces,
-            freq_band=freq_band,
-            fs=signal.sampling_rate,
-            statistic="mean",
-        )
-        selected_chan = channel_ids[np.argmax(hil_stat)]
-
-        traces = signal.time_slice(channel_id=selected_chan).traces.reshape(1, -1)
-
-    print(f"Best channel for theta: {selected_chan}")
-    if ignore_epochs is not None:
-        ignore_times = ignore_epochs.as_array()
-    else:
-        ignore_times = None
-
-    epochs, metadata = _detect_freq_band_epochs(
-        signals=traces,
-        freq_band=freq_band,
-        thresh=thresh,
-        mindur=mindur,
-        maxdur=maxdur,
-        mergedist=mergedist,
-        fs=signal.sampling_rate,
-        ignore_times=ignore_times,
-    )
-    epochs["start"] = epochs["start"] + signal.t_start
-    epochs["stop"] = epochs["stop"] + signal.t_start
-
-    metadata["channels"] = selected_chan
-    return Epoch(epochs=epochs, metadata=metadata)
+    self.epochs, self.metadata = signal_process.detect_freq_band_epochs(best_chan)
 
 
 def detect_spindle_epochs(
     signal: Signal,
-    probegroup: ProbeGroup = None,
+    probegroup: ProbeGroup,
     freq_band=(8, 16),
     thresh=(1, 5),
     mindur=0.35,
@@ -338,32 +288,24 @@ def detect_spindle_epochs(
     method="hilbert",
 ):
 
-    if probegroup is None:
-        selected_chans = signal.channel_id
-        traces = signal.traces
-
-    else:
-        if isinstance(probegroup, np.ndarray):
-            changrps = np.array(probegroup, dtype="object")
-        if isinstance(probegroup, ProbeGroup):
-            changrps = probegroup.get_connected_channels(groupby="shank")
-            # if changrp:
-        selected_chans = []
-        for changrp in changrps:
-            signal_slice = signal.time_slice(
-                channel_id=changrp.astype("int"), t_start=0, t_stop=3600
-            )
-            hil_stat = signal_process.hilbert_ampltiude_stat(
-                signal_slice.traces,
-                freq_band=freq_band,
-                fs=signal.sampling_rate,
-                statistic="mean",
-            )
-            selected_chans.append(changrp[np.argmax(hil_stat)])
-
-        traces = signal.time_slice(channel_id=selected_chans).traces
+    changrps = probegroup.get_connected_channels(groupby="shank")
+    selected_chans = []
+    for changrp in changrps:
+        # if changrp:
+        signal_slice = signal.time_slice(
+            channel_id=changrp.astype("int"), t_start=0, t_stop=3600
+        )
+        hil_stat = signal_process.hilbert_ampltiude_stat(
+            signal_slice.traces,
+            freq_band=freq_band,
+            fs=signal.sampling_rate,
+            statistic="mean",
+        )
+        selected_chans.append(changrp[np.argmax(hil_stat)])
 
     print(f"Selected channels for spindles: {selected_chans}")
+
+    traces = signal.time_slice(channel_id=selected_chans).traces
 
     if ignore_epochs is not None:
         ignore_times = ignore_epochs.as_array()
@@ -393,6 +335,15 @@ def detect_gamma_epochs():
 
 class Gamma:
     """Events and analysis related to gamma oscillations"""
+
+    def __init__(self, basepath):
+
+        if isinstance(basepath, Recinfo):
+            self._obj = basepath
+        else:
+            self._obj = Recinfo(basepath)
+
+        filePrefix = self._obj.files.filePrefix
 
     def get_peak_intervals(
         self,
