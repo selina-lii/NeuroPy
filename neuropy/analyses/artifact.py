@@ -121,10 +121,7 @@ def detect_artifact_epochs(
         )
         metadata = {"threshold": thresh}
 
-        art_epochs = Epoch(epochs, metadata)
-        art_epochs.filename = signal.source_file
-
-        return art_epochs
+        return Epoch(epochs, metadata)
     else:
         print("No artifacts found at this threshold")
         pass
