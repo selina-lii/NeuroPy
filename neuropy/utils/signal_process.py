@@ -55,6 +55,36 @@ class filter_sig:
         return yf
 
     @staticmethod
+    def notch(
+        signal: np.ndarray,
+        w0: float or int,
+        Q: float or int or None,
+        bw: float or int or None = None,
+        fs: int = 30000,
+        ax: int = -1,
+    ):
+        """Runs a notch filter on your data. If Q is none, must enter bw (bandwidth) of noise to remove.
+        See scipy.signal.iirnotch for more info on parameters."""
+        if Q is None:
+            assert bw is float or int, "If Q is not specified, bw must be provided"
+            Quse = np.round(w0 / bw)
+        else:
+            Quse = Q
+        b, a = sg.iirnotch(w0=w0, Q=Quse, fs=fs)
+        try:
+            yf = sg.filtfilt(b, a, signal, axis=ax)
+        except np.core._exceptions._ArrayMemoryError:
+            yf = []
+            print(
+                "signal array is too large for memory, filtering each channel independently"
+            )
+            for trace in signal:
+                yf.append(sg.filtfilt(b, a, trace, axis=ax).astype("int16"))
+            yf = np.asarray(yf, dtype="int16")
+
+        return yf
+
+    @staticmethod
     def delta(signal, fs=1250, order=3, ax=-1):
         return filter_sig.bandpass(signal, lf=0.5, hf=4, fs=fs, order=order, ax=ax)
 
