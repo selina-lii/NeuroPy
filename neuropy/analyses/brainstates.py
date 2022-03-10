@@ -1,17 +1,13 @@
 from pathlib import Path
-from pstats import Stats
-from tracemalloc import start
 import numpy as np
 import pandas as pd
-from scipy.ndimage import gaussian_filter1d
+import scipy.ndimage as filtSig
 import scipy.stats as stats
 from hmmlearn.hmm import GaussianHMM
 from joblib import Parallel, delayed
-import matplotlib.pyplot as plt
 
-from ..utils import signal_process, mathutil
+from neuropy.utils import signal_process
 from .. import core
-from ..plotting import plot_hypnogram
 
 
 def hmmfit1d(Data):
@@ -89,18 +85,37 @@ def correlation_emg(
     print("starting emg calculation")
     highfreq = 600
     lowfreq = 300
-    t_start = signal.t_start
-    t_stop = signal.t_stop
     sRate = signal.sampling_rate
     n_probes = probe.n_probes
-    changrp = np.concatenate(probe.get_connected_channels(groupby="probe"))
+    changrp = probe.get_connected_channels(groupby="probe")
 
-    emg_chans = changrp.astype("int")
+    # ----selecting a fixed number of shanks from each probe-----
+    # max_shanks_probe = [np.min([3, _]) for _ in nShanksProbe]
+    # selected_shanks = []
+    # for probe in range(nProbes):
+    #     shanks_in_probe = [
+    #         changrp[_] for _ in np.where(probesid == probe)[0] if changrp[_]
+    #     ]
+    #     selected_shanks.append(
+    #         np.concatenate(
+    #             np.random.choice(
+    #                 shanks_in_probe, max_shanks_probe[probe], replace=False
+    #             )
+    #         )
+    #     )
+
+    # ---- selecting probe with most number of shanks -------
+    # which_probe = np.argmax(nShanksProbe)
+    # selected_shanks = np.where(probesid == which_probe)[0]
+    # # making sure shanks are not empty
+    # selected_shanks = [changrp[_] for _ in selected_shanks if changrp[_]]
+
+    emg_chans = (changrp[0]).astype("int")
     n_emg_chans = len(emg_chans)
     # eegdata = signal.time_slice(channel_id=emg_chans)
     total_duration = signal.duration
 
-    timepoints = np.arange(t_start, t_stop - window, window - overlap)
+    timepoints = np.arange(0, total_duration - window, window - overlap)
 
     # ---- Mean correlation across all selected channels calculated in parallel --
     def corrchan(start):
@@ -122,6 +137,23 @@ def correlation_emg(
 
     print("emg calculation done")
     return emg_lfp
+
+
+def _label2states(theta_delta, delta_l, emg_l):
+
+    state = np.zeros(len(theta_delta))
+    for i, (ratio, delta, emg) in enumerate(zip(theta_delta, delta_l, emg_l)):
+
+        if ratio == 1 and emg == 1:  # active wake
+            state[i] = 4
+        elif ratio == 0 and emg == 1:  # quiet wake
+            state[i] = 3
+        elif ratio == 1 and emg == 0:  # REM
+            state[i] = 2
+        elif ratio == 0 and emg == 0:  # NREM
+            state[i] = 1
+
+    return state
 
 
 def _states2time(label):
@@ -150,20 +182,57 @@ def _states2time(label):
     return all_states
 
 
+def _removetransient(statetime):
+
+    duration = statetime.duration
+    start = statetime.start
+    end = statetime.stop
+    state = statetime.state
+
+    arr = np.zeros((len(start), 4))
+    arr[:, 0] = start
+    arr[:, 1] = end
+    arr[:, 2] = duration
+    arr[:, 3] = state
+
+    srt_ind = np.argsort(arr[:, 0])
+    arr = arr[srt_ind, :]
+
+    ind = 1
+    while ind < len(arr) - 1:
+        if (arr[ind, 2] < 50) and (arr[ind - 1, 3] == arr[ind + 1, 3]):
+            arr[ind - 1, :] = np.array(
+                [
+                    arr[ind - 1, 0],
+                    arr[ind + 1, 1],
+                    arr[ind + 1, 1] - arr[ind - 1, 0],
+                    arr[ind - 1, 3],
+                ]
+            )
+            arr = np.delete(arr, [ind, ind + 1], 0)
+        else:
+            ind += 1
+
+    statetime = pd.DataFrame(
+        {
+            "start": arr[:, 0],
+            "stop": arr[:, 1],
+            "duration": arr[:, 2],
+            "state": arr[:, 3],
+        }
+    )
+
+    return statetime
+
+
 def detect_brainstates_epochs(
     signal: core.Signal,
     probe: core.ProbeGroup,
     window=1,
     overlap=0.2,
-    sigma=3,
-    emg_channel=None,
-    theta_channel=None,
-    delta_channel=None,
-    behavior_epochs=None,
-    min_dur=6,
-    ignore_epochs: core.Epoch = None,
-    plot=True,
-    plot_filename=None,
+    emg: core.Signal = None,
+    sigma=10,
+    ignore_epochs=None,
 ):
     """detects sleep states for the recording
 
@@ -177,71 +246,51 @@ def detect_brainstates_epochs(
         seconds of overlap between adjacent window , by default 0.2
     emgfile : bool, optional
         if True load the emg file in the basepath, by default False
-    behavior_epochs : None,
-        These are eopchs when the animal was put on a track for behavior.
-        Using wavelet these epochs can be further fine tuned for accurate active and quiet period.
+
     """
 
+    if emg is None:
+        emg = correlation_emg(
+            signal=signal, probe=probe, window=window, overlap=overlap
+        )
+
+    emg = filtSig.gaussian_filter1d(emg, sigma=sigma)
+
     changrp = probe.get_connected_channels(groupby="shank")
-    wp = dict(window=window, overlap=overlap)
+    chan = changrp[7][-1]
 
-    smooth_ = lambda arr: gaussian_filter1d(arr, sigma=sigma / (window - overlap))
-    print(f"channel for sleep detection: {theta_channel,delta_channel}")
+    print(f"channel for sleep detection: {chan}")
 
-    # ---- theta-delta ratio calculation -----
-    if theta_channel is not None:
-        theta_signal = signal.time_slice(channel_id=[theta_channel])
-        theta_chan_sg = signal_process.FourierSg(theta_signal, norm_sig=True, **wp)
-        theta = smooth_(theta_chan_sg.theta)
-        band30 = smooth_(theta_chan_sg.get_band_power(1, 30))
-        time = theta_chan_sg.time
-
-    if delta_channel is not None:
-        delta_signal = signal.time_slice(channel_id=[theta_channel])
-        delta_chan_sg = signal_process.FourierSg(delta_signal, norm_sig=True, **wp)
-        delta = smooth_(delta_chan_sg.delta)
-
+    score_signal = signal.time_slice(channel_id=[chan])
+    bands = signal_process.SpectrogramBands(
+        score_signal, window=window, overlap=overlap, smooth=sigma, norm_sig=True
+    )
+    time = bands.time
+    deltaplus = bands.deltaplus
+    theta = bands.theta
+    theta_deltaplus_ratio = theta / deltaplus
     print(f"spectral properties calculated")
 
-    theta_delta_ratio = theta / delta
+    # if (noisy := artifact.time) is not None:
+    #     noisy_timepoints = []
+    #     for noisy_ind in range(noisy.shape[0]):
+    #         st = noisy[noisy_ind, 0]
+    #         en = noisy[noisy_ind, 1]
+    #         noisy_indices = np.where((time > st) & (time < en))[0]
+    #         noisy_timepoints.extend(noisy_indices)
 
-    # ---- emg processing ----
-    if emg_channel is None:
-        emg = correlation_emg(signal=signal, probe=probe, **wp)
-        emg = smooth_(emg)
-    else:
-        emg = signal.time_slice(emg_channel)
+    #     theta_deltaplus_ratio[noisy_timepoints] = np.nan
+    #     emg[noisy_timepoints] = np.nan
+    #     deltaplus[noisy_timepoints] = np.nan
 
-    # ----- set timepoints from ignore_epochs to np.nan ------
-
-    if ignore_epochs is not None:
-        noisy = ignore_epochs.as_array()
-        noisy_timepoints = []
-        for noisy_ind in range(noisy.shape[0]):
-            st = noisy[noisy_ind, 0]
-            en = noisy[noisy_ind, 1]
-            noisy_indices = np.where((time > st) & (time < en))[0]
-            noisy_timepoints.extend(noisy_indices)
-
-        band30[noisy_timepoints] = np.nan
-        theta_delta_ratio[noisy_timepoints] = np.nan
-        emg[noisy_timepoints] = np.nan
-
-    band30_label = hmmfit1d(1 / band30)
-    theta_delta_label = hmmfit1d(theta_delta_ratio)
+    deltaplus_label = hmmfit1d(deltaplus)
+    theta_deltaplus_label = hmmfit1d(theta_deltaplus_ratio)
     emg_label = hmmfit1d(emg)
 
-    states = 3 * np.ones(len(band30_label))  # initialize all states to 3 (qyiet awake)
-    states[(band30_label == 1) & (emg_label == 1)] = 4  # Wake
-    states[(band30_label == 1) & (emg_label == 0) & (theta_delta_label == 0)] = 3  # QW
-    states[(band30_label == 1) & (emg_label == 0) & (theta_delta_label == 1)] = 2  # REM
-    states[
-        (band30_label == 0) & (emg_label == 0) & (theta_delta_label == 0)
-    ] = 1  # NREM
-
+    states = _label2states(theta_deltaplus_label, deltaplus_label, emg_label)
     statetime = (_states2time(states)).astype(int)
 
-    epochs = pd.DataFrame(
+    statetime = pd.DataFrame(
         {
             "start": time[statetime[:, 0]],
             "stop": time[statetime[:, 1]],
@@ -249,67 +298,12 @@ def detect_brainstates_epochs(
             "state": statetime[:, 2],
         }
     )
+
+    epochs = _removetransient(statetime)
+
     state_to_label = {1: "nrem", 2: "rem", 3: "quiet", 4: "active"}
     epochs["label"] = epochs["state"].map(state_to_label)
     epochs.drop("state", axis=1, inplace=True)
     metadata = {"window": window, "overlap": overlap}
-    epochs = core.Epoch(epochs=epochs)
-    epochs = epochs.duration_slice(min_dur=min_dur)
-    epochs = epochs.fill_blank("from_left")  # this will also fill ignore_epochs
 
-    # clearing out ignore_epochs
-    if ignore_epochs is not None:
-        for e in ignore_epochs.as_array():
-            epochs = epochs.delete_in_between(e[0], e[1])
-
-    if behavior_epochs is not None:
-        for e in behavior_epochs.as_array():
-            epochs = epochs.delete_in_between(e[0], e[1])
-            theta_in_epoch = theta_signal.time_slice(t_start=e[0], t_stop=e[1])
-            # bandpass filter in broad band theta
-            theta_bp = signal_process.filter_sig.bandpass(
-                theta_in_epoch, lf=1, hf=25
-            ).traces[0]
-            hilbert_amp = stats.zscore(np.abs(signal_process.hilbertfast(theta_bp)))
-            high_theta = mathutil.threshPeriods(
-                hilbert_amp,
-                lowthresh=0,
-                highthresh=0.5,
-                minDistance=250,
-                minDuration=1250,
-            )
-            low_theta = np.vstack((high_theta[:-1, 1], high_theta[1:, 0])).T
-
-            if high_theta[0, 0] > e[0]:
-                low_theta = np.insert(low_theta, 0, [e[0], high_theta[0, 0]])
-
-            if high_theta[-1, -1] < e[1]:
-                low_theta = np.insert(low_theta, -1, [high_theta[-1, -1], e[1]])
-
-            new_epochs = (
-                np.vstack((high_theta, low_theta)) / signal.sampling_rate
-            ) + e[0]
-            new_labels = ["active"] * high_theta.shape[0] + ["quiet"] * low_theta.shape[
-                0
-            ]
-            states_in_epoch = core.Epoch.from_array(
-                new_epochs[:, 0], new_epochs[:, 1], new_labels
-            )
-
-            # update the epochs to include these new ones
-            epochs = epochs + states_in_epoch
-
-    epochs.metadata = metadata
-
-    if plot:
-        fig, axs = plt.subplots(5, 1, sharex=True)
-
-        axs[0].plot(time, stats.zscore(delta))
-        axs[0].set_ylim([-0.5, 1.5])
-        axs[1].plot(time, stats.zscore(theta_delta_ratio))
-        axs[1].set_ylim([-0.3, 4])
-        axs[2].plot(time, 1 / band30)
-        axs[3].plot(time, emg)
-        plot_hypnogram(epochs, ax=axs[4])
-
-    return epochs
+    return core.Epoch(epochs=epochs, metadata=metadata)

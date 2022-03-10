@@ -1,23 +1,101 @@
 import numpy as np
 import pandas as pd
 from .datawriter import DataWriter
+from neuropy.utils.mixins.print_helpers import SimplePrintable, OrderedMeta
+from neuropy.utils.mixins.time_slicing import StartStopTimesMixin, TimeSlicableObjectProtocol
 
 
-class Epoch(DataWriter):
+class NamedTimerange(SimplePrintable, metaclass=OrderedMeta):
+    """ A simple named period of time with a known start and end time """
+    def __init__(self, name, start_end_times):
+        self.name = name
+        self.start_end_times = start_end_times
+        
+    @property
+    def t_start(self):
+        return self.start_end_times[0]
+    
+    @t_start.setter
+    def t_start(self, t):
+        self.start_end_times[0] = t
+
+    @property
+    def duration(self):
+        return self.t_stop - self.t_start
+    
+    @property
+    def t_stop(self):
+        return self.start_end_times[1]
+    
+    @t_stop.setter
+    def t_stop(self, t):
+        self.start_end_times[1] = t
+    
+    
+    def to_Epoch(self):
+        return Epoch(pd.DataFrame({'start': [self.t_start], 'stop': [self.t_stop], 'label':[self.name]}))
+        
+
+
+
+class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
     def __init__(self, epochs: pd.DataFrame, metadata=None) -> None:
+        """[summary]
+        Args:
+            epochs (pd.DataFrame): Each column is a pd.Series(["start", "stop", "label"])
+            metadata (dict, optional): [description]. Defaults to None.
+        """
         super().__init__(metadata=metadata)
-
         self._check_epochs(epochs)
+        self._data = epochs.sort_values(by=["start"]) # sorts all values in ascending order
+        
+        # TODO: If the 'label' column of the dataframe is empty, should populate it with the index (after sorting) as a string.
+        # epochs['label'] = epochs.index
         epochs["label"] = epochs["label"].astype("str")
-        self._epochs = epochs.sort_values(by=["start"])
 
     @property
     def starts(self):
-        return self._epochs.start.values
+        return self._data.start.values
 
     @property
     def stops(self):
-        return self._epochs.stop.values
+        return self._data.stop.values
+    
+    @property
+    def t_start(self):
+        return self.starts[0]
+    
+    @t_start.setter
+    def t_start(self, t):
+        include_indicies = np.argwhere(t < self.stops)
+        if (np.size(include_indicies) == 0):
+            # this proposed t_start is after any contained epochs, so the returned object would be empty
+            print('Error: this proposed t_start ({}) is after any contained epochs, so the returned object would be empty'.format(t))
+            raise ValueError
+        first_include_index = include_indicies[0]
+        # print('\t first_include_index: {}'.format(first_include_index))
+        # print('\t changing ._data.loc[first_include_index, (\'start\')] from {} to {}'.format(self._data.loc[first_include_index, ('start')].item(), t))
+        
+        if (first_include_index > 0):
+            # drop the epochs preceeding the first_include_index:
+            drop_indicies = np.arange(first_include_index)
+            print('drop_indicies: {}'.format(drop_indicies))
+            raise NotImplementedError # doesn't yet drop the indicies before the first_include_index
+        self._data.loc[first_include_index, ('start')] = t # exclude the first short period where the animal isn't on the maze yet
+        
+        
+
+    @property
+    def duration(self):
+        return self.t_stop - self.t_start
+    
+    @property
+    def t_stop(self):
+        return self.stops[-1]
+    
+    # @t_stop.setter
+    # def t_stop(self, t):
+    #     self.start_end_times[1] = t
 
     @property
     def durations(self):
@@ -29,40 +107,34 @@ class Epoch(DataWriter):
 
     @property
     def labels(self):
-        return self._epochs.label.values
-
-    def set_labels(self, labels):
-        self._epochs["label"] = labels
-        return Epoch(epochs=self._epochs)
-
-    def __add__(self, epochs):
-        assert isinstance(epochs, Epoch), "Can only add two core.Epoch objects"
-        df1 = self._epochs[["start", "stop", "label"]]
-        df2 = epochs._epochs[["start", "stop", "label"]]
-        df_new = pd.concat([df1, df2]).reset_index(drop=True)
-        return Epoch(epochs=df_new)
+        return self._data.label.values
 
     def get_unique_labels(self):
         return np.unique(self.labels)
+    
+    
+    def get_named_timerange(self, epoch_name):
+        return NamedTimerange(name=epoch_name, start_end_times=self[epoch_name])
 
-    def is_labels_unique(self):
-        return len(np.unique(self.labels)) == len(self)
+
+    def to_dict(self, recurrsively=False):
+        d = {"epochs": self._data, "metadata": self.metadata}
+        return d
 
     def to_dataframe(self):
-        df = self._epochs.copy()
+        df = self._data.copy()
         df["duration"] = self.durations
         return df
 
-    def add_column(self, name: str, arr: np.ndarray):
-        data = self.to_dataframe()
-        data[name] = arr
-        return Epoch(epochs=data, metadata=self.metadata)
+    @property
+    def metadata(self):
+        return self._metadata
 
-    def add_dataframe(self, df: pd.DataFrame):
-        assert isinstance(df, pd.DataFrame), "df should be a pandas dataframe"
-        data = self.to_dataframe()
-        data_new = pd.concat([data, df], axis=1)
-        return Epoch(epochs=data_new, metadata=self.metadata)
+    @metadata.setter
+    def metadata(self, metadata):
+        """metadata compatibility"""
+
+        self._metadata = metadata
 
     def _check_epochs(self, epochs):
         assert isinstance(epochs, pd.DataFrame)
@@ -71,89 +143,66 @@ class Epoch(DataWriter):
         ), "Epoch dataframe should at least have columns with names: start, stop, label"
 
     def __repr__(self) -> str:
-        return f"{len(self.starts)} epochs\nSnippet: \n {self._epochs.head(5)}"
+        # return f"{len(self.starts)} epochs"
+        return f"{len(self.starts)} epochs\n{self.as_array().__repr__()}\n"
+
+
+    def _repr_pretty_(self, p, cycle=False):
+        """ The cycle parameter will be true if the representation recurses - e.g. if you put a container inside itself. """
+        # p.text(self.__repr__() if not cycle else '...')
+        p.text(self.to_dataframe().__repr__() if not cycle else '...')
+        
+        # return self.as_array().__repr__() # p.text(repr(self))
+
 
     def __str__(self) -> str:
-        pass
+        return f"{len(self.starts)} epochs\n{self.as_array().__repr__()}\n"
+    
 
-    def __getitem__(self, i):
-
-        if isinstance(i, str):
-            data = self._epochs[self._epochs["label"] == i].copy()
-        elif isinstance(i, int):
-            data = self._epochs.iloc[[i]].copy()
+    def __getitem__(self, slice_):
+        
+        if isinstance(slice_, str):
+            indices = np.where(self.labels == slice_)[0]
+            if len(indices) > 1:
+                return np.vstack((self.starts[indices], self.stops[indices])).T
+            else:
+                return np.array([self.starts[indices], self.stops[indices]]).squeeze()
         else:
-            data = self._epochs.iloc[i].copy()
+            return np.vstack((self.starts[slice_], self.stops[slice_])).T
 
-        return Epoch(epochs=data.reset_index(drop=True))
-
-    def __len__(self):
-        return self.n_epochs
-
+    # for TimeSlicableObjectProtocol:
     def time_slice(self, t_start, t_stop):
         # TODO time_slice should also include partial epochs
         # falling in between the timepoints
         df = self.to_dataframe()
+        t_start, t_stop = self.safe_start_stop_times(t_start, t_stop)
         df = df[(df["start"] > t_start) & (df["start"] < t_stop)].reset_index(drop=True)
         return Epoch(df)
-
-    def duration_slice(self, min_dur=None, max_dur=None):
-        """return epochs that have durations between given thresholds
-
-        Parameters
-        ----------
-        min_dur : float, optional
-            minimum duration in seconds, by default None
-        max_dur : float, optional
-            maximum duration in seconds, by default None,
-
-        Returns
-        -------
-        epoch
-            epochs with durations between min_dur and max_dur
-        """
-        durations = self.durations
-        if min_dur is None:
-            min_dur = np.min(durations)
-        if max_dur is None:
-            max_dur = np.max(durations)
-
-        return self[(durations >= min_dur) & (durations <= max_dur)]
-
+        
     def label_slice(self, label):
-        assert isinstance(label, str), "label must be string"
-        df = self._epochs[self._epochs["label"] == label].reset_index(drop=True)
-        return Epoch(epochs=df)
-
-    @staticmethod
-    def from_array(starts, stops, labels=None):
-        df = pd.DataFrame({"start": starts, "stop": stops, "label": labels})
-        return Epoch(epochs=df)
-
-    @staticmethod
-    def from_file(f):
-        d = DataWriter.from_file(f)
-        if d is not None:
-            return Epoch.from_dict(d)
+        if isinstance(label, (list, np.ndarray)):
+            df = self._data[np.isin(self._data["label"], label)].reset_index(drop=True)
         else:
-            return None
+            assert isinstance(label, str), "label must be string"
+            df = self._data[self._data["label"] == label].reset_index(drop=True)
+        return Epoch(epochs=df)
 
-    @property
-    def is_overlapping(self):
-        starts = self.starts
-        stops = self.stops
+    def to_dict(self, recurrsively=False):
+        return {
+            "epochs": self._data,
+            "metadata": self._metadata,
+        }
 
-        return np.all((starts[1:] - stops[:-1]) < 0)
+    @staticmethod
+    def from_dict(d: dict):
+        return Epoch(d["epochs"], metadata=d["metadata"])
 
-    def itertuples(self):
-        return self.to_dataframe().itertuples()
 
     def fill_blank(self, method="from_left"):
-
-        ep_starts = self._epochs["start"].values
-        ep_stops = self._epochs["stop"].values
-        ep_durations = self._epochs["duration"].values
-        ep_labels = self._epochs["label"].values
+        ep_starts = self.epochs["start"].values
+        ep_stops = self.epochs["stop"].values
+        ep_durations = self.epochs["duration"].values
+        ep_labels = self.epochs["label"].values
 
         mask = (ep_starts[:-1] + ep_durations[:-1]) < ep_starts[1:]
         (inds,) = np.nonzero(mask)
@@ -175,14 +224,11 @@ class Epoch(DataWriter):
                 ep_starts[ind + 1] -= gap / 2.0
                 ep_durations[ind + 1] += gap / 2.0
 
-        # self.epochs["start"] = ep_starts
-        # self.epochs["stop"] = ep_starts + ep_durations
-        # self.epochs["duration"] = ep_durations
-
-        return self.from_array(starts=ep_starts,stops=ep_starts+ep_durations,labels=ep_labels)
+        self.epochs["start"] = ep_starts
+        self.epochs["stop"] = ep_starts + ep_durations
+        self.epochs["duration"] = ep_durations
 
     def delete_in_between(self, t1, t2):
-
         epochs_df = self.to_dataframe()[["start", "stop", "label"]]
         # delete epochs if they are within t1, t2
         epochs_df = epochs_df[~((epochs_df["start"] >= t1) & (epochs_df["stop"] <= t2))]
@@ -220,7 +266,6 @@ class Epoch(DataWriter):
         return Epoch(epochs_df)
 
     def get_proportion_by_label(self, t_start=None, t_stop=None):
-
         if t_start is None:
             t_start = self.starts[0]
         if t_stop is None:
@@ -228,7 +273,7 @@ class Epoch(DataWriter):
 
         duration = t_stop - t_start
 
-        ep = self._epochs.copy()
+        ep = self._data.copy()
         ep = ep[(ep.stop > t_start) & (ep.start < t_stop)].reset_index(drop=True)
 
         if ep["start"].iloc[0] < t_start:
@@ -251,7 +296,6 @@ class Epoch(DataWriter):
         return label_proportion
 
     def count(self, t_start=None, t_stop=None, binsize=300):
-
         if t_start is None:
             t_start = 0
 
@@ -262,12 +306,10 @@ class Epoch(DataWriter):
         bins = np.arange(t_start, t_stop + binsize, binsize)
         return np.histogram(mid_times, bins=bins)[0]
 
-    def as_array(self):
-        """Returns starts and stops as 2d numpy array"""
-        return self.to_dataframe()[["start", "stop"]].to_numpy()
+    def to_neuroscope(self, ext="evt"):
+        with self.filename.with_suffix(f".evt.{ext}").open("w") as a:
+            for event in self.epochs.itertuples():
+                a.write(f"{event.start*1000} start\n{event.stop*1000} end\n")
 
-    def flatten(self):
-        """Returns 1d numpy array of alternating starts and stops
-        NOTE: returned array is monotonically increasing only if epochs are non-overlapping
-        """
-        return self.as_array().flatten("C")
+    def as_array(self):
+        return self.to_dataframe()[["start", "stop"]].to_numpy()
