@@ -10,14 +10,14 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.special import factorial
 from tqdm import tqdm
 
-from neuropy.analyses.placefields import Pf2D
-
-# from .placefields import Pf1d, Pf2d
+from .placefields import Pf1D, PF2d
 from .. import core
-from neuropy.utils import mathutil
+from ..utils import mathutil
 
 
-def epochs_spkcount(neurons: core.Neurons, epochs: core.Epoch, bin_size=0.01, slideby=None):
+def epochs_spkcount(
+    neurons: core.Neurons, epochs: core.Epoch, bin_size=0.01, slideby=None
+):
     # ---- Binning events and calculating spike counts --------
     spkcount = []
     nbins = np.zeros(epochs.n_epochs, dtype="int")
@@ -114,7 +114,10 @@ class Decode1d:
         bincntr = self.ratemap.xbin_centers
 
         if self.epochs is not None:
-            spkcount, nbins = epochs_spkcount(self.neurons, self.epochs, self.bin_size, self.slideby)
+
+            spkcount, nbins = epochs_spkcount(
+                self.neurons, self.epochs, self.bin_size, self.slideby
+            )
             posterior = self._decoder(np.hstack(spkcount), tuning_curves)
             decodedPos = bincntr[np.argmax(posterior, axis=0)]
             cum_nbins = np.cumsum(nbins)[:-1]
@@ -126,7 +129,9 @@ class Decode1d:
             self.score, _ = self.score_posterior(self.posterior)
 
         else:
-            spkcount = self.neurons.get_binned_spiketrains(bin_size=self.bin_size).spike_counts
+            spkcount = self.neurons.get_binned_spiketrains(
+                bin_size=self.bin_size
+            ).spike_counts
 
             self.posterior = self._decoder(spkcount, tuning_curves)
             self.decoded_position = bincntr[np.argmax(self.posterior, axis=0)]
@@ -264,8 +269,8 @@ class Decode1d:
 
 
 class Decode2d:
-    ## TODO: refactor to no longer use the obsolite PF2d and Spikes classes and instead use the Pf2d class
-    def __init__(self, pf2d_obj: Pf2D):
+    def __init__(self, pf2d_obj: PF2d):
+
         assert isinstance(pf2d_obj, PF2d)
         self._obj = pf2d_obj._obj
         self.pf2d = pf2d_obj
