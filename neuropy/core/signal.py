@@ -10,7 +10,6 @@ class Signal:
         sampling_rate,
         t_start=0.0,
         channel_id=None,
-        source_file=None,
     ) -> None:
         self.traces = traces
         self.t_start = t_start
@@ -19,7 +18,6 @@ class Signal:
             self.channel_id = np.arange(self.n_channels)
         else:
             self.channel_id = channel_id
-        self.source_file = source_file
 
     @property
     def t_stop(self):

@@ -11,7 +11,6 @@ class Epoch(DataWriter):
         epochs = self._check_epochs(epochs)
         epochs.loc[:, "label"] = epochs["label"].astype("str")
         self._epochs = epochs.sort_values(by=["start"]).reset_index(drop=True)
-        self.epochs = self._data.copy()
 
     @property
     def starts(self):
