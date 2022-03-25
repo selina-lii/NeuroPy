@@ -8,6 +8,7 @@ from scipy import stats
 
 def plot_epochs(
     epochs: Epoch,
+    y_shift=0,
     labels_order=None,
     colors="Set3",
     alpha=1,
@@ -33,12 +34,6 @@ def plot_epochs(
     [type]
         [description]
     """
-
-    if isinstance(epochs, pd.DataFrame):
-        epochs = Epoch(epochs)
-
-    assert isinstance(epochs, Epoch), "epochs must be neuropy.Epoch object"
-
     n_epochs = epochs.n_epochs
 
     if isinstance(colors, str):
@@ -69,16 +64,18 @@ def plot_epochs(
         dh = 1
         y_min = np.zeros(len(epochs))
 
+    y = 0
     for i, epoch in enumerate(epochs.to_dataframe().itertuples()):
         ax.axvspan(
             epoch.start,
             epoch.stop,
             y_min[i],
             y_min[i] + dh,
-            facecolor=colors[i],
+            color=colors[i],
             edgecolor=None,
             alpha=alpha,
         )
+        y += y_shift
 
     return ax
 
