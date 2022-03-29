@@ -28,7 +28,6 @@ class DataWriter:
 
     @staticmethod
     def from_file(f):
-        f = Path(f) if isinstance(f, str) else f
         if f.is_file():
             d = np.load(f, allow_pickle=True).item()
             return d
