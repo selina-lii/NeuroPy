@@ -258,10 +258,8 @@ class Neurons(DataWriter):
         neuropy.core.BinnedSpiketrains
 
         """
-        duration = self.t_stop - self.t_start
-        n_bins = np.floor(duration / bin_size)
-        # bins = np.arange(self.t_start, self.t_stop + bin_size, bin_size)
-        bins = np.arange(n_bins + 1) * bin_size + self.t_start
+
+        bins = np.arange(self.t_start, self.t_stop + bin_size, bin_size)
         spike_counts = np.asarray(
             [np.histogram(_, bins=bins)[0] for _ in self.spiketrains]
         ).astype("float")
