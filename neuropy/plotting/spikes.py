@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from .. import core
 import numpy as np
-
+from neuropy.utils.colors_util import ColorsUtil
 
 def plot_raster(
     neurons: core.Neurons,
@@ -12,7 +12,6 @@ def plot_raster(
     marker="|",
     markersize=2,
     add_vert_jitter=False,
-    alpha=1,
 ):
     """creates raster plot using spiktrains in neurons
 
@@ -34,7 +33,7 @@ def plot_raster(
         adds vertical jitter to help visualize super dense spiking, not standardly used for rasters...
     """
     if ax is None:
-        _, ax = plt.subplots()
+        fig, ax = plt.subplots()
 
     n_neurons = neurons.n_neurons
 
@@ -46,21 +45,20 @@ def plot_raster(
             color = [cmap(_ / n_neurons) for _ in range(n_neurons)]
         except:
             color = [color] * n_neurons
-    ax.patch.set_facecolor("k")
 
     for ind, spiketrain in enumerate(neurons.spiketrains):
         if add_vert_jitter:
             jitter_add = np.random.randn(len(spiketrain)) * 0.1
+            alpha_use = 0.25
         else:
-            jitter_add = 0
+            jitter_add, alpha_use = 0, 0.5
         ax.plot(
             spiketrain,
             (ind + 1) * np.ones(len(spiketrain)) + jitter_add,
             marker,
             markersize=markersize,
-            markeredgewidth=1.5,
             color=color[ind],
-            alpha=alpha,
+            alpha=alpha_use,
         )
 
     ax.set_xlim([neurons.t_start, neurons.t_stop])
@@ -211,12 +209,3 @@ def plot_waveforms(neurons: core.Neurons, sort_order=None, color="#afadac"):
     return ax
 
 
-
-def get_neuron_colors(sort_indicies, cmap="tab20b"):
-    # returns the list of colors
-    cmap = mpl.cm.get_cmap(cmap)
-    n_neurons = len(sort_indicies)
-    colors_array = np.zeros((4, n_neurons))
-    for i, neuron_ind in enumerate(sort_indicies):
-        colors_array[:, i] = cmap(i / len(sort_indicies))
-    return colors_array
