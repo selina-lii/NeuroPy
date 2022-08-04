@@ -5,9 +5,7 @@ from sklearn.manifold import Isomap
 from scipy.ndimage import gaussian_filter1d
 
 from .. import core
-from neuropy.utils.mathutil import contiguous_regions, threshPeriods
-
-from dataclasses import dataclass # for BinningInfo
+from ..utils.mathutil import contiguous_regions, threshPeriods
 
 
 def linearize_position(position: core.Position, sample_sec=3, method="isomap", sigma=2):
@@ -24,12 +22,11 @@ def linearize_position(position: core.Position, sample_sec=3, method="isomap", s
         'PCA' (for straight tracks)
 
     """
-    ## OLD:
-    # xpos = position.x
-    # ypos = position.y
-    # xy_pos = np.vstack((xpos, ypos)).T
-    pos_df = position.to_dataframe()
-    xy_pos = pos_df[['x','y']].to_numpy()
+    xpos = position.x
+    ypos = position.y
+
+    # NRK todo: check xpos and ypos shape before analyzing.
+    xy_pos = np.vstack((xpos, ypos)).T
     xlinear = None
     if method.lower() == "pca":
         pca = PCA(n_components=1)
@@ -44,25 +41,21 @@ def linearize_position(position: core.Position, sample_sec=3, method="isomap", s
         if iso_pos.std(axis=0)[0] < iso_pos.std(axis=0)[1]:
             iso_pos[:, [0, 1]] = iso_pos[:, [1, 0]]
         xlinear = iso_pos[:, 0]
-    else:
-        print('ERROR: invalid method name: {}'.format(method))
+
     xlinear = gaussian_filter1d(xlinear, sigma=sigma)
-    
-    return core.Position.from_separate_arrays(position.time, xlinear, lin_pos=xlinear, metadata=position.metadata)
-    # return core.Position(pd.DataFrame({'t':pos_df.time, 'x': xlinear}), metadata=position.metadata)
-    
-    # return core.Position.init(
-    #     traces=xlinear, t_start=position.t_start, sampling_rate=position.sampling_rate
-    # )
+    xlinear -= np.min(xlinear)
+    return core.Position(
+        traces=xlinear, t_start=position.t_start, sampling_rate=position.sampling_rate
+    )
 
 
-def calculate_run_direction(
+def run_direction(
     position: core.Position,
-    speedthresh=(10, 20),
-    merge_dur=2,
-    min_dur=2,
-    smooth_speed=50,
-    min_dist=50,
+    speed_thresh=(10, 20),
+    min_duration=2,
+    merge_duration=2,
+    sigma=10,
+    min_distance=50,
 ):
     """Divide running epochs into forward and backward.
     Currently only works for one dimensional position data
@@ -71,42 +64,40 @@ def calculate_run_direction(
     ----------
     speedthresh : tuple, optional
         low and high speed threshold for speed, by default (10, 20)
-    merge_dur : int, optional
+    merge_duration : int, optional
         two epochs if less than merge_dur (seconds) apart they will be merged , by default 2 seconds
-    min_dur : int, optional
+    min_duration : int, optional
         minimum duration of a run epoch, by default 2 seconds
-    smooth_speed : int, optional
-        speed is smoothed, increase if epochs are fragmented, by default 50
-    min_dist : int, optional
-        the animal should cover this much distance in one direction within the lap to be included, by default 50
+    sigma : int, optional
+        speed is smoothed, increase if epochs are fragmented, by default 10
+    min_distance : int, optional
+        the animal should cover this much distance in one direction within the lap to be included, by default 50 cm
     plot : bool, optional
         plots the epochs with position and speed data, by default True
     """
 
+    metadata = locals()
+    metadata.pop("position")
+
     assert position.ndim == 1, "Run direction only supports one dimensional position"
 
-    trackingsampling_rate = position.time
-    posdata = position.to_dataframe()
-
-    posdata = posdata[(posdata.time > period[0]) & (posdata.time < period[1])]
-    x = posdata.linear
-    time = posdata.time
-    speed = posdata.speed
-    speed = gaussian_filter1d(posdata.speed, sigma=smooth_speed)
+    sampling_rate = position.sampling_rate
+    x = position.x
+    speed = gaussian_filter1d(position.speed, sigma=sigma)
 
     high_speed = threshPeriods(
         speed,
-        lowthresh=speedthresh[0],
-        highthresh=speedthresh[1],
-        minDistance=merge_dur * trackingsampling_rate,
-        minDuration=min_dur * trackingsampling_rate,
+        lowthresh=speed_thresh[0],
+        highthresh=speed_thresh[1],
+        minDistance=merge_duration * sampling_rate,
+        minDuration=min_duration * sampling_rate,
     )
     val = []
     for epoch in high_speed:
         displacement = x[epoch[1]] - x[epoch[0]]
         # distance = np.abs(np.diff(x[epoch[0] : epoch[1]])).sum()
 
-        if np.abs(displacement) > min_dist:
+        if np.abs(displacement) > min_distance:
             if displacement < 0:
                 val.append(-1)
             elif displacement > 0:
@@ -119,14 +110,11 @@ def calculate_run_direction(
     high_speed = np.delete(high_speed, np.where(val == 0)[0], axis=0)
     val = np.delete(val, np.where(val == 0)[0])
 
-    high_speed = np.around(high_speed / trackingsampling_rate + period[0], 2)
+    high_speed = np.around(high_speed / sampling_rate + position.t_start, 2)
     data = pd.DataFrame(high_speed, columns=["start", "stop"])
-    # data["duration"] = np.diff(high_speed, axis=1)
-    data["direction"] = np.where(val > 0, "forward", "backward")
+    data["label"] = np.where(val > 0, "forward", "backward")
 
-    self.epochs = run_epochs
-
-    return run_epochs
+    return core.Epoch(epochs=data, metadata=metadata)
 
 
 def calculate_run_epochs(
@@ -193,89 +181,3 @@ def calculate_run_epochs(
     data["direction"] = np.where(val > 0, "forward", "backward")
 
     return run_epochs
-
-
-@dataclass
-class BinningInfo(object):
-    """Docstring for BinningInfo."""
-    variable_extents: tuple
-    step: float
-    num_bins: int
-    bin_indicies: np.ndarray
-    
-    
-
-def compute_spanning_bins(variable_values, num_bins:int=None, bin_size:float=None):
-    """Extracted from pyphocorehelpers.indexing_helpers import compute_position_grid_size for use in BaseDataSessionFormats
-
-
-    Args:
-        variable_values ([type]): [description]
-        num_bins (int, optional): [description]. Defaults to None.
-        bin_size (float, optional): [description]. Defaults to None.
-        debug_print (bool, optional): [description]. Defaults to False.
-
-    Raises:
-        ValueError: [description]
-
-    Returns:
-        [type]: [description]
-        
-    Usage:
-        ## Binning with Fixed Number of Bins:    
-        xbin, ybin, bin_info = compute_spanning_bins(pos_df.x.to_numpy(), bin_size=active_config.computation_config.grid_bin[0]) # bin_size mode
-        print(bin_info)
-        ## Binning with Fixed Bin Sizes:
-        xbin, ybin, bin_info = compute_spanning_bins(pos_df.x.to_numpy(), num_bins=num_bins) # num_bins mode
-        print(bin_info)
-        
-    """
-    assert (num_bins is None) or (bin_size is None), 'You cannot constrain both num_bins AND bin_size. Specify only one or the other.'
-    assert (num_bins is not None) or (bin_size is not None), 'You must specify either the num_bins XOR the bin_size.'
-    curr_variable_extents = (np.nanmin(variable_values), np.nanmax(variable_values))
-    
-    if num_bins is not None:
-        ## Binning with Fixed Number of Bins:
-        mode = 'num_bins'
-        xnum_bins = num_bins
-        xbin, xstep = np.linspace(curr_variable_extents[0], curr_variable_extents[1], num=num_bins, retstep=True)  # binning of x position
-        
-    elif bin_size is not None:
-        ## Binning with Fixed Bin Sizes:
-        mode = 'bin_size'
-        xstep = bin_size
-        xbin = np.arange(curr_variable_extents[0], (curr_variable_extents[1] + xstep), xstep, )  # binning of x position
-        # the interval does not include this value, except in some cases where step is not an integer and floating point round-off affects the length of out.
-        xnum_bins = len(xbin)
-        
-    else:
-        raise ValueError
-    
-    return xbin, BinningInfo(curr_variable_extents, xstep, xnum_bins, np.arange(xnum_bins))
-      
-      
-def compute_position_grid_size(*any_1d_series, num_bins:tuple):
-    """  Computes the required bin_sizes from the required num_bins (for each dimension independently)
-    Usage:
-    out_grid_bin_size, out_bins, out_bins_infos = compute_position_grid_size(curr_kdiba_pipeline.sess.position.x, curr_kdiba_pipeline.sess.position.y, num_bins=(64, 64))
-    active_grid_bin = tuple(out_grid_bin_size)
-    print(f'active_grid_bin: {active_grid_bin}') # (3.776841861770752, 1.043326930905373)
-    
-    History:
-        Extracted from pyphocorehelpers.indexing_helpers import compute_position_grid_size for use in BaseDataSessionFormats
-    
-    """
-    assert (len(any_1d_series)) == len(num_bins), f'(len(other_1d_series)) must be the same length as the num_bins tuple! But (len(other_1d_series)): {(len(any_1d_series))} and len(num_bins): {len(num_bins)}!'
-    num_series = len(num_bins)
-    out_bins = []
-    out_bins_info = []
-    out_bin_grid_step_size = np.zeros((num_series,))
-
-    for i in np.arange(num_series):
-        xbins, xbin_info = compute_spanning_bins(any_1d_series[i], num_bins=num_bins[i])
-        out_bins.append(xbins)
-        out_bins_info.append(xbin_info)
-        out_bin_grid_step_size[i] = xbin_info.step
-
-    return out_bin_grid_step_size, out_bins, out_bins_info
-
