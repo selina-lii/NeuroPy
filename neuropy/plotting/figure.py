@@ -166,12 +166,14 @@ class Fig:
         self.gs = gs
 
     def subplot(self, subplot_spec, sharex=None, sharey=None, **kwargs):
-        return plt.subplot(subplot_spec, sharex=sharex, sharey=sharey, **kwargs)
+        return self.fig.add_subplot(subplot_spec, sharex=sharex, sharey=sharey, **kwargs)
 
     def add_subfigure(self, *args, **kwargs) -> mpl.figure.SubFigure:
         return self.fig.add_subfigure(*args, **kwargs)
 
-    def subplot2grid(self, subplot_spec, grid=(1, 3), **kwargs):
+    def subplot2grid(
+        self, subplot_spec, grid=(1, 3), return_axes: bool = False, **kwargs
+    ):
         """Subplots within a subplot
 
         Parameters
@@ -180,15 +182,27 @@ class Fig:
             subplot inside which subplots are created
         grid : tuple, optional
             number of rows and columns for subplots, by default (1, 3)
+        return_axes: returns axes instead of gridspec
 
         Returns
         -------
-        gridspec
+        gridspec (or axes if specified)
         """
         gs = gridspec.GridSpecFromSubplotSpec(
             grid[0], grid[1], subplot_spec=subplot_spec, **kwargs
         )
-        return gs
+
+        if not return_axes:
+            return gs
+        elif return_axes:
+            ax = []
+            for row in range(grid[0]):
+                ax_col = []
+                for col in range(grid[1]):
+                    ax_col.append(self.fig.add_subplot(gs[row, col]))
+                ax.append(ax_col)
+            # [a.axis("off") for a in ax]
+            return np.array(ax).squeeze() if np.array(ax).ndim > 1 else np.array(ax)
 
     def panel_label(self, ax, label, fontsize=12, x=-0.14, y=1.15):
         ax.text(
@@ -299,6 +313,172 @@ def pretty_plot(ax, round_ylim=False):
     ax.spines["top"].set_visible(False)
 
     return ax
+
+
+# class ScrollPlot:
+#     """
+#     Plot stuff then scroll through it! A bit hacked together as of 2/28/2020. Better would be to input a figure and axes
+#     along with the appropriate plotting functions?
+#     Created on Thu Jan 18 10:53:29 2018
+#     @author: William Mau, modified by Nat Kinsky
+#     :param
+#         plot_func: tuple of plotting functions to plot into the appropriate axes (default) or figure (have to
+#         specify config='figure').
+#         x: X axis data.
+#         y: Y axis data.
+#         xlabel = 'x': X axis label.
+#         ylabel = 'y': Y axis label.
+#         combine_rows = list of subplots rows to combine into one subplot. Currently only supports doing all bottom
+#         rows which must match the functions specified in plot_func
+#     """
+
+#     # Initialize the class. Gather the data and labels.
+#     def __init__(
+#         self,
+#         plot_func,
+#         xlabel="",
+#         ylabel="",
+#         titles=([" "] * 10000),
+#         n_rows=1,
+#         n_cols=1,
+#         figsize=(8, 6),
+#         combine_rows=[],
+#         config="axes",
+#         **kwargs,
+#     ):
+
+#         self.plot_func = plot_func
+#         self.xlabel = xlabel
+#         self.ylabel = ylabel
+#         self.titles = titles
+#         self.n_rows = n_rows  # NK can make default = len(plot_func)
+#         self.n_cols = n_cols
+#         self.share_y = False
+#         self.share_x = False
+#         self.figsize = figsize
+#         self.config = config  # options are 'axes' or 'figure'
+
+#         # Dump all arguments into ScrollPlot.
+#         for key, value in kwargs.items():
+#             setattr(self, key, value)
+
+#         if config == "axes":
+#             self.fig, self.ax, = plt.subplots(
+#                 self.n_rows,
+#                 self.n_cols,
+#                 sharey=self.share_y,
+#                 sharex=self.share_x,
+#                 figsize=self.figsize,
+#             )
+#             if n_cols == 1 and n_rows == 1:
+#                 self.ax = (self.ax,)
+
+#             # Make rows into one subplot if specified
+#             if len(combine_rows) > 0:
+#                 for row in combine_rows:
+#                     plt.subplot2grid(
+#                         (self.n_rows, self.n_cols),
+#                         (row, 0),
+#                         colspan=self.n_cols,
+#                         fig=self.fig,
+#                     )
+#                 self.ax = self.fig.get_axes()
+
+#             # Flatten into 1d array if necessary and not done already via combining rows
+#             if n_cols > 1 and n_rows > 1 and hasattr(self.ax, "flat"):
+#                 self.ax = self.ax.flat
+
+#             # Necessary for scrolling.
+#             if not hasattr(self, "current_position"):
+#                 self.current_position = 0
+
+#             # Plot the first plot of each function and label
+#             for ax_ind, plot_f in enumerate(self.plot_func):
+#                 plot_f(self, ax_ind)
+#                 self.apply_labels()
+#                 # print(str(ax_ind))
+
+#             # Connect the figure to keyboard arrow keys.
+#             self.fig.canvas.mpl_connect(
+#                 "key_press_event", lambda event: self.update_plots(event)
+#             )
+#         elif config == "figure":
+#             print("not yet configured")
+
+#     # Go up or down the list. Left = down, right = up.
+#     def scroll(self, event):
+#         if event.key == "right" and self.current_position <= self.last_position:
+#             if self.current_position <= self.last_position:
+#                 if self.current_position == self.last_position:
+#                     self.current_position = 0
+#                 else:
+#                     self.current_position += 1
+#         elif event.key == "left" and self.current_position >= 0:
+#             if self.current_position == 0:
+#                 self.current_position = self.last_position
+#             else:
+#                 self.current_position -= 1
+#         elif event.key == "6":
+#             if (self.current_position + 15) < self.last_position:
+#                 self.current_position += 15
+#             elif (self.current_position + 15) >= self.last_position:
+#                 if self.current_position == self.last_position:
+#                     self.current_position = 0
+#                 else:
+#                     self.current_position = self.last_position
+#         elif event.key == "4":
+#             print("current position before = " + str(self.current_position))
+#             if self.current_position > 15:
+#                 self.current_position -= 15
+#             elif self.current_position <= 15:
+#                 if self.current_position == 0:
+#                     self.current_position = self.last_position
+#                 else:
+#                     self.current_position = 0
+#             print("current position after = " + str(self.current_position))
+#         elif event.key == "9" and (self.current_position + 100) < self.last_position:
+#             self.current_position += 100
+#         elif event.key == "7" and self.current_position > 100:
+#             self.current_position -= 100
+
+#             # Apply axis labels.
+
+#     def apply_labels(self):
+#         plt.xlabel(self.xlabel)
+#         plt.ylabel(self.ylabel)
+#         plt.title(self.titles[self.current_position])
+
+#     # Update the plot based on keyboard inputs.
+#     def update_plots(self, event):
+#         # Clear axis.
+#         try:
+#             for ax in self.ax:
+#                 ax.cla()
+#                 # print('Cleared axes!')
+#         except:
+#             self.ax.cla()
+
+#         # Scroll then update plot.
+#         self.scroll(event)
+
+#         # Run the plotting function.
+#         for ax_ind, plot_f in enumerate(self.plot_func):
+#             plot_f(self, ax_ind)
+#             # self.apply_labels()
+
+#         # Draw.
+#         self.fig.canvas.draw()
+
+#         if event.key == "escape":
+#             plt.close(self.fig)
+
+#     def update_fig(self, event, **kwargs):
+#         self.fig.clf()
+#         self.scroll(event)
+#         self.plot_func(fig=self.fig, **kwargs)
+#         self.fig.canvas.draw()
+#         if event.key == "escape":
+#             plt.close(self.fig)
 
 
 def neuron_number_title(neurons):
