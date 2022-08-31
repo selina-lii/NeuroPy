@@ -1,15 +1,20 @@
-import matplotlib.pyplot as plt
+from pathlib import Path
+from pstats import Stats
+from tracemalloc import start
 import numpy as np
 import pandas as pd
+from scipy.ndimage import gaussian_filter1d
 import scipy.stats as stats
 from hmmlearn.hmm import GaussianHMM
 from joblib import Parallel, delayed
-from neuropy.core.epoch import Epoch
-from scipy.ndimage import gaussian_filter1d
+import matplotlib.pyplot as plt
+from neuropy.core import epoch
 
+from neuropy.core.epoch import Epoch
+
+from ..utils import signal_process, mathutil
 from .. import core
 from ..plotting import plot_epochs
-from ..utils import mathutil, signal_process
 
 
 def hmmfit1d(Data, ret_means=False, **kwargs):
@@ -104,7 +109,7 @@ def correlation_emg(
     x, y = probe_df.x.values.astype("float"), probe_df.y.values.astype("float")
     squared_diff = lambda arr: (arr[:, np.newaxis] - arr[np.newaxis, :]) ** 2
     distance = np.sqrt(squared_diff(x) + squared_diff(y))
-    distance_bool = distance > 0
+    distance_bool = distance > 150
 
     timepoints = np.arange(t_start, t_stop - window, window - overlap)
 
@@ -177,12 +182,12 @@ def detect_brainstates_epochs(
         theta = smooth_(theta_chan_sg.theta)
         delta_all = smooth_(theta_chan_sg.get_band_power(2, 20))
         time = theta_chan_sg.time
-        theta_ratio = theta / delta_all
+        theta_ratio = stats.zscore(theta / delta_all)
 
     if delta_channel is not None:
         delta_signal = signal.time_slice(channel_id=[theta_channel])
         delta_chan_sg = signal_process.FourierSg(delta_signal, **spect_kw)
-        delta = smooth_(delta_chan_sg.delta)
+        delta = stats.zscore(smooth_(delta_chan_sg.delta))
 
     print(f"spectral properties calculated")
 
@@ -196,6 +201,7 @@ def detect_brainstates_epochs(
         # TODO: if one of the channels provides emg, use that
         # emg = signal.time_slice(emg_channel)
 
+    emg = stats.zscore(emg)
     # ----- set timepoints from ignore_epochs to np.nan ------
 
     if ignore_epochs is not None:
@@ -210,11 +216,6 @@ def detect_brainstates_epochs(
         delta[noisy_timepoints] = np.nan
         theta_ratio[noisy_timepoints] = np.nan
         emg[noisy_timepoints] = np.nan
-
-    # --zscore parameters
-    delta = stats.zscore(delta, nan_policy="omit")
-    emg = stats.zscore(emg, nan_policy="omit")
-    theta_ratio = stats.zscore(theta_ratio, nan_policy="omit")
 
     delta_bool = hmmfit1d(delta).astype("bool")
     theta_ratio_bool = hmmfit1d(theta_ratio).astype("bool")

@@ -25,7 +25,6 @@ class Pf1D(core.Ratemap):
     ):
         """computes 1d place field using linearized coordinates. It always computes two place maps with and
         without speed thresholds.
-
         Parameters
         ----------
         neurons : core.Neurons
@@ -42,7 +41,10 @@ class Pf1D(core.Ratemap):
             speed threshold for calculating place field, by default None
         sigma : float
             standard deviation for smoothing occupancy and spikecounts in each position bin, in units of cm, default 1 cm
+<<<<<<< HEAD
+=======
 
+>>>>>>> neuropy_orig/main
         NOTE: speed_thresh is ignored if epochs is provided
         """
 
@@ -124,7 +126,6 @@ class Pf1D(core.Ratemap):
 
     def estimate_theta_phases(self, signal: core.Signal):
         """Calculates phase of spikes computed for placefields
-
         Parameters
         ----------
         theta_chan : int
@@ -218,20 +219,17 @@ class Pf1D(core.Ratemap):
         return plotting.plot_raw_ratemaps()
 
 
-class Pf2D:
-    def __init__(
-        self,
-        neurons: core.Neurons,
-        position: core.Position,
-        epochs: core.Epoch = None,
-        frate_thresh=1.0,
-        speed_thresh=3,
-        grid_bin=1,
-        sigma=1,
+class PF2d:
+    def __init__(self, basepath, **kwargs):
+        if isinstance(basepath, Recinfo):
+            self._obj = basepath
+        else:
+            self._obj = Recinfo(basepath)
+
+    def compute(
+        self, period, spikes=None, gridbin=10, speed_thresh=5, frate_thresh=1, smooth=2
     ):
-
         """Calculates 2D placefields
-
         Parameters
         ----------
         period : list/array
@@ -240,42 +238,43 @@ class Pf2D:
             bin size of grid in centimeters, by default 10
         speed_thresh : int, optional
             speed threshold in cm/s, by default 10 cm/s
-
         Returns
         -------
         [type]
             [description]
         """
-        assert position.ndim > 1, "Position is not 2D"
-        period = [position.t_start, position.t_stop]
-        smooth_ = lambda f: gaussian_filter1d(
-            f, sigma / grid_bin, axis=-1
-        )  # divide by grid_bin to account for discrete spacing
+        assert len(period) == 2, "period should have length 2"
+        position = ExtractPosition(self._obj)
+        # ------ Cell selection ---------
+        if spikes is None:
+            spike_info = Spikes(self._obj)
+            spikes = spike_info.pyr
+            cell_ids = spike_info.pyrid
+        else:
+            cell_ids = np.arange(len(spikes))
 
-        spikes = neurons.time_slice(*period).spiketrains
-        cell_ids = neurons.neuron_ids
         nCells = len(spikes)
 
         # ----- Position---------
         xcoord = position.x
         ycoord = position.y
-        time = position.time
-        trackingRate = position.sampling_rate
+        time = position.t
+        trackingRate = position.tracking_sRate
 
         ind_maze = np.where((time > period[0]) & (time < period[1]))
         x = xcoord[ind_maze]
         y = ycoord[ind_maze]
         t = time[ind_maze]
 
-        x_grid = np.arange(min(x), max(x) + grid_bin, grid_bin)
-        y_grid = np.arange(min(y), max(y) + grid_bin, grid_bin)
+        x_grid = np.arange(min(x), max(x) + gridbin, gridbin)
+        y_grid = np.arange(min(y), max(y) + gridbin, gridbin)
         # x_, y_ = np.meshgrid(x_grid, y_grid)
 
         diff_posx = np.diff(x)
         diff_posy = np.diff(y)
 
-        speed = np.sqrt(diff_posx**2 + diff_posy**2) / (1 / trackingRate)
-        speed = smooth_(speed)
+        speed = np.sqrt(diff_posx ** 2 + diff_posy ** 2) / (1 / trackingRate)
+        speed = gaussian_filter1d(speed, sigma=smooth)
 
         dt = t[1] - t[0]
         running = np.where(speed / dt > speed_thresh)[0]
@@ -303,7 +302,7 @@ class Pf2D:
 
                 # Calculate maps
                 spk_map = np.histogram2d(spk_x, spk_y, bins=(x_grid_, y_grid_))[0]
-                spk_map = smooth_(spk_map)
+                spk_map = gaussian_filter(spk_map, sigma=smooth)
                 maps.append(spk_map / occupancy_)
 
                 spk_t.append(spk_maze[spd_ind])
@@ -315,7 +314,7 @@ class Pf2D:
         # NRK todo: might need to normalize occupancy so sum adds up to 1
         occupancy = np.histogram2d(x_thresh, y_thresh, bins=(x_grid, y_grid))[0]
         occupancy = occupancy / trackingRate + 10e-16  # converting to seconds
-        occupancy = smooth_(occupancy)
+        occupancy = gaussian_filter(occupancy, sigma=2)
 
         maps, spk_pos, spk_t = make_pfs(
             t, x, y, spikes, occupancy, speed_thresh, period, x_grid, y_grid
@@ -341,7 +340,7 @@ class Pf2D:
         self.t = t
         self.xgrid = x_grid
         self.ygrid = y_grid
-        self.gridbin = grid_bin
+        self.gridbin = gridbin
         self.speed_thresh = speed_thresh
         self.period = period
         self.frate_thresh = frate_thresh
@@ -358,7 +357,6 @@ class Pf2D:
 
     def plotMap(self, subplots=(7, 4), fignum=None):
         """Plots heatmaps of placefields with peak firing rate
-
         Parameters
         ----------
         speed_thresh : bool, optional
@@ -453,7 +451,7 @@ class Pf2D:
                 ax1.set_title(f"Cell {info}")
 
         fig.suptitle(
-            f"Place maps for cells with their peak firing rate (frate thresh={self.frate_thresh},speed_thresh={self.speed_thresh})"
+            f"Place maps for cells with their peak firing rate (frate thresh={self.peak_frate},speed_thresh={self.speed_thresh})"
         )
 
     def plotRaw_v_time(self, cellind, speed_thresh=False, alpha=0.5, ax=None):
@@ -468,7 +466,7 @@ class Pf2D:
             a.plot(self.t, pos)
             a.set_xlabel("Time (seconds)")
             a.set_ylabel(ylabel)
-            # pretty_plot(a)
+            pretty_plot(a)
 
         # Grab correct spike times/positions
         if speed_thresh:

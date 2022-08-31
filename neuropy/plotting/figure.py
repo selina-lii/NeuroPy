@@ -102,40 +102,33 @@ class Colormap:
 
 
 class Fig:
+    labelsize = 8
+
     def __init__(
         self,
         num=None,
         grid=(2, 2),
         size=(8.5, 11),
-        fontsize=5,
+        fontsize=8,
         axis_color="#545454",
-        axis_lw=1.2,
-        tick_size=3.5,
+        axis_lw=1.5,
         constrained_layout=True,
-        fontname="Arial",
         **kwargs,
     ):
 
         # --- plot settings --------
-        mpl.rcParams["font.family"] = fontname
-        # mpl.rcParams["font.sans-serif"] = "Arial"
-        mpl.rcParams["pdf.fonttype"] = 42
-        mpl.rcParams["ps.fonttype"] = 42
         mpl.rcParams["axes.linewidth"] = axis_lw
         mpl.rcParams["axes.labelsize"] = fontsize
         mpl.rcParams["axes.titlesize"] = fontsize
         mpl.rcParams["axes.edgecolor"] = axis_color
         mpl.rcParams["xtick.labelsize"] = fontsize
-        mpl.rcParams["xtick.major.pad"] = 2
         mpl.rcParams["ytick.labelsize"] = fontsize
         mpl.rcParams["axes.spines.top"] = False
         mpl.rcParams["axes.spines.right"] = False
-        mpl.rcParams["xtick.major.width"] = axis_lw
-        mpl.rcParams["xtick.major.size"] = tick_size
-        mpl.rcParams["ytick.major.size"] = tick_size
+        mpl.rcParams["xtick.major.width"] = 1.5
         mpl.rcParams["xtick.color"] = axis_color
         mpl.rcParams["xtick.labelcolor"] = "k"
-        mpl.rcParams["ytick.major.width"] = axis_lw
+        mpl.rcParams["ytick.major.width"] = 1.5
         mpl.rcParams["ytick.color"] = axis_color
         mpl.rcParams["ytick.labelcolor"] = "k"
         mpl.rcParams["figure.constrained_layout.use"] = constrained_layout
@@ -158,18 +151,14 @@ class Fig:
 
         fig = plt.figure(num=num, figsize=(8.5, 11), clear=True)
         fig.set_size_inches(size[0], size[1])
-        gs = gridspec.GridSpec(grid[0], grid[1], figure=fig, **kwargs)
-
+        gs = gridspec.GridSpec(grid[0], grid[1], figure=fig)
         # fig.subplots_adjust(**kwargs)
 
         self.fig = fig
         self.gs = gs
 
-    def subplot(self, subplot_spec, sharex=None, sharey=None, **kwargs):
-        return plt.subplot(subplot_spec, sharex=sharex, sharey=sharey, **kwargs)
-
-    def add_subfigure(self, *args, **kwargs) -> mpl.figure.SubFigure:
-        return self.fig.add_subfigure(*args, **kwargs)
+    def subplot(self, subplot_spec):
+        return plt.subplot(subplot_spec)
 
     def subplot2grid(self, subplot_spec, grid=(1, 3), **kwargs):
         """Subplots within a subplot
@@ -239,7 +228,7 @@ class Fig:
                 alpha=0.5,
             )
 
-        fig.savefig(filename, dpi=dpi, backend="pdf")
+        fig.savefig(filename, dpi=dpi)
 
         if caption is not None:
             fig_caption = Fig(grid=(1, 1))
@@ -266,10 +255,10 @@ class Fig:
         ax.tick_params("y", length=0)
 
     @staticmethod
-    def toggle_spines(ax, sides=("top", "right"), keep=False):
+    def remove_spines(ax, sides=("top", "right")):
 
         for side in sides:
-            ax.spines[side].set_visible(keep)
+            ax.spines[side].set_visible(False)
 
     @staticmethod
     def set_spines_width(ax, lw=2, sides=("bottom", "left")):

@@ -1,5 +1,7 @@
 import numpy as np
 
+# from .core import DataWriter
+
 
 class Signal:
     def __init__(
@@ -8,6 +10,7 @@ class Signal:
         sampling_rate,
         t_start=0.0,
         channel_id=None,
+        source_file=None,
     ) -> None:
         self.traces = traces
         self.t_start = t_start
@@ -16,6 +19,7 @@ class Signal:
             self.channel_id = np.arange(self.n_channels)
         else:
             self.channel_id = channel_id
+        self.source_file = source_file
 
     @property
     def t_stop(self):
@@ -71,27 +75,6 @@ class Signal:
 
         return Signal(traces, self.sampling_rate, t_start, channel_id)
 
-    def rescale(self, factor=0.95 * 1e-3):
-        """scales signal, use it for converting raw signal to volts, but can consume too much memory and time when used on large memmap arrays
-
-        Parameters
-        ----------
-        factor : float, optional
-            multiply the signal with this value, by default 0.95*1e-6 (openephys raw to millivolts)
-
-        Returns
-        -------
-        Signal
-            Signal object containing rescaled traces
-        """
-
-        return Signal(
-            traces=self.traces * factor,
-            sampling_rate=self.sampling_rate,
-            t_start=self.t_start,
-            channel_id=self.channel_id,
-        )
-
 
 class Spectrogram(Signal):
     def __init__(self, traces, freqs, sampling_rate=1, t_start=0) -> None:
@@ -103,29 +86,6 @@ class Spectrogram(Signal):
 
     def time_slice(self, t_start=None, t_stop=None):
         return super().time_slice(t_start=t_start, t_stop=t_stop)
-
-    def freq_slice(self, f1=None, f2=None):
-        if f1 is None:
-            f1 = self.freqs[0]
-
-        if f2 is None:
-            f2 = self.freqs[-1]
-
-        assert f1 >= self.freqs[0], "f1 should be greater than lowest frequency"
-        assert (
-            f2 <= self.freqs[-1]
-        ), "f2 should be lower than highest possible frequency"
-        assert f2 > f1, "f2 should be greater than f1"
-
-        ind = np.where((self.freqs >= f1) & (self.freqs <= f2))[0]
-        freqs = self.freqs[ind]
-
-        return Spectrogram(
-            traces=self.traces[ind],
-            freqs=freqs,
-            sampling_rate=self.sampling_rate,
-            t_start=self.t_start,
-        )
 
     def mean_power(self):
         return np.mean(self.traces, axis=0)

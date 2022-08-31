@@ -2,11 +2,18 @@ from enum import unique
 import numpy as np
 import pandas as pd
 from .datawriter import DataWriter
+from pathlib import Path
 
 
 class Epoch(DataWriter):
-    def __init__(self, epochs: pd.DataFrame, metadata=None) -> None:
+    def __init__(self, epochs: pd.DataFrame or None, metadata=None, file=None) -> None:
         super().__init__(metadata=metadata)
+
+        if epochs is None:
+            assert (
+                file is not None
+            ), "Must specify file to load if no epochs dataframe entered"
+            epochs = np.load(file, allow_pickle=True).item()["epochs"]
 
         epochs = self._check_epochs(epochs)
         epochs.loc[:, "label"] = epochs["label"].astype("str")
@@ -91,7 +98,7 @@ class Epoch(DataWriter):
 
         if isinstance(i, str):
             data = self._epochs[self._epochs["label"] == i].copy()
-        elif isinstance(i, (int, np.integer)):
+        elif isinstance(i, int):
             data = self._epochs.iloc[[i]].copy()
         else:
             data = self._epochs.iloc[i].copy()
@@ -101,24 +108,12 @@ class Epoch(DataWriter):
     def __len__(self):
         return self.n_epochs
 
-    def time_slice(self, t_start, t_stop, strict=True):
-        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
-        starts = self.starts
-        stops = self.stops
-
-        if strict:
-            keep = (starts >= t_start) & (stops <= t_stop)  # strictly inside
-            epoch_df = self.to_dataframe()[keep].reset_index(drop=True)
-            epoch_df = epoch_df.drop(["duration"], axis=1)
-        else:
-            # also include and trim epochs: that span the entire range, epochs that start before but end inside, epochs that start inside but end outside
-            keep = (starts <= t_stop) & (stops >= t_start)
-            epoch_df = self.to_dataframe()[keep].reset_index(drop=True)
-            epoch_df = epoch_df.drop(["duration"], axis=1)
-            epoch_df[epoch_df["start"] < t_start] = t_start
-            epoch_df[epoch_df["stop"] > t_stop] = t_stop
-
-        return Epoch(epoch_df)
+    def time_slice(self, t_start, t_stop):
+        # TODO time_slice should also include partial epochs
+        # falling in between the timepoints
+        df = self.to_dataframe()
+        df = df[(df["start"] > t_start) & (df["start"] < t_stop)].reset_index(drop=True)
+        return Epoch(df)
 
     def duration_slice(self, min_dur=None, max_dur=None):
         """return epochs that have durations between given thresholds
@@ -250,60 +245,6 @@ class Epoch(DataWriter):
 
         return self.from_array(
             starts=ep_starts, stops=ep_starts + ep_durations, labels=ep_labels
-        )
-
-    def merge(self, dt):
-        """Merge epochs that are within some temporal distance
-
-        Parameters
-        ----------
-        dt : float
-            temporal distance in seconds
-
-        Returns
-        -------
-        Epoch
-        """
-        n_epochs = self.n_epochs
-        starts, stops = self.starts, self.stops
-        ind_delete = []
-        for i in range(n_epochs - 1):
-            if (starts[i + 1] - stops[i]) < dt:
-
-                # stretch the second epoch to cover the range of both epochs
-                starts[i + 1] = min(starts[i], starts[i + 1])
-                stops[i + 1] = max(stops[i], stops[i + 1])
-
-                ind_delete.append(i)
-
-        epochs_arr = np.vstack((starts, stops)).T
-        epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
-        return Epoch.from_array(epochs_arr[:, 0], epochs_arr[:, 1])
-
-    def contains(self, t):
-        """Check if timepoints lie within epochs, must be non-overlapping epochs
-
-        Parameters
-        ----------
-        t : array
-            timepoints in seconds
-
-        Returns
-        -------
-        _type_
-            _description_
-        """
-
-        assert ~self.is_overlapping, "Epochs must be non overlapping"
-
-        labels = self.labels
-        bin_loc = np.digitize(t, self.flatten())
-        indx_bool = bin_loc % 2 == 1
-
-        return (
-            indx_bool,
-            t[indx_bool],
-            labels[((bin_loc[indx_bool] - 1) / 2).astype("int")],
         )
 
     def delete_in_between(self, t1, t2):

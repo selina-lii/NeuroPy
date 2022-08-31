@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from ..utils.mathutil import gaussian_kernel1D
+from scipy.ndimage import gaussian_filter1d
 import scipy.signal as sg
 from .datawriter import DataWriter
 from . import Epoch
@@ -136,9 +136,12 @@ class Neurons(DataWriter):
 
     def time_slice(self, t_start=None, t_stop=None):
 
-        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        t_start, t_stop = self._time_check(t_start, t_stop)
         neurons = deepcopy(self)
-        spiketrains = [t[(t >= t_start) & (t <= t_stop)] for t in neurons.spiketrains]
+        spiketrains = [
+            spktrn[(spktrn > t_start) & (spktrn < t_stop)]
+            for spktrn in neurons.spiketrains
+        ]
 
         return Neurons(
             spiketrains=spiketrains,
@@ -175,6 +178,15 @@ class Neurons(DataWriter):
         #     ]
         # )
 
+    def _time_check(self, t_start, t_stop):
+        if t_start is None:
+            t_start = self.t_start
+
+        if t_stop is None:
+            t_stop = self.t_stop
+
+        return t_start, t_stop
+
     def __str__(self) -> str:
         return f"# neurons = {self.n_neurons}"
 
@@ -203,8 +215,7 @@ class Neurons(DataWriter):
 
     def get_by_id(self, ids):
         """Returns neurons object with neuron_ids equal to ids"""
-        # indices = np.isin(self.neuron_ids, ids, assume_unique=True)
-        indices = np.array([np.where(self.neuron_ids == _)[0][0] for _ in ids])
+        indices = np.isin(self.neuron_ids, ids)
         return self[indices]
 
     def get_isi(self, bin_size=0.001, n_bins=200):
@@ -247,16 +258,14 @@ class Neurons(DataWriter):
         neuropy.core.BinnedSpiketrains
 
         """
-        duration = self.t_stop - self.t_start
-        n_bins = np.floor(duration / bin_size)
-        # bins = np.arange(self.t_start, self.t_stop + bin_size, bin_size)
-        bins = np.arange(n_bins + 1) * bin_size + self.t_start
+
+        bins = np.arange(self.t_start, self.t_stop + bin_size, bin_size)
         spike_counts = np.asarray(
             [np.histogram(_, bins=bins)[0] for _ in self.spiketrains]
         ).astype("float")
         if ignore_epochs is not None:
             ignore_bins = ignore_epochs.flatten()
-            ignore_indices = np.digitize(bins[:-1], ignore_bins) % 2 == 1
+            ignore_indices = np.where(np.digitize(bins, ignore_bins) % 2 == 1)[0]
             spike_counts[:, ignore_indices] = np.nan
 
         return BinnedSpiketrain(
@@ -333,9 +342,7 @@ class Neurons(DataWriter):
 
         return np.asarray(counts)
 
-    def get_spikes_in_epochs(
-        self, epochs: Epoch, bin_size=0.01, slideby=None, sigma=None
-    ):
+    def get_spikes_in_epochs(self, epochs: Epoch, bin_size=0.01, slideby=None):
         """A list of 2D arrays containing spike counts
 
         Parameters
@@ -346,8 +353,6 @@ class Neurons(DataWriter):
             bin size to be used to within each epoch, by default 0.01
         slideby : [type], optional
             if spike counts should have sliding window, by default None
-        sigma: float, optional
-            standard deviation for gaussian kernel used for smoothing in seconds, by default None
 
         Returns
         -------
@@ -398,13 +403,6 @@ class Neurons(DataWriter):
 
                 nbins[i] = slide_view.shape[1]
                 spkcount.append(slide_view)
-
-        if sigma is not None:
-            kernel = gaussian_kernel1D(sigma=sigma, bin_size=bin_size)
-            spkcount = [
-                np.apply_along_axis(np.convolve, arr=_, v=kernel, mode="same", axis=1)
-                for _ in spkcount
-            ]
 
         return spkcount, nbins
 
@@ -468,8 +466,8 @@ class BinnedSpiketrain(DataWriter):
     def time(self):
         return np.arange(self.n_bins) * self.bin_size + self.t_start
 
-    def _get_nan_bins(self):
-        return np.isnan(self.spike_counts).any(axis=0)
+    def _ignore_indices_bool(self):
+        return ~np.isnan(self.spike_counts).any(axis=0)
 
     def get_pairwise_corr(self, pairs_bool=None, return_pair_id=False):
         """Pairwise correlation between pairs of binned of spiketrains
@@ -488,7 +486,7 @@ class BinnedSpiketrain(DataWriter):
         """
 
         assert self.n_neurons > 1, "Should have more than 1 neuron"
-        corr = np.corrcoef(self.spike_counts[:, ~self._get_nan_bins()])
+        corr = np.corrcoef(self.spike_counts[:, self._ignore_indices_bool()])
 
         if pairs_bool is not None:
             assert (

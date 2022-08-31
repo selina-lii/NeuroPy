@@ -11,7 +11,6 @@ def plot_raster(
     color=None,
     marker="|",
     markersize=2,
-    markeredgewidth=1,
     add_vert_jitter=False,
     alpha=1,
 ):
@@ -58,7 +57,7 @@ def plot_raster(
             (ind + 1) * np.ones(len(spiketrain)) + jitter_add,
             marker,
             markersize=markersize,
-            markeredgewidth=markeredgewidth,
+            markeredgewidth=1.5,
             color=color[ind],
             alpha=alpha,
         )
