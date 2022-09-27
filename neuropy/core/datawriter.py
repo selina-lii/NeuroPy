@@ -1,38 +1,15 @@
 import numpy as np
-import pathlib
 from pathlib import Path
 
-from neuropy.utils.mixins.dict_representable import DictRepresentable
-from neuropy.utils.mixins.file_representable import FileRepresentable
-from neuropy.utils.mixins.print_helpers import SimplePrintable
 
-
-class LegacyDataLoadingMixin:
-    @classmethod
-    def legacy_from_dict(cls, dict_rep: dict):
-        """ Tries to load the dict using previous versions of this code. """
-        raise NotImplementedError
-    
-        
-
-class DataWriter(FileRepresentable, DictRepresentable, LegacyDataLoadingMixin, SimplePrintable):
-    def __init__(self, metadata=None) -> None:
-
-        self._filename = None
+class DataWriter:
+    def __init__(self, metadata: dict = None) -> None:
 
         if metadata is not None:
             assert isinstance(metadata, dict), "Only dictionary accepted as metadata"
-
-        self._metadata: dict = metadata
-
-    @property
-    def filename(self):
-        return self._filename
-
-    @filename.setter
-    def filename(self, f):
-        assert isinstance(f, (str, Path))
-        self._filename = f
+            self._metadata: dict = metadata
+        else:
+            self._metadata: dict = {}
 
     @property
     def metadata(self):
@@ -43,69 +20,34 @@ class DataWriter(FileRepresentable, DictRepresentable, LegacyDataLoadingMixin, S
         """metadata compatibility"""
         if d is not None:
             assert isinstance(d, dict), "Only dictionary accepted"
-            if self._metadata is not None:
-                self._metadata = self._metadata | d # if we already have valid metadata, merge the dicts
-            else:
-                self._metadata = d # otherwise we can just set it directly
-                
-    ## DictRepresentable protocol:
-    @staticmethod
-    def from_dict(d):
-        return NotImplementedError
+            self._metadata = self._metadata | d
 
-    def to_dict(self, recurrsively=False):
-        return NotImplementedError
-
-    ## FileRepresentable protocol:
     @classmethod
-    def from_file(cls, f):
+    def from_dict(cls, d):
+        return cls(**d)
+
+    @staticmethod
+    def from_file(f):
+        f = Path(f) if isinstance(f, str) else f
         if f.is_file():
-            dict_rep = None
-            try:
-                dict_rep = np.load(f, allow_pickle=True).item()
-                # return dict_rep
-            except NotImplementedError:
-                print("Issue with pickled POSIX_PATH on windows for path {}, falling back to non-pickled version...".format(f))
-                temp = pathlib.PosixPath
-                # pathlib.PosixPath = pathlib.WindowsPath # Bad hack
-                pathlib.PosixPath = pathlib.PurePosixPath # Bad hack
-                dict_rep = np.load(f, allow_pickle=True).item()
-            
-            if dict_rep is not None:
-                # Convert to object
-                try:
-                    obj = cls.from_dict(dict_rep)
-                except KeyError as e:
-                    # print(f'f: {f}, dict_rep: {dict_rep}')
-                    # Tries to load using any legacy methods defined in the class
-                    obj = cls.legacy_from_dict(dict_rep)
-                    # raise e
-                
-                obj.filename = f
-                return obj
-            return dict_rep
-            
+            d = np.load(f, allow_pickle=True).item()
+            return d
         else:
             return None
-        
-    @classmethod
-    def to_file(cls, data: dict, f, status_print=True):
-        if f is not None:
-            assert isinstance(f, Path)
-            np.save(f, data)
-            if status_print:
-                print(f"{f.name} saved")
-        else:
-            print("WARNING: filename can not be None")
 
+    def to_dict(self):
+        d = dict()
+        attrs = self.__dict__.keys()
+        for k in attrs:
+            if k.startswith("_"):
+                d[k[1:]] = getattr(self, k)
+            else:
+                d[k] = getattr(self, k)
+        return d
 
-    def save(self, status_print=True):
+    def save(self, fp):
+
+        assert isinstance(fp, (str, Path)), "filename is invalid"
         data = self.to_dict()
-        DataWriter.to_file(data, self.filename)
-
-    def delete_file(self):
-        self.filename.unlink()
-        print(f"file {self.filename} removed")
-
-    def create_backup(self):
-        pass
+        np.save(fp, data)
+        print(f"{fp} saved")
