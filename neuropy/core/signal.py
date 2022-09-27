@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class Signal:
     def __init__(
         self,
@@ -9,8 +10,7 @@ class Signal:
         channel_id=None,
         source_file=None,
     ) -> None:
-        assert traces.ndim <= 2
-        self.traces = traces if traces.ndim == 2 else traces[None, :]
+        self.traces = traces
         self.t_start = t_start
         self._sampling_rate = sampling_rate
         if channel_id is None:
