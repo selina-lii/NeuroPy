@@ -7,7 +7,7 @@ from scipy import stats
 
 
 def plot_epochs(
-    epochs: Epoch, labels_order=None, colors="Set3", alpha=1, collapsed=False, ax=None
+    ax, epochs: Epoch, ymin=0.5, ymax=0.55, color="Set3", style="step_blocks"
 ):
     """Plots epochs on a given axis, with different style of plotting
 
@@ -23,60 +23,32 @@ def plot_epochs(
         [description], by default 0.55
     color : str, optional
         [description], by default "gray"
-    collapsed:
 
     Returns
     -------
     [type]
         [description]
     """
-
-    if isinstance(epochs, pd.DataFrame):
-        epochs = Epoch(epochs)
-
-    assert isinstance(epochs, Epoch), "epochs must be neuropy.Epoch object"
-
+    delta = 0
     n_epochs = epochs.n_epochs
-
-    if isinstance(colors, str):
-        try:
-            cmap = mpl.cm.get_cmap(colors)
-            colors = [cmap(i / n_epochs) for i in range(n_epochs)]
-        except:
-            colors = [colors] * n_epochs
-    elif isinstance(colors, dict):
-        colors = [colors[label] for label in epochs.labels]
-
-    if epochs.has_labels:
-        labels = epochs.labels
-        unique_labels = np.unique(epochs.labels)
-        n_labels = len(unique_labels)
-
-        if labels_order is not None:
-            assert np.array_equal(
-                np.sort(labels_order), np.sort(unique_labels)
-            ), "labels_order does not match with epochs labels"
-            unique_labels = labels_order
-
-        dh = 1 if collapsed else 1 / n_labels
-        y_min = np.zeros(len(epochs))
-        if not collapsed:
-            for i, l in enumerate(unique_labels):
-                y_min[labels == l] = i * dh
-    else:
-        dh = 1
-        y_min = np.zeros(len(epochs))
+    cmap = mpl.cm.get_cmap(color)
 
     for i, epoch in enumerate(epochs.to_dataframe().itertuples()):
         ax.axvspan(
             epoch.start,
             epoch.stop,
-            y_min[i],
-            y_min[i] + dh,
-            facecolor=colors[i],
-            edgecolor=None,
-            alpha=alpha,
+            ymin + delta,
+            ymax + delta,
+            color=cmap(i / n_epochs),
+            alpha=0.5,
         )
+        # ax.text(
+        #     epochs.stops[-1],
+        #     ymax + delta,
+        #     epoch.label,
+        #     transform=ax.get_yaxis_transform(),
+        # )
+        delta = delta + 0.07
 
     return ax
 
