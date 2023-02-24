@@ -1,6 +1,7 @@
 import numpy as np
 from scipy import stats
 
+
 class SimulatedData:
     def __init__(self, basepath) -> None:
         self.basepath = basepath
