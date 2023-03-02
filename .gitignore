@@ -128,7 +128,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 .vscode/settings.json
-tests/PositionTestingVariables.npz
-neuropy/.vscode/settings.json
-.vscode/bookmarks.json
-desktop.ini
+
+# auto backup files
+.DS_store
+*.DS_store
