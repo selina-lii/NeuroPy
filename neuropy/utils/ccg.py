@@ -11,21 +11,19 @@ import numpy as np
 # Cross-correlograms
 # ------------------------------------------------------------------------------
 _ACCEPTED_ARRAY_DTYPES = (
-    float,
-    # np.float32,
-    # np.float64,
-    int,
-    # np.int,
-    # np.int8,
-    # np.int16,
+    np.float,
+    np.float32,
+    np.float64,
+    np.int,
+    np.int8,
+    np.int16,
     np.uint8,
     np.uint16,
-    # np.int32,
-    # np.int64,
-    # np.uint32,
-    # np.uint64,
-    # np.bool,
-    bool,
+    np.int32,
+    np.int64,
+    np.uint32,
+    np.uint64,
+    np.bool,
 )
 
 
@@ -181,8 +179,8 @@ def correlograms(
     assert np.all(np.diff(spike_times) >= 0), "The spike times must be " "increasing."
 
     # Get the spike samples.
-    spike_times = np.asarray(spike_times, dtype=float)
-    spike_samples = (spike_times * sample_rate).astype(int)
+    spike_times = np.asarray(spike_times, dtype=np.float64)
+    spike_samples = (spike_times * sample_rate).astype(np.int64)
 
     spike_clusters = _as_array(spike_clusters)
 
