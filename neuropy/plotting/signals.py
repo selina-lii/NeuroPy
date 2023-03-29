@@ -97,8 +97,6 @@ def plot_signal_traces(signal: Signal, ax=None, pad=0.2, color="k", lw=1):
     if ax is None:
         _, ax = plt.subplots(1, 1)
 
-    ax.clear()
-
     try:
         cmap = mpl.cm.get_cmap(color)
         colors = [cmap(_ / n_channels) for _ in range(n_channels)]
@@ -116,3 +114,13 @@ def plot_signal_traces(signal: Signal, ax=None, pad=0.2, color="k", lw=1):
     ax.tick_params(axis="both", length=0)
 
     return ax
+
+
+def plot_signal_heatmap(signal: Signal, ax=None, **kwargs):
+
+    if ax is None:
+        _, ax = plt.subplots()
+
+    ax.pcolormesh(
+        signal.time, signal.channel_id, signal.traces, shading="gouraud", **kwargs
+    )
