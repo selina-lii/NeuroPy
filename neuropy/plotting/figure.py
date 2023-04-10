@@ -4,12 +4,11 @@ from pathlib import Path
 
 import matplotlib as mpl
 import matplotlib.gridspec as gridspec
+from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 import numpy as np
 from cycler import cycler
-from matplotlib.collections import PatchCollection
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Rectangle
 
 
 class Colormap:
@@ -83,26 +82,94 @@ class Colormap:
 
         return colmap
 
+    def dynamic4(self):
+        white = 255 * np.ones(80).reshape(20, 4)
+        white = white / 255
+        jet = mpl.cm.get_cmap("jet")
+        greys = mpl.cm.get_cmap("Greys")
+
+        colmap = np.vstack(
+            (
+                ListedColormap(greys(np.linspace(0.5, 0.8, 12))).colors,
+                ListedColormap(jet(np.linspace(0, 1, 30))).colors,
+                ListedColormap(greys(np.linspace(0.5, 0.8, 12)[::-1])).colors,
+            )
+        )
+
+        colmap = ListedColormap(colmap)
+
+        return colmap
+
 
 class Fig:
-    labelsize = 8
-
-    def draw(self, num=None, grid=(2, 2), size=(8.5, 11), style="figPublish", **kwargs):
+    def __init__(
+        self,
+        num=None,
+        grid=(2, 2),
+        size=(8.5, 11),
+        fontsize=5,
+        axis_color="#545454",
+        axis_lw=1.2,
+        tick_size=3.5,
+        constrained_layout=True,
+        fontname="Arial",
+        **kwargs,
+    ):
 
         # --- plot settings --------
-        mpl_rcParams_style_dict = self.get_mpl_style(style=style)
-        mpl.rcParams.update(mpl_rcParams_style_dict)
+        mpl.rcParams["font.family"] = fontname
+        # mpl.rcParams["font.sans-serif"] = "Arial"
+        mpl.rcParams["pdf.fonttype"] = 42
+        mpl.rcParams["ps.fonttype"] = 42
+        mpl.rcParams["axes.linewidth"] = axis_lw
+        mpl.rcParams["axes.labelsize"] = fontsize
+        mpl.rcParams["axes.titlesize"] = fontsize
+        mpl.rcParams["axes.edgecolor"] = axis_color
+        mpl.rcParams["xtick.labelsize"] = fontsize
+        mpl.rcParams["xtick.major.pad"] = 2
+        mpl.rcParams["ytick.labelsize"] = fontsize
+        mpl.rcParams["axes.spines.top"] = False
+        mpl.rcParams["axes.spines.right"] = False
+        mpl.rcParams["xtick.major.width"] = axis_lw
+        mpl.rcParams["xtick.major.size"] = tick_size
+        mpl.rcParams["ytick.major.size"] = tick_size
+        mpl.rcParams["xtick.color"] = axis_color
+        mpl.rcParams["xtick.labelcolor"] = "k"
+        mpl.rcParams["ytick.major.width"] = axis_lw
+        mpl.rcParams["ytick.color"] = axis_color
+        mpl.rcParams["ytick.labelcolor"] = "k"
+        mpl.rcParams["figure.constrained_layout.use"] = constrained_layout
+        mpl.rcParams["axes.prop_cycle"] = cycler(
+            "color",
+            [
+                "#5cc0eb",
+                "#faa49d",
+                "#05d69e",
+                "#253237",
+                "#ef6e4e",
+                "#f0a8e6",
+                "#aaa8f0",
+                "#f0a8af",
+                "#dfe36b",
+                "#825265",
+                "#e8594f",
+            ],
+        )
 
         fig = plt.figure(num=num, figsize=(8.5, 11), clear=True)
         fig.set_size_inches(size[0], size[1])
-        gs = gridspec.GridSpec(grid[0], grid[1], figure=fig)
-        fig.subplots_adjust(**kwargs)
+        gs = gridspec.GridSpec(grid[0], grid[1], figure=fig, **kwargs)
+
+        # fig.subplots_adjust(**kwargs)
 
         self.fig = fig
-        return self.fig, gs
+        self.gs = gs
 
-    def add_subplot(self, subplot_spec):
-        return plt.subplot(subplot_spec)
+    def subplot(self, subplot_spec, sharex=None, sharey=None, **kwargs):
+        return plt.subplot(subplot_spec, sharex=sharex, sharey=sharey, **kwargs)
+
+    def add_subfigure(self, *args, **kwargs) -> mpl.figure.SubFigure:
+        return self.fig.add_subfigure(*args, **kwargs)
 
     def subplot2grid(self, subplot_spec, grid=(1, 3), **kwargs):
         """Subplots within a subplot
@@ -123,10 +190,10 @@ class Fig:
         )
         return gs
 
-    def panel_label(self, ax, label, fontsize=12):
+    def panel_label(self, ax, label, fontsize=12, x=-0.14, y=1.15):
         ax.text(
-            x=-0.08,
-            y=1.15,
+            x=x,
+            y=y,
             s=label,
             transform=ax.transAxes,
             fontsize=fontsize,
@@ -135,11 +202,26 @@ class Fig:
             ha="right",
         )
 
-    def savefig(self, fname: Path, scriptname=None, fig=None):
+    def legend(self, ax, text, color, fontsize=8, x=0.65, y=0.9, dy=0.1):
+        for i, (s, c) in enumerate(zip(text, color)):
+            ax.text(
+                x=x,
+                y=y - i * dy,
+                s=s,
+                color=c,
+                transform=ax.transAxes,
+                fontsize=fontsize,
+                fontweight="bold",
+                va="top",
+                ha="left",
+            )
+
+    def savefig(self, fname: Path, scriptname=None, fig=None, caption=None, dpi=300):
 
         if fig is None:
             fig = self.fig
 
+        # fig.set_dpi(300)
         filename = fname.with_suffix(".pdf")
 
         today = date.today().strftime("%m/%d/%y")
@@ -156,7 +238,27 @@ class Fig:
                 va="bottom",
                 alpha=0.5,
             )
-        fig.savefig(filename)
+
+        fig.savefig(filename, dpi=dpi, backend="pdf")
+
+        if caption is not None:
+            fig_caption = Fig(grid=(1, 1))
+            ax_caption = fig_caption.subplot(fig_caption.gs[0])
+            ax_caption.text(0, 0.5, caption, wrap=True)
+            ax_caption.axis("off")
+            fig_caption.savefig(filename.with_suffix(".caption.pdf"))
+
+            """ Previously caption was combined to create a multi-page pdf with main figure. But this created dpi issue where we can't increase dpi to only saved pdf (pdfpages does not have that functionality yet) without affecting the plot in matplotlib widget which becomes bigger because of dpi-pixels relationsip)
+            """
+            # with PdfPages(filename) as pdf:
+            #     pdf.savefig(self.fig)
+
+            #     fig_caption = Fig(grid=(1, 1))
+            #     ax_caption = fig_caption.subplot(fig_caption.gs[0])
+
+            #     ax_caption.text(0, 0.5, caption, wrap=True)
+            #     ax_caption.axis("off")
+            #     pdf.savefig(fig_caption.fig)
 
     @staticmethod
     def pf_1D(ax):
@@ -164,54 +266,21 @@ class Fig:
         ax.tick_params("y", length=0)
 
     @staticmethod
-    def remove_spines(ax, sides=("top", "right")):
+    def toggle_spines(ax, sides=("top", "right"), keep=False):
 
         for side in sides:
-            ax.spines[side].set_visible(False)
+            ax.spines[side].set_visible(keep)
 
     @staticmethod
     def set_spines_width(ax, lw=2, sides=("bottom", "left")):
+
         for side in sides:
             ax.spines[side].set_linewidth(lw)
 
-
-    @classmethod
-    def get_mpl_style(cls, style:str="figPublish"):
-        """ Gets the matplotlib rcParams for various formatted styles
-        Usage:
-            from neuropy.plotting.figure import Fig
-            mpl_rcParams_style_dict = Fig.get_mpl_style(style='figPublish')
-            mpl.rcParams.update(mpl_rcParams_style_dict)
-
-        with mpl.rc_context(Fig.get_mpl_style(style='figPublish')):
-            plt.plot(data)
-
-        @mpl.rc_context(Fig.get_mpl_style(style='figPublish'))
-        def plotting_function():
-            plt.plot(data)
-
-        """
-        if style == "figPublish":
-            return {'axes.linewidth': 2,
-                'axes.labelsize': 8,
-                'axes.titlesize': 8,
-                'xtick.labelsize': 8,
-                'ytick.labelsize': 8,
-                'axes.spines.top': False,
-                'axes.spines.right': False,
-                'axes.prop_cycle': cycler("color", [ "#5cc0eb", "#faa49d", "#05d69e", "#253237", "#ef6e4e", "#f0a8e6", "#aaa8f0", "#f0a8af", "#dfe36b", "#825265", "#e8594f", ], )
-                }
-        elif style == "Pres":
-            return {'axes.linewidth': 3,
-                'axes.labelsize': 10,
-                'axes.titlesize': 10,
-                'xtick.labelsize': 10,
-                'ytick.labelsize': 10,
-                'axes.spines.right': False,
-                'axes.spines.top': False
-                }
-        else:
-            raise NotImplementedError
+    @staticmethod
+    def center_spines(ax):
+        ax.spines["left"].set_position("zero")
+        ax.spines["bottom"].set_position("zero")
 
 
 def pretty_plot(ax, round_ylim=False):
@@ -232,69 +301,7 @@ def pretty_plot(ax, round_ylim=False):
     return ax
 
 
-
-def debug_print_matplotlib_figure_size(F):
-    """ Prints the current figure size and DPI for a matplotlib figure F. 
-    See https://stackoverflow.com/questions/332289/how-do-you-change-the-size-of-figures-drawn-with-matplotlib 
-    Usage:
-        SizeInches, DPI = debug_print_matplotlib_figure_size(a_fig)
-    """
-    DPI = F.get_dpi()
-    print(f'DPI: {DPI}')
-    SizeInches = F.get_size_inches()
-    print(f'Default size in Inches: {SizeInches}')
-    print('Which should result in a {} x {} Image'.format(DPI*SizeInches[0], DPI*SizeInches[1]))
-    return SizeInches, DPI
-
-def rescale_figure_size(F, scale_multiplier=2.0, debug_print=False):
-    """ Scales up the Matplotlib Figure by a factor of scale_multiplier (in both width and height) without distorting the fonts or line sizes. 
-    Usage:
-        rescale_figure_size(a_fig, scale_multiplier=2.0, debug_print=True)
-    """
-    CurrentSize = F.get_size_inches()
-    F.set_size_inches((CurrentSize[0]*scale_multiplier, CurrentSize[1]*scale_multiplier))
-    if debug_print:
-        RescaledSize = F.get_size_inches()
-        print(f'Size in Inches: {RescaledSize}')
-    return F
-
-
-def compute_figure_size_pixels(figure_size_inches):
-    # px_to_inches = 1/plt.rcParams['figure.dpi']  # pixel in inches
-    inches_to_px = plt.rcParams['figure.dpi']  # pixel in inches
-    return (figure_size_inches[0]*inches_to_px, figure_size_inches[1]*inches_to_px)
-
-
-def compute_figure_size_inches(figure_size_pixels):
-    """ inverse of compute_figure_size_pixels """
-    inches_to_px = float(plt.rcParams['figure.dpi'])  # pixel in inches
-    return (np.round(float(figure_size_pixels[0])/inches_to_px), np.round(float(figure_size_pixels[1])/inches_to_px))
-
 def neuron_number_title(neurons):
     titles = ["Neuron: " + str(n) for n in neurons]
 
     return titles
-
-
-def make_boxes(
-    ax, xdata, ydata, xerror, yerror, facecolor="r", edgecolor="None", alpha=0.5
-):
-
-    # Loop over data points; create box from errors at each point
-    errorboxes = [
-        Rectangle((x, y), xe, ye) for x, y, xe, ye in zip(xdata, ydata, xerror, yerror)
-    ]
-
-    # Create patch collection with specified colour/alpha
-    pc = PatchCollection(
-        errorboxes, facecolor=facecolor, alpha=alpha, edgecolor=edgecolor
-    )
-
-    # Add collection to axes
-    ax.add_collection(pc)
-
-    # Plot errorbars
-    # artists = ax.errorbar(
-    #     xdata, ydata, xerr=xerror, yerr=yerror, fmt="None", ecolor="k"
-    # )
-    return 1
