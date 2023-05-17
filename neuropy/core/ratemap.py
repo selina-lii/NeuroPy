@@ -1,88 +1,149 @@
-from copy import deepcopy
-from warnings import warn
 import numpy as np
-from neuropy.core.neuron_identities import NeuronIdentitiesDisplayerMixin
-from neuropy.utils.mixins.binning_helpers import BinnedPositionsMixin
-from neuropy.plotting.mixins.ratemap_mixins import RatemapPlottingMixin
-from neuropy.utils import mathutil
 from . import DataWriter
-
-class Ratemap(NeuronIdentitiesDisplayerMixin, RatemapPlottingMixin, BinnedPositionsMixin, DataWriter):
-    """A Ratemap holds information about each unit's firing rate across binned positions. 
-        In addition, it also holds (tuning curves).
-        
-        
-    Internal:
+from scipy import stats, interpolate
 
 
-        # Map Properties:
-        self.occupancy 
-        self.spikes_maps
-        self.tuning_curves
-        self.unsmoothed_tuning_maps
+class Ratemap(DataWriter):
+    """Ratemap class to hold tuning curves of neurons. For example, place field ratemaps"""
 
-        # Neuron Identity:
-        self._neuron_ids
-        self._neuron_extended_ids
+    def __init__(
+        self,
+        tuning_curves: np.ndarray,
+        coords: np.ndarray,
+        occupancy=None,
+        neuron_ids=None,
+        metadata=None,
+    ) -> None:
+        """Inputs for Ratemap class
 
-        # Position Identity:
-        self.xbin
-        self.ybin
-        
-        # Other:
-        self.metadata
-        
-    Args:
-        NeuronIdentitiesDisplayerMixin (_type_): _description_
-        RatemapPlottingMixin (_type_): _description_
-        DataWriter (_type_): _description_
-    """
-    def __init__(self, tuning_curves, unsmoothed_tuning_maps=None, spikes_maps=None, 
-        xbin=None, ybin=None, occupancy=None,
-        neuron_ids=None, neuron_extended_ids=None, metadata=None) -> None:
-        
-        super().__init__()
+        Parameters
+        ----------
+        tuning_curves : np.ndarray, (neurons, nx) or (neurons, nx, ny)
+            numpy array for firing rates
+        coords : float, array, [float,float] or [array,array]
+            values defining the coordinates in cms,
+                * If float, the spacing for all dimensions.
+                * If array, the coordinates for all dimensions.
+                    (x_bins=y_bins=coords).
+                * If [float, float], the spacing in each dimension
+                    (x_binsize, y_binsize = bins).
+                * If [array, array], the bin edges in each dimension
+                    (x_edges, y_edges = bins).
+                * A combination [int, array] or [array, int], where int
+                    is the number of bins and array is the bin edges.
+        occupancy : np.array, optional
+            occupancy map for the tuning curves, by default None
+        neuron_ids : np.array, optional
+            neuron_ids of the neurons, by default None
+        metadata : _type_, optional
+            _description_, by default None
+        """
+        super().__init__(metadata=metadata)
 
-        self.spikes_maps = np.asarray(spikes_maps)
-        self.tuning_curves = np.asarray(tuning_curves)
-        if unsmoothed_tuning_maps is not None:
-            self.unsmoothed_tuning_maps = np.asarray(unsmoothed_tuning_maps)
-        else:
-            self.unsmoothed_tuning_maps = None
-        
-        if neuron_ids is not None:
-            assert len(neuron_ids) == self.tuning_curves.shape[0]
-            self._neuron_ids = neuron_ids
-        if neuron_extended_ids is not None:
-            assert len(neuron_extended_ids) == self.tuning_curves.shape[0]
-            assert len(neuron_extended_ids) == len(self._neuron_ids)
-            # NeuronExtendedIdentityTuple objects
-            self._neuron_extended_ids = neuron_extended_ids   
-        
-        self.xbin = xbin
-        self.ybin = ybin
+        self.tuning_curves = tuning_curves
+        self.coords = coords
         self.occupancy = occupancy
+        self.neuron_ids = neuron_ids
 
-        self.metadata = metadata
-    
-    # NeuronIdentitiesDisplayerMixin requirements
+    @property
+    def tuning_curves(self):
+        return self._tuning_curves
+
+    @tuning_curves.setter
+    def tuning_curves(self, val):
+        val = np.asarray(val)
+        assert val.ndim <= 3, "tuning_curves shape should be <= 3"
+        self._tuning_curves = val
+
+    @property
+    def occupancy(self):
+        return self._occupancy
+
+    @occupancy.setter
+    def occupancy(self, arr):
+        if arr is not None:
+            arr = np.asarray(arr)
+            assert (
+                arr.shape == self.tuning_curves.shape[1:]
+            ), "Occupancy shape should be of same shape as tuning_curves"
+
+        self._occupancy = arr
+
+    @property
+    def coords(self):
+        return self._coords
+
+    @coords.setter
+    def coords(self, val):
+        if self.ndim == 1:
+            if isinstance(val, (int, float)):
+                val = np.arange(0, val * self.tuning_curves.shape[1], val)
+
+            assert (
+                len(val) == self.tuning_curves.shape[1]
+            ), "length of coords should be equal to tuning_curve.shape[1]"
+            assert np.allclose(m := np.diff(val), m[0]), "x should be equally spaced"
+            val = val.reshape(1, -1)
+
+        if self.ndim == 2:
+            if isinstance(val, (int, float)):
+                x = np.arange(0, val * self.tuning_curves.shape[1], val)
+                val = np.vstack([x, x])
+
+            if len(val) == 2:
+                x, y = val
+                if isinstance(x, (int, float)):
+                    x = np.arange(0, x * self.tuning_curves.shape[1], x)
+                if isinstance(y, (int, float)):
+                    y = np.arange(0, y * self.tuning_curves.shape[1], y)
+
+                assert len(x) == self.tuning_curves.shape[1], "improper coords"
+                assert len(y) == self.tuning_curves.shape[2], "improper coords"
+                val = np.vstack([x, y])
+
+        assert val.ndim == 2, "Improper coords"
+
+        self._coords = val
+
+    def x(self):
+        return self.coords[0]
+
+    def y(self):
+        assert self.ndim == 2, "Can't return y for 1D ratemaps"
+        return self.coords[1]
+
     @property
     def neuron_ids(self):
-        """The neuron_ids property."""
         return self._neuron_ids
+
     @neuron_ids.setter
-    def neuron_ids(self, value):
-        self._neuron_ids = value
-       
-       
+    def neuron_ids(self, arr):
+        if arr is not None:
+            assert (
+                len(arr) == self.tuning_curves.shape[0]
+            ), "The length of neuron_ids should match the tuning_curves.shape[0]"
+            self._neuron_ids = np.asarray(arr)
+        else:
+            self._neuron_ids = np.arange(self.tuning_curves.shape[0])
+
+    def copy(self):
+        return Ratemap(
+            tuning_curves=self.tuning_curves,
+            x=self.x,
+            y=self.y,
+            neuron_ids=self.neuron_ids,
+            occupancy=self.occupancy,
+            metadata=self.metadata,
+        )
+
     @property
-    def neuron_extended_ids(self):
-        """The neuron_extended_ids property."""
-        return self._neuron_extended_ids
-    @neuron_extended_ids.setter
-    def neuron_extended_ids(self, value):
-        self._neuron_extended_ids = value
-     
+    def x_binsize(self):
+        return np.diff(self.xbin)[0]
+
+    @property
+    def y_binsize(self):
+        if self.y is not None:
+            return np.diff(self.ybin)[0]
 
     @property
     def n_neurons(self):
@@ -91,179 +152,59 @@ class Ratemap(NeuronIdentitiesDisplayerMixin, RatemapPlottingMixin, BinnedPositi
     @property
     def ndim(self):
         return self.tuning_curves.ndim - 1
-    
-    
-    @property
-    def normalized_tuning_curves(self):
-        return self.pdf_normalized_tuning_curves
-        
 
-    # ---------------------- occupancy properties -------------------------
-    @property
-    def never_visited_occupancy_mask(self):
-        """ a boolean mask that's True everyhwere the animal has never visited according to self.occupancy, and False everyhwere else. """
-        return Ratemap.build_never_visited_mask(self.occupancy)
-    
-    
-    @property
-    def nan_never_visited_occupancy(self):
-        """ returns the self.occupancy after replacing all never visited locations, indicated by a zero occupancy, by NaNs for the purpose of building visualizations. """
-        return Ratemap.nan_never_visited_locations(self.occupancy)
-    
-    # --------------------- Normalization and Scaling Helpers -------------------- #
-    @property
-    def pdf_normalized_tuning_curves(self):
-        """ AOC (area-under-curve) normalization for tuning curves. """
-        return Ratemap.perform_AOC_normalization(self.tuning_curves)
-        
-    @property
-    def tuning_curve_peak_firing_rates(self):
-        """ the non-normalized peak location of each tuning curve. Represents the peak firing rate of that curve. """
-        warn('tuning_curve_peak_firing_rates: was accessed, but does not give the actual cell firing rate because of the smoothing. Use Ratemap.tuning_curve_unsmoothed_peak_firing_rates for accurate firing rates in Spikes / Second ')
-        return np.array([np.nanmax(a_tuning_curve) for a_tuning_curve in self.tuning_curves])
-    
-    @property
-    def tuning_curve_unsmoothed_peak_firing_rates(self):
-        """ the non-normalized and unsmoothed value of the maximum firing rate at the peak of each tuning curve in NumSpikes/Second. Represents the peak firing rate of that curve. """
-        assert self.unsmoothed_tuning_maps is not None, "self.unsmoothed_tuning_maps is None! Did you pass it in while building the Ratemap?"
-        return np.array([np.nanmax(a_tuning_curve) for a_tuning_curve in self.unsmoothed_tuning_maps])
-    
-        
-    @property
-    def unit_max_tuning_curves(self):
-        """ tuning curves normalized by scaling their max value down to 1.0.
-            The peak of each placefield will have height 1.0.
-        """
-        unit_max_tuning_curves = [a_tuning_curve / np.nanmax(a_tuning_curve) for a_tuning_curve in self.tuning_curves]
-        validate_unit_max = [np.nanmax(a_unit_max_tuning_curve) for a_unit_max_tuning_curve in unit_max_tuning_curves]
-        # print(f'validate_unit_max: {validate_unit_max}')
-        assert np.allclose(validate_unit_max, np.full_like(validate_unit_max, 1.0), equal_nan=True), f"unit_max_tuning_curves doesn't have a max==1.0 after scaling!!! Maximums: {validate_unit_max}"
-        return np.array(unit_max_tuning_curves)
-    
-    
-    @property
-    def minmax_normalized_tuning_curves(self):
-        """ tuning curves normalized by scaling their min/max values down to the range (0, 1).
-            The peak of each placefield will have height 1.0.
-        """
-        return Ratemap.nanmin_nanmax_scaler(self.tuning_curves)
+    def get_frate_normalized(self):
+        pass
 
-    # Other ______________________________________________________________________________________________________________ #
+    def resample(self, nbins):
+        """Resample the ratemap with nbins
 
-    def get_sort_indicies(self, sortby=None):
-        # curr_tuning_curves = self.normalized_tuning_curves
-        # ind = np.unravel_index(np.argsort(curr_tuning_curves, axis=None), curr_tuning_curves.shape)
-        
-        if sortby is None:
-            sort_ind = np.argsort(np.argmax(self.normalized_tuning_curves, axis=1))
-        elif isinstance(sortby, (list, np.ndarray)):
-            sort_ind = sortby
-        else:
-            sort_ind = np.arange(self.n_neurons)
-        return sort_ind
-
-    def to_1D_maximum_projection(self):
-        return Ratemap.build_1D_maximum_projection(self)
-
-
-    # ----------------------  Static Methods -------------------------:
-    @staticmethod
-    def nan_ptp(a, **kwargs):
-        return np.ptp(a[np.isfinite(a)], **kwargs)
-
-    @staticmethod
-    def nanmin_nanmax_scaler(x, axis=-1, **kwargs):
-        """Scales the values x to lie between 0 and 1 along the specfied axis, ignoring NaNs!
         Parameters
         ----------
-        x : np.array
-            numpy ndarray
+        nbins : int, optional
+            the number of bins in new ratemap
+
         Returns
         -------
-        np.array
-            scaled array
+        Ratemap
+            new ratemap
         """
-        try:
-            return (x - np.nanmin(x, axis=axis, keepdims=True)) / Ratemap.nan_ptp(x, axis=axis, keepdims=True, **kwargs)
-        except ValueError:  #raised if `y` is empty.
-            # Without this try-except we encountered "ValueError: zero-size array to reduction operation minimum which has no identity" when x was empty.
-            return x # just return the raw x-value, as it's empty and doesn't need scaling
+        assert self.ndim == 1, "Only allowed for 1 dimensional ratemaps"
+        f_tc = interpolate.interp1d(self.x, self.tuning_curves)
+        x_new = np.linspace(self.x[0], self.x[-1], nbins)
+        tc_new = f_tc(x_new)  # Interpolated tuning curve
 
+        ratemap_new = self.copy()
+        ratemap_new.tuning_curves = tc_new
+        ratemap_new.x = x_new
 
-    @staticmethod    
-    def NormalizeData(data):
-        """ Simple alternative to the mathutil.min_max_scalar that doesn't produce so man NaN values. """
-        data[np.isnan(data)] = 0.0 # Set NaN values to 0.0
-        return (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
+        return ratemap_new
 
+    def peak_locations(self, by="index"):
+        sort_ind = np.argmax(stats.zscore(self.tuning_curves, axis=1), axis=1)
+        if by == "index":
+            return sort_ind
+        if by == "position":
+            return self.xbin[sort_ind]
 
-    @classmethod
-    def perform_AOC_normalization(cls, active_tuning_curves, debug_print=False):
-    # def perform_AOC_normalization(cls, ratemap: Ratemap, debug_print=True):
-        """ Normalizes each cell's tuning map in ratemap by dividing by each cell's area under the curve (AOC). The resultant tuning maps are therefore converted into valid PDFs 
-        
-        Inputs:
-            active_tuning_curves: nd.array
+    def get_sort_order(self, by="index"):
+        """Return sorting order tuning curves by position in ascending order
+
+        Parameters
+        ----------
+        by : str, optional
+            'index' returns row-index location of tuning_curves, 'neuron_id' returns id of neurons that will sort the location of peaks tuning curves, by default "index"
+
+        Returns
+        -------
+        [type]
+            [description]
         """
-        # active_tuning_curves = ratemap.normalized_tuning_curves
-        # active_tuning_curves = ratemap.tuning_curves
-        tuning_curves_ndim = active_tuning_curves.ndim - 1
-        
-        if tuning_curves_ndim == 1:
-            ## 1D normalization:
-            _test_1D_normalization_constants = 1.0/np.sum(active_tuning_curves, 1) # normalize by summing over all 1D positions for each cell
-            ## Compute the area-under-the-curve normalization by dot-dividing each cell's PF by the normalization constant
-            _test_1D_AOC_normalized_pdf = (active_tuning_curves.transpose() * _test_1D_normalization_constants).transpose() # (39, 59)
-            ## Test success by summing (all should be nearly 1.0):
-            is_valid_normalized_pf = np.logical_not(np.isnan(np.sum(_test_1D_AOC_normalized_pdf, 1))) # The True entries are non-Nan and should be equal to 1.0, the other elements are NaN and have no valid pf yet.
-            if debug_print:
-                print(f'is_valid_normalized_pf: {is_valid_normalized_pf}')
-                
-            assert np.isclose(np.sum(_test_1D_AOC_normalized_pdf[is_valid_normalized_pf,:], 1), 1.0).all(), f"After AOC normalization the sum over each cell should be 1.0, but it is not! {np.sum(_test_1D_AOC_normalized_pdf, 1)}"
-            return _test_1D_AOC_normalized_pdf
-        elif tuning_curves_ndim == 2:
-            ## 2D normalization
-            _test_2D_normalization_constants = 1.0/np.sum(active_tuning_curves, (1,2)) # normalize by summing over all 1D positions for each cell
-            _test_2D_AOC_normalized_pdf = (active_tuning_curves.transpose(1,2,0) * _test_2D_normalization_constants).transpose(2,0,1) # (39, 59) # (59, 21, 39) prior to second transpose
-            is_valid_normalized_pf = np.logical_not(np.isnan(np.sum(_test_2D_AOC_normalized_pdf, (1,2)))) # The True entries are non-Nan and should be equal to 1.0, the other elements are NaN and have no valid pf yet.
-            if debug_print:
-                print(f'is_valid_normalized_pf: {is_valid_normalized_pf}')
-                            
-            ## Test success by summing (all should be nearly 1.0):
-            assert np.isclose(np.sum(_test_2D_AOC_normalized_pdf[is_valid_normalized_pf,:,:], (1,2)), 1.0).all(), f"After AOC normalization the sum over each cell should be 1.0, but it is not! {np.sum(_test_2D_AOC_normalized_pdf, (1,2))}"
-            return _test_2D_AOC_normalized_pdf
-        else:
-            print(f'tuning_curves_ndim: {tuning_curves_ndim} not implemented!')
-            raise NotImplementedError
+        sort_ind = np.argsort(self.peak_locations(by="index"))
+        if by == "neuron_id":
+            return self.neuron_ids[sort_ind]
+        if by == "index":
+            return sort_ind
 
- 
-    @staticmethod           
-    def build_never_visited_mask(occupancy):
-        """ returns a mask of never visited locations for the provided occupancy """
-        return (occupancy == 0) # return locations with zero occupancy
-
-    @staticmethod
-    def nan_never_visited_locations(occupancy):
-        """ replaces all never visited locations, indicated by a zero occupancy, by NaNs for the purpose of building visualizations. """
-        nan_never_visited_occupancy = occupancy.copy()
-        nan_never_visited_occupancy[nan_never_visited_occupancy == 0] = np.nan # all locations with zeros, replace them with NaNs
-        return nan_never_visited_occupancy
-
-    @classmethod
-    def build_1D_maximum_projection(cls, ratemap_2D: "Ratemap") -> "Ratemap":
-        """ builds a 1D ratemap from a 2D ratemap
-        creation_date='2023-04-05 14:02'
-
-        Usage:
-            ratemap_1D = build_1D_maximum_projection(ratemap_2D)
-        """
-        assert ratemap_2D.ndim > 1, f"ratemap_2D ndim must be greater than 1 (usually 2) but ndim: {ratemap_2D.ndim}."
-        ratemap_1D_spikes_maps = np.nanmax(ratemap_2D.spikes_maps, axis=-1) #.shape (n_cells, n_xbins)
-        ## 2023-04-07 - This isn't good enough, we need to recompute the tuning_curves from the maximum spikes_maps bin. The excessive occupancy at the end-caps is already diminishing the tuning curves here, right?
-        ratemap_1D_tuning_curves = np.nanmax(ratemap_2D.tuning_curves, axis=-1) #.shape (n_cells, n_xbins)
-        ratemap_1D_unsmoothed_tuning_maps = np.nanmax(ratemap_2D.unsmoothed_tuning_maps, axis=-1) #.shape (n_cells, n_xbins)
-        ratemap_1D_occupancy = np.sum(ratemap_2D.occupancy, axis=-1) #.shape (n_xbins,)
-
-        ratemap_1D = Ratemap(ratemap_1D_tuning_curves, unsmoothed_tuning_maps=ratemap_1D_unsmoothed_tuning_maps, spikes_maps=ratemap_1D_spikes_maps, xbin=ratemap_2D.xbin, ybin=None, occupancy=ratemap_1D_occupancy, neuron_ids=deepcopy(ratemap_2D.neuron_ids), neuron_extended_ids=deepcopy(ratemap_2D.neuron_extended_ids), metadata=ratemap_2D.metadata)
-        return ratemap_1D
-
+    def peak_firing_rate(self):
+        return np.max(self.tuning_curves, axis=1)

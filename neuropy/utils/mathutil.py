@@ -5,6 +5,48 @@ from sklearn.decomposition import FastICA, PCA
 from scipy import stats
 from hmmlearn.hmm import GaussianHMM
 from .ccg import correlograms
+import scipy.signal as sg
+
+
+def choose_elementwise(x, y, condition):
+    assert type(x) == type(y), "Both inputs should have same type"
+    assert type(condition) is np.ndarray, "condition should be a boolean array"
+
+    if type(x) is np.ndarray:
+        assert x.shape == y.shape, "Input arrays should have same shape"
+        out = np.zeros_like(x)
+        out[..., condition] = x[..., condition]
+        out[..., ~condition] = y[..., ~condition]
+    else:
+        try:
+            out = [x if cond else y for (x, y, cond) in zip(x, y, condition)]
+        except:
+            raise TypeError("Inpvalid inputs")
+
+    return out
+
+
+def gaussian_kernel1D(sigma, bin_size, truncate=4.0):
+    """Get a gaussian kernel
+
+    Parameters
+    ----------
+    sigma : float
+        standard deviation of the kernel
+    bin_size : float
+        bin size of the kernel
+    truncate: float
+        limit kernel to this standard deviation,default = 4.0
+
+    Returns
+    -------
+    np.array
+        gaussian kernel
+    """
+    t_gauss = np.arange(-truncate * sigma, truncate * sigma, bin_size)
+    gaussian = np.exp(-(t_gauss**2) / (2 * sigma**2))
+    gaussian /= np.sum(gaussian)
+    return gaussian
 
 
 def min_max_scaler(x, axis=-1):
@@ -19,13 +61,6 @@ def min_max_scaler(x, axis=-1):
     -------
     np.array
         scaled array
-
-
-    ERRORS:
-        2023-03-02 - ValueError: zero-size array to reduction operation minimum which has no identity
-            Occurs when np.shape(x) is (0,)
-
-
     """
     return (x - np.min(x, axis=axis, keepdims=True)) / np.ptp(
         x, axis=axis, keepdims=True
@@ -51,7 +86,7 @@ def partialcorr(x, y, z):
     xz = x.corr(z)
     zy = z.corr(y)
 
-    parcorr = (xy - xz * zy) / (np.sqrt(1 - xz ** 2) * np.sqrt(1 - zy ** 2))
+    parcorr = (xy - xz * zy) / (np.sqrt(1 - xz**2) * np.sqrt(1 - zy**2))
 
     return parcorr
 
@@ -126,9 +161,9 @@ def getICA_Assembly(x):
     return V
 
 
-def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50):
+def threshPeriods(arr, lowthresh=1, highthresh=2, minDistance=30, minDuration=50):
 
-    ThreshSignal = np.diff(np.where(sig > lowthresh, 1, 0))
+    ThreshSignal = np.diff(np.where(arr > lowthresh, 1, 0))
     start = np.where(ThreshSignal == 1)[0]
     stop = np.where(ThreshSignal == -1)[0]
 
@@ -163,7 +198,7 @@ def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50
     fourthPass = []
     # peakNormalizedPower, peaktime = [], []
     for i in range(len(thirdPass)):
-        maxValue = max(sig[thirdPass[i, 0] : thirdPass[i, 1]])
+        maxValue = max(arr[thirdPass[i, 0] : thirdPass[i, 1]])
         if maxValue >= highthresh:
             fourthPass.append(thirdPass[i])
             # peakNormalizedPower.append(maxValue)
@@ -177,25 +212,69 @@ def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50
     return np.asarray(fourthPass)
 
 
+def _unpack_args(values, fs=1):
+    """Parsing argument for thresh_epochs"""
+    try:
+        val_min, val_max = values
+    except (TypeError, ValueError):
+        val_min, val_max = (values, None)
+
+    val_min = val_min * fs
+    val_max = val_max * fs if val_max is not None else None
+
+    return val_min, val_max
+
+
+def thresh_epochs(arr: np.ndarray, thresh, length, sep=0, boundary=0, fs=1):
+
+    hmin, hmax = _unpack_args(thresh)  # does not need fs
+    lmin, lmax = _unpack_args(length, fs=fs)
+    sep = sep * fs + 1e-6
+
+    assert hmin >= boundary, "boundary must be smaller than min thresh"
+
+    arr_thresh = np.where(arr >= boundary, arr, 0)
+    peaks, props = sg.find_peaks(arr_thresh, height=[hmin, hmax], prominence=0)
+
+    starts, stops = props["left_bases"], props["right_bases"]
+    peaks_values = arr_thresh[peaks]
+
+    # ----- merge overlapping epochs ------
+    n_epochs = len(starts)
+    ind_delete = []
+    for i in range(n_epochs - 1):
+        if (starts[i + 1] - stops[i]) < sep:
+
+            # stretch the second epoch to cover the range of both epochs
+            starts[i + 1] = min(starts[i], starts[i + 1])
+            stops[i + 1] = max(stops[i], stops[i + 1])
+
+            peaks_values[i + 1] = max(peaks_values[i], peaks_values[i + 1])
+            peaks[i + 1] = [peaks[i], peaks[i + 1]][
+                np.argmax([peaks_values[i], peaks_values[i + 1]])
+            ]
+            ind_delete.append(i)
+
+    epochs_arr = np.vstack((starts, stops, peaks, peaks_values)).T
+    epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
+
+    # ----- duration thresholds ------
+    epochs_length = epochs_arr[:, 1] - epochs_arr[:, 0]
+    if lmax is None:
+        lmax = epochs_length.max()
+    ind_keep = (epochs_length >= lmin) & (epochs_length <= lmax)
+
+    starts, stops, peaks, peaks_values = epochs_arr[ind_keep, :].T
+
+    return starts / fs, stops / fs, peaks / fs, peaks_values
+
+
 def contiguous_regions(condition):
     """Finds contiguous True regions of the boolean array "condition". Returns
     a 2D array where the first column is the start index of the region and the
     second column is the end index. Taken directly from stackoverflow:
     https://stackoverflow.com/questions/4494404/find-large-number-of-
-    consecutive-values-fulfilling-condition-in-a-numpy-array
-        
-    Usage:
-        from neuropy.utils.mathutil import contiguous_regions
-        idnan = mathutil.contiguous_regions(np.isnan(x))  # identify missing data points
-
-            for ids in idnan:
-                missing_ids = range(ids[0], ids[-1])
-                bracket_ids = ids + [-1, 0]
-                xgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], x[bracket_ids])
-                ygood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], y[bracket_ids])
-                zgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], z[bracket_ids])
-
-    """
+    consecutive-values-fulfilling-condition-in-a-numpy-array"""
 
     # Find the indices of changes in "condition"
     d = np.diff(condition)
@@ -216,53 +295,6 @@ def contiguous_regions(condition):
     # Reshape the result into two columns
     idx.shape = (-1, 2)
     return idx
-
-
-def radon_transform(arr, nlines=5000):
-    """Line fitting algorithm primarily used in decoding algorithm, a variant of radon transform, algorithm based on Kloosterman et al. 2012
-
-    Parameters
-    ----------
-    arr : [type]
-        [description]
-
-    Returns
-    -------
-    [type]
-        [description]
-
-    References
-    ----------
-    1) Kloosterman et al. 2012
-    """
-    t = np.arange(arr.shape[1])
-    nt = len(t)
-    tmid = (nt + 1) / 2
-    pos = np.arange(arr.shape[0])
-    npos = len(pos)
-    pmid = (npos + 1) / 2
-    arr = np.apply_along_axis(np.convolve, axis=0, arr=arr, v=np.ones(3))
-
-    theta = np.random.uniform(low=-np.pi / 2, high=np.pi / 2, size=nlines)
-    diag_len = np.sqrt((nt - 1) ** 2 + (npos - 1) ** 2)
-    intercept = np.random.uniform(low=-diag_len / 2, high=diag_len / 2, size=nlines)
-
-    cmat = np.tile(intercept, (nt, 1)).T
-    mmat = np.tile(theta, (nt, 1)).T
-    tmat = np.tile(t, (nlines, 1))
-    posterior = np.zeros((nlines, nt))
-
-    y_line = (((cmat - (tmat - tmid) * np.cos(mmat)) / np.sin(mmat)) + pmid).astype(int)
-    t_out = np.where((y_line < 0) | (y_line > npos - 1))
-    t_in = np.where((y_line >= 0) & (y_line <= npos - 1))
-    posterior[t_out] = np.median(arr[:, t_out[1]], axis=0)
-    posterior[t_in] = arr[y_line[t_in], t_in[1]]
-
-    posterior_sum = np.nanmean(posterior, axis=1)
-    max_line = np.argmax(posterior_sum)
-    slope = -(1 / np.tan(theta[max_line]))
-
-    return posterior_sum[max_line], slope
 
 
 def hmmfit1d(Data, n_comp=2, n_iter=50):
@@ -370,3 +402,34 @@ def eventpsth(ref, event, fs, quantparam=None, binsize=0.01, window=1, nQuantile
     )
 
     return ccg[:-1, -1, :]
+
+
+def gini(arr, eps=1e-8):
+    """
+    Calculate the Gini coefficient of a numpy array.
+
+    Source: PyGini
+    https://github.com/mckib2/pygini/blob/master/pygini/gini.py
+
+    -----
+    Based on bottom eq on [2]_.
+    References
+    ----------
+    .. [2]_ http://www.statsdirect.com/help/
+            default.htm#nonparametric_methods/gini.htm
+    """
+
+    # All values are treated equally, arrays must be 1d and > 0:
+    arr = np.abs(arr).flatten() + eps
+
+    # Values must be sorted:
+    arr = np.sort(arr)
+
+    # Index per array element:
+    index = np.arange(1, arr.shape[0] + 1)
+
+    # Number of array elements:
+    N = arr.shape[0]
+
+    # Gini coefficient:
+    return (np.sum((2 * index - N - 1) * arr)) / (N * np.sum(arr))
