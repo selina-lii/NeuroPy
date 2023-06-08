@@ -77,14 +77,16 @@ class NeuroscopeIO:
         """
         pass
 
-    def write_neurons(self, neurons: core.Neurons):
-        """To view spikes in neuroscope, spikes are exported to .clu.1 and .res.1 files in the basepath.
+    def write_neurons(self, neurons: core.Neurons, suffix_num: int = 1):
+        """To view spikes in neuroscope, spikes are exported to .clu.# and .res.# files in the basepath.
         You can order the spikes in a way to view sequential activity in neuroscope.
 
         Parameters
         ----------
         spks : list
             list of spike times.
+        suffix_num: int
+            number to tack onto end of clu and res files.
         """
 
         spks = neurons.spiketrains
@@ -98,34 +100,40 @@ class NeuroscopeIO:
         clu_id = clu_id[sort_ind]
         clu_id = np.append(nclu, clu_id)
 
-        file_clu = self.source_file.with_suffix(".clu.1")
-        file_res = self.source_file.with_suffix(".res.1")
+        file_clu = self.source_file.with_suffix(".clu." + str(suffix_num))
+        file_res = self.source_file.with_suffix(".res." + str(suffix_num))
 
         with file_clu.open("w") as f_clu, file_res.open("w") as f_res:
             for item in clu_id:
-                f_clu.write(f"{item}\n")
+                f_clu.write(f"{int(item)}\n")
             for frame in spk_frame:
                 f_res.write(f"{frame}\n")
 
-    def write_epochs(self, epochs: core.Epoch, ext=".epc"):
+        return file_clu
+
+    def write_epochs(self, epochs: core.Epoch, ext="epc"):
         with self.source_file.with_suffix(f".evt.{ext}").open("w") as a:
             for event in epochs.to_dataframe().itertuples():
                 a.write(f"{event.start*1000} start\n{event.stop*1000} stop\n")
 
     def write_position(self, position: core.Position):
+        """Writes core.Position object to neuroscope compatible format
+
+        Parameters
+        ----------
+        position : core.Position
+        """
         # neuroscope only displays positive values so translating the coordinates
         x, y = position.x, position.y
-        x = self.x + abs(min(self.x))
-        y = self.y + abs(min(self.y))
-        print(max(x))
-        print(max(y))
+        x = x + abs(min(x))
+        y = y + abs(min(y))
 
-        filename = self._obj.files.filePrefix.with_suffix(".pos")
+        filename = self.source_file.with_suffix(".pos")
         with filename.open("w") as f:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return {
             "source_file": self.source_file,
             "channel_groups": self.channel_groups,
