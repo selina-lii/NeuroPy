@@ -102,7 +102,7 @@ class Shank:
     def n_contacts(self):
         return len(self.x)
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         layout = {
             "x": self.x,
             "y": self.y,
@@ -137,8 +137,16 @@ class Probe:
             assert np.all([_.__class__.__name__ == "Shank" for _ in shanks])
 
         self._data = pd.DataFrame(
-            columns=["x", "y", "contact_id", "channel_id", "connected", "shank_id"]
+            {
+                "x": np.array([]),
+                "y": np.array([]),
+                "contact_id": np.array([]),
+                "channel_id": np.array([]),
+                "connected": np.array([], dtype=bool),
+                "shank_id": np.array([]),
+            }
         )
+
         x = np.arange(len(shanks)) * shank_pitch[0]
         y = np.arange(len(shanks)) * shank_pitch[1]
         for i, shank in enumerate(shanks):
@@ -146,7 +154,8 @@ class Probe:
             shank_df["x"] += x[i]
             shank_df["y"] += y[i]
             shank_df["shank_id"] = i * np.ones(shank.n_contacts)
-            self._data = self._data.append(shank_df)
+            # self._data = self._data.append(shank_df)
+            self._data = pd.concat([self._data, shank_df])
         self._data = self._data.reset_index(drop=True)
         self._data["contact_id"] = np.arange(len(self._data))
 
@@ -193,9 +202,9 @@ class Probe:
         for shank in shanks:
             shank_df = shank.to_dataframe()
             shank_df["shank_id"] = (self.n_shanks - 1) * np.ones(shank.n_contacts)
-            self._data = self._data.append(shank_df)
+            self._data = pd.concat([self._data, shank_df])
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return self._data.to_dict()
 
     def to_dataframe(self):
@@ -295,6 +304,26 @@ class ProbeGroup(DataWriter):
             [shank_ids[np.where(channel_ids == _)[0]] for _ in channel_id]
         )
 
+    def get_probe_id_for_channels(self, channel_id):
+        """Get probe ids for the channels.
+
+        Parameters
+        ----------
+        channel_id : array
+            channel_ids, can have repeated values
+
+        Returns
+        -------
+        array
+            probe_ids corresponding to the channels
+        """
+        probe_ids = self.probe_id
+        channel_ids = self.channel_id
+
+        return np.concatenate(
+            [probe_ids[np.where(channel_ids == _)[0]] for _ in channel_id]
+        ).astype("int")
+
     def get_probe(self):
         pass
 
@@ -338,11 +367,11 @@ class ProbeGroup(DataWriter):
         if self.n_probes > 0:
             probe_df["shank_id"] = probe_df["shank_id"] + self.n_shanks
 
-        self._data = self._data.append(probe_df)
+        self._data = pd.concat([self._data, probe_df])
 
         # _, counts = np.unique(self.get_channel_ids(), return_counts=True)
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return {
             "data": self._data,
             "metadata": self.metadata,
@@ -353,6 +382,12 @@ class ProbeGroup(DataWriter):
         prbgrp = ProbeGroup(metadata=d["metadata"])
         prbgrp._data = d["data"].sort_values(["shank_id", "y"], ascending=[True, False])
         return prbgrp
+
+    @staticmethod
+    def from_file(f):
+        d = DataWriter.from_file(f)
+        if d is not None:
+            return ProbeGroup.from_dict(d)
 
     def to_dataframe(self):
         return pd.DataFrame(self._data)
