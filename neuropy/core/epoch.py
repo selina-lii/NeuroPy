@@ -1,438 +1,315 @@
-from importlib import metadata
-import warnings
-from warnings import warn
+from enum import unique
 import numpy as np
 import pandas as pd
 from .datawriter import DataWriter
-from neuropy.utils.mixins.print_helpers import SimplePrintable, OrderedMeta
-from neuropy.utils.mixins.time_slicing import StartStopTimesMixin, TimeSlicableObjectProtocol, TimeSlicedMixin, TimeColumnAliasesProtocol
-from neuropy.utils.efficient_interval_search import get_non_overlapping_epochs, deduplicate_epochs # for EpochsAccessor's .get_non_overlapping_df()
-
-class NamedTimerange(SimplePrintable, metaclass=OrderedMeta):
-    """ A simple named period of time with a known start and end time """
-    def __init__(self, name, start_end_times):
-        self.name = name
-        self.start_end_times = start_end_times
-        
-    @property
-    def t_start(self):
-        return self.start_end_times[0]
-    
-    @t_start.setter
-    def t_start(self, t):
-        self.start_end_times[0] = t
-
-    @property
-    def duration(self):
-        return self.t_stop - self.t_start
-    
-    @property
-    def t_stop(self):
-        return self.start_end_times[1]
-    
-    @t_stop.setter
-    def t_stop(self, t):
-        self.start_end_times[1] = t
-    
-    
-    def to_Epoch(self):
-        return Epoch(pd.DataFrame({'start': [self.t_start], 'stop': [self.t_stop], 'label':[self.name]}))
-        
-
-@pd.api.extensions.register_dataframe_accessor("epochs")
-class EpochsAccessor(TimeColumnAliasesProtocol, TimeSlicedMixin, StartStopTimesMixin, TimeSlicableObjectProtocol):
-    """ A Pandas pd.DataFrame representation of [start, stop, label] epoch intervals """
-    
-    _time_column_name_synonyms = {"start":{'begin','start_t'},
-            "stop":['end','stop_t'],
-            "label":['name', 'id', 'flat_replay_idx']
-        }
-    
-
-    _required_column_names = ['start', 'stop', 'label', 'duration']
-
-    def __init__(self, pandas_obj):
-        pandas_obj = self.renaming_synonym_columns_if_needed(pandas_obj, required_columns_synonym_dict=self._time_column_name_synonyms) 
-        pandas_obj = self._validate(pandas_obj)
-        self._obj = pandas_obj
-        self._obj = self._obj.sort_values(by=["start"]) # sorts all values in ascending order
-        # Optional: If the 'label' column of the dataframe is empty, should populate it with the index (after sorting) as a string.
-        # self._obj['label'] = self._obj.index
-        self._obj["label"] = self._obj["label"].astype("str")
-        # Optional: Add 'duration' column:
-        self._obj["duration"] = self._obj["stop"] - self._obj["start"]
-        # Optional: check for and remove overlaps
-
-    @classmethod
-    def _validate(cls, obj):
-        """ verify there is a column that identifies the spike's neuron, the type of cell of this neuron ('cell_type'), and the timestamp at which each spike occured ('t'||'t_rel_seconds') """       
-        return obj # important! Must return the modified obj to be assigned (since its columns were altered by renaming
-
-    @property
-    def is_valid(self):
-        """ The dataframe is valid (because it passed _validate(...) in __init__(...) so just return True."""
-        return True
-
-    @property
-    def starts(self):
-        return self._obj.start.values
-
-    @property
-    def stops(self):
-        return self._obj.stop.values
-    
-    @property
-    def t_start(self):
-        return self.starts[0]
-    @t_start.setter
-    def t_start(self, t):
-        include_indicies = np.argwhere(t < self.stops)
-        if (np.size(include_indicies) == 0):
-            # this proposed t_start is after any contained epochs, so the returned object would be empty
-            print('Error: this proposed t_start ({}) is after any contained epochs, so the returned object would be empty'.format(t))
-            raise ValueError
-        first_include_index = include_indicies[0]
-        
-        if (first_include_index > 0):
-            # drop the epochs preceeding the first_include_index:
-            drop_indicies = np.arange(first_include_index)
-            print('drop_indicies: {}'.format(drop_indicies))
-            raise NotImplementedError # doesn't yet drop the indicies before the first_include_index
-        self._obj.loc[first_include_index, ('start')] = t # exclude the first short period where the animal isn't on the maze yet
-
-    @property
-    def duration(self):
-        return self.t_stop - self.t_start
-    
-    @property
-    def t_stop(self):
-        return self.stops[-1]
-
-    @property
-    def durations(self):
-        return self.stops - self.starts
-
-    @property
-    def n_epochs(self):
-        return len(self.starts)
-
-    @property
-    def labels(self):
-        return self._obj.label.values
+from pathlib import Path
+import scipy.signal as sg
+import typing
 
 
-    @property
-    def extra_data_column_names(self):
-        """Any additional columns in the dataframe beyond those that exist by default. """
-        return list(set(self._obj.columns) - set(self._required_column_names))
-        
-    @property
-    def extra_data_datframe(self) -> pd.DataFrame:
-        """The subset of the dataframe containing additional information in its columns beyond that what is required. """
-        return self._obj[self.extra_data_column_names]
+def _unpack_args(values, fs=1):
+    """Parsing argument for thresh_epochs"""
+    try:
+        val_min, val_max = values
+    except (TypeError, ValueError):
+        val_min, val_max = (values, None)
+
+    val_min = val_min * fs
+    val_max = val_max * fs if val_max is not None else None
+
+    return val_min, val_max
 
 
-
-    def as_array(self):
-        return self._obj[["start", "stop"]].to_numpy()
-
-    def get_unique_labels(self):
-        return np.unique(self.labels)
-
-
-    def get_start_stop_tuples_list(self):
-        """ returns a list of (start, stop) tuples. """
-        return list(zip(self.starts, self.stops))
-
-    def get_valid_df(self):
-        """ gets a validated copy of the dataframe. Looks better than doing `epochs_df.epochs._obj` """
-        return self._obj.copy()
-
-    ## Handling overlapping
-    def get_non_overlapping_df(self, debug_print=False):
-        """ Returns a dataframe with overlapping epochs removed. """
-        ## 2023-02-23 - PortionInterval approach to ensuring uniqueness:
-        from neuropy.utils.efficient_interval_search import convert_PortionInterval_to_epochs_df, _convert_start_end_tuples_list_to_PortionInterval
-        ## Capture dataframe properties beyond just the start/stop times:
-        
-        # d = P.IntervalDict()
-        self.extra_data_datframe
-
-
-        _intermediate_portions_interval = _convert_start_end_tuples_list_to_PortionInterval(zip(self.starts, self.stops))
-        
-        if debug_print:
-            before_num_rows = self.n_epochs
-            filtered_epochs = convert_PortionInterval_to_epochs_df(_convert_start_end_tuples_list_to_PortionInterval(zip(self.starts, self.stops)))
-            after_num_rows = np.shape(filtered_epochs)[0]
-            changed_num_rows = after_num_rows - before_num_rows
-            print(f'Dataframe Changed from {before_num_rows} -> {after_num_rows} ({changed_num_rows = })')
-            return filtered_epochs
-        else:
-            return convert_PortionInterval_to_epochs_df(_convert_start_end_tuples_list_to_PortionInterval(zip(self.starts, self.stops)))
-
-    def get_epochs_longer_than(self, minimum_duration, debug_print=False):
-        """ returns a copy of the dataframe contining only epochs longer than the specified minimum_duration. """
-        active_filter_epochs = self.get_valid_df()
-        if debug_print:
-            before_num_rows = np.shape(active_filter_epochs)[0]
-        if 'duration' not in active_filter_epochs.columns:
-            active_filter_epochs['duration'] = active_filter_epochs['stop'] - active_filter_epochs['start']
-        if debug_print:
-            filtered_epochs = active_filter_epochs[active_filter_epochs['duration'] >= minimum_duration]
-            after_num_rows = np.shape(filtered_epochs)[0]
-            changed_num_rows = after_num_rows - before_num_rows
-            print(f'Dataframe Changed from {before_num_rows} -> {after_num_rows} ({changed_num_rows = })')
-            return filtered_epochs
-        else:
-            return active_filter_epochs[active_filter_epochs['duration'] >= minimum_duration]
-
-    # for TimeSlicableObjectProtocol:
-    def time_slice(self, t_start, t_stop):
-        # TODO time_slice should also include partial epochs falling in between the timepoints
-        df = self._obj.copy() 
-        t_start, t_stop = self.safe_start_stop_times(t_start, t_stop)
-        df = df[(df["start"] >= t_start) & (df["start"] <= t_stop)].reset_index(drop=True)
-        return df
-        
-    def label_slice(self, label):
-        if isinstance(label, (list, np.ndarray)):
-            df = self._obj[np.isin(self._obj["label"], label)].reset_index(drop=True)
-        else:
-            assert isinstance(label, str), "label must be string"
-            df = self._obj[self._obj["label"] == label].reset_index(drop=True)
-        return df
-
-    def filtered_by_duration(self, min_duration=None, max_duration=None):
-        return self._obj[(self.durations >= (min_duration or 0.0)) & (self.durations <= (max_duration or np.inf))].reset_index(drop=True)
-        
-    # Requires Optional `portion` library
-    # import portion as P # Required for interval search: portion~=2.3.0
-    @classmethod
-    def from_PortionInterval(cls, portion_interval):
-        from neuropy.utils.efficient_interval_search import convert_PortionInterval_to_epochs_df
-        return convert_PortionInterval_to_epochs_df(portion_interval)
-
-    def to_PortionInterval(self):
-        from neuropy.utils.efficient_interval_search import _convert_start_end_tuples_list_to_PortionInterval
-        return _convert_start_end_tuples_list_to_PortionInterval(zip(self.starts, self.stops))
-
-
-class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
-    def __init__(self, epochs: pd.DataFrame, metadata=None) -> None:
-        """[summary]
-        Args:
-            epochs (pd.DataFrame): Each column is a pd.Series(["start", "stop", "label"])
-            metadata (dict, optional): [description]. Defaults to None.
-        """
+class Epoch(DataWriter):
+    def __init__(
+        self, epochs: pd.DataFrame or dict or None, metadata=None, file=None
+    ) -> None:
         super().__init__(metadata=metadata)
-        self._df = epochs.epochs.get_valid_df() # gets already sorted appropriately and everything
-        self._check_epochs(epochs) # check anyway
 
-    @property
-    def starts(self):
-        return self._df.epochs.starts
+        if epochs is None:
+            assert (
+                file is not None
+            ), "Must specify file to load if no epochs dataframe entered"
+            epochs = np.load(file, allow_pickle=True).item()["epochs"]
 
-    @property
-    def stops(self):
-        return self._df.epochs.stops
-    
-    @property
-    def t_start(self):
-        return self.starts[0]
-    @t_start.setter
-    def t_start(self, t):
-        self._df.epochs.t_start = t
+        self._epochs = self._validate(epochs)
 
-    @property
-    def duration(self):
-        return self.t_stop - self.t_start
-    
-    @property
-    def t_stop(self):
-        return self.stops[-1]
+    def _validate(self, epochs):
+        if isinstance(epochs, dict):
+            try:
+                epochs = pd.DataFrame(epochs)
+            except:
+                "If epochs is a dictionary then it should be pandas compatible"
 
-    @property
-    def durations(self):
-        return self.stops - self.starts
-
-    @property
-    def n_epochs(self):
-        return self._df.epochs.n_epochs
-    @property
-    def labels(self):
-        return self._df.epochs.labels
-
-    def get_unique_labels(self):
-        return np.unique(self.labels)
-    
-    def get_named_timerange(self, epoch_name):
-        return NamedTimerange(name=epoch_name, start_end_times=self[epoch_name])
-
-    def to_dict(self, recurrsively=False):
-        d = {"epochs": self._df, "metadata": self.metadata}
-        return d
-
-    def to_dataframe(self):
-        df = self._df.copy()
-        return df
-
-    @property
-    def metadata(self):
-        return self._metadata
-
-    @metadata.setter
-    def metadata(self, metadata):
-        """metadata compatibility"""
-
-        self._metadata = metadata
-
-    def _check_epochs(self, epochs):
         assert isinstance(epochs, pd.DataFrame)
-        # epochs.epochs.
         assert (
             pd.Series(["start", "stop", "label"]).isin(epochs.columns).all()
-        ), "Epoch dataframe should at least have columns with names: start, stop, label"
+        ), "epochs should at least have columns/keys with names: start, stop, label"
+        epochs.loc[:, "label"] = epochs["label"].astype("str")
+        epochs = epochs.sort_values(by=["start"]).reset_index(drop=True)
+        return epochs.copy()
 
-    def __repr__(self) -> str:
-        # return f"{len(self.starts)} epochs"
-        return f"{len(self.starts)} epochs\n{self.as_array().__repr__()}\n"
+    @property
+    def starts(self):
+        return self._epochs.start.values
 
-    def _repr_pretty_(self, p, cycle=False):
-        """ The cycle parameter will be true if the representation recurses - e.g. if you put a container inside itself. """
-        # p.text(self.__repr__() if not cycle else '...')
-        p.text(self.to_dataframe().__repr__() if not cycle else '...')
+    @property
+    def stops(self):
+        return self._epochs.stop.values
 
-    def __str__(self) -> str:
-        return f"{len(self.starts)} epochs\n{self.as_array().__repr__()}\n"
-    
-    def __len__(self):
-        """ allows using `len(epochs_obj)` and getting the number of epochs. """
+    @property
+    def durations(self):
+        return self.stops - self.starts
+
+    @property
+    def n_epochs(self):
         return len(self.starts)
 
-    def str_for_concise_display(self) -> str:
-        """ returns a minimally descriptive string like: '60 epochs in (17.9, 524.1)' that doesn't print all the array elements only the number of epochs and the first and last. """
-        return f"{len(self.starts)} epochs in ({self.starts[0]:.1f}, {self.stops[-1]:.1f})" # "60 epochs in (17.9, 524.1)"
+    @property
+    def labels(self):
+        return self._epochs.label.values
 
-    def str_for_filename(self) -> str:
-        return f"Epoch[{len(self.starts)}]({self.starts[0]:.1f}-{self.stops[-1]:.1f})" #
+    def set_labels(self, labels):
+        self._epochs["label"] = labels
+        return Epoch(epochs=self._epochs)
 
+    @property
+    def has_labels(self):
+        return np.all(self._epochs["label"] != "")
 
-    def __getitem__(self, slice_):
-        if isinstance(slice_, str):
-            indices = np.where(self.labels == slice_)[0]
-            if len(indices) > 1:
-                return np.vstack((self.starts[indices], self.stops[indices])).T
-            else:
-                return np.array([self.starts[indices], self.stops[indices]]).squeeze()
+    def __add__(self, epochs):
+        assert isinstance(epochs, Epoch), "Can only add two core.Epoch objects"
+        my_columns = self._epochs.columns
+        other_columns = epochs._epochs.columns
+        if np.array_equal(my_columns, other_columns):
+            df_new = pd.concat([self._epochs, epochs._epochs], ignore_index=True)
         else:
-            return np.vstack((self.starts[slice_], self.stops[slice_])).T
+            my_df = self._epochs[["start", "stop", "label"]]
+            other_df = epochs._epochs[["start", "stop", "label"]]
+            df_new = pd.concat([my_df, other_df]).reset_index(drop=True)
 
-    # for TimeSlicableObjectProtocol:
-    def time_slice(self, t_start, t_stop):
-        return Epoch(epochs=self._df.epochs.time_slice(t_start, t_stop), metadata=self.metadata) # NOTE: drops metadata
-        
-    def label_slice(self, label):
-        return Epoch(epochs=self._df.epochs.label_slice(label), metadata=self.metadata)
+        return Epoch(epochs=df_new)
 
-    def boolean_indicies_slice(self, boolean_indicies):
-        return Epoch(epochs=self._df[boolean_indicies], metadata=self.metadata)
+    def shift(self, dt):
+        epochs = self._epochs.copy()
+        epochs[["start", "stop"]] += dt
+        return Epoch(epochs=epochs, metadata=self.metadata)
 
-    def filtered_by_duration(self, min_duration=None, max_duration=None):
-        return Epoch(epochs=self._df.epochs.filtered_by_duration(min_duration, max_duration), metadata=self.metadata)
+    def get_unique_labels(self):
+        return np.unique(self.labels)
 
-    @classmethod
-    def filter_epochs(cls, curr_epochs, pos_df:pd.DataFrame=None, spikes_df:pd.DataFrame=None, require_intersecting_epoch:"Epoch"=None, min_epoch_included_duration=0.06, max_epoch_included_duration=0.6,
-        maximum_speed_thresh=2.0, min_inclusion_fr_active_thresh=2.0, min_num_unique_aclu_inclusions=3, debug_print=False) -> "Epoch":
-        """filters the provided replay epochs by specified constraints.
+    def is_labels_unique(self):
+        return len(np.unique(self.labels)) == len(self)
 
-        Args:
-            curr_epochs (Epoch): the epochs to filter on
-            min_epoch_included_duration (float, optional): all epochs shorter than min_epoch_included_duration will be excluded from analysis. Defaults to 0.06.
-            max_epoch_included_duration (float, optional): all epochs longer than max_epoch_included_duration will be excluded from analysis. Defaults to 0.6.
-            maximum_speed_thresh (float, optional): epochs are only included if the animal's interpolated speed (as determined from the session's position dataframe) is below the speed. Defaults to 2.0 [cm/sec].
-            min_inclusion_fr_active_thresh: minimum firing rate (in Hz) for a unit to be considered "active" for inclusion.
-            min_num_unique_aclu_inclusions: minimum number of unique active cells that must be included in an epoch to have it included.
+    def to_dataframe(self):
+        df = self._epochs.copy()
+        df["duration"] = self.durations
+        return df
 
-            save_on_compute (bool, optional): _description_. Defaults to False.
-            debug_print (bool, optional): _description_. Defaults to False.
+    def add_column(self, name: str, arr: np.ndarray):
+        data = self.to_dataframe()
+        data[name] = arr
+        return Epoch(epochs=data, metadata=self.metadata)
 
-        Returns:
-            Epoch: the filtered epochs as an Epoch object
+    def add_dataframe(self, df: pd.DataFrame):
+        assert isinstance(df, pd.DataFrame), "df should be a pandas dataframe"
+        data = self.to_dataframe()
+        data_new = pd.concat([data, df], axis=1)
+        return Epoch(epochs=data_new, metadata=self.metadata)
 
-        NOTE: this really is a general method that works for any Epoch object or Epoch-type dataframe to filter it.
+    def __repr__(self) -> str:
+        return f"{len(self.starts)} epochs\nSnippet: \n {self._epochs.head(5)}"
 
-        TODO 2023-04-11 - This really belongs in the Epoch class or the epoch dataframe accessor. 
+    def __str__(self) -> str:
+        pass
 
+    def __getitem__(self, i):
+        if isinstance(i, str):
+            data = self._epochs[self._epochs["label"] == i].copy()
+        # elif all(isinstance(_, str) for _ in i):
+        #     data = self._epochs[self._epochs["label"].isin(i)].copy()
+        elif isinstance(i, (int, np.integer)):
+            data = self._epochs.iloc[[i]].copy()
+        else:
+            data = self._epochs.iloc[i].copy()
+
+        return Epoch(epochs=data.reset_index(drop=True))
+
+    def __len__(self):
+        return self.n_epochs
+
+    def time_slice(self, t_start, t_stop, strict=True):
+        """Return epochs which are within the provided time limits
+
+        Parameters
+        ----------
+        t_start : float, seconds
+            start time
+        t_stop : float, seconds
+            stop time
+        strict : bool, optional
+            whether to return epochs that strictly begin and end within the time limits, if False --> trim epochs which span partially or completely outside of time limits, by default True
+
+        Returns
+        -------
+        Epoch
+            _description_
         """
-        from neuropy.utils.efficient_interval_search import filter_epochs_by_speed
-        from neuropy.utils.efficient_interval_search import filter_epochs_by_num_active_units
+        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        starts = self.starts
+        stops = self.stops
 
-        if not isinstance(curr_epochs, pd.DataFrame):
-            curr_epochs = curr_epochs.to_dataframe() # .get_valid_df() # convert to pd.DataFrame to start
-    
-        assert isinstance(curr_epochs, pd.DataFrame), f'curr_replays must be a pd.DataFrame or Epoch object, but is {type(curr_epochs)}'
-        # Ensure the dataframe representation has the required columns. TODO: is this needed?
-        if not 'stop' in curr_epochs.columns:
-            # Make sure it has the 'stop' column which is expected as opposed to the 'end' column
-            curr_epochs['stop'] = curr_epochs['end'].copy()
-        if not 'label' in curr_epochs.columns:
-            # Make sure it has the 'stop' column which is expected as opposed to the 'end' column
-            curr_epochs['label'] = curr_epochs['flat_replay_idx'].copy()
-        # must convert back from pd.DataFrame to Epoch object to use the Epoch methods
-        curr_epochs = cls(curr_epochs)
-
-        ## Use the existing replay epochs from the session but ensure they look valid:
-
-        ## Filter based on required overlap with Ripples:
-        if require_intersecting_epoch is not None:
-            curr_epochs = cls.from_PortionInterval(require_intersecting_epoch.to_PortionInterval().intersection(curr_epochs.to_PortionInterval()))
+        if strict:
+            keep = (starts >= t_start) & (stops <= t_stop)  # strictly inside
+            epoch_df = self.to_dataframe()[keep].reset_index(drop=True)
+            epoch_df = epoch_df.drop(["duration"], axis=1)
         else:
-            curr_epochs = cls.from_PortionInterval(curr_epochs.to_PortionInterval()) # just do this to ensure non-overlapping
+            # also include and trim epochs: that span the entire range, epochs that start before but end inside, epochs that start inside but end outside
+            keep = (starts <= t_stop) & (stops >= t_start)
+            epoch_df = self.to_dataframe()[keep].reset_index(drop=True)
+            epoch_df = epoch_df.drop(["duration"], axis=1)
+            epoch_df.loc[epoch_df["start"] < t_start, "start"] = t_start
+            epoch_df.loc[epoch_df["stop"] > t_stop, "stop"] = t_stop
 
-        if curr_epochs.n_epochs == 0:
-            warn(f'curr_epochs already empty prior to any filtering')
+        return Epoch(epoch_df)
 
-        # Filter by duration bounds:
-        curr_epochs = curr_epochs.filtered_by_duration(min_duration=min_epoch_included_duration, max_duration=max_epoch_included_duration)
+    def duration_slice(self, min_dur=None, max_dur=None):
+        """return epochs that have durations between given thresholds
 
-        # Filter *_replays_Interval by requiring them to be below the speed:
-        if maximum_speed_thresh is not None:
-            assert pos_df is not None, "must provide pos_df if filtering by speed"
-            if curr_epochs.n_epochs > 0:
-                curr_epochs, above_speed_threshold_intervals, below_speed_threshold_intervals = filter_epochs_by_speed(pos_df, curr_epochs, speed_thresh=maximum_speed_thresh, debug_print=debug_print)
-            else:
-                warn(f'curr_epochs already empty prior to filtering by speed')
+        Parameters
+        ----------
+        min_dur : float, optional
+            minimum duration in seconds, by default None
+        max_dur : float, optional
+            maximum duration in seconds, by default None,
 
-        # 2023-02-10 - Trimming and Filtering Estimated Replay Epochs based on cell activity and pyramidal cell start/end times:
-        if (min_inclusion_fr_active_thresh is not None) or (min_num_unique_aclu_inclusions is not None):
-            assert spikes_df is not None, "must provide spikes_df if filtering by active units"
-            active_spikes_df = spikes_df.spikes.sliced_by_neuron_type('pyr') # trim based on pyramidal cell activity only
-            if curr_epochs.n_epochs > 0:
-                curr_epochs, _extra_outputs = filter_epochs_by_num_active_units(active_spikes_df, curr_epochs, min_inclusion_fr_active_thresh=min_inclusion_fr_active_thresh, min_num_unique_aclu_inclusions=min_num_unique_aclu_inclusions, include_intermediate_computations=False) # TODO: seems wasteful considering we compute all these spikes_df metrics and refinements and then don't return them.
-            else:
-                warn(f'curr_epochs already empty prior to filtering by firing rate or minimum active units')
-                
-        return curr_epochs
+        Returns
+        -------
+        epoch
+            epochs with durations between min_dur and max_dur
+        """
+        durations = self.durations
+        if min_dur is None:
+            min_dur = np.min(durations)
+        if max_dur is None:
+            max_dur = np.max(durations)
 
+        return self[(durations >= min_dur) & (durations <= max_dur)]
 
+    def label_slice(self, labels: typing.Union[list[str], str]):
+        """Returns Epoch for input labels
 
-    def to_dict(self, recurrsively=False):
-        return {
-            "epochs": self._df,
-            "metadata": self._metadata,
-        }
+        Parameters
+        ----------
+        labels : _type_
+            _description_
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        if isinstance(labels, str):
+            labels = [labels]
+
+        assert np.all([isinstance(_, str) for _ in labels])
+        df = self._epochs[np.isin(self.labels, labels)].reset_index(drop=True)
+        return Epoch(epochs=df)
 
     @staticmethod
-    def from_dict(d: dict):
-        return Epoch(d["epochs"], metadata=d["metadata"])
+    def from_array(starts, stops, labels=None):
+        df = pd.DataFrame({"start": starts, "stop": stops, "label": labels})
+        return Epoch(epochs=df)
 
-    ## TODO: refactor these methods into the 'epochs' pd.DataFrame accessor above and then wrap them:
-    def fill_blank(self, method="from_left"):
-        ep_starts = self.epochs["start"].values
-        ep_stops = self.epochs["stop"].values
-        ep_durations = self.epochs["duration"].values
-        ep_labels = self.epochs["label"].values
+    @staticmethod
+    def from_string_array(arr, dt: float = 1.0, t: np.array = None):
+        """Convert a string array of type ['A','A','B','C','C'] to epochs
+        Parameters
+        ----------
+        arr : np.array
+            array of strings
+        dt : float
+            sampling time of arr, by default 1 second
+        t : np.array
+            time array of same length as arr giving corresponding time in seconds, if provided it overrides dt
+        """
+        unique_labels = np.unique(arr)
+        pad = lambda x: np.pad(x, (1, 1), "constant", constant_values=(0, 0))
+
+        starts, stops, labels = [], [], []
+        for l in unique_labels:
+            l_transition = np.diff(pad(np.where(arr == l, 1, 0)))
+            l_start = np.where(l_transition == 1)[0]
+            l_stop = np.where(l_transition == -1)[0]
+
+            starts.append(l_start)
+            stops.append(l_stop)
+            labels.extend([l] * len(l_start))
+
+        starts = np.concatenate(starts)
+        stops = np.concatenate(stops)
+
+        # padding correction
+        stops[stops == len(arr)] = len(arr) - 1
+
+        if t is not None:
+            assert len(t) == len(arr), "time length should be same as input array"
+            starts = t[starts]
+            stops = t[stops]
+        else:
+            starts = starts * dt
+            stops = stops * dt
+
+        return Epoch.from_array(starts, stops, labels)
+
+    @staticmethod
+    def from_file(f):
+        d = DataWriter.from_file(f)
+        if d is not None:
+            return Epoch.from_dict(d)
+        else:
+            return None
+
+    @property
+    def is_overlapping(self):
+        if self.n_epochs > 1:
+            starts = self.starts
+            stops = self.stops
+            return np.all((starts[1:] - stops[:-1]) < 0)
+        else:
+            return False
+
+    def itertuples(self):
+        return self.to_dataframe().itertuples()
+
+    def fill_blank(
+        self,
+        method: typing.Literal["from_left", "from_right", "from_nearest"] = "from_left",
+    ):
+        """Gaps in the epochs will be filled based on given criteria.
+        Visualization:
+
+        from_left:    |epoch1| gap |epoch2| --> |epoch1  ->|epoch2|
+        from_right:   |epoch1| gap |epoch2| --> |epoch1|<-  epoch2|
+        from_nearest: |epoch1| gap |epoch2| --> |epoch1->|<-epoch2|
+
+        Parameters
+        ----------
+        method : str, optional
+            how will the gaps be filled, by default "from_left"
+            from_left = epoch preceding the gap is extended to fill
+            from_right = epoch succeeding the gap is extended to fill
+            from_nearest = first half of gap filled by extending preceding epoch and    second half is filled by extending succeeding epoch
+
+        Returns
+        -------
+        core.Epoch
+            epochs after filling the blank timepoints
+        """
+        ep_starts = self.starts
+        ep_stops = self.stops
+        ep_durations = self.durations
+        ep_labels = self.labels
 
         mask = (ep_starts[:-1] + ep_durations[:-1]) < ep_starts[1:]
         (inds,) = np.nonzero(mask)
@@ -454,9 +331,106 @@ class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
                 ep_starts[ind + 1] -= gap / 2.0
                 ep_durations[ind + 1] += gap / 2.0
 
-        self.epochs["start"] = ep_starts
-        self.epochs["stop"] = ep_starts + ep_durations
-        self.epochs["duration"] = ep_durations
+        # self.epochs["start"] = ep_starts
+        # self.epochs["stop"] = ep_starts + ep_durations
+        # self.epochs["duration"] = ep_durations
+
+        return self.from_array(
+            starts=ep_starts, stops=ep_starts + ep_durations, labels=ep_labels
+        )
+
+    def merge(self, dt):
+        """Merge epochs that are within some temporal distance
+
+        Parameters
+        ----------
+        dt : float
+            temporal distance in seconds
+
+        Returns
+        -------
+        Epoch
+        """
+        n_epochs = self.n_epochs
+        starts, stops = self.starts, self.stops
+        ind_delete = []
+        for i in range(n_epochs - 1):
+            if (starts[i + 1] - stops[i]) < dt:
+                # stretch the second epoch to cover the range of both epochs
+                starts[i + 1] = min(starts[i], starts[i + 1])
+                stops[i + 1] = max(stops[i], stops[i + 1])
+
+                ind_delete.append(i)
+
+        epochs_arr = np.vstack((starts, stops)).T
+        epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
+
+        return Epoch.from_array(epochs_arr[:, 0], epochs_arr[:, 1])
+
+    def merge_neighbors(self):
+        """Epochs of same label and common boundary will be merged. For example,
+        [1,2] and [2,3] --> [1,3]
+
+        Returns
+        -------
+        core.Epoch
+            epochs after merging neigbours sharing same label and boundary
+        """
+        ep_times, ep_stops, ep_labels = (self.starts, self.stops, self.labels)
+
+        ep_durations = self.durations
+
+        ind_delete = []
+        for label in ep_labels:
+            (inds,) = np.nonzero(ep_labels == label)
+            for i in range(len(inds) - 1):
+                # if two sequentially adjacent epochs with the same label
+                # overlap or have less than 1 microsecond separation, merge them
+                if ep_times[inds[i + 1]] - ep_stops[inds[i]] < 1e-6:
+                    # stretch the second epoch to cover the range of both epochs
+                    ep_times[inds[i + 1]] = min(
+                        ep_times[inds[i]], ep_times[inds[i + 1]]
+                    )
+                    ep_stops[inds[i + 1]] = max(
+                        ep_stops[inds[i]], ep_stops[inds[i + 1]]
+                    )
+                    ep_durations[inds[i + 1]] = (
+                        ep_stops[inds[i + 1]] - ep_times[inds[i + 1]]
+                    )
+
+                    ind_delete.append(inds[i])
+
+        epochs_arr = np.vstack((ep_times, ep_stops)).T
+        epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
+        labels_arr = np.delete(ep_labels, ind_delete)
+
+        return Epoch.from_array(epochs_arr[:, 0], epochs_arr[:, 1], labels_arr)
+
+    def contains(self, t):
+        """Check if timepoints lie within epochs, must be non-overlapping epochs
+
+        Parameters
+        ----------
+        t : array
+            timepoints in seconds
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+
+        assert self.is_overlapping == False, "Epochs must be non overlapping"
+
+        labels = self.labels
+        bin_loc = np.digitize(t, self.flatten())
+        indx_bool = bin_loc % 2 == 1
+
+        return (
+            indx_bool,
+            t[indx_bool],
+            labels[((bin_loc[indx_bool] - 1) / 2).astype("int")],
+        )
 
     def delete_in_between(self, t1, t2):
         epochs_df = self.to_dataframe()[["start", "stop", "label"]]
@@ -489,13 +463,24 @@ class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
         ].copy()
         flank_stop["start"] = t2
         epochs_df = epochs_df[~((epochs_df["start"] < t1) & (epochs_df["stop"] > t2))]
-        epochs_df = epochs_df.append(flank_start)
-        epochs_df = epochs_df.append(flank_stop)
-        epochs_df = epochs_df.reset_index(drop=True)
-
+        epochs_df = pd.concat([epochs_df, flank_start, flank_stop], ignore_index=True)
         return Epoch(epochs_df)
 
-    def get_proportion_by_label(self, t_start=None, t_stop=None):
+    def proportion_by_label(self, t_start=None, t_stop=None):
+        """Get porportion of time for each label type
+
+        Parameters
+        ----------
+        t_start : float, optional
+            start time in seconds, by default None
+        t_stop : float, optional
+            stop time in seconds, by default None
+
+        Returns
+        -------
+        dict
+            dictionary containing proportion for each unique label between t_start and t_stop
+        """
         if t_start is None:
             t_start = self.starts[0]
         if t_stop is None:
@@ -503,7 +488,7 @@ class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
 
         duration = t_stop - t_start
 
-        ep = self._df.copy()
+        ep = self._epochs.copy()
         ep = ep[(ep.stop > t_start) & (ep.start < t_stop)].reset_index(drop=True)
 
         if ep["start"].iloc[0] < t_start:
@@ -525,6 +510,23 @@ class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
 
         return label_proportion
 
+    def durations_by_label(self):
+        """Return total duration for each unique label
+
+        Returns
+        -------
+        dict
+            dictionary contating duration of each unique label
+        """
+        labels = self.labels
+        durations = self.durations
+        unique_labels = self.get_unique_labels()
+        label_durations = {}
+        for label in unique_labels:
+            label_durations[label] = durations[labels == label].sum()
+
+        return label_durations
+
     def count(self, t_start=None, t_stop=None, binsize=300):
         if t_start is None:
             t_start = 0
@@ -536,25 +538,105 @@ class Epoch(StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
         bins = np.arange(t_start, t_stop + binsize, binsize)
         return np.histogram(mid_times, bins=bins)[0]
 
-    def to_neuroscope(self, ext="PHO"):
-        assert self.filename is not None
-        out_filepath = self.filename.with_suffix(f".{ext}.evt")
-        with out_filepath.open("w") as a:
-            for event in self._df.itertuples():
-                a.write(f"{event.start*1000} start\n{event.stop*1000} end\n")
-        return out_filepath
-
     def as_array(self):
+        """Returns starts and stops as 2d numpy array"""
         return self.to_dataframe()[["start", "stop"]].to_numpy()
 
-    # Requires Optional `portion` library
-    @classmethod
-    def from_PortionInterval(cls, portion_interval, metadata=None):
-        return Epoch(epochs=EpochsAccessor.from_PortionInterval(portion_interval), metadata=metadata) 
+    def flatten(self):
+        """Returns 1d numpy array of alternating starts and stops
+        NOTE: returned array is monotonically increasing only if epochs are non-overlapping
+        """
+        return self.as_array().flatten("C")
 
-    def to_PortionInterval(self):
-        return self._df.epochs.to_PortionInterval()
+    @staticmethod
+    def from_peaks(arr: np.ndarray, thresh, length, sep=0, boundary=0, fs=1):
+        hmin, hmax = _unpack_args(thresh)  # does not need fs
+        lmin, lmax = _unpack_args(length, fs=fs)
+        sep = sep * fs + 1e-6
 
-    def get_non_overlapping(self, debug_print=False):
-        """ Returns a copy with overlapping epochs removed. """
-        return Epoch(epochs=self._df.epochs.get_non_overlapping_df(debug_print=debug_print), metadata=self.metadata)
+        assert hmin >= boundary, "boundary must be smaller than min thresh"
+
+        arr_thresh = np.where(arr >= boundary, arr, 0)
+        peaks, props = sg.find_peaks(arr_thresh, height=[hmin, hmax], prominence=0)
+
+        starts, stops = props["left_bases"], props["right_bases"]
+        peaks_values = arr_thresh[peaks]
+
+        # ----- merge overlapping epochs ------
+        n_epochs = len(starts)
+        ind_delete = []
+        for i in range(n_epochs - 1):
+            if (starts[i + 1] - stops[i]) < sep:
+                # stretch the second epoch to cover the range of both epochs
+                starts[i + 1] = min(starts[i], starts[i + 1])
+                stops[i + 1] = max(stops[i], stops[i + 1])
+
+                peaks_values[i + 1] = max(peaks_values[i], peaks_values[i + 1])
+                peaks[i + 1] = [peaks[i], peaks[i + 1]][
+                    np.argmax([peaks_values[i], peaks_values[i + 1]])
+                ]
+                ind_delete.append(i)
+
+        epochs_arr = np.vstack((starts, stops, peaks, peaks_values)).T
+        epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
+
+        # ----- duration thresholds ------
+        epochs_length = epochs_arr[:, 1] - epochs_arr[:, 0]
+        if lmax is None:
+            lmax = epochs_length.max()
+        ind_keep = (epochs_length >= lmin) & (epochs_length <= lmax)
+
+        starts, stops, peaks, peaks_values = epochs_arr[ind_keep, :].T
+
+        # return starts / fs, stops / fs, peaks / fs, peaks_values
+
+        return Epoch.from_array(starts / fs, stops / fs), peaks / fs, peaks_values
+
+    @staticmethod
+    def from_boolean_array(arr, t=None):
+        """Create epochs from a boolean array
+
+        Parameters
+        ----------
+        arr : np.array
+            timeseries of boolean values
+        t : np.array, optional
+            corresponding time in seconds, by default None
+
+        Returns
+        -------
+        core.Epoch
+            epochs where the arr is high
+        """
+        assert np.array_equal(arr, arr.astype(bool)), "Only boolean array accepted"
+        int_arr = arr.astype("int")
+        pad_arr = np.pad(int_arr, 1)
+        diff_arr = np.diff(pad_arr)
+        starts, stops = np.where(diff_arr == 1)[0], np.where(diff_arr == -1)[0]
+        stops[stops == len(arr)] = len(arr) - 1
+
+        if t is not None:
+            assert len(t) == len(arr), "time length should be same as input array"
+            starts, stops = t[starts], t[stops]
+
+        return Epoch.from_array(starts, stops, "high")
+
+    def get_indices_for_time(self, t: np.array):
+        """Mark indices of a time array that lie within the epochs.
+
+        Parameters
+        ----------
+        t : np.array
+            array of time points in seconds
+
+        Returns
+        -------
+        Boolean array
+
+        """
+        time_bool = np.zeros_like(t)
+
+        for e in self.as_array():
+            time_bool[np.where((t >= e[0]) & (t <= e[1]))[0]] = 1
+
+        return time_bool.astype("bool")
