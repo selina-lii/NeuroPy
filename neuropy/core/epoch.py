@@ -4,14 +4,6 @@ from warnings import warn
 import numpy as np
 import pandas as pd
 from .datawriter import DataWriter
-import tables as tb
-from tables import (
-    Int8Col, Int16Col, Int32Col, Int64Col,
-    UInt8Col, UInt16Col, UInt32Col, UInt64Col,
-    Float32Col, Float64Col,
-    TimeCol, ComplexCol, StringCol, BoolCol, EnumCol
-)
-
 from neuropy.utils.mixins.print_helpers import SimplePrintable, OrderedMeta
 from neuropy.utils.mixins.time_slicing import StartStopTimesMixin, TimeSlicableObjectProtocol, TimeSlicedMixin, TimeColumnAliasesProtocol
 from neuropy.utils.efficient_interval_search import get_non_overlapping_epochs, deduplicate_epochs # for EpochsAccessor's .get_non_overlapping_df()
@@ -226,15 +218,6 @@ class EpochsAccessor(TimeColumnAliasesProtocol, TimeSlicedMixin, StartStopTimesM
         return _convert_start_end_tuples_list_to_PortionInterval(zip(self.starts, self.stops))
 
 
-# PyTables Definition
-class EpochTable(tb.IsDescription):
-    """ represents a single neuron in the scope of multiple sessions for use in a PyTables table or HDF5 output file """
-    t_start = Float64Col()  
-    t_end = Float64Col()
-    label = StringCol(16) # 16-character String, globally unique neuron identifier (across all sessions) composed of a session_uid and the neuron's (session-specific) aclu
-
-
-
 class Epoch(HDFMixin, StartStopTimesMixin, TimeSlicableObjectProtocol, DataWriter):
     def __init__(self, epochs: pd.DataFrame, metadata=None) -> None:
         """[summary]
@@ -329,6 +312,7 @@ class Epoch(HDFMixin, StartStopTimesMixin, TimeSlicableObjectProtocol, DataWrite
 
     def str_for_filename(self) -> str:
         return f"Epoch[{len(self.starts)}]({self.starts[0]:.1f}-{self.stops[-1]:.1f})" #
+
 
     def __getitem__(self, slice_):
         if isinstance(slice_, str):
@@ -601,9 +585,6 @@ class Epoch(HDFMixin, StartStopTimesMixin, TimeSlicableObjectProtocol, DataWrite
         #     group.attrs['t_start'] = self.t_start
         #     group.attrs['t_stop'] = self.t_stop
         #     group.attrs['n_epochs'] = self.n_epochs
-
-
-
 
     @classmethod
     def read_hdf(cls, file_path, key: str, **kwargs) -> "Epoch":
