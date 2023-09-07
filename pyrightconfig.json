@@ -21,11 +21,11 @@
     "**/dist",
     "**/build",
     "**/.idea",
-  ],
-  "ignore": [
     "**/.venv",
-    "src/oldstuff"
   ],
+//   "ignore": [
+//     "src/oldstuff"
+//   ],
 
   "defineConstant": {
     "DEBUG": true
