@@ -1,19 +1,28 @@
 {
   "include": [
-    "neuropy"
+    "src"
   ],
   
   "exclude": [
+    "**/.git", "**.svn", "**/.hg", "**/CVS", "**/*.asv",
     "**/node_modules",
+    "**/.classpath",
+    "**/.factorypath",
+    "**/.ipynb_checkpoints",
+    "**/.project",
+    "**/.settings",
+    "**/.spyproject",
+    "**/.virtual_documents",
+    "**/.vscode",
+    "**/.dvc",
     "**/__pycache__",
-	"**/.vscode",
-	"**/.idea",
-	"**/dist",
-	"**/build",
-    // "src/experimental",
-    // "src/typestubs"
+    "**/.vscode",
+    "**/.idea",
+    "**/dist",
+    "**/build",
+    "**/.idea",
+    "**/.venv",
   ],
-
 //   "ignore": [
 //     "src/oldstuff"
 //   ],
@@ -27,6 +36,7 @@
 
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
+
   "pythonVersion": "3.9",
 //   "pythonPlatform": "Linux",
 //   "executionEnvironments": [
@@ -53,7 +63,7 @@
 //       ]
 //     },
 //     {
-//       "root": "neuropy"
+//       "root": "src"
 //     }
 //   ]
 }
