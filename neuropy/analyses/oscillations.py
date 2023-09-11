@@ -18,7 +18,6 @@ def _detect_freq_band_epochs(
     fs,
     sigma,
     ignore_times=None,
-    return_power=False,
 ):
     """Detects epochs of high power in a given frequency band
 
@@ -104,7 +103,7 @@ def _detect_freq_band_epochs(
 
     # ------duration thresh---------
     epochs = epochs.duration_slice(min_dur=mindur, max_dur=maxdur)
-    print(f"{len(epochs)} epochs remaining with durations within ({mindur},{maxdur})")
+    print(f"{len(epochs)} epochs reamining with durations within ({mindur},{maxdur})")
 
     epochs.metadata = {
         "params": {
@@ -116,10 +115,8 @@ def _detect_freq_band_epochs(
             # "mergedist": mergedist,
         },
     }
-    if not return_power:
-        return epochs
-    else:
-        return epochs, power
+
+    return epochs
 
 
 def detect_hpc_slow_wave_epochs(

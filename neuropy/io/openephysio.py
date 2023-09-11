@@ -20,9 +20,9 @@ def get_us_start(settings_file: str, from_zone="UTC", to_zone="America/Detroit")
         "Utilities/PhoStartTimestamp Processor"
     ]["PhoStartTimestampPlugin"]["RecordingStartTimestamp"]["startTime"]
     dt_start_utc = datetime.strptime(start_us[:-1], "%Y-%m-%d_%H:%M:%S.%f").replace(
-        tzinfo=tz.gettz(from_zone)
+        tzinfo=tz.gettz("UTC")
     )
-    to_zone = tz.gettz(to_zone)
+    to_zone = tz.gettz("America/Detroit")
 
     return dt_start_utc.astimezone(to_zone)
 
@@ -164,9 +164,7 @@ def load_all_ttl_events(basepath: str or Path, sync: bool = False, **kwargs):
     for TTLfolder, expfolder in zip(TTLpaths, exppaths):
         events = load_ttl_events(TTLfolder, **kwargs)
         events_all.append(events)
-
-        # This shouldn't be necessary for grabbing event timestamps.
-        # nframes_dat.append(get_dat_timestamps(expfolder, sync=sync))
+        nframes_dat.append(get_dat_timestamps(expfolder, sync=sync))
 
     # Now loop through and make everything into a datetime in case you are forced to use system times to synchronize everything later
     times_list = []
