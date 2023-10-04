@@ -1,3 +1,5 @@
+import ast
+
 import numpy as np
 from glob import glob
 import os
@@ -5,13 +7,37 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree
 import pandas as pd
+from datetime import datetime, timezone
+from dateutil import tz
+import matplotlib.pyplot as plt
 
 
-def get_dat_timestamps(basepath: str or Path, sync: bool = True):
+def get_us_start(settings_file: str, from_zone="UTC", to_zone="America/Detroit"):
+    """Get microsecond time second precision start time from Pho/Timestamp plugin"""
+
+    experiment_meta = XML2Dict(settings_file)
+
+    start_us = experiment_meta["SIGNALCHAIN"]["PROCESSOR"][
+        "Utilities/PhoStartTimestamp Processor"
+    ]["PhoStartTimestampPlugin"]["RecordingStartTimestamp"]["startTime"]
+    dt_start_utc = datetime.strptime(start_us[:-1], "%Y-%m-%d_%H:%M:%S.%f").replace(
+        tzinfo=tz.gettz(from_zone)
+    )
+    to_zone = tz.gettz(to_zone)
+
+    return dt_start_utc.astimezone(to_zone)
+
+
+def get_dat_timestamps(basepath: str or Path, sync: bool = False, start_end_only=False):
     """
     Gets timestamps for each frame in your dat file(s) in a given directory.
+
+    IMPORTANT: in the event your .dat file has less frames than you timestamps.npy file,
+    you MUST create a "dropped_end_frames.txt" file with the # of missing frames in the same folder
+    to properly account for this offset.
     :param basepath: str, path to parent directory, holding your 'experiment' folder(s).
     :param sync: True = use 'synchronized_timestamps.npy' file, default = False
+    :param start_end_only: True = only grab start and end timestamps
     :return:
     """
     basepath = Path(basepath)
@@ -19,23 +45,108 @@ def get_dat_timestamps(basepath: str or Path, sync: bool = True):
     timestamp_files = get_timestamp_files(basepath, type="continuous", sync=sync)
 
     timestamps = []
-    for file in timestamp_files:
+    nrec, start_end_str, nframe_dat = [], [], []  # for start_end=True only
+    nframe_end = -1
+    for idf, file in enumerate(timestamp_files):
         set_file = get_settings_filename(file)  # get settings file name
-        experiment_meta = XML2Dict(basepath / set_file)  # Get meta data
-        start_time = pd.Timestamp(
-            experiment_meta["INFO"]["DATE"]
-        )  # get start time frfom meta-data
+        set_folder = get_set_folder(file)
+        try:
+            start_time = get_us_start(set_folder / set_file)
+            # print("Using precise start time from Pho/Timestamp plugin")
+        except KeyError:
+            try:
+                experiment_meta = XML2Dict(set_folder / set_file)  # Get meta data
+                start_time = pd.Timestamp(
+                    experiment_meta["INFO"]["DATE"]
+                )  # get start time from meta-data
+            except FileNotFoundError:
+                print(
+                    "WARNING:"
+                    + str(set_folder / set_file)
+                    + " not found. Inferring start time from directory structure. PLEASE CHECK!"
+                )
+                # Find folder with timestamps
+                m = re.search(
+                    "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}",
+                    str(set_folder),
+                )
+                start_time = pd.to_datetime(m.group(0), format="%Y-%m-%d_%H-%M-%S")
+
         SR, sync_frame = parse_sync_file(
-            file.parents[2] / "sync_messages.txt"
+            file.parents[3] / "recording1/sync_messages.txt"
         )  # Get SR and sync frame info
+        print("start time = " + str(start_time))
         stamps = np.load(file)  # load in timestamps
+
+        # Remove any dropped end frames.
+        if (file.parent / "dropped_end_frames.txt").exists():
+            with open((file.parent / "dropped_end_frames.txt"), "rb") as fp:
+                nfile = fp.readlines(0)
+                pattern = re.compile("[0-9]+")
+                ndropped = int(pattern.search(str(nfile[0])).group(0))
+
+            print(f"Dropping last {ndropped} frames per dropped_end_frames.txt file")
+            stamps = stamps[0:-ndropped]
+        if start_end_only:  # grab start and end timestamps only
+            # Add up start and end frame numbers
+            nframe_dat.extend([nframe_end + 1, nframe_end + len(stamps)])
+            nframe_end = nframe_dat[-1]
+            stamps = stamps[[0, -1]]
         timestamps.append(
             (
                 start_time + pd.to_timedelta((stamps - sync_frame) / SR, unit="sec")
             ).to_frame(index=False)
         )  # Add in absolute timestamps, keep index of acquisition system
 
-    return pd.concat(timestamps)
+        if start_end_only:
+            nrec.extend([idf, idf])
+            start_end_str.extend(["start", "stop"])
+
+    if not start_end_only:
+        return pd.concat(timestamps)
+    else:
+        return pd.DataFrame(
+            {
+                "Recording": nrec,
+                "Datetime": np.concatenate(timestamps).reshape(-1),
+                "Condition": start_end_str,
+                "nframe_dat": nframe_dat,
+            }
+        )
+
+
+def create_sync_df(
+    basepath: str or Path, sync: bool = False, sr_dat=30000, sr_eeg=1250
+):
+    """Create a dataframe with start and stop times of all recordings in a parent folder.
+    nframe_dat and nframe_eeg assumes the files have been concatenated into one file.
+    """
+
+    start_stop_df = get_dat_timestamps(basepath, sync, start_end_only=True)
+
+    # Calculate eeg frames
+    nframe_eeg = (start_stop_df["nframe_dat"] / (sr_dat / sr_eeg)).values.astype(int)
+
+    # Augment repeated frame numbers by one
+    repeat_ind = np.where(np.diff(nframe_eeg) == 0)[0] + 1
+    nframe_eeg[repeat_ind] += 1
+
+    # Combine into one dataframe after calculating combined dat/eeg file times
+    sync_df = pd.concat(
+        (
+            start_stop_df,
+            pd.DataFrame(
+                {
+                    "dat_time": start_stop_df["nframe_dat"] / sr_dat,
+                    "nframe_eeg": nframe_eeg,
+                    "eeg_time": nframe_eeg / sr_eeg,
+                }
+            ),
+        ),
+        axis=1,
+    )
+
+    return sync_df
 
 
 def get_timestamp_files(
@@ -88,14 +199,15 @@ def get_lfp_timestamps(dat_times_or_folder, SRdat=30000, SRlfp=1250):
     return dat_times.iloc[slice(0, None, int(SRdat / SRlfp))]
 
 
-def load_all_ttl_events(basepath: str or Path, sync: bool = False, **kwargs):
+def load_all_ttl_events(
+    basepath: str or Path, sanity_check_channel: int or None = None, **kwargs
+):
     """Loads TTL events from digital input port on an OpenEphys box or Intan Recording Controller in BINARY format.
     Assumes you have left the directory structure intact! Flexible - can load from just one recording or all recordings.
     Combines all events into one dataframe with datetimes.
 
     :param TTLpath: folder where TTL files live
-    :param sync: continuous data timestamps to use for alignment. False(default) = use 'timestamps.npy',
-    True = use 'synchronized_timestamps.npy'
+    :param sanity_check_channel: int or None (default), if not None specifies TTL channel to plot timestamps of
     :param kwargs: accepts all kwargs to load_ttl_events
     """
     basepath = Path(basepath)
@@ -108,20 +220,31 @@ def load_all_ttl_events(basepath: str or Path, sync: bool = False, **kwargs):
     for TTLfolder, expfolder in zip(TTLpaths, exppaths):
         events = load_ttl_events(TTLfolder, **kwargs)
         events_all.append(events)
-        nframes_dat.append(get_dat_timestamps(expfolder, sync=sync))
+
+        # This shouldn't be necessary for grabbing event timestamps.
+        # nframes_dat.append(get_dat_timestamps(expfolder, sync=sync))
 
     # Now loop through and make everything into a datetime in case you are forced to use system times to synchronize everything later
     times_list = []
     for ide, events in enumerate(events_all):
         times_list.append(events_to_datetime(events))
-        # NRK todo: start here 11/1/2021 - make a continuous running index here to match up with concatenated .dat files!
 
-    # NRK todo: add in recording # as a column for easy reference
+    ttl_df = pd.concat(times_list)
 
-    return pd.concat(times_list)
+    # Plot sanity check
+    if sanity_check_channel is not None:
+        assert isinstance(sanity_check_channel, int)
+        ts_plot = ttl_df[ttl_df["channel_states"].abs() == sanity_check_channel]
+        ttt = (ts_plot["datetimes"] - ts_plot["datetimes"].iloc[0]).values
+        _, ax = plt.subplots()
+        ax.plot(ttt)
+        ax.set_xlabel(f"TTL{sanity_check_channel} #")
+        ax.set_ylabel("Time elapsed from first TTL event (sec)")
+        ax.set_title("Sanity check - should be monotonically increasing!")
+    return ttl_df
 
 
-def load_ttl_events(TTLfolder, zero_timestamps=True, event_names=""):
+def load_ttl_events(TTLfolder, zero_timestamps=True, event_names="", sync_info=True):
     """Loads TTL events for one recording folder and spits out a dictionary.
 
     :param TTLfolder: folder where your TTLevents live, recorded in BINARY format.
@@ -130,6 +253,7 @@ def load_ttl_events(TTLfolder, zero_timestamps=True, event_names=""):
     :param event_names: can pass a dictionary to keep track of what each event means, e.g.
     event_names = {1: 'optitrack_start', 2: 'lick'} would tell you channel1 = input from optitrack and
     channel2 = animal lick port activations
+    :param sync_info: True (default), grabs sync related info if TTlfolder is in openephys directory structure
     :return: channel_states, channels, full_words, and timestamps in ndarrays
     """
     TTLfolder = Path(TTLfolder)
@@ -140,34 +264,40 @@ def load_ttl_events(TTLfolder, zero_timestamps=True, event_names=""):
         events[varname] = np.load(TTLfolder / (varname + ".npy"))
 
     # Get sync info
-    sync_file = TTLfolder.parents[2] / "sync_messages.txt"
-    SR, record_start = parse_sync_file(sync_file)
-    events["SR"] = SR
+    if sync_info:
+        # sync_file = TTLfolder.parents[2] / "sync_messages.txt"
+        sync_file = (
+            TTLfolder.parents[3] / "recording1/sync_messages.txt"
+        )  # Get SR and sync frame info
+        SR, record_start = parse_sync_file(sync_file)
+        events["SR"] = SR
 
-    # Zero timestamps
-    if zero_timestamps:
-        events["timestamps"] = events["timestamps"] - record_start
+        # Zero timestamps
+        if zero_timestamps:
+            events["timestamps"] = events["timestamps"] - record_start
 
-    # Grab start time from .xml file and keep it with events just in case
-    settings_file = TTLfolder.parents[4] / get_settings_filename(TTLfolder)
-    try:
-        events["start_time"] = pd.to_datetime(XML2Dict(settings_file)["INFO"]["DATE"])
-    except FileNotFoundError:
-        print("Settings file: " + str(settings_file) + " NOT FOUND")
+        # Grab start time from .xml file and keep it with events just in case
+        settings_file = TTLfolder.parents[4] / get_settings_filename(TTLfolder)
+        try:
+            events["start_time"] = pd.to_datetime(
+                XML2Dict(settings_file)["INFO"]["DATE"]
+            )
+        except FileNotFoundError:
+            print("Settings file: " + str(settings_file) + " NOT FOUND")
 
-        # Find start time using filename
-        p = re.compile(
-            "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-2]+[0-9]+-[0-6]+[0-9]+-[0-6]+[0-9]+"
-        )
-        events["start_time"] = pd.to_datetime(
-            p.search(str(settings_file)).group(0), format="%Y-%m-%d_%H-%M-%S"
-        )
+            # Find start time using filename
+            p = re.compile(
+                "[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-2]+[0-9]+-[0-6]+[0-9]+-[0-6]+[0-9]+"
+            )
+            events["start_time"] = pd.to_datetime(
+                p.search(str(settings_file)).group(0), format="%Y-%m-%d_%H-%M-%S"
+            )
 
-        # Print to screen to double check!
-        print(
-            str(events["start_time"])
-            + " loaded from folder structure, be sure to double check!"
-        )
+            # Print to screen to double check!
+            print(
+                str(events["start_time"])
+                + " loaded from folder structure, be sure to double check!"
+            )
 
     # Last add in event_names dict
     events["event_names"] = event_names
@@ -195,6 +325,56 @@ def events_to_datetime(events):
     return pd.DataFrame.from_dict(sub_dict)
 
 
+def recording_events_to_combined_time(
+    event_df: pd.DataFrame,
+    sync_df: pd.DataFrame,
+    time_out="eeg_time",
+    event_ts_key: str = "datetimes",
+    sync_ts_key: str = "Datetime",
+):
+
+    """Infers appropriate start frame/time of each event if multiple recordings/experiments in the same folder
+    have been combined
+    :param event_df: dataframe with datetimes of each event
+    :param sync_df: output of function create_sync_df
+    :param time_out: eeg_time or dat_time
+    :param event_ts_key: key to use to access datetimes in event_df
+    :param sync_ts_key: key to use to access datetimes in sync_df"""
+    # Calc and check that each cs occurs in the same recording.
+    nrec_start = [
+        sync_df["Recording"][np.max(np.nonzero(start > sync_df[sync_ts_key]))]
+        for start in event_df[event_ts_key]
+    ]
+    nrec_stop = [
+        sync_df["Recording"][np.min(np.nonzero(start < sync_df[sync_ts_key]))]
+        for start in event_df[event_ts_key]
+    ]
+
+    # Loop through each recording and calculate CS time in combined dat/eeg file
+    if nrec_start == nrec_stop:
+        event_time_comb = []
+        for nrec, event_time in zip(nrec_start, event_df[event_ts_key]):
+            # Get correct start time of recording in the desired output time (eeg/dat) and timestamp
+            rec_start_time = sync_df[
+                (sync_df["Recording"] == nrec) & (sync_df["Condition"] == "start")
+            ][time_out].values[0]
+            rec_start_timestamp = sync_df[
+                (sync_df["Recording"] == nrec) & (sync_df["Condition"] == "start")
+            ][sync_ts_key].iloc[0]
+            event_dt = (event_time - rec_start_timestamp).total_seconds()
+            event_time_comb.append(event_dt + rec_start_time)
+
+        event_time_comb = np.array(event_time_comb)
+
+    else:
+        print(
+            f"Recording start and end numbers do not all match. starts = {nrec_start}, ends = {nrec_stop}."
+        )
+        event_time_comb = np.nan
+
+    return event_time_comb
+
+
 def parse_sync_file(sync_file):
     """Grab synchronization info for a given session
     :param sync_file: path to 'sync_messages.txt' file in recording folder tree for that recording.
@@ -205,23 +385,48 @@ def parse_sync_file(sync_file):
     # Read in file
     sync_lines = open(sync_file).readlines()
 
-    # Grab sampling rate and sync time based on file structure
-    SR = int(
-        sync_lines[1][
-            re.search("@", sync_lines[1])
-            .span()[1] : re.search("Hz", sync_lines[1])
-            .span()[0]
-        ]
-    )
-    sync_frame = int(
-        sync_lines[1][
-            re.search("start time: ", sync_lines[1])
-            .span()[1] : re.search("@[0-9]*Hz", sync_lines[1])
-            .span()[0]
-        ]
-    )
+    try:
+        # Grab sampling rate and sync time based on file structure
+        SR = int(
+            sync_lines[1][
+                re.search("@", sync_lines[1])
+                .span()[1] : re.search("Hz", sync_lines[1])
+                .span()[0]
+            ]
+        )
+        sync_frame = int(
+            sync_lines[1][
+                re.search("start time: ", sync_lines[1])
+                .span()[1] : re.search("@[0-9]*Hz", sync_lines[1])
+                .span()[0]
+            ]
+        )
+    except IndexError:  # Fill in from elsewhere if sync_messages missing info
+        parent_dir = Path(sync_file).parent
+        timestamp_files = sorted(parent_dir.glob("**/continuous/**/timestamps.npy"))
+        assert len(timestamp_files) == 1, "Too many timestamps.npy files"
+        sync_frame = np.load(timestamp_files[0])[0]
+
+        structure_file = parent_dir / "structure.oebin"
+        with open(structure_file) as f:
+            data = f.read()
+        structure = ast.literal_eval(data)
+        SR = structure["continuous"][0]["sample_rate"]
 
     return SR, sync_frame
+
+
+def get_set_folder(child_dir):
+    """Gets the folder where your settings.xml file and experiment folders should live."""
+    child_dir = Path(child_dir)
+    expfolder_id = np.where(
+        [
+            str(child_dir.parents[id]).find("experiment") > -1
+            for id in range(len(child_dir.parts) - 1)
+        ]
+    )[0].max()
+
+    return child_dir.parents[expfolder_id + 1]
 
 
 def get_settings_filename(child_dir):
@@ -510,5 +715,6 @@ def GetRecChs(File):
 
 
 if __name__ == "__main__":
-    basepath = "/data/Working/Opto/Rat694/2021_08_03_1_placestim3"
-    times = load_all_ttl_events(basepath)
+    base_folder = "/data3/Trace_FC/Recording_Rats/Django/2023_03_10_recall2"
+    get_dat_timestamps(base_folder, start_end_only=True)
+    pass

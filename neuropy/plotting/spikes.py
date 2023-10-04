@@ -2,7 +2,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from .. import core
 import numpy as np
-from neuropy.utils.colors_util import ColorsUtil
+import seaborn as sns
+
 
 def plot_raster(
     neurons: core.Neurons,
@@ -11,7 +12,10 @@ def plot_raster(
     color=None,
     marker="|",
     markersize=2,
+    markeredgewidth=1,
     add_vert_jitter=False,
+    alpha=1,
+    rasterized=False,
 ):
     """creates raster plot using spiktrains in neurons
 
@@ -22,7 +26,7 @@ def plot_raster(
     ax : obj, optional
         axis to plot onto, by default None
     sort_by_frate : bool, optional
-        If true then sorts spikes by the number of spikes (frate), by default False
+        If True then sorts spikes by the number of spikes (frate), by default False
     color : [type], optional
         color for raster plots, by default None
     marker : str, optional
@@ -33,7 +37,7 @@ def plot_raster(
         adds vertical jitter to help visualize super dense spiking, not standardly used for rasters...
     """
     if ax is None:
-        fig, ax = plt.subplots()
+        _, ax = plt.subplots()
 
     n_neurons = neurons.n_neurons
 
@@ -49,23 +53,63 @@ def plot_raster(
     for ind, spiketrain in enumerate(neurons.spiketrains):
         if add_vert_jitter:
             jitter_add = np.random.randn(len(spiketrain)) * 0.1
-            alpha_use = 0.25
         else:
-            jitter_add, alpha_use = 0, 0.5
+            jitter_add = 0
         ax.plot(
             spiketrain,
             (ind + 1) * np.ones(len(spiketrain)) + jitter_add,
             marker,
             markersize=markersize,
+            markeredgewidth=markeredgewidth,
             color=color[ind],
-            alpha=alpha_use,
+            alpha=alpha,
+            rasterized=rasterized,
         )
 
     ax.set_xlim([neurons.t_start, neurons.t_stop])
+    # ax.ticklabel_format(axis="x", useOffset=False)
+    # ax.tick_params(axis="x", rotation=30)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Units")
+    ax.set_ylabel("Neurons")
 
     return ax
+
+
+def plot_binned_raster(
+    binned_spiketrain: (core.BinnedSpiketrain, core.Mua),
+    event_times: np.ndarray or list,
+    buffer_sec: tuple = (5, 5),
+    neuron_id: int = 0,
+    nxticks=5,
+    event_label: str = "event",
+    ax=None,
+    **kwargs,
+):
+    """Plot binned spike train raster in colormap. **kwargs to seaborn.heatmap"""
+    if ax is None:
+        _, ax = plt.subplots()
+
+    fr_array, pe_times = core.neurons.binned_pe_raster(
+        binned_spiketrain,
+        event_times,
+        buffer_sec=buffer_sec,
+        neuron_id=neuron_id,
+    )
+
+    xtick_inds = np.linspace(0, len(pe_times) - 1, nxticks).astype(int)
+
+    sns.heatmap(
+        fr_array,
+        ax=ax,
+        xticklabels=int(np.mean(np.diff(xtick_inds)).astype(int)),
+        **kwargs,
+    )
+
+    ax.set_xticklabels(np.round(pe_times[xtick_inds], 2))
+    ax.set_xlabel(f"Time from {event_label}")
+    ax.set_ylabel(f"{event_label} #")
+
+    return ax, fr_array, pe_times
 
 
 def plot_mua(mua: core.Mua, ax=None, **kwargs):
@@ -207,5 +251,3 @@ def plot_waveforms(neurons: core.Neurons, sort_order=None, color="#afadac"):
     ax.plot(waves.T, color=color, alpha=0.5)
 
     return ax
-
-
