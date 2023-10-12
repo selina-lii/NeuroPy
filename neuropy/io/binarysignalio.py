@@ -1,10 +1,6 @@
 import numpy as np
-import pandas as pd
+from ..core import Signal
 from pathlib import Path
-import numpy as np
-
-from ..core import Epoch, Signal
-from ..core import Signal, Epoch
 
 
 class BinarysignalIO:
@@ -29,10 +25,6 @@ class BinarysignalIO:
         )
 
     @property
-    def _dtype(self):
-        return self.dtype
-
-    @property
     def duration(self):
         return self._raw_traces.shape[1] / self.sampling_rate
 
@@ -40,23 +32,10 @@ class BinarysignalIO:
     def n_frames(self):
         return self._raw_traces.shape[1]
 
-    def infer_start_time(self, stat_modify_time):
-        """Infers the start time based on modify time for file obtained from "stat" command, which should correspond
-        to when the file was saved/recording stopped.
-        :param stat_modify_time: str copied and pasted from running "$ stat filename",
-        e.g. "2021-08-03 11:57:37.224000000"
-        :return:
-        """
-        mod_datetime = pd.to_datetime(
-            stat_modify_time
-        )  # convert modify time to datetime
-        start_time = mod_datetime - pd.to_timedelta(self.duration, unit="sec")
-
-        return start_time
-
     def get_signal(self, channel_indx=None, t_start=None, t_stop=None):
-        # if isinstance(channel_indx, list):
-        #     channel_indx = [channel_indx]
+
+        if isinstance(channel_indx, int):
+            channel_indx = [channel_indx]
 
         if t_start is None:
             t_start = 0.0
@@ -72,70 +51,10 @@ class BinarysignalIO:
         else:
             sig = self._raw_traces[channel_indx, frame_start:frame_stop]
 
-        if sig.ndim == 1:
-            sig = sig.reshape(1, -1)
-        return Signal(
-            traces=sig,
-            sampling_rate=self.sampling_rate,
-            t_start=t_start,
-            channel_id=channel_indx,
-            source_file=self.source_file,
-        )
-
-    def frame_slice(self, channel_indx=None, frame_start=None, frame_stop=None):
-        if isinstance(channel_indx, int):
-            channel_indx = [channel_indx]
-
-        if frame_start is None:
-            frame_start = 0
-
-        if frame_stop is None:
-            frame_stop = self.n_frames
-
-        if channel_indx is None:
-            sig = self._raw_traces[:, frame_start:frame_stop]
-        else:
-            sig = self._raw_traces[channel_indx, frame_start:frame_stop]
-
-        if sig.ndim == 1:
-            sig = sig.reshape(1, -1)
-        return Signal(
-            traces=sig,
-            sampling_rate=self.sampling_rate,
-            t_start=frame_start / self.sampling_rate,
-            channel_id=channel_indx,
-        )
-
-    def get_frames_within_epochs(self, epochs: Epoch, channel_indx, ret_time=False):
-        """Return concatenated frames corresponding to epochs
-
-        Parameters
-        ----------
-        epochs : Epoch
-            start and stop of epochs
-        channel_indx : int/list
-            channels by index location in the binary file
-
-        Returns
-        -------
-        array
-            concatenated frames
-        """
-        epochs_frames = (epochs.as_array() * self.sampling_rate).astype("int")
-        frames = np.concatenate([np.arange(*e) for e in epochs_frames])
-
-        if isinstance(channel_indx, int):
-            channel_indx = [channel_indx]
-
-        if ret_time:
-            return (
-                self._raw_traces[np.ix_(channel_indx, frames)],
-                frames / self.sampling_rate,
-            )
-        else:
-            return self._raw_traces[np.ix_(channel_indx, frames)]
+        return Signal(sig, self.sampling_rate, t_start, channel_id=channel_indx)
 
     def write_time_slice(self, write_filename, t_start, t_stop):
+
         duration = t_stop - t_start
 
         # read required chunk from the source file
@@ -152,3 +71,28 @@ class BinarysignalIO:
             write_filename, dtype=self.dtype, mode="w+", shape=(len(read_data))
         )
         write_data[: len(read_data)] = read_data
+
+
+    # Persistance
+    def __getstate__(self):
+        """ Custom serialization/deserialization method to enable saving pipeline on macOS. Previously failed with the error:
+            TypeError: cannot pickle 'mmap.mmap' object ' #11823
+            Issue with macOS (Darwin) and multi-processing
+            https://github.com/stamparm/maltrail/issues/11823
+        """
+        # Copy the object's state from self.__dict__ which contains
+        # all our instance attributes. Always use the dict.copy()
+        # method to avoid modifying the original state.
+        state = self.__dict__.copy()
+        # Remove the unpicklable entries.
+        del state['_raw_traces']
+        return state
+
+    def __setstate__(self, state):
+        # Restore instance attributes (i.e., filename and lineno).
+        self.__dict__.update(state)
+        # Re-load the raw traces from file on load from the saved properties. The same file must exist, meaning this solution isn't portable.
+        self._raw_traces = (
+            np.memmap(self.source_file, dtype=self.dtype, mode="r").reshape(-1, self.n_channels).T
+        )
+
