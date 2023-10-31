@@ -7,13 +7,7 @@ from scipy.ndimage import gaussian_filter1d, gaussian_filter
 
 
 def plot_spectrogram(
-    sxx,
-    time_lims,
-    freq_lims=(0, 30),
-    ax=None,
-    cmap="jet",
-    sigma=None,
-    std_sxx=None,
+    sxx, time, freq, freq_lim=(0, 30), ax=None, cmap="jet", sigma=None
 ):
     """Generating spectrogram plot for given channel
 
@@ -31,20 +25,9 @@ def plot_spectrogram(
         if none generates a new figure, by default None
     """
 
-    # Figure out if using legacy functionality or updated
-    # assert isinstance(sxx, (np.ndarray, Spectrogram, WaveletSg, FourierSg))  # this is buggy and doesn't work, omit for now
-    if isinstance(sxx, np.ndarray):
-        legacy = True
-        spec_use = None
-    else:
-        legacy = False
-        spec = sxx
-        sxx = spec.traces
-
     if sigma is not None:
         sxx = gaussian_filter(sxx, sigma=sigma)
-    if std_sxx is None:  # Calculate standard deviation if needed for plotting purposes.
-        std_sxx = np.std(sxx)
+    std_sxx = np.std(sxx)
     # time = np.linspace(time[0], time[1], sxx.shape[1])
     # freq = np.linspace(freq[0], freq[1], sxx.shape[0])
 
@@ -52,84 +35,57 @@ def plot_spectrogram(
         _, ax = plt.subplots(1, 1)
 
     # ---------- plotting ----------------
-    if legacy:
+    def plotspec(n_std, freq_lim):
+        # slow to plot
+        # ax.pcolormesh(
+        #     spec.time,
+        #     spec.freq,
+        #     sxx,
+        #     cmap=cmap,
+        #     vmax=n_std * std_sxx,
+        #     rasterized=True,
+        # )
+        # ax.set_ylim(freq)
 
-        def plotspec(n_std, freq_lim):
-            """Plots data fine but doesn't preserve time and frequency info on axes"""
-            ax.imshow(
-                sxx,
-                cmap=cmap,
-                vmax=n_std * std_sxx,
-                rasterized=True,
-                origin="lower",
-                extent=[time_lims[0], time_lims[-1], freq_lims[0], freq_lims[-1]],
-                aspect="auto",
-            )
-            ax.set_ylim(freq_lim[0], freq_lim[1])
-
-        ax.set_xlim([time_lims[0], time_lims[-1]])
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Frequency (Hz)")
-
-        # ---- updating plotting values for interaction ------------
-        ipywidgets.interact(
-            plotspec,
-            n_std=ipywidgets.FloatSlider(
-                value=6,
-                min=0.1,
-                max=30,
-                step=0.1,
-                description="Clim :",
-            ),
-            freq_lim=ipywidgets.IntRangeSlider(
-                value=freq_lims, min=0, max=625, step=1, description="Freq. range:"
-            ),
+        # fast to plot
+        ax.imshow(
+            sxx,
+            cmap=cmap,
+            vmax=n_std * std_sxx,
+            rasterized=True,
+            origin="lower",
+            extent=[time[0], time[-1], freq[0], freq[-1]],
+            aspect="auto",
         )
-    else:
+        ax.set_ylim(freq_lim[0], freq_lim[1])
 
-        def plotspec(n_std, freq):
-            """Plots data from Spectrogram class and preserves time and frequency info on axes"""
-            spec_use = spec.time_slice(t_start=time_lims[0], t_stop=time_lims[1])
-            ax.pcolormesh(
-                spec_use.time,
-                spec_use.freqs,
-                spec_use.traces,
-                cmap=cmap,
-                vmax=n_std * std_sxx,
-                rasterized=True,
-            )
-            ax.set_ylim(freq)
+    ax.set_xlim([time[0], time[-1]])
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Frequency")
 
-        ax.set_xlim([time_lims[0], time_lims[-1]])
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Frequency (Hz)")
-
-        # ---- updating plotting values for interaction ------------
-        ipywidgets.interact(
-            plotspec,
-            n_std=ipywidgets.FloatSlider(
-                value=6,
-                min=0.1,
-                max=30,
-                step=0.1,
-                description="Clim :",
-            ),
-            freq=ipywidgets.IntRangeSlider(
-                value=freq_lims, min=0, max=625, step=1, description="Freq. range:"
-            ),
-        )
+    # ---- updating plotting values for interaction ------------
+    ipywidgets.interact(
+        plotspec,
+        n_std=ipywidgets.FloatSlider(
+            value=20,
+            min=0.1,
+            max=30,
+            step=0.1,
+            description="Clim :",
+        ),
+        # cmap=ipywidgets.Dropdown(
+        #     options=["Spectral_r", "copper", "hot_r"],
+        #     value=cmap,
+        #     description="Colormap:",
+        # ),
+        freq_lim=ipywidgets.IntRangeSlider(
+            value=freq_lim, min=0, max=625, step=1, description="Freq. range:"
+        ),
+    )
     return ax
 
 
-def plot_signal_traces(
-    signal: Signal,
-    ax=None,
-    pad=0.2,
-    color="k",
-    lw=1,
-    axlabel=False,
-    epochs=None,
-):
+def plot_signal_traces(signal: Signal, ax=None, pad=0.2, color="k", lw=1):
 
     n_channels = signal.n_channels
     sig = signal.traces
@@ -141,6 +97,8 @@ def plot_signal_traces(
     if ax is None:
         _, ax = plt.subplots(1, 1)
 
+    ax.clear()
+
     try:
         cmap = mpl.cm.get_cmap(color)
         colors = [cmap(_ / n_channels) for _ in range(n_channels)]
@@ -150,44 +108,11 @@ def plot_signal_traces(
     for i, trace in enumerate(sig):
         ax.plot(signal.time, trace, color=colors[i], lw=lw)
 
-    channel_id = (
-        [signal.channel_id] if isinstance(signal.channel_id, int) else signal.channel_id
-    )
     ax.set_yticks(pad_vals)
-    ax.set_yticklabels(channel_id)
-    if not axlabel:
-        ax.set_xticklabels([])
-        ax.spines["bottom"].set_visible(False)
+    ax.set_yticklabels(signal.channel_id)
+    ax.set_xticklabels([])
     ax.spines["left"].set_visible(False)
-
+    ax.spines["bottom"].set_visible(False)
     ax.tick_params(axis="both", length=0)
-
-    if epochs is not None:
-        epochs_plot = epochs.time_slice(t_start=signal.t_start, t_stop=signal.t_stop)
-        for start, stop in zip(epochs_plot.starts, epochs_plot.stops):
-            ax.axvspan(start, stop, color=[0, 0.3, 0, 0.5])
-
-    return ax
-
-
-def plot_signal_heatmap(signal: Signal, ax=None, **kwargs):
-
-    if ax is None:
-        _, ax = plt.subplots()
-
-    ax.pcolormesh(
-        signal.time, signal.channel_id, signal.traces, shading="gouraud", **kwargs
-    )
-
-
-def plot_signal_w_epochs(signal, channel, epochs, ax=None):
-    """Plot a trace from a single electrode with epochs overlying it for quick sanity check"""
-
-    if ax is None:
-        _, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(signal.time, signal.traces[channel])
-
-    for start, stop in zip(epochs.starts, epochs.stops):
-        ax.axvspan(start, stop, color=[0, 0.3, 0, 0.5])
 
     return ax
