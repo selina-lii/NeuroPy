@@ -9,219 +9,15 @@ from joblib import Parallel, delayed
 from scipy import fftpack, stats
 from scipy.fftpack import next_fast_len
 from scipy.ndimage import gaussian_filter
-import seaborn as sns
-from scipy.interpolate import interp2d
 
-try:
-    from ..plotting import Fig
-    from .. import core
-except ImportError:
-    from neuropy.plotting import Fig
-    from neuropy import core
-
-
-class Spectrogram(core.Signal):
-    def __init__(self, traces, freqs, sampling_rate=1, t_start=0) -> None:
-        super().__init__(traces, sampling_rate, t_start=t_start, channel_id=freqs)
-
-    @property
-    def freqs(self):
-        return self.channel_id
-
-    def time_slice(self, t_start=None, t_stop=None):
-        spec_slice = super().time_slice(t_start=t_start, t_stop=t_stop)
-        return Spectrogram(
-            spec_slice.traces,
-            self.freqs,
-            sampling_rate=self.sampling_rate,
-            t_start=self.t_start,
-        )
-
-    def freq_slice(self, f1=None, f2=None):
-        if f1 is None:
-            f1 = self.freqs[0]
-
-        if f2 is None:
-            f2 = self.freqs[-1]
-
-        assert f1 >= self.freqs[0], "f1 should be greater than lowest frequency"
-        assert (
-            f2 <= self.freqs[-1]
-        ), "f2 should be lower than highest possible frequency"
-        assert f2 > f1, "f2 should be greater than f1"
-
-        ind = np.where((self.freqs >= f1) & (self.freqs <= f2))[0]
-        freqs = self.freqs[ind]
-
-        return Spectrogram(
-            traces=self.traces[ind],
-            freqs=freqs,
-            sampling_rate=self.sampling_rate,
-            t_start=self.t_start,
-        )
-
-    def mean_power(self):
-        return np.mean(self.traces, axis=0)
-
-    def get_band_power(self, f1=None, f2=None):
-        if f1 is None:
-            f1 = self.freqs[0]
-
-        if f2 is None:
-            f2 = self.freqs[-1]
-
-        assert f1 >= self.freqs[0], "f1 should be greater than lowest frequency"
-        assert (
-            f2 <= self.freqs[-1]
-        ), "f2 should be lower than highest possible frequency"
-        assert f2 > f1, "f2 should be greater than f1"
-
-        ind = np.where((self.freqs >= f1) & (self.freqs <= f2))[0]
-        band_power = np.mean(self.traces[ind, :], axis=0)
-        return band_power
-
-    def get_band_ratio(self, band1, band2):
-        assert len(band1) == 2, "band1 must have 2 frequencies"
-        assert len(band2) == 2, "band2 must have 2 frequencies"
-        assert np.diff(band1)[0] > 0, "band1: 2nd value should be greater"
-        assert np.diff(band2)[0] > 0, "band2: 2nd value should be greater"
-
-        return self.get_band_power(*band1) / self.get_band_power(*band2)
-
-    def get_noisy_spect_bool(self, thresh=5):
-        """Identifies indices which are noisy in a spectrogram. Time points are considered noisy if sum of the power across all frequencies exceeds threshold std or is zero.
-
-        Parameters
-        ----------
-        thresh: float
-            indices exceeding this are considered noisy
-
-        Returns
-        -------
-        Boolean array
-        """
-        spect_sum = self.traces.sum(axis=0)
-        return (stats.zscore(spect_sum) >= thresh) | (spect_sum <= 0)
-
-    def get_pe_spec(
-        self,
-        event_times,
-        buffer_sec=(0.5, 0.5),
-        ignore_epochs: core.Epoch = None,
-        print_ignored_frames: bool = True,
-    ):
-        """Get peri-event spectrogram for every event.
-
-        Parameters
-        ----------
-        event_times: ndarray of floats times of each event in seconds, will be time 0 in mean spectrogram
-
-        buffer_sec: tuple of floats defining amount of time before/after event to grab.
-
-        ignore_epochs: core.Epoch class of epochs to ignore when calculating mean spectrogram
-
-        Returns
-        -------
-        spec: nfreq x nbins x nevents array containing spectrogram for each event
-              ranging from -buffer_sec[0] to buffer_sec[1]"""
-
-        event_times = event_times.squeeze()
-        assert event_times.ndim == 1, "event_times must be broadcastable to ndim=1"
-
-        # Should not be necessary, keep ls - just in case
-        # Keep only events within time limits of recording, retaining any nans
-        epoch_start_stops = event_times[:, None] + np.multiply(buffer_sec, (-1, 1))
-        keep_bool = (epoch_start_stops[:, 0] > self.t_start) & (
-            epoch_start_stops[:, 1] < self.t_stop
-        )
-        nan_bool = np.isnan(event_times)
-        keep_bool = keep_bool | nan_bool
-        if np.sum(keep_bool) < len(event_times):
-            event_times = event_times[keep_bool]
-            print(
-                f"Events {np.where(~keep_bool)[0]} are outside of data range and were dropped"
-            )
-
-        sxx_list = []
-        ntime_bins = int(np.ceil(np.sum(buffer_sec) * self.sampling_rate))
-        for t_event in event_times:
-            if not np.isnan(t_event):
-                start_time = t_event - buffer_sec[0]
-                stop_time = t_event + buffer_sec[1]
-                wvlet_temp = self.time_slice(t_start=start_time, t_stop=stop_time)
-
-                # Add/remove one frame at end if array size doesn't match expected number of time bins
-                if len(wvlet_temp.time) != ntime_bins:
-                    if len(wvlet_temp.time) == (ntime_bins + 1):
-                        stop_time -= 0.5 / self.sampling_rate
-                    elif len(wvlet_temp.time) == (ntime_bins - 1):
-                        stop_time += 0.5 / self.sampling_rate
-                    else:
-                        print("Error - time bins off by more than 1")
-                    wvlet_temp = self.time_slice(t_start=start_time, t_stop=stop_time)
-                sxx_temp = wvlet_temp.traces
-
-                # Ignore times if specified - these are likely already NaN in the spectrogram
-                if ignore_epochs is not None:
-                    time_bins = np.linspace(start_time, stop_time, ntime_bins)
-                    ignore_bool, ignore_times, _ = ignore_epochs.contains(time_bins)
-
-                    # Display ignored frames
-                    if np.sum(ignore_bool) > 0:
-                        sxx_temp[:, ignore_bool] = np.nan
-                        if print_ignored_frames:
-                            print(
-                                f"{np.sum(ignore_bool)} frames between {ignore_times.min():.1F} and {ignore_times.max():.1F} ignored (sent to nan)"
-                            )
-
-            else:  # Fill in with nans if event is missing
-                wvlet_temp = self.time_slice(t_start=1, t_stop=1 + np.sum(buffer_sec))
-                sxx_temp = np.ones_like(wvlet_temp.traces) * np.nan
-            sxx_list.append(sxx_temp)
-
-        return np.stack(sxx_list, axis=2)
-
-    def get_pe_mean_spec(
-        self,
-        event_times,
-        buffer_sec=(0.5, 0.5),
-        ignore_epochs: core.Epoch = None,
-        print_ignored_frames: bool = False,
-    ):
-        """Get peri-event mean spectrogram.
-
-        Parameters
-        ----------
-        event_times: ndarray of floats times of each event in seconds, will be time 0 in mean spectrogram
-
-        buffer_sec: tuple of floats defining amount of time before/after event to grab.
-
-        ignore_epochs: core.Epoch class of epochs to ignore when calculating mean spectrogram
-
-        Returns
-        -------
-        Spectrogram class with traces = mean spectrogram and times ranging from -buffer_sec[0] to buffer_sec[1]
-        """
-
-        # Get spectrogram for each event
-        sxx_by_event = self.get_pe_spec(
-            event_times, buffer_sec, ignore_epochs, print_ignored_frames
-        )
-
-        # Take the mean
-        sxx_mean = np.nanmean(sxx_by_event, axis=2)
-
-        return Spectrogram(
-            sxx_mean,
-            self.freqs,
-            sampling_rate=self.sampling_rate,
-            t_start=-buffer_sec[0],
-        )
+from ..plotting import Fig
+from .. import core
 
 
 class filter_sig:
     @staticmethod
-    def bandpass(signal, lf, hf, fs=1250, order=3, ax=-1):
+    def bandpass(signal, hf, lf, fs=1250, order=3, ax=-1):
+
         if isinstance(signal, core.Signal):
             y = signal.traces
             nyq = 0.5 * signal.sampling_rate
@@ -242,22 +38,10 @@ class filter_sig:
 
     @staticmethod
     def highpass(signal, cutoff, fs=1250, order=6, ax=-1):
-        if isinstance(signal, core.Signal):
-            y = signal.traces
-            nyq = 0.5 * signal.sampling_rate
-            b, a = sg.butter(order, cutoff / nyq, btype="highpass")
-            yf = sg.filtfilt(b, a, y, axis=-1)
-            yf = core.Signal(
-                traces=yf,
-                sampling_rate=signal.sampling_rate,
-                t_start=signal.t_start,
-                channel_id=signal.channel_id,
-            )
-        else:
-            nyq = 0.5 * fs
+        nyq = 0.5 * fs
 
-            b, a = sg.butter(order, cutoff / nyq, btype="highpass")
-            yf = sg.filtfilt(b, a, signal, axis=ax)
+        b, a = sg.butter(order, cutoff / nyq, btype="highpass")
+        yf = sg.filtfilt(b, a, signal, axis=ax)
 
         return yf
 
@@ -271,34 +55,32 @@ class filter_sig:
         return yf
 
     @staticmethod
-    def notch(
-        signal: np.ndarray,
-        w0: float or int,
-        Q: float or int or None,
-        bw: float or int or None = None,
-        fs: int = 30000,
-        ax: int = -1,
-    ):
-        """Runs a notch filter on your data. If Q is none, must enter bw (bandwidth) of noise to remove.
-        See scipy.signal.iirnotch for more info on parameters."""
-        if Q is None:
-            assert bw is float or int, "If Q is not specified, bw must be provided"
-            Quse = np.round(w0 / bw)
-        else:
-            Quse = Q
-        b, a = sg.iirnotch(w0=w0, Q=Quse, fs=fs)
-        try:
-            yf = sg.filtfilt(b, a, signal, axis=ax)
-        except np.core._exceptions._ArrayMemoryError:
-            yf = []
-            print(
-                "signal array is too large for memory, filtering each channel independently"
-            )
-            for trace in signal:
-                yf.append(sg.filtfilt(b, a, trace, axis=ax).astype("int16"))
-            yf = np.asarray(yf, dtype="int16")
+    def delta(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=0.5, hf=4, fs=fs, order=order, ax=ax)
 
-        return yf
+    @staticmethod
+    def theta(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=4, hf=10, fs=fs, order=order, ax=ax)
+
+    @staticmethod
+    def spindle(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=8, hf=16, fs=fs, order=order, ax=ax)
+
+    @staticmethod
+    def slowgamma(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=25, hf=50, fs=fs, order=order, ax=ax)
+
+    @staticmethod
+    def mediumgamma(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=60, hf=90, fs=fs, order=order, ax=ax)
+
+    @staticmethod
+    def fastgamma(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=100, hf=140, fs=fs, order=order, ax=ax)
+
+    @staticmethod
+    def ripple(signal, fs=1250, order=3, ax=-1):
+        return filter_sig.bandpass(signal, lf=150, hf=240, fs=fs, order=order, ax=ax)
 
 
 def whiten(strain, interp_psd, dt):
@@ -316,165 +98,274 @@ def whiten(strain, interp_psd, dt):
     return white_ht
 
 
-class WaveletSg(Spectrogram):
+class SpectrogramBands:
     def __init__(
         self,
         signal: core.Signal,
-        freqs,
-        norm_sig=False,
-        ncycles=7,
-        sigma=None,
-    ) -> None:
-        """Wavelet spectrogram on core.Signal object
-
-        Parameters
-        ----------
-        signal : core.Signal
-            should have only a single channel
-        freqs : np.array
-            frequencies of query
-        norm_sig : bool, optional
-            whether to normalize the signal, by default True
-        ncycles : int, optional
-            number of cycles for wavelet,higher number gives better frequency resolution at higher frequencies, by default 7 cycles
-        sigma : int, optional
-            smoothing to apply on spectrum along time axis for each frequency trace, in units of seconds, by default None
-
-        Suggestions/References
-        ----------------------
-
-        Wavelet :
-            ncycles = 7, [Colgin et al. 2009, Tallon-Baudry et al. 1997]
-            ncycles = 3, [MX Cohen, Analyzing neural time series data book, 2014]
-
-        """
-
-        assert signal.n_channels == 1, "signal should have only a single channel"
-        trace = signal.traces[0]
-        if norm_sig:
-            trace = stats.zscore(trace)
-
-        sxx = self._wt(trace, freqs, signal.sampling_rate, ncycles)
-        sampling_rate = signal.sampling_rate
-
-        if sigma is not None:
-            # TODO it is slow for large array, maybe move to a method and use fastlen padding
-            sampling_period = 1 / sampling_rate
-            sxx = filtSig.gaussian_filter1d(sxx, sigma=sigma / sampling_period, axis=-1)
-
-        super().__init__(
-            traces=sxx, freqs=freqs, sampling_rate=sampling_rate, t_start=signal.t_start
-        )
-
-    def _wt(self, signal, freqs, fs, ncycles):
-        """wavelet transform"""
-        n = len(signal)
-        fastn = next_fast_len(n)
-        signal = np.pad(signal, (0, fastn - n), "constant", constant_values=0)
-        signal = np.tile(signal, (len(freqs), 1))
-        conv_val = np.zeros((len(freqs), n), dtype=complex)
-
-        freqs = freqs[:, np.newaxis]
-        t_wavelet = np.arange(-4, 4, 1 / fs)[np.newaxis, :]
-
-        sigma = ncycles / (2 * np.pi * freqs)
-        A = (sigma * np.sqrt(np.pi)) ** -0.5
-        real_part = np.exp(-(t_wavelet ** 2) / (2 * sigma ** 2))
-        img_part = np.exp(2j * np.pi * (t_wavelet * freqs))
-        wavelets = A * real_part * img_part
-
-        conv_val = sg.fftconvolve(signal, wavelets, mode="same", axes=-1)
-        conv_val = np.asarray(conv_val)[:, :n]
-        return np.abs(conv_val).astype("float32")
-
-
-class FourierSg(Spectrogram):
-    def __init__(
-        self,
-        signal: core.Signal,
-        window=1,
+        window: float = 1,
         overlap=0.5,
-        norm_sig=True,
-        freqs=None,
+        smooth=None,
         multitaper=False,
-        sigma=None,
-    ) -> None:
-        """Fourier spectrogram on core.Signal object
+        norm_sig=False,
+    ):
 
-        Parameters
-        ----------
-        signal : core.Signal
-            should have only a single channel
-        norm_sig : bool, optional
-            whether to normalize the signal, by default True
-        window : float, optional
-            length of each segment in seconds, ignored if using wavelet method, by default 1 s
-        overlap : float, optional
-            length of overlap between adjacent segments, by default 0.5
-        freqs : np.array
-            If provided, the spectrogram will use interpolation to evaluate at these frequencies
-        multitaper: bool,
-            whether to use multitaper for estimation, by default False
-        sigma : int, optional
-            smoothing to applied on spectrum, in units of seconds, by default 2 s
-
-        NOTE: time is center of windows
-
-        """
-
-        assert signal.n_channels == 1, "signal should have only a single channel"
-        trace = signal.traces[0]
-        if norm_sig:
-            trace = stats.zscore(trace)
-
-        if multitaper:
-            sxx, f, t = self._ft(trace, signal.sampling_rate, window, overlap, mt=True)
-        else:
-            sxx, f, t = self._ft(trace, signal.sampling_rate, window, overlap)
-
-            if freqs is not None:
-                func_sxx = interp2d(t, f, sxx)
-                sxx = func_sxx(t, freqs)
-                f = freqs
-
-        sampling_rate = 1 / (t[1] - t[0])
-
-        if sigma is not None:
-            # TODO it is slow for large array, maybe move to a method and use fastlen padding
-            sampling_period = 1 / sampling_rate
-            sxx = filtSig.gaussian_filter1d(sxx, sigma=sigma / sampling_period, axis=-1)
-
-        super().__init__(
-            traces=sxx,
-            sampling_rate=sampling_rate,
-            freqs=f,
-            t_start=signal.t_start + t[0],
-        )
-
-    def _ft(self, signal, fs, window, overlap, mt=False):
-        """fourier transform"""
+        assert signal.n_channels == 1, "signal should have only one trace"
+        fs = signal.sampling_rate
         window = int(window * fs)
         overlap = int(overlap * fs)
 
+        sig = signal.traces[0]
+        if norm_sig:
+            sig = stats.zscore(signal.traces[0])
+
         f = None
-        if mt:
+        if multitaper:
             tapers = sg.windows.dpss(M=window, NW=5, Kmax=6)
 
             sxx_taper = []
             for taper in tapers:
-                f, t, sxx = sg.spectrogram(
-                    signal, window=taper, fs=fs, noverlap=overlap
-                )
+                f, t, sxx = sg.spectrogram(sig, window=taper, fs=fs, noverlap=overlap)
                 sxx_taper.append(sxx)
             sxx = np.dstack(sxx_taper).mean(axis=2)
 
         else:
-            f, t, sxx = sg.spectrogram(signal, fs=fs, nperseg=window, noverlap=overlap)
+            f, t, sxx = sg.spectrogram(sig, fs=fs, nperseg=window, noverlap=overlap)
 
-        return sxx, f, t
+        if smooth is not None:
+            sxx = filtSig.gaussian_filter1d(sxx, sigma=smooth, axis=-1)
+
+        self.freq = f
+        self.time = t + signal.t_start
+        self.sxx = sxx
+        self.smooth = smooth
+
+    def get_band_power(self, f1=None, f2=None):
+
+        if f1 is None:
+            f1 = self.freq[0]
+
+        if f2 is None:
+            f2 = self.freq[-1]
+
+        assert f1 >= self.freq[0], "f1 should be greater than lowest frequency"
+        assert f2 <= self.freq[-1], "f2 should be lower than highest possible frequency"
+        assert f2 > f1, "f2 should be greater than f1"
+
+        ind = np.where((self.freq >= f1) & (self.freq <= f2))[0]
+        band_power = np.mean(self.sxx[ind, :], axis=0)
+        return band_power
+
+    @property
+    def delta(self):
+        return self.get_band_power(f1=0.5, f2=4)
+
+    @property
+    def deltaplus(self):
+        deltaplus_ind = np.where(
+            ((self.freq > 0.5) & (self.freq < 4))
+            | ((self.freq > 12) & (self.freq < 15))
+        )[0]
+        deltaplus_sxx = np.mean(self.sxx[deltaplus_ind, :], axis=0)
+        return deltaplus_sxx
+
+    @property
+    def theta(self):
+        return self.get_band_power(f1=5, f2=11)
+
+    @property
+    def spindle(self):
+        return self.get_band_power(f1=10, f2=20)
+
+    @property
+    def gamma(self):
+        return self.get_band_power(f1=30, f2=90)
+
+    @property
+    def ripple(self):
+        return self.get_band_power(f1=140, f2=250)
+
+    @property
+    def theta_delta_ratio(self):
+        return self.theta / self.delta
+
+    @property
+    def theta_deltaplus_ratio(self):
+        return self.theta / self.deltaplus
+
+    def plotSpect(self, ax=None, freqRange=None):
+
+        if ax is None:
+            fig, ax = plt.subplots(1, 1)
+        sxx = self.sxx / np.max(self.sxx)
+        sxx = gaussian_filter(sxx, sigma=1)
+        vmax = np.max(sxx) / 4
+        if freqRange is None:
+            freq_indx = np.arange(len(self.freq))
+        else:
+            freq_indx = np.where(
+                (self.freq > freqRange[0]) & (self.freq < freqRange[1])
+            )[0]
+        ax.pcolormesh(
+            self.time,
+            self.freq[freq_indx],
+            sxx[freq_indx, :],
+            cmap="Spectral_r",
+            vmax=vmax,
+        )
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Frequency (Hz)")
 
 
-def hilbertfast(arr, ax=-1):
+@dataclass
+class wavelet_decomp:
+    lfp: np.array
+    freqs: np.array = np.arange(1, 20)
+    sampfreq: int = 1250
+
+    def colgin2009(self):
+        """colgin
+
+
+        Returns:
+            [type]: [description]
+
+        References
+        ------------
+        1) Colgin, L. L., Denninger, T., Fyhn, M., Hafting, T., Bonnevie, T., Jensen, O., ... & Moser, E. I. (2009). Frequency of gamma oscillations routes flow of information in the hippocampus. Nature, 462(7271), 353-357.
+        2) Tallon-Baudry, C., Bertrand, O., Delpuech, C., & Pernier, J. (1997). Oscillatory γ-band (30–70 Hz) activity induced by a visual search task in humans. Journal of Neuroscience, 17(2), 722-734.
+        """
+        t_wavelet = np.arange(-4, 4, 1 / self.sampfreq)
+        freqs = self.freqs
+        n = len(self.lfp)
+        fastn = next_fast_len(n)
+        signal = np.pad(self.lfp, (0, fastn - n), "constant", constant_values=0)
+        # signal = np.tile(np.expand_dims(signal, axis=0), (len(freqs), 1))
+        # wavelet_at_freqs = np.zeros((len(freqs), len(t_wavelet)), dtype=complex)
+        conv_val = np.zeros((len(freqs), n), dtype=complex)
+        # for i, freq in enumerate(freqs):
+        def wav_cal(freq):
+            sigma = 7 / (2 * np.pi * freq)
+            A = (sigma * np.sqrt(np.pi)) ** -0.5
+            wavelet_at_freq = (
+                A
+                * np.exp(-(t_wavelet ** 2) / (2 * sigma ** 2))
+                * np.exp(2j * np.pi * freq * t_wavelet)
+            )
+
+            return sg.fftconvolve(signal, wavelet_at_freq, mode="same", axes=-1)[:n]
+
+        conv_val = Parallel(n_jobs=10)(delayed(wav_cal)(freq) for freq in freqs)
+        conv_val = np.asarray(conv_val)
+
+        return np.abs(conv_val) ** 2
+
+    def quyen2008(self):
+        """colgin
+
+
+        Returns:
+            [type]: [description]
+
+        References
+        ------------
+        1) Le Van Quyen, M., Bragin, A., Staba, R., Crépon, B., Wilson, C. L., & Engel, J. (2008). Cell type-specific firing during ripple oscillations in the hippocampal formation of humans. Journal of Neuroscience, 28(24), 6104-6110.
+        """
+        t_wavelet = np.arange(-4, 4, 1 / self.sampfreq)
+        freqs = self.freqs
+        signal = self.lfp
+        signal = np.tile(np.expand_dims(signal, axis=0), (len(freqs), 1))
+
+        wavelet_at_freqs = np.zeros((len(freqs), len(t_wavelet)))
+        for i, freq in enumerate(freqs):
+            sigma = 5 / (6 * freq)
+            A = np.sqrt(freq)
+            wavelet_at_freqs[i, :] = (
+                A
+                * np.exp(-((t_wavelet) ** 2) / (sigma ** 2))
+                * np.exp(2j * np.pi * freq * t_wavelet)
+            )
+
+        conv_val = sg.fftconvolve(signal, wavelet_at_freqs, mode="same", axes=-1)
+
+        return np.abs(conv_val) ** 2
+
+    def bergel2018(self):
+        """colgin
+
+
+        Returns:
+            [type]: [description]
+
+        References:
+        ---------------
+        1) Bergel, A., Deffieux, T., Demené, C., Tanter, M., & Cohen, I. (2018). Local hippocampal fast gamma rhythms precede brain-wide hyperemic patterns during spontaneous rodent REM sleep. Nature communications, 9(1), 1-12.
+
+        """
+        signal = self.lfp
+        t_wavelet = np.arange(-4, 4, 1 / self.sampfreq)
+        freqs = self.freqs
+
+        wave_spec = []
+        for freq in freqs:
+            sigma = freq / (2 * np.pi * 7)
+            A = (sigma * np.sqrt(np.pi)) ** -0.5
+            my_wavelet = (
+                A
+                * np.exp(-((t_wavelet) ** 2) / (2 * sigma ** 2))
+                * np.exp(2j * np.pi * freq * t_wavelet)
+            )
+            # conv_val = np.convolve(signal, my_wavelet, mode="same")
+            conv_val = sg.fftconvolve(signal, my_wavelet, mode="same")
+
+            wave_spec.append(conv_val)
+
+        wave_spec = np.abs(np.asarray(wave_spec))
+        return wave_spec * np.linspace(1, 150, 100).reshape(-1, 1)
+
+    def torrenceCompo(self):
+        # wavelet = _check_parameter_wavelet("morlet")
+        # sj = 1 / (wavelet.flambda() * self.freqs)
+        # wave, period, scale, coi = wavelet(
+        #     self.lfp, 1 / self.sampfreq, pad=1, dj=0.25, s0, j1, mother
+        # )
+        pass
+
+    def cohen(self, ncycles=3):
+        """Implementation of ref. 1 chapter 13
+
+
+        Returns:
+            [type]: [description]
+
+        References:
+        ---------------
+        1) Cohen, M. X. (2014). Analyzing neural time series data: theory and practice. MIT press.
+
+        """
+        signal = self.lfp
+        t_wavelet = np.arange(-4, 4, 1 / self.sampfreq)
+        freqs = self.freqs
+
+        wave_spec = []
+        for freq in freqs:
+            s = ncycles / (2 * np.pi * freq)
+            A = (s * np.sqrt(np.pi)) ** -0.5
+            my_wavelet = (
+                A
+                * np.exp(-(t_wavelet ** 2) / (2 * s ** 2))
+                * np.exp(2j * np.pi * freq * t_wavelet)
+            )
+            # conv_val = np.convolve(signal, my_wavelet, mode="same")
+            conv_val = sg.fftconvolve(signal, my_wavelet, mode="same")
+
+            wave_spec.append(conv_val)
+
+        wave_spec = np.abs(np.asarray(wave_spec))
+        return wave_spec ** 2
+
+
+def hilbertfast(signal, ax=-1):
+
     """inputs a signal does padding to next power of 2 for faster computation of hilbert transform
 
     Arguments:
@@ -483,15 +374,29 @@ def hilbertfast(arr, ax=-1):
     Returns:
         [type] -- [description]
     """
-    signal_length = arr.shape[-1]
-    hilbertsig = sg.hilbert(arr, fftpack.next_fast_len(signal_length), axis=ax)
+    signal_length = signal.shape[-1]
+    hilbertsig = sg.hilbert(signal, fftpack.next_fast_len(signal_length), axis=ax)
 
-    if np.ndim(arr) > 1:
+    if np.ndim(signal) > 1:
         hilbertsig = hilbertsig[:, :signal_length]
     else:
         hilbertsig = hilbertsig[:signal_length]
 
     return hilbertsig
+
+
+def fftnormalized(signal, fs=1250):
+
+    # Number of sample points
+    N = len(signal)
+    # sample spacing
+    T = 1 / fs
+    y = signal
+    yf = fft(y)
+    freq = np.linspace(0.0, 1.0 / (2.0 * T), N // 2)
+    pxx = 2.0 / N * np.abs(yf[0 : N // 2])
+
+    return pxx, freq
 
 
 @dataclass
@@ -612,6 +517,7 @@ class bicoherence:
         return bicoher
 
     def plot(self, index=None, ax=None, smooth=2, **kwargs):
+
         if index is None:
             bic = self.bicoher
         else:
@@ -702,6 +608,7 @@ class Csd:
         pass
 
     def plot(self, ax=None, smooth=3, plotLFP=False, **kwargs):
+
         if smooth is not None:
             csdmap = gaussian_filter(self.csdmap, sigma=smooth)
         else:
@@ -722,7 +629,7 @@ class Csd:
 
         if plotLFP:
             lfp = stats.zscore(self.lfp, axis=None) * np.mean(np.diff(self.coords)) / 2
-            ax.plot(self.time, lfp.T + self.coords, "gray", lw=1)
+            plt.plot(self.time, lfp.T + self.coords, "gray")
 
 
 def mtspect(signal, nperseg, noverlap, fs=1250):
@@ -1070,6 +977,7 @@ def psd_auc(signal: core.Signal, freq_band: tuple, window=10, overlap=5):
     fs = signal.sampling_rate
     aucChans = []
     for sig in signal.traces:
+
         f, pxx = sg.welch(
             stats.zscore(sig),
             fs=fs,
@@ -1085,7 +993,7 @@ def psd_auc(signal: core.Signal, freq_band: tuple, window=10, overlap=5):
     return aucChans
 
 
-def hilbert_amplitude_stat(signals, freq_band, fs, statistic="mean"):
+def hilbert_ampltiude_stat(signals, freq_band, fs, statistic="mean"):
     """Calculates hilbert amplitude statistic over the entire signal
 
     Parameters
@@ -1159,287 +1067,3 @@ def theta_phase_specfic_extraction(signal, y, fs, binsize=20, slideby=None):
         )
 
     return y_at_phase, angle_bin, angle_centers
-
-
-def irasa(
-    data,
-    sf=None,
-    ch_names=None,
-    band=(1, 30),
-    hset=np.arange(1.1, 1.95, 0.05),
-    return_fit=False,
-    win_sec=4,
-    kwargs_welch=dict(average="median", window="hamming"),
-):
-    """
-    Separate the aperiodic (= fractal, or 1/f) and oscillatory component of the
-    power spectra of EEG data using the IRASA method.
-    .. versionadded:: 0.1.7
-
-    Copyright (c) 2018, Raphael Vallat
-    All rights reserved.
-
-    Parameters
-    ----------
-    data : :py:class:`numpy.ndarray` or :py:class:`mne.io.BaseRaw`
-        1D or 2D EEG data. Can also be a :py:class:`mne.io.BaseRaw`, in which
-        case ``data``, ``sf``, and ``ch_names`` will be automatically
-        extracted, and ``data`` will also be converted from Volts (MNE default)
-        to micro-Volts (YASA).
-    sf : float
-        The sampling frequency of data AND the hypnogram.
-        Can be omitted if ``data`` is a :py:class:`mne.io.BaseRaw`.
-    ch_names : list
-        List of channel names, e.g. ['Cz', 'F3', 'F4', ...]. If None,
-        channels will be labelled ['CHAN001', 'CHAN002', ...].
-        Can be omitted if ``data`` is a :py:class:`mne.io.BaseRaw`.
-    band : tuple or None
-        Broad band frequency range.
-        Default is 1 to 30 Hz.
-    hset : :py:class:`numpy.ndarray`
-        Resampling factors used in IRASA calculation. Default is to use a range
-        of values from 1.1 to 1.9 with an increment of 0.05.
-    return_fit : boolean
-        If True (default), fit an exponential function to the aperiodic PSD
-        and return the fit parameters (intercept, slope) and :math:`R^2` of
-        the fit.
-        The aperiodic signal, :math:`L`, is modeled using an exponential
-        function in semilog-power space (linear frequencies and log PSD) as:
-        .. math:: L = a + \\text{log}(F^b)
-        where :math:`a` is the intercept, :math:`b` is the slope, and
-        :math:`F` the vector of input frequencies.
-    win_sec : int or float
-        The length of the sliding window, in seconds, used for the Welch PSD
-        calculation. Ideally, this should be at least two times the inverse of
-        the lower frequency of interest (e.g. for a lower frequency of interest
-        of 0.5 Hz, the window length should be at least 2 * 1 / 0.5 =
-        4 seconds).
-    kwargs_welch : dict
-        Optional keywords arguments that are passed to the
-        :py:func:`scipy.signal.welch` function.
-    Returns
-    -------
-    freqs : :py:class:`numpy.ndarray`
-        Frequency vector.
-    psd_aperiodic : :py:class:`numpy.ndarray`
-        The fractal (= aperiodic) component of the PSD.
-    psd_oscillatory : :py:class:`numpy.ndarray`
-        The oscillatory (= periodic) component of the PSD.
-    fit_params : :py:class:`pandas.DataFrame` (optional)
-        Dataframe of fit parameters. Only if ``return_fit=True``.
-    Notes
-    -----
-    The Irregular-Resampling Auto-Spectral Analysis (IRASA) method is
-    described in Wen & Liu (2016). In a nutshell, the goal is to separate the
-    fractal and oscillatory components in the power spectrum of EEG signals.
-    The steps are:
-    1. Compute the original power spectral density (PSD) using Welch's method.
-    2. Resample the EEG data by multiple non-integer factors and their
-       reciprocals (:math:`h` and :math:`1/h`).
-    3. For every pair of resampled signals, calculate the PSD and take the
-       geometric mean of both. In the resulting PSD, the power associated with
-       the oscillatory component is redistributed away from its original
-       (fundamental and harmonic) frequencies by a frequency offset that varies
-       with the resampling factor, whereas the power solely attributed to the
-       fractal component remains the same power-law statistical distribution
-       independent of the resampling factor.
-    4. It follows that taking the median of the PSD of the variously
-       resampled signals can extract the power spectrum of the fractal
-       component, and the difference between the original power spectrum and
-       the extracted fractal spectrum offers an approximate estimate of the
-       power spectrum of the oscillatory component.
-    Note that an estimate of the original PSD can be calculated by simply
-    adding ``psd = psd_aperiodic + psd_oscillatory``.
-    For an example of how to use this function, please refer to
-    https://github.com/raphaelvallat/yasa/blob/master/notebooks/11_IRASA.ipynb
-    References
-    ----------
-    .. [1] Wen, H., & Liu, Z. (2016). Separating Fractal and Oscillatory
-           Components in the Power Spectrum of Neurophysiological Signal.
-           Brain Topography, 29(1), 13–26.
-           https://doi.org/10.1007/s10548-015-0448-0
-    .. [2] https://github.com/fieldtrip/fieldtrip/blob/master/specest/
-    .. [3] https://github.com/fooof-tools/fooof
-    .. [4] https://www.biorxiv.org/content/10.1101/299859v1
-    """
-    import fractions
-
-    # Check if input data is a MNE Raw object
-
-    # Safety checks
-    assert isinstance(data, np.ndarray), "Data must be a numpy array."
-    data = np.atleast_2d(data)
-    assert data.ndim == 2, "Data must be of shape (nchan, n_samples)."
-    nchan, npts = data.shape
-    assert nchan < npts, "Data must be of shape (nchan, n_samples)."
-    assert sf is not None, "sf must be specified if passing a numpy array."
-    assert isinstance(sf, (int, float))
-    if ch_names is None:
-        ch_names = ["CHAN" + str(i + 1).zfill(3) for i in range(nchan)]
-    else:
-        ch_names = np.atleast_1d(np.asarray(ch_names, dtype=str))
-        assert ch_names.ndim == 1, "ch_names must be 1D."
-        assert len(ch_names) == nchan, "ch_names must match data.shape[0]."
-
-    # Check the other arguments
-    hset = np.asarray(hset)
-    assert hset.ndim == 1, "hset must be 1D."
-    assert hset.size > 1, "2 or more resampling fators are required."
-    hset = np.round(hset, 4)  # avoid float precision error with np.arange.
-    band = sorted(band)
-    assert band[0] > 0, "first element of band must be > 0."
-    assert band[1] < (sf / 2), "second element of band must be < (sf / 2)."
-    win = int(win_sec * sf)  # nperseg
-
-    # Calculate the original PSD over the whole data
-    freqs, psd = sg.welch(data, sf, nperseg=win, **kwargs_welch)
-
-    # Start the IRASA procedure
-    psds = np.zeros((len(hset), *psd.shape))
-
-    for i, h in enumerate(hset):
-        # Get the upsampling/downsampling (h, 1/h) factors as integer
-        rat = fractions.Fraction(str(h))
-        up, down = rat.numerator, rat.denominator
-        # Much faster than FFT-based resampling
-        data_up = sg.resample_poly(data, up, down, axis=-1)
-        data_down = sg.resample_poly(data, down, up, axis=-1)
-        # Calculate the PSD using same params as original
-        freqs_up, psd_up = sg.welch(data_up, h * sf, nperseg=win, **kwargs_welch)
-        freqs_dw, psd_dw = sg.welch(data_down, sf / h, nperseg=win, **kwargs_welch)
-        # Geometric mean of h and 1/h
-        psds[i, :] = np.sqrt(psd_up * psd_dw)
-
-    # Now we take the median PSD of all the resampling factors, which gives
-    # a good estimate of the aperiodic component of the PSD.
-    psd_aperiodic = np.median(psds, axis=0)
-    print(psd_aperiodic.shape, psd_aperiodic[:2])
-
-    # We can now calculate the oscillations (= periodic) component.
-    psd_osc = psd - psd_aperiodic
-
-    # Let's crop to the frequencies defined in band
-    mask_freqs = np.ma.masked_outside(freqs, *band).mask
-    freqs = freqs[~mask_freqs]
-    psd_aperiodic = np.compress(~mask_freqs, psd_aperiodic, axis=-1)
-    psd_osc = np.compress(~mask_freqs, psd_osc, axis=-1)
-
-    if return_fit:
-        # Aperiodic fit in semilog space for each channel
-        from scipy.optimize import curve_fit
-
-        intercepts, slopes, r_squared = [], [], []
-
-        def func(t, a, b):
-            # See https://github.com/fooof-tools/fooof
-            return a + np.log(t ** b)
-
-        for y in np.atleast_2d(psd_aperiodic):
-            y_log = np.log(y)
-            # Note that here we define bounds for the slope but not for the
-            # intercept.
-            popt, pcov = curve_fit(
-                func, freqs, y_log, p0=(2, -1), bounds=((-np.inf, -10), (np.inf, 2))
-            )
-            intercepts.append(popt[0])
-            slopes.append(popt[1])
-            # Calculate R^2: https://stackoverflow.com/q/19189362/10581531
-            residuals = y_log - func(freqs, *popt)
-            ss_res = np.sum(residuals ** 2)
-            ss_tot = np.sum((y_log - np.mean(y_log)) ** 2)
-            r_squared.append(1 - (ss_res / ss_tot))
-
-        # Create fit parameters dataframe
-        fit_params = {
-            "Chan": ch_names,
-            "Intercept": intercepts,
-            "Slope": slopes,
-            "R^2": r_squared,
-            "std(osc)": np.std(psd_osc, axis=-1, ddof=1),
-        }
-        return freqs, psd_aperiodic, psd_osc, pd.DataFrame(fit_params)
-    else:
-        return freqs, psd_aperiodic, psd_osc
-
-
-def plot_miniscope_noise(
-    signal,
-    ch,
-    block_sec=10,
-    interval_sec=60,
-    remove_disconnects=False,
-    EWLnoise_range=(4835, 4855),
-):
-    assert isinstance(signal, core.Signal)
-
-    f_full, Pxx_full, time = [], [], []
-    nblocks = np.floor(signal.duration / interval_sec).astype(int)
-    for id in range(nblocks):
-        block_start = int(interval_sec * id * signal.sampling_rate)
-        block_end = int(block_start + signal.sampling_rate * block_sec)
-        f, Pxx = sg.welch(
-            signal.traces[ch][block_start:block_end],
-            fs=signal.sampling_rate,
-            nperseg=signal.sampling_rate,
-            scaling="spectrum",
-        )
-        f_full.append(f)
-        Pxx_full.append(Pxx)
-        time.append(block_start / signal.sampling_rate)
-
-    f_full = np.asarray(f_full)
-    Pxx_full = np.asarray(Pxx_full)
-
-    # Quick and dirty method to remove disconnects - threshold excessive high frequency noise
-    if remove_disconnects:
-        freq_bool = np.bitwise_and(
-            f_full[0] > EWLnoise_range[1], f_full[0] < EWLnoise_range[0]
-        )
-        good_epochs = Pxx_full[:, freq_bool].sum(axis=1) < 20000
-        f_full = f_full[good_epochs]
-        Pxx_full = Pxx_full[good_epochs]
-
-    fig, ax = plt.subplots(2, 3, figsize=(12, 8))
-    colors = plt.cm.rainbow(np.linspace(0, 1, nblocks))
-    for fT, PxxT, color in zip(f_full, Pxx_full, colors):
-        ax[0][0].plot(fT, PxxT, color=color)
-    ax[0][0].set_xlabel("Freq (Hz)")
-    ax[0][0].set_ylabel("PSD")
-
-    # noise_limits = [[4835, 4855], [9670, 9700], [14510, 14550], [57, 63]]
-    noise_limits = [
-        np.array(EWLnoise_range),
-        np.array(EWLnoise_range) * 2,
-        np.array(EWLnoise_range) * 3,
-        np.array([57, 63]),
-    ]
-    for a, lim in zip(ax.reshape(-1)[1:], noise_limits):
-        freq_bool = np.bitwise_and(f > lim[0], f < lim[1])
-        if np.any(freq_bool):
-            sns.heatmap(Pxx_full[:, freq_bool].T, ax=a)
-            a.set_yticks([0, freq_bool.sum()])
-            a.set_yticklabels([str(f[freq_bool].min()), str(f[freq_bool].max())])
-            a.set_xticks((0, nblocks))
-            a.set(xticklabels=("0", str(time[-1])))
-            a.set_xlabel("Time (30 sec blocks)")
-            a.set_ylabel("Frez (Hz)")
-        else:
-            a.text(
-                0.1,
-                0.5,
-                f"{lim[0]}-{lim[1]} Hz above Nyquist Frequency",
-            )
-
-    fig.suptitle("Miniscope Noise Tracking")
-
-    return f_full, Pxx_full
-
-
-if __name__ == "__main__":
-    import DataPaths.subjects as subjects
-    sess = subjects.sd.ratKday1[0]
-    post = sess.paradigm["post"].flatten()
-    period = [post[0] + 5 * 3600, post[0] + 6 * 3600]
-    chan = sess.best_channels.slow_wave
-    lfp = sess.eegfile.get_signal(chan, *period)
-    irasa(lfp.traces.squeeze(), lfp.sampling_rate, band=(1, 100), return_fit=True)
