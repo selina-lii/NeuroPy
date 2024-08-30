@@ -31,7 +31,7 @@ class Neurons(HDF_SerializationMixin, NeuronUnitSlicableObjectProtocol, StartSto
         ...
     
     @property
-    def neuron_type(self): # -> list[Any] | NDArray[Any]:
+    def neuron_type(self): # -> list[type[int]] | NDArray[Any]:
         """The neuron_type property."""
         ...
     
@@ -40,7 +40,7 @@ class Neurons(HDF_SerializationMixin, NeuronUnitSlicableObjectProtocol, StartSto
         ...
     
     @property
-    def aclu_to_neuron_type_map(self): # -> dict[_KT, _VT]:
+    def aclu_to_neuron_type_map(self): # -> dict[bytes, bytes]:
         """ builds a map from the neuron_id to the neuron_type """
         ...
     

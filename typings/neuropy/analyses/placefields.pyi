@@ -39,17 +39,17 @@ class PlacefieldComputationParameters(SimplePrintable, DiffableObject, Subsettab
         ...
     
     @property
-    def grid_bin_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview:
+    def grid_bin_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview[int]:
         """The grid_bin_1D property."""
         ...
     
     @property
-    def grid_bin_bounds_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview | None:
+    def grid_bin_bounds_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview[int] | None:
         """The grid_bin_bounds property."""
         ...
     
     @property
-    def smooth_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview:
+    def smooth_1D(self): # -> generic | bool | int | float | complex | str | bytes | memoryview[int]:
         """The smooth_1D property."""
         ...
     

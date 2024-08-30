@@ -90,3 +90,31 @@ class SimpleFieldSizesReprMixin:
     
 
 
+_default_class_name_dict_replace = ...
+def convert_attrs_inline_class_instance_to_normal_class_defn(an_instance, class_name_replace_dict=..., print_output: bool = ...) -> str:
+    """ Converts an inline `attrs`-based class definition generated via `attrs.make_class(...)` to a full-class-defn-form class definition.
+    
+     For example:
+        ```python
+        HeuristicScoresTuple = attrs.make_class("HeuristicScoresTuple", {k:field() for k in ("longest_sequence_length", "longest_sequence_length_ratio", "direction_change_bin_ratio", "congruent_dir_bins_ratio", "total_congruent_direction_change", 
+                                                                                            "total_variation", "integral_second_derivative", "stddev_of_diff",
+                                                                                            "position_derivatives_df")}, bases=(UnpackableMixin, object,))
+        ```
+
+        ```python
+        class HeuristicScoresTuple(UnpackableMixin, object,):
+            longest_sequence_length = field()
+            longest_sequence_length_ratio = field()
+            # ... remainder of fields
+        ```
+
+
+    Usage:
+
+        from neuropy.utils.mixins.AttrsClassHelpers import convert_attrs_inline_class_instance_to_normal_class_defn
+        content = convert_attrs_inline_class_instance_to_normal_class_defn(an_instance=deepcopy(active_heuristic_scores))
+        print(content)
+    
+    """
+    ...
+

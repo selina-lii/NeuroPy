@@ -13,7 +13,7 @@ from datetime import datetime
 class NonStringIterable(metaclass=abc.ABCMeta):
     __slots__ = ...
     @abc.abstractmethod
-    def __iter__(self): # -> Generator[None, Any, None]:
+    def __iter__(self): # -> Generator[Never, Any, None]:
         ...
     
     @classmethod

@@ -530,8 +530,14 @@ def matplotlib_configuration_update(is_interactive: bool, backend: Optional[str]
     
     # Example usage:
 
-        from neuropy.utils.matplotlib_helpers import matplotlib_configuration
-        with matplotlib_configuration(is_interactive=False, backend='AGG'):
+        from neuropy.utils.matplotlib_helpers import matplotlib_configuration_update
+        
+        _restore_previous_matplotlib_settings_callback = matplotlib_configuration_update(is_interactive=True, backend='Qt5Agg')
+        _restore_previous_matplotlib_settings_callback = matplotlib_configuration_update(is_interactive=False, backend='AGG')
+            
+            
+            
+        with matplotlib_configuration_update(is_interactive=False, backend='AGG'):
             # Perform non-interactive Matplotlib operations with 'AGG' backend
             plt.plot([1, 2, 3, 4], [1, 4, 9, 16])
             plt.xlabel('X-axis')
@@ -539,7 +545,7 @@ def matplotlib_configuration_update(is_interactive: bool, backend: Optional[str]
             plt.title('Non-interactive Mode with AGG Backend')
             plt.savefig('plot.png')  # Save the plot to a file (non-interactive mode)
 
-        with matplotlib_configuration(is_interactive=True, backend='Qt5Agg'):
+        with matplotlib_configuration_update(is_interactive=True, backend='Qt5Agg'):
             # Perform interactive Matplotlib operations with 'Qt5Agg' backend
             plt.plot([1, 2, 3, 4], [1, 4, 9, 16])
             plt.xlabel('X-axis')
@@ -707,6 +713,16 @@ class ValueFormatter:
         ...
     
 
+
+def find_first_available_matplotlib_font_name(desired_fonts_list): # -> None:
+    """ returns the first font that is available to matplotlib
+    
+        from neuropy.utils.matplotlib_helpers import find_first_available_matplotlib_font_name
+
+        found_font_name = find_first_available_matplotlib_font_name(desired_fonts_list=['Source Sans Pro', 'Source Sans 3', 'DejaVu Sans Mono'])
+
+    """
+    ...
 
 def parse_and_format_unformatted_values_text(unformatted_text_block: str, key_value_split: str = ..., desired_label_value_sep: str = ..., a_val_formatter: Optional[ValueFormatter] = ...) -> Tuple[List[StyledText], ValueFormatter]:
     """ takes a potentially multi-line string containing keys and values like:

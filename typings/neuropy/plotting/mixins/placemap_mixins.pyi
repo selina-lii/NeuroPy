@@ -16,7 +16,7 @@ class PfnD_PlotOccupancy_Mixin:
 
 
 class PfnDPlottingMixin(PfnD_PlotOccupancy_Mixin):
-    def plot_ratemaps_1D(self, ax=..., pad=..., normalize=..., sortby=..., cmap=..., active_context=..., **kwargs): # -> tuple[Axes | Any, NDArray[Any] | NDArray[intp] | ndarray[Any, Any], ndarray[Any, Any]]:
+    def plot_ratemaps_1D(self, ax=..., pad=..., normalize=..., sortby=..., cmap=..., active_context=..., **kwargs): # -> tuple[Axes | Any, NDArray[Any] | ndarray[Any, dtype[Any]] | ndarray[Any, dtype[intp]] | ndarray[Any, Any], ndarray[Any, Any]]:
         """ Note that normalize is required to fit all of the plots on this kind of stacked figure. """
         ...
     

@@ -131,7 +131,7 @@ def contiguous_regions(condition): # -> Any | NDArray[signedinteger[_NBitIntP]]:
 def hmmfit1d(Data, n_comp=..., n_iter=...): # -> NDArray[Any] | None:
     ...
 
-def eventpsth(ref, event, fs, quantparam=..., binsize=..., window=..., nQuantiles=...): # -> ndarray[Any, dtype[Any]] | ndarray[Any, dtype[int32]]:
+def eventpsth(ref, event, fs, quantparam=..., binsize=..., window=..., nQuantiles=...): # -> ndarray[Any, dtype[Any]] | ndarray[Any, dtype[signedinteger[_32Bit]]]:
     """psth of 'event' with respect to 'ref'
 
     Parameters
