@@ -4,7 +4,51 @@ import pandas as pd
 from sklearn.decomposition import FastICA, PCA
 from scipy import stats
 from hmmlearn.hmm import GaussianHMM
+from sklearn.mixture import GaussianMixture
 from .ccg import correlograms
+import scipy.signal as sg
+import typing
+
+
+def choose_elementwise(x, y, condition):
+    assert type(x) == type(y), "Both inputs should have same type"
+    assert type(condition) is np.ndarray, "condition should be a boolean array"
+
+    if type(x) is np.ndarray:
+        assert x.shape == y.shape, "Input arrays should have same shape"
+        out = np.zeros_like(x)
+        out[..., condition] = x[..., condition]
+        out[..., ~condition] = y[..., ~condition]
+    else:
+        try:
+            out = [x if cond else y for (x, y, cond) in zip(x, y, condition)]
+        except:
+            raise TypeError("Inpvalid inputs")
+
+    return out
+
+
+def gaussian_kernel1D(sigma, bin_size, truncate=4.0):
+    """Get a gaussian kernel
+
+    Parameters
+    ----------
+    sigma : float
+        standard deviation of the kernel
+    bin_size : float
+        bin size of the kernel
+    truncate: float
+        limit kernel to this standard deviation,default = 4.0
+
+    Returns
+    -------
+    np.array
+        gaussian kernel
+    """
+    t_gauss = np.arange(-truncate * sigma, truncate * sigma, bin_size)
+    gaussian = np.exp(-(t_gauss**2) / (2 * sigma**2))
+    gaussian /= np.sum(gaussian)
+    return gaussian
 
 
 def min_max_scaler(x, axis=-1):
@@ -19,160 +63,15 @@ def min_max_scaler(x, axis=-1):
     -------
     np.array
         scaled array
-
-
-    ERRORS:
-        2023-03-02 - ValueError: zero-size array to reduction operation minimum which has no identity
-            Occurs when np.shape(x) is (0,)
-
-
     """
     return (x - np.min(x, axis=axis, keepdims=True)) / np.ptp(
         x, axis=axis, keepdims=True
     )
 
 
-def bounded(v: float, vmin: float = -np.inf, vmax: float = np.inf) -> float:
-    """Returns the value bounded between two optional lower and upper bounds.
-    It clips to the bounds.
-
-    Usage:
-        from neuropy.utils.mathutil import bounded
-
-        v_bounded = bounded(value, vmin=0.0, vmax=1.0)
-    
-    Usage 2:
-        value = [-150, -65, -0.9, 0, 0.9, 65, 150]
-
-        bounded(value, vmin=0.0, vmax=1.0) # array([0. , 0. , 0. , 0. , 0.9, 1. , 1. ])
-        bounded(value, vmin=-1.0, vmax=1.0) # array([-1. , -1. , -0.9,  0. ,  0.9,  1. ,  1. ])
-
-        
-    """
-    if np.isscalar(v):
-        if np.isnan(v):
-            return np.nan  # Return NaN directly if v is NaN
-        return min(max(v, vmin), vmax)  # No need for numpy functions for scalar
-    
-    # If v is array-like
-    v = np.array(v)
-    v = np.clip(v, vmin, vmax)
-    return v
-
-    
-def map_to_fixed_range(lin_pos, x_min:float=0.0, x_max:float=1.0):
-    # Normalize lin_pos to the range [0, 1]
-    lin_pos_normalized = (lin_pos - np.nanmin(lin_pos)) / (np.nanmax(lin_pos) - np.nanmin(lin_pos))
-    # Scale the normalized lin_pos to the range [x_min, x_max]
-    mapped_pos = lin_pos_normalized * (x_max - x_min) + x_min
-    return mapped_pos
-
-# @function_attributes(short_name=None, tags=['map','values','transform'], input_requires=[], output_provides=[], uses=[], used_by=[], creation_date='2023-05-31 16:53', related_items=[])
-def map_value(value, from_range: tuple[float, float], to_range: tuple[float, float]):
-    """ Maps values from a range `from_low_high_tuple`: (a, b) to a new range `to_low_high_tuple`: (A, B). Similar to arduino's `map(value, fromLow, fromHigh, toLow, toHigh)` function
-    
-    Usage:
-        from neuropy.utils.mathutil import map_value
-        track_change_mapped_idx = map_value(track_change_time, (Flat_epoch_time_bins_mean[0], Flat_epoch_time_bins_mean[-1]), (0, (num_epochs-1)))
-        track_change_mapped_idx
-        
-    Example 2: Defining Shortcut mapping
-        map_value_time_to_epoch_idx_space = lambda v: map_value(v, (Flat_epoch_time_bins_mean[0], Flat_epoch_time_bins_mean[-1]), (0, (num_epochs-1))) # same map
-
-    """
-    # Calculate the ratio of the input value relative to the input range
-    from_low, from_high = from_range
-    to_low, to_high = to_range
-    ratio = (value - from_low) / (from_high - from_low)
-    # Map the ratio to the output range
-    mapped_value = to_low + (to_high - to_low) * ratio
-    # Return the mapped value
-    return mapped_value
-
-
-def compute_grid_bin_bounds(*args):
-    """ computes the (min, max) bound for each passed array and returns a tuple of these (min, max) tuples. 
-    from neuropy.utils.mathutil import compute_grid_bin_bounds
-    
-    grid_bin_bounds: `((x_min, x_max), (y_min, y_max), ...)
-    
-    """
-    grid_bin_bounds = []
-    for data in args:
-        if data is not None:
-            bounds = (np.nanmin(data), np.nanmax(data))
-        else:
-            bounds = None # append None to the array
-        grid_bin_bounds.append(bounds)
-    return tuple(grid_bin_bounds)
-
-
-
 def cdf(x, bins):
     """Returns cummulative distribution for x at bins"""
     return np.cumsum(np.histogram(x, bins, density=True)[0])
-
-
-def partialcorr(x, y, z):
-    """
-    correlation between x and y , with controlling for z
-    """
-    # convert them to pandas series
-    x = pd.Series(x)
-    y = pd.Series(y)
-    z = pd.Series(z)
-    # xyz = pd.DataFrame({"x-values": x, "y-values": y, "z-values": z})
-
-    xy = x.corr(y)
-    xz = x.corr(z)
-    zy = z.corr(y)
-
-    parcorr = (xy - xz * zy) / (np.sqrt(1 - xz ** 2) * np.sqrt(1 - zy ** 2))
-
-    return parcorr
-
-
-def parcorr_mult(x, y, z):
-    """
-    correlation between multidimensional x and y , with controlling for multidimensional z
-
-    """
-
-    parcorr = np.zeros((len(z), len(y), len(x)))
-    for i, x_ in enumerate(x):
-        for j, y_ in enumerate(y):
-            for k, z_ in enumerate(z):
-                parcorr[k, j, i] = partialcorr(x_, y_, z_)
-
-    revcorr = np.zeros((len(z), len(y), len(x)))
-    for i, x_ in enumerate(x):
-        for j, y_ in enumerate(y):
-            for k, z_ in enumerate(z):
-                revcorr[k, j, i] = partialcorr(x_, z_, y_)
-
-    return parcorr, revcorr
-
-
-# TODO improve the partial correlation calucalation maybe use arrays instead of list
-def parcorr_muglt(x, y, z):
-    """
-    correlation between multidimensional x and y , with controlling for multidimensional z
-
-    """
-
-    parcorr = np.zeros(z.shape[0], y.shape[0], x.shape[0])
-    for i, x_ in enumerate(x):
-        for j, y_ in enumerate(y):
-            for k, z_ in enumerate(z):
-                parcorr[k, j, i] = partialcorr(x_, y_, z_)
-
-    revcorr = np.zeros((len(z), len(y), len(x)))
-    for i, x_ in enumerate(x):
-        for j, y_ in enumerate(y):
-            for k, z_ in enumerate(z):
-                revcorr[k, j, i] = partialcorr(x_, z_, y_)
-
-    return parcorr, revcorr
 
 
 def getICA_Assembly(x):
@@ -202,9 +101,8 @@ def getICA_Assembly(x):
     return V
 
 
-def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50):
-
-    ThreshSignal = np.diff(np.where(sig > lowthresh, 1, 0))
+def threshPeriods(arr, lowthresh=1, highthresh=2, minDistance=30, minDuration=50):
+    ThreshSignal = np.diff(np.where(arr > lowthresh, 1, 0))
     start = np.where(ThreshSignal == 1)[0]
     stop = np.where(ThreshSignal == -1)[0]
 
@@ -239,7 +137,7 @@ def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50
     fourthPass = []
     # peakNormalizedPower, peaktime = [], []
     for i in range(len(thirdPass)):
-        maxValue = max(sig[thirdPass[i, 0] : thirdPass[i, 1]])
+        maxValue = max(arr[thirdPass[i, 0] : thirdPass[i, 1]])
         if maxValue >= highthresh:
             fourthPass.append(thirdPass[i])
             # peakNormalizedPower.append(maxValue)
@@ -253,25 +151,67 @@ def threshPeriods(sig, lowthresh=1, highthresh=2, minDistance=30, minDuration=50
     return np.asarray(fourthPass)
 
 
+def _unpack_args(values, fs=1):
+    """Parsing argument for thresh_epochs"""
+    try:
+        val_min, val_max = values
+    except (TypeError, ValueError):
+        val_min, val_max = (values, None)
+
+    val_min = val_min * fs
+    val_max = val_max * fs if val_max is not None else None
+
+    return val_min, val_max
+
+
+def thresh_epochs(arr: np.ndarray, thresh, length, sep=0, boundary=0, fs=1):
+    hmin, hmax = _unpack_args(thresh)  # does not need fs
+    lmin, lmax = _unpack_args(length, fs=fs)
+    sep = sep * fs + 1e-6
+
+    assert hmin >= boundary, "boundary must be smaller than min thresh"
+
+    arr_thresh = np.where(arr >= boundary, arr, 0)
+    peaks, props = sg.find_peaks(arr_thresh, height=[hmin, hmax], prominence=0)
+
+    starts, stops = props["left_bases"], props["right_bases"]
+    peaks_values = arr_thresh[peaks]
+
+    # ----- merge overlapping epochs ------
+    n_epochs = len(starts)
+    ind_delete = []
+    for i in range(n_epochs - 1):
+        if (starts[i + 1] - stops[i]) < sep:
+            # stretch the second epoch to cover the range of both epochs
+            starts[i + 1] = min(starts[i], starts[i + 1])
+            stops[i + 1] = max(stops[i], stops[i + 1])
+
+            peaks_values[i + 1] = max(peaks_values[i], peaks_values[i + 1])
+            peaks[i + 1] = [peaks[i], peaks[i + 1]][
+                np.argmax([peaks_values[i], peaks_values[i + 1]])
+            ]
+            ind_delete.append(i)
+
+    epochs_arr = np.vstack((starts, stops, peaks, peaks_values)).T
+    epochs_arr = np.delete(epochs_arr, ind_delete, axis=0)
+
+    # ----- duration thresholds ------
+    epochs_length = epochs_arr[:, 1] - epochs_arr[:, 0]
+    if lmax is None:
+        lmax = epochs_length.max()
+    ind_keep = (epochs_length >= lmin) & (epochs_length <= lmax)
+
+    starts, stops, peaks, peaks_values = epochs_arr[ind_keep, :].T
+
+    return starts / fs, stops / fs, peaks / fs, peaks_values
+
+
 def contiguous_regions(condition):
     """Finds contiguous True regions of the boolean array "condition". Returns
     a 2D array where the first column is the start index of the region and the
     second column is the end index. Taken directly from stackoverflow:
     https://stackoverflow.com/questions/4494404/find-large-number-of-
-    consecutive-values-fulfilling-condition-in-a-numpy-array
-        
-    Usage:
-        from neuropy.utils.mathutil import contiguous_regions
-        idnan = mathutil.contiguous_regions(np.isnan(x))  # identify missing data points
-
-            for ids in idnan:
-                missing_ids = range(ids[0], ids[-1])
-                bracket_ids = ids + [-1, 0]
-                xgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], x[bracket_ids])
-                ygood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], y[bracket_ids])
-                zgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], z[bracket_ids])
-
-    """
+    consecutive-values-fulfilling-condition-in-a-numpy-array"""
 
     # Find the indices of changes in "condition"
     d = np.diff(condition)
@@ -294,7 +234,107 @@ def contiguous_regions(condition):
     return idx
 
 
-def hmmfit1d(Data, n_comp=2, n_iter=50):
+def schmitt_threshold(arr: np.array, low_thresh: float, high_thresh: float):
+    """Detect high and low states in an array using two thresholds (Schmitt trigger). Works best for bimodal data.
+
+    Parameters
+    ----------
+    arr : np.array
+        array for threshold detection
+    low_thresh : float
+        low threshold
+    high_thresh : float
+        high threshold
+
+    Returns
+    -------
+    logical array
+        array of 0(low state) and 1(high state)
+    """
+    states = np.zeros_like(arr)
+    first_low = np.where(arr <= low_thresh)[0][0]
+    first_high = np.where(arr >= high_thresh)[0][0]
+    first_ind = np.min([first_low, first_high])
+    states[:first_ind] = np.argmin([first_low, first_high])
+    current_state = states[first_ind - 1]
+
+    for i in range(first_ind, len(arr)):
+        if arr[i] >= high_thresh:
+            current_state = 1
+        if arr[i] <= low_thresh:
+            current_state = 0
+
+        states[i] = current_state
+
+    return states
+
+
+def bimodal_classify(
+    arr,
+    ret_params=False,
+    threshold_type: typing.Literal["default", "schmitt"] = "default",
+):
+    """Gaussian classification of features into two components.
+
+    Parameters
+    ----------
+    arr : 1D or 2D array
+        features to be classified.
+    ret_params : bool, optional
+        Gaussian fit parameters are retured if true , by default False
+    plot : bool, optional
+        _description_, by default False
+    ax : _type_, optional
+        _description_, by default None
+
+    Returns
+    -------
+    _type_
+        _description_
+    """
+    assert arr.ndim < 2, "Only 1D data accepted"
+
+    clus = GaussianMixture(
+        n_components=2, init_params="k-means++", max_iter=200, n_init=10
+    ).fit(arr[:, None])
+    labels = clus.predict(arr[:, None])
+    clus_means = clus.means_.squeeze()
+
+    # --- order cluster labels by increasing mean (low=0, high=1) ------
+    sort_idx = np.argsort(clus_means)
+    label_map = np.zeros_like(sort_idx)
+    label_map[sort_idx] = np.arange(len(sort_idx))
+    fixed_labels = label_map[labels.astype("int")]
+    means = clus_means[sort_idx]
+    covs = clus.covariances_.squeeze()[sort_idx]
+    weights = clus.weights_[sort_idx]
+
+    if threshold_type == "schmitt":
+        bins = np.linspace(arr.min(), arr.max(), 200)
+        full_fit = np.zeros_like(bins)
+        for i in range(2):
+            full_fit += stats.norm.pdf(bins, means[i], np.sqrt(covs[i])) * weights[i]
+
+        bins_between_peaks = (bins > means[0]) & (bins < means[1])
+        thresh_ind = np.argmin(full_fit[bins_between_peaks])
+        thresh_val = bins[bins_between_peaks][thresh_ind]
+        low_thresh = (means[0] + thresh_val) / 2
+        high_thresh = (means[1] + thresh_val) / 2
+
+        fixed_labels = schmitt_threshold(arr, low_thresh, high_thresh)
+
+    if ret_params:
+        params_dict = dict(
+            weights=weights,
+            means=means,
+            covariances=covs,
+        )
+        return fixed_labels, params_dict
+    else:
+        return fixed_labels
+
+
+def hmmfit1d(Data, ret_means=False, **kwargs):
     # hmm states on 1d data and returns labels with highest mean = highest label
     flag = None
     if np.isnan(Data).any():
@@ -306,7 +346,15 @@ def hmmfit1d(Data, n_comp=2, n_iter=50):
         flag = 1
 
     Data = (np.asarray(Data)).reshape(-1, 1)
-    model = GaussianHMM(n_components=n_comp, n_iter=n_iter).fit(Data)
+    models = []
+    scores = []
+    for i in range(10):
+        model = GaussianHMM(n_components=2, n_iter=10, random_state=i, **kwargs)
+        model.fit(Data)
+        models.append(model)
+        scores.append(model.score(Data))
+    model = models[np.argmax(scores)]
+
     hidden_states = model.predict(Data)
     mus = np.squeeze(model.means_)
     sigmas = np.squeeze(np.sqrt(model.covars_))
@@ -318,7 +366,7 @@ def hmmfit1d(Data, n_comp=2, n_iter=50):
     transmat = transmat[idx, :][:, idx]
 
     state_dict = {}
-    states = [i for i in range(5)]
+    states = [i for i in range(4)]
     for i in idx:
         state_dict[idx[i]] = states[i]
 
@@ -326,15 +374,16 @@ def hmmfit1d(Data, n_comp=2, n_iter=50):
     relabeled_states[:2] = [0, 0]
     relabeled_states[-2:] = [0, 0]
 
-    hmmlabels = None
     if flag:
-
         hmmlabels[non_nan_indices] = relabeled_states
 
     else:
         hmmlabels = relabeled_states
 
-    return hmmlabels
+    if ret_means:
+        return hmmlabels, mus
+    else:
+        return hmmlabels
 
 
 def eventpsth(ref, event, fs, quantparam=None, binsize=0.01, window=1, nQuantiles=1):
@@ -399,3 +448,34 @@ def eventpsth(ref, event, fs, quantparam=None, binsize=0.01, window=1, nQuantile
     )
 
     return ccg[:-1, -1, :]
+
+
+def gini(arr, eps=1e-8):
+    """
+    Calculate the Gini coefficient of a numpy array.
+
+    Source: PyGini
+    https://github.com/mckib2/pygini/blob/master/pygini/gini.py
+
+    -----
+    Based on bottom eq on [2]_.
+    References
+    ----------
+    .. [2]_ http://www.statsdirect.com/help/
+            default.htm#nonparametric_methods/gini.htm
+    """
+
+    # All values are treated equally, arrays must be 1d and > 0:
+    arr = np.abs(arr).flatten() + eps
+
+    # Values must be sorted:
+    arr = np.sort(arr)
+
+    # Index per array element:
+    index = np.arange(1, arr.shape[0] + 1)
+
+    # Number of array elements:
+    N = arr.shape[0]
+
+    # Gini coefficient:
+    return (np.sum((2 * index - N - 1) * arr)) / (N * np.sum(arr))
