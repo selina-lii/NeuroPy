@@ -19,22 +19,19 @@ class ProcessData:
         # self.recinfo = NeuroscopeIO(xml_files[0])
         self.recinfo = neuroscopeio.NeuroscopeIO(xml_files[0])
         eegfiles = sorted(basepath.glob("*.eeg"))
-        try:
-            assert len(eegfiles) == 1, "Fewer/more than one .eeg file detected"
-            self.eegfile = binarysignalio.BinarysignalIO(
-                eegfiles[0],
-                n_channels=self.recinfo.n_channels,
-                sampling_rate=self.recinfo.eeg_sampling_rate,
-            )
-        except AssertionError:
-            print("Fewer/more than one .eeg file detected, no eeg file loaded")
+        assert len(eegfiles) == 1, "Fewer/more than one .eeg file detected"
+        self.eegfile = binarysignalio.BinarysignalIO(
+            eegfiles[0],
+            n_channels=self.recinfo.n_channels,
+            sampling_rate=self.recinfo.eeg_sampling_rate,
+        )
         try:
             self.datfile = binarysignalio.BinarysignalIO(
                 eegfiles[0].with_suffix(".dat"),
                 n_channels=self.recinfo.n_channels,
                 sampling_rate=self.recinfo.dat_sampling_rate,
             )
-        except (FileNotFoundError, IndexError):
+        except FileNotFoundError:
             print("No dat file found, not loading")
 
     def __repr__(self) -> str:
