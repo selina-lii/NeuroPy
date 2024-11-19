@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from datetime import datetime
 import pandas as pd
-from neuropy.utils import position_util, mathutil
+from ..utils import position_util, mathutil
 from pathlib import Path
 from ..core import Position
 
@@ -354,12 +354,7 @@ class OptitrackIO:
 
         # ------- collecting timepoints related to position tracking ------
         posfiles = np.asarray(sorted(self.dirname.glob("*.csv")))
-        posfilestimes = np.asarray(
-            [
-                datetime.strptime(file.stem, "Take %Y-%m-%d %I.%M.%S %p")
-                for file in posfiles
-            ]
-        )
+        posfilestimes = np.asarray([getStartTime(file) for file in posfiles])
         filesort_ind = np.argsort(posfilestimes).astype(int)
         posfiles = posfiles[filesort_ind]
 
