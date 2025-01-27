@@ -1,7 +1,11 @@
 import numpy as np
+import pandas as pd
 from pathlib import Path
 import xml.etree.ElementTree as Etree
-from .. import core
+# from .. import core
+from neuropy.core.neurons import Neurons
+from neuropy.core.position import Position
+from neuropy.core.epoch import Epoch
 
 
 class NeuroscopeIO:
@@ -77,14 +81,16 @@ class NeuroscopeIO:
         """
         pass
 
-    def write_neurons(self, neurons: core.Neurons):
-        """To view spikes in neuroscope, spikes are exported to .clu.1 and .res.1 files in the basepath.
+    def write_neurons(self, neurons: Neurons, suffix_num: int = 1):
+        """To view spikes in neuroscope, spikes are exported to .clu.# and .res.# files in the basepath.
         You can order the spikes in a way to view sequential activity in neuroscope.
 
         Parameters
         ----------
         spks : list
             list of spike times.
+        suffix_num: int
+            number to tack onto end of clu and res files.
         """
 
         spks = neurons.spiketrains
@@ -98,34 +104,47 @@ class NeuroscopeIO:
         clu_id = clu_id[sort_ind]
         clu_id = np.append(nclu, clu_id)
 
-        file_clu = self.source_file.with_suffix(".clu.1")
-        file_res = self.source_file.with_suffix(".res.1")
+        file_clu = self.source_file.with_suffix(".clu." + str(suffix_num))
+        file_res = self.source_file.with_suffix(".res." + str(suffix_num))
 
         with file_clu.open("w") as f_clu, file_res.open("w") as f_res:
             for item in clu_id:
-                f_clu.write(f"{item}\n")
+                f_clu.write(f"{int(item)}\n")
             for frame in spk_frame:
                 f_res.write(f"{frame}\n")
 
-    def write_epochs(self, epochs: core.Epoch, ext=".epc"):
+        return file_clu
+
+    def write_epochs(self, epochs: Epoch, ext="epc"):
         with self.source_file.with_suffix(f".evt.{ext}").open("w") as a:
             for event in epochs.to_dataframe().itertuples():
-                a.write(f"{event.start*1000} start\n{event.stop*1000} stop\n")
+                # First attempt to fix bug where Neuropy exported .evt files get broken after manual
+                # adjustment in NeuroScope - does not seem to work
+                event_start, event_stop = event.start * 1000, event.stop * 1000
+                if np.mod(event_start, 1) == 0:
+                    event_start += 0.2
+                if np.mod(event_stop, 1) == 0:
+                    event_stop += 0.2
+                a.write(f"{event_start}\tstart\n{event_stop}\tstop\n")
 
-    def write_position(self, position: core.Position):
+    def write_position(self, position: Position):
+        """Writes core.Position object to neuroscope compatible format
+
+        Parameters
+        ----------
+        position : core.Position
+        """
         # neuroscope only displays positive values so translating the coordinates
         x, y = position.x, position.y
-        x = self.x + abs(min(self.x))
-        y = self.y + abs(min(self.y))
-        print(max(x))
-        print(max(y))
+        x = x + abs(min(x))
+        y = y + abs(min(y))
 
-        filename = self._obj.files.filePrefix.with_suffix(".pos")
+        filename = self.source_file.with_suffix(".pos")
         with filename.open("w") as f:
             for xpos, ypos in zip(x, y):
                 f.write(f"{xpos} {ypos}\n")
 
-    def to_dict(self, recurrsively=False):
+    def to_dict(self):
         return {
             "source_file": self.source_file,
             "channel_groups": self.channel_groups,
@@ -135,3 +154,25 @@ class NeuroscopeIO:
             "dat_sampling_rate": self.dat_sampling_rate,
             "eeg_sampling_rate": self.eeg_sampling_rate,
         }
+
+    def event_to_epochs(self, evt_file, label=""):
+        """Read in an event file and convert to an epochs object"""
+        with open(evt_file, "r") as f:
+            Lines = f.readlines()
+
+        # Neuropy output saves file without tab separators
+        if Lines[0].find("\t") > -1:
+            split_str = "\t"
+        else:  # if you savne in Neuroscope the event file now has tab separators
+            split_str = " "
+
+        starts, stops = [], []
+        for line in Lines:
+            if line.find("start") > -1:
+                starts.append(float(line.split(f"{split_str}start")[0]) / 1000)
+            elif line.find("stop") > -1:
+                stops.append(float(line.split(f"{split_str}stop")[0]) / 1000)
+
+        return Epoch(
+            pd.DataFrame({"start": starts, "stop": stops, "label": label})
+        )
