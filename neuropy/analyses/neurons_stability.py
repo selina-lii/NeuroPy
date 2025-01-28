@@ -1,5 +1,4 @@
 import numpy as np
-
 from .. import core
 
 
@@ -72,7 +71,7 @@ def isi_stability(neurons: core.Neurons, window=3600, isi_thresh=0.04, on_thresh
     return stability_bool
 
 
-def waveform_stability(neurons: core.Neurons):
+def waveform_similarity(self):
     pass
 
 
