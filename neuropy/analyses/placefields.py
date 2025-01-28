@@ -18,69 +18,6 @@ from neuropy.utils.mathutil import contiguous_regions
 from neuropy.externals.peak_prominence2d import getProminence
 
 
-class Pf1Dsplit():
-    """Class used to split up Pf1D object by blocks to assess reliability"""
-    def __init__(
-            self,
-            neurons: core.Neurons,
-            position: core.Position,
-            epochs: core.Epoch = None,
-            frate_thresh=1.0,
-            speed_thresh=3,
-            grid_bin=5,
-            sigma=1,
-            t_interval_split=60,
-    ):
-        self.t_start = position.t_start
-        self.t_stop = position.t_stop
-
-        # Get epochs for each split of the session
-        blocks1, blocks2 = self.get_split_session_blocks(t_interval=t_interval_split)
-
-        # Merge speed_thresh and blocks1 (speed_thresh is ignored in Pf1D class if epochs is provided)
-        abv_thresh_epochs = core.Epoch.from_boolean_array(position.speed > speed_thresh, position.time)
-        blocks1 = blocks1.intersection(abv_thresh_epochs, res=1/position.sampling_rate)
-        blocks2 = blocks2.intersection(abv_thresh_epochs, res=1 / position.sampling_rate)
-
-        # Last merge any other epochs provided
-        if epochs is not None:
-            blocks1 = blocks1.intersection(epochs, res=1/position.sampling_rate)
-            blocks2 = blocks2.intersection(epochs, res=1/position.sampling_rate)
-
-        # Create Pf1D object for each block
-        self.pf1 = Pf1D(neurons, position, blocks1, frate_thresh, speed_thresh, grid_bin, sigma)
-        self.pf2 = Pf1D(neurons, position, blocks2, frate_thresh, speed_thresh, grid_bin, sigma)
-
-    def get_split_session_blocks(self, t_interval):
-        """Calculate within session correlations for placefields calculated in 'time_interval_sec' blocks.
-
-        :param t_interval: block size to use. Default (60) will break up session into 60 second blocks
-        for calculating odd vs. even minute placefields. Using session midpoint will calculate 1st v 2nd half."""
-
-        # Break out blocks
-        blocks = core.Epoch(pd.DataFrame({"start": np.arange(self.t_start, self.t_stop - t_interval, t_interval),
-                                          "stop": np.arange(self.t_start + t_interval, self.t_stop, t_interval),
-                                          "label": ""}))
-        blocks1 = blocks[::2]
-        blocks1.set_labels("even")
-        blocks2 = blocks[1::2]
-        blocks2.set_labels("odd")
-
-        return blocks1, blocks2
-
-    def get_correlations(self, sigma_bin):
-        """Calculate between block correlations after smoothing with sigma"""
-
-        tuning_curves1 = self.pf1.smooth_tuning_curves(sigma_bin)
-        tuning_curves2 = self.pf2.smooth_tuning_curves(sigma_bin)
-
-        corrs = []
-        for tc1, tc2 in zip(tuning_curves1, tuning_curves2):
-            corrs.append(np.corrcoef(tc1, tc2)[0, 1])
-
-        return np.array(corrs)
-
-
 class Pf1D(core.Ratemap):
     def __init__(
         self,
@@ -90,7 +27,7 @@ class Pf1D(core.Ratemap):
         frate_thresh=1.0,
         speed_thresh=3,
         grid_bin=5,
-        sigma=0,
+        sigma=1,
     ):
         """computes 1d place field using linearized coordinates. It always computes two place maps with and
         without speed thresholds.
@@ -109,9 +46,7 @@ class Pf1D(core.Ratemap):
         speed_thresh : float
             speed threshold for calculating place field, by default None
         sigma : float
-            standard deviation for smoothing occupancy and spikecounts in each position bin,
-            in units of cm, PRIOR to calculating binned tuning curves. default 0 cm
-            NOTE that smoothing before creating tuning-curves is not standard, kept for legacy purposes.
+            standard deviation for smoothing occupancy and spikecounts in each position bin, in units of cm, default 1 cm
         NOTE: speed_thresh is ignored if epochs is provided
         """
 
@@ -126,9 +61,9 @@ class Pf1D(core.Ratemap):
 
         smooth_ = lambda f: gaussian_filter1d(
             f, sigma / grid_bin, axis=-1
-        ) if sigma > 0 else f  # divide by grid_bin to account for discrete spacing
+        )  # divide by grid_bin to account for discrete spacing
 
-        xbin = np.arange(np.min(x), np.max(x) + grid_bin, grid_bin)
+        xbin = np.arange(np.nanmin(x), np.nanmax(x) + grid_bin, grid_bin)
 
         if epochs is not None:
             assert isinstance(epochs, core.Epoch), "epochs should be core.Epoch object"
@@ -197,7 +132,6 @@ class Pf1D(core.Ratemap):
         self.x = x
         self.t_start = t_start
         self.t_stop = t_stop
-        self.sigma = sigma
 
     def estimate_theta_phases(self, signal: core.Signal):
         """Calculates phase of spikes computed for placefields
@@ -221,17 +155,13 @@ class Pf1D(core.Ratemap):
     ):
         cmap = mpl.cm.get_cmap(cmap)
 
-        # mapinfo = self.ratemaps
+        mapinfo = self.ratemaps
 
-        # ratemaps = mapinfo["ratemaps"]
-        ratemaps = self.ratemap_spiketrains
+        ratemaps = mapinfo["ratemaps"]
         if normalize:
-            # ratemaps = [map_ / np.max(map_) for map_ in ratemaps]
-            ratemaps = [map_ / np.max(map_) if len(map_) > 0 else np.array([]) for map_ in ratemaps]
-        # phases = mapinfo["phases"]
-        # position = mapinfo["pos"]
-        phases = self.ratemap_spiketrains_phases
-        position = self.ratemap_spiketrains_pos
+            ratemaps = [map_ / np.max(map_) for map_ in ratemaps]
+        phases = mapinfo["phases"]
+        position = mapinfo["pos"]
         nCells = len(ratemaps)
         bin_cntr = self.bin[:-1] + np.diff(self.bin).mean() / 2
 
@@ -310,7 +240,7 @@ class Pf1D(core.Ratemap):
         if scale == "tuning_curve":
             ncm = np.ptp(self.coords)
             nbins = self.tuning_curves.shape[1]
-            scale_factor = (nbins - 0) / ncm
+            scale_factor = (nbins - 2) / ncm
 
         for i, (spk_pos, spk_t) in enumerate(zip(spiketrains_pos, spiketrains_t)):
             if plot_time:
@@ -386,11 +316,10 @@ class Pf1D(core.Ratemap):
                                                **kwargs_widths)
             for idp, (height, prom, cent, width, edge) in enumerate(zip(heights, prominences, centers, widths, edges)):
                 pf_stats_list.append(pd.DataFrame({"cell_id": nid, "peak_no": idp, "height": height,
-                                                   "prominence": prom, "center_bin": cent, "width_bin": width,
+                                                   "prominence": prom, "center": cent, "width": width,
                                                    "left_edge": edge[0], "right_edge": edge[1]}, index=[ind]))
-                ind += 1
 
-        return pd.concat(pf_stats_list, axis=0)
+        return pd.concat(pf_stats_list, axis=0).reset_index()
 
     def get_pf_peaks(self, cell_ind=None, cell_id=None, sigma=1.5,
                      step=0.1, centroid_num_to_center=1, verbose=False, **kwargs):
@@ -428,15 +357,13 @@ class Pf1D(core.Ratemap):
 
         return np.array(heights), np.array(prominences), np.array(centers), tuning_curve
 
-    def get_pf_widths(self, tuning_curve, heights, prominences, centers, height_thresh=0.5, plot=False, ax=None):
+    def get_pf_widths(self, tuning_curve, heights, prominences, centers, height_thresh=0.5, plot=False):
         """Gets placefield widths after obtaining peak height, location, and prominence data using .get_pf_peaks
 
         :param: tuning_curve: smoothed tuning curve, output from .get_pf_peaks
         :param: heights, prominences, centers: outputs from .get_pf_peaks
-        :param: height thresh: float between 0 and 1, height threshold at which to calculate pf width.
-                1 = at peak, 0 = at base
+        :param: height thresh: float between 0 and 1, height threshold at which to calculate pf width
         :param: plot: plots identified, heights, prominences, and widths, default = False
-        :param: ax: axes to plot into if plot=True
 
         :return: widths, edges: 1d and 2d np.ndarrays of widths, and left/right edges for each field.
                  one edge = np.nan means the edge of the field lies outside of the data limits
@@ -446,73 +373,45 @@ class Pf1D(core.Ratemap):
         edges, widths = [], []
 
         if plot:
-            if ax is None:
-                _, ax = plt.subplots()
+            _, ax = plt.subplots()
 
-        track_width = tuning_curve.size
         for height, pro, center in zip(heights, prominences, centers):
             # identify regions above height threshold
-            abv_thresh_regions = contiguous_regions(tuning_curve - (height - pro * (1 - height_thresh)) > 0)
+            abv_thresh_regions = contiguous_regions(tuning_curve - (height - pro * height_thresh) > 0)
 
             # In case multiple peaks are above this threshold, grab only the indices which contain the peak center
+            left_ind, right_ind = abv_thresh_regions[
+                np.array([(center > lims[0]) & (center < lims[1]) for lims in abv_thresh_regions])].squeeze()
 
-            try:
-                left_ind, right_ind = abv_thresh_regions[
-                    np.array([(center > lims[0]) & (center < lims[1]) for lims in abv_thresh_regions])].squeeze()
+            # Interpolate the exact crossing point
+            left_edge, right_edge, edge = np.nan, np.nan
+            track_width = tuning_curve.size
+            if left_ind > 0:
+                left_edge = np.interp(0, tuning_curve[[left_ind - 1, left_ind]] - (height - pro * height_thresh),
+                                      [left_ind - 1, left_ind])
+            if right_ind < track_width:
+                right_edge = np.interp(0, tuning_curve[[right_ind, right_ind - 1]] - (height - pro * height_thresh),
+                                       [right_ind, right_ind - 1])
 
-                # Interpolate the exact crossing point
-                left_edge, right_edge = np.nan, np.nan
-                if left_ind > 0:
-                    left_edge = np.interp(0, tuning_curve[[left_ind - 1, left_ind]] - (height - pro * (1 - height_thresh)),
-                                          [left_ind - 1, left_ind])
-                if right_ind < track_width:
-                    right_edge = np.interp(0, tuning_curve[[right_ind, right_ind - 1]] - (height - pro * (1 - height_thresh)),
-                                           [right_ind, right_ind - 1])
-
-                if np.isnan(left_edge):
-                    width_use = right_edge
-                elif np.isnan(right_edge):
-                    width_use = track_width - left_edge
-                else:
-                    width_use = right_edge - left_edge
-            except ValueError:  # If width is less than one bin at that height threshold, make everything a nan
-                left_edge, right_edge, width_use = np.nan, np.nan, np.nan
-
+            # Save
+            if np.isnan(left_edge):
+                width_use = right_edge
+            elif np.isnan(right_edge):
+                width_use = track_width - left_edge
+            else:
+                width_use = right_edge - left_edge
             widths.append(width_use)
             edges.append(np.array([left_edge, right_edge]))
 
-        ### TODO: cleanup and remove any small peaks that are entirely within the width of another peak
-        # or just merge peaks that are within a given distance of one another?  Not many!
-
-        # Plot tuning curve
         if plot:
-
-            self.plot_pf_peaks_and_width(tuning_curve, widths, edges, heights, prominences, centers,
-                                         height_thresh, track_width=track_width, ax=ax)
+            ax.plot(tuning_curve,  ".-")
+            for width, edge, height, pro, center in zip(widths, edges, heights, prominences, centers):
+                ax.plot([center, center], [height - pro, height], 'k:')
+                ax.plot([edge[0], edge[1]],
+                        [height - pro * height_thresh, height - pro * height_thresh],
+                        'r')
 
         return np.array(widths), np.array(edges)
-
-    @staticmethod
-    def plot_pf_peaks_and_widths(tuning_curve, widths, edges, heights, prominences, centers,
-                                height_thresh, track_width=None, ax=None):
-
-        # Create axes
-        if ax is None:
-            _, ax = plt.subplots()
-
-        if track_width is None:
-            track_width = tuning_curve.size
-
-        # Plot tuning curve with peak, prominence, and width all shown
-        ax.plot(tuning_curve, ".-")
-        for width, edge, height, pro, center in zip(widths, edges, heights, prominences, centers):
-            ax.plot([center, center], [height - pro, height], 'k:')
-            if ~np.isnan(width):
-                left_edge_use = 0 if np.isnan(edge[0]) else edge[0]
-                right_edge_use = track_width if np.isnan(edge[1]) else edge[1]
-                ax.plot([left_edge_use, right_edge_use],
-                        [height - pro * (1 - height_thresh), height - pro * (1 - height_thresh)],
-                        'r')
 
     # def get_pf_widths(self, rel_height_thresh: float = 0.5, dist_thresh: float = 10,
     #                   width: float = 3, height: float = 1, prominence: float = 1, smooth_sigma=1,
@@ -559,7 +458,7 @@ class Pf2D:
         epochs: core.Epoch = None,
         frate_thresh=1.0,
         speed_thresh=3,
-        grid_bin=1,
+        grid_bin=10,
         sigma=1,
     ):
         """Calculates 2D placefields
@@ -578,9 +477,11 @@ class Pf2D:
         """
         assert position.ndim > 1, "Position is not 2D"
         period = [position.t_start, position.t_stop]
-        smooth_ = lambda f: gaussian_filter1d(
-            f, sigma / grid_bin, axis=-1
-        )  # divide by grid_bin to account for discrete spacing
+        #smooth_ = lambda f: gaussian_filter1d(
+        #    f, sigma / grid_bin, axis=-1
+        #)  # divide by grid_bin to account for discrete spacing
+        smooth_ = lambda f: gaussian_filter(f, sigma=(sigma / grid_bin, 
+                                                      sigma / grid_bin))
 
         spikes = neurons.time_slice(*period).spiketrains
         cell_ids = neurons.neuron_ids
@@ -588,7 +489,7 @@ class Pf2D:
 
         # ----- Position---------
         xcoord = position.x
-        ycoord = position.y
+        ycoord = position.z #default for optitrack input
         time = position.time
         trackingRate = position.sampling_rate
 
@@ -597,8 +498,8 @@ class Pf2D:
         y = ycoord[ind_maze]
         t = time[ind_maze]
 
-        x_grid = np.arange(min(x), max(x) + grid_bin, grid_bin)
-        y_grid = np.arange(min(y), max(y) + grid_bin, grid_bin)
+        x_grid = np.arange(np.nanmin(x), np.nanmax(x) + grid_bin, grid_bin)
+        y_grid = np.arange(np.nanmin(y), np.nanmax(y) + grid_bin, grid_bin)
         # x_, y_ = np.meshgrid(x_grid, y_grid)
 
         diff_posx = np.diff(x)
@@ -606,7 +507,7 @@ class Pf2D:
 
         speed = np.sqrt(diff_posx**2 + diff_posy**2) / (1 / trackingRate)
 
-        speed = smooth_(speed)
+        #speed = smooth_(speed)
 
         dt = t[1] - t[0]
         running = np.where(speed / dt > speed_thresh)[0]
@@ -664,7 +565,7 @@ class Pf2D:
         self.spk_pos = get_elem(spk_pos)
         self.spk_t = get_elem(spk_t)
         self.ratemaps = get_elem(maps)
-        self.cell_ids = cell_ids[good_cells_indx]
+        self.cell_ids = cell_ids.iloc[good_cells_indx]
         self.occupancy = occupancy
         self.speed = speed
         self.x = x
@@ -723,6 +624,8 @@ class Pf2D:
             figures.append(fig)
 
         for cell, pfmap in enumerate(map_use):
+            if cell == 19: #tmp
+                continue
             ind = cell // np.prod(subplots)
             subplot_ind = cell % np.prod(subplots)
             ax1 = figures[ind].add_subplot(gs[ind][subplot_ind])
@@ -736,7 +639,7 @@ class Pf2D:
             # max_frate =
             ax1.axis("off")
             ax1.set_title(
-                f"Cell {self.cell_ids[cell]} \n{round(np.nanmax(pfmap),2)} Hz"
+                f"Cell {self.cell_ids.iloc[cell]} \n{round(np.nanmax(pfmap),2)} Hz"
             )
 
             # cbar_ax = fig.add_axes([0.9, 0.3, 0.01, 0.3])
@@ -775,11 +678,11 @@ class Pf2D:
             else:
                 ax1 = ax[cell]
             ax1.plot(self.x, self.y, color="#d3c5c5")
-            ax1.plot(spk_x, spk_y, ".r", markersize=0.8, color=[1, 0, 0, alpha])
+            ax1.plot(spk_x, spk_y, ".r", markersize=0.8)  #, color=[1, 0, 0, alpha])
             ax1.axis("off")
             if label_cells:
                 # Put info on title
-                info = self.cell_ids[cell]
+                info = self.cell_ids.iloc[cell]
                 ax1.set_title(f"Cell {info}")
 
         fig.suptitle(
@@ -852,7 +755,23 @@ class Pf2D:
         neurons = sess.neurons_stable.get_neuron_type("pyr")  # get pre-selected stable neurons
         kw = dict(frate_thresh=0, grid_bin=5)  # Define placefield parameters
 
-        pfmaze = Pf1Dsplit(neurons, position=sess.maze, t_interval_split=60, **kw)
-        pf_data_df = pfmaze.neuron_slice(inds=np.arange(10)).get_pf_data(test="blah", step=0.1, height_thresh=0.75, plot=True)
+        pfmaze = Pf1D(neurons, position=sess.maze, **kw)
+        pf_data_df = pfmaze.neuron_slice(inds=np.arange(10)).get_pf_data(test="blah", step=0.1, height_thresh=0.5, plot=True)
         pass
         # pfmaze.plot_ratemap_w_raster([2])
+
+    def neuron_slice(self, inds=None, ids=None):
+        """Slice out neurons"""
+        assert (inds is None) != (ids is None), "Exactly one of 'inds' and 'ids' must be a list or array"
+        if ids is not None:
+            inds = [np.where(idd == self.neuron_ids)[0][0] for idd in np.atleast_1d(ids)]
+        inds = np.sort(np.atleast_1d(inds))
+
+        # Make a copy and slice
+        pfslice = deepcopy(self)
+        #pfslice.tuning_curves = self.tuning_curves[inds]
+        pfslice.neuron_ids = self.neuron_ids[inds]
+        pfslice.ratemap_spiketrains = [self.ratemap_spiketrains[ind] for ind in inds]
+        pfslice.ratemap_spiketrains_pos = [self.ratemap_spiketrains_pos[ind] for ind in inds]
+
+        return pfslice
