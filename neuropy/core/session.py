@@ -1,7 +1,9 @@
 from pathlib import Path
 import os
 
+# from neuropy.io.neuroscopeio import NeuroscopeIO
 import neuropy.io.neuroscopeio as neuroscopeio
+# from neuropy.io.binarysignalio import BinarysignalIO
 import neuropy.io.binarysignalio as binarysignalio
 
 class ProcessData:
@@ -14,6 +16,7 @@ class ProcessData:
         fp = xml_files[0].with_suffix("")
         self.filePrefix = fp
 
+        # self.recinfo = NeuroscopeIO(xml_files[0])
         self.recinfo = neuroscopeio.NeuroscopeIO(xml_files[0])
         eegfiles = sorted(basepath.glob("*.eeg"))
         try:
