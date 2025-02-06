@@ -9,6 +9,7 @@ from pathlib import Path
 import typing
 
 from .. import core
+from ..plotting import plot_epochs
 from ..utils import mathutil, signal_process
 
 
