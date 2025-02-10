@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
-from neuropy import core
-from neuropy.plotting.figure import Fig
+from .. import core
+from .figure import Fig
 
 
 def _none_axis(ax):

@@ -139,11 +139,8 @@ def interp_missing_pos(x, y, z, t):
     idnan = mathutil.contiguous_regions(np.isnan(x))  # identify missing data points
 
     for ids in idnan:
-        missing_ids = range(max(0, ids[0]), min(len(xgood), ids[-1]))
-        bracket_ids = [max(0, ids[0] - 1), min(len(t) - 1, ids[-1] + 1)]
-
-        #missing_ids = range(ids[0], ids[-1])
-        #bracket_ids = ids + [-1, 0]
+        missing_ids = range(ids[0], ids[-1])
+        bracket_ids = ids + [-1, 0]
         xgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], x[bracket_ids])
         ygood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], y[bracket_ids])
         zgood[missing_ids] = np.interp(t[missing_ids], t[bracket_ids], z[bracket_ids])
@@ -353,16 +350,11 @@ class OptitrackIO:
         scale : float, optional
             scale the extracted coordinates, by default 1.0
         """
-        
-        # ----- grab only files that are position files -------
-        all_files = sorted(file for file in self.dirname.rglob("Take*") if file.suffix in {".csv", ".fbx"})
 
-        sampling_rate = getSampleRate(all_files[0])
-        #sampling_rate = getSampleRate(sorted((self.dirname).glob("*.csv"))[0])
+        sampling_rate = getSampleRate(sorted((self.dirname).glob("*.csv"))[0])
 
         # ------- collecting timepoints related to position tracking ------
-        #currently the next few lines will break with fbx. fix if you're gonna use
-        posfiles = np.asarray(all_files)
+        posfiles = np.asarray(sorted(self.dirname.glob("*.csv")))
         posfilestimes = np.asarray([getStartTime(file) for file in posfiles])
         filesort_ind = np.argsort(posfilestimes).astype(int)
         posfiles = posfiles[filesort_ind]
