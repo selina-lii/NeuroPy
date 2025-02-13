@@ -139,7 +139,3 @@ dmypy.json
 # auto backup files
 .DS_store
 *.DS_store
-
-#VScode
-.vscode
-*.vscode
