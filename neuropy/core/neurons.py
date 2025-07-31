@@ -9,6 +9,15 @@ from copy import deepcopy
 from joblib import Parallel, delayed
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
+from typing import Self
+
+#TODO should we complicate Neurons with cuda?
+import numpy as np
+try:
+    import cupy as cp
+except ImportError:
+    print("Error importing CuPy")
+    cp = None
 
 
 class Neurons(DataWriter):
@@ -61,6 +70,12 @@ class Neurons(DataWriter):
         super().__init__(metadata=metadata)
 
         self.spiketrains = np.array(spiketrains, dtype="object")
+        #TODO keep the list structure when spiketrain lengths happen to be the same
+        if len(self.spiketrains.shape)==2:
+            #self.spiketrains=spiketrains
+            result = np.empty(self.spiketrains.shape[0], dtype="object")
+            result[:] = [np.asarray(self.spiketrains[i],dtype=float) for i in range(self.spiketrains.shape[0])]
+            self.spiketrains=result
         if neuron_ids is None:
             self.neuron_ids = np.arange(len(self.spiketrains))
         else:
@@ -202,6 +217,7 @@ class Neurons(DataWriter):
             raise ValueError("Must specify either neuron_inds or neuron_ids.")
 
         # Extract data using the found positions
+        #TODO this is built on the assumption that all positions either have values in field or don't
         spiketrains = neurons.spiketrains[positions]
         neuron_type = None if neurons.neuron_type is None else neurons.neuron_type[positions]
         waveforms = None if neurons.waveforms is None else neurons.waveforms[positions]
@@ -453,8 +469,39 @@ class Neurons(DataWriter):
 
         return np.vstack(psths)
 
-    def add_jitter(self):
-        pass
+    def merge(self, neurons: Self):
+        """
+        Combine another Neurons object with self
+        """
+        def safe_extend(list1, list2):
+            if list1 is None and list2 is None:
+                return None
+            if list2 is None:
+                list2=[None]*neurons.n_neurons
+            if list1 is None:
+                list1=[None]*self.n_neurons
+            return np.concatenate([list1,list2])
+        def safe_extend3d(list1, list2,):
+            """
+            Always returns (N1+N2, x, y) array, filling None with NaN
+            """
+            if list1 is None and list2 is None:
+                return None
+            if list2 is None:
+                list2 = np.full((neurons.n_neurons,list1[0].shape[0],list1[0].shape[1]), np.nan)
+            if list1 is None:
+                list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
+            return np.concatenate([list1,list2])
+
+        self.spiketrains = safe_extend(self.spiketrains,neurons.spiketrains)
+        self.neuron_ids = safe_extend(self.neuron_ids,neurons.neuron_ids)
+        self.neuron_type = safe_extend(self.neuron_type,neurons.neuron_type)
+        self.neuron_type = safe_extend(self.neuron_type,neurons.neuron_type)
+        self.waveforms = safe_extend3d(self.waveforms,neurons.waveforms)
+        self.waveforms_amplitude = safe_extend(self.waveforms_amplitude,neurons.waveforms_amplitude)
+        self.peak_channels = safe_extend(self.peak_channels,neurons.peak_channels)
+        self.clu_q = safe_extend(self.clu_q,neurons.clu_q)
+        self.shank_ids = safe_extend(self.shank_ids,neurons.shank_ids)
 
     def get_neurons_in_epochs(self, epochs: Epoch):
         """Remove spikes that lie outside of given epochs and return a new Neurons object with t_start and t_stop changed to start of first epoch and stop of last epoch.
