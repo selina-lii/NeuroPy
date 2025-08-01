@@ -575,11 +575,9 @@ def cp_spike_correlations_2groups(
 
     # Get unique neuron clusters
     clusters = _unique_cupy(spike_clusters)
-    n_clusters = len(clusters)
+    # n_clusters = len(clusters)
 
     spike_clusters_i = _cp_index_of(spike_clusters, clusters)
-
-    
 
     shift = 1
 
@@ -605,7 +603,7 @@ def cp_spike_correlations_2groups(
         d = spike_diff_b[m] # SL get which bins need to be incremented
 
         # SL This function only computes intergroup ccgs between
-        #   reference (group0) and non-reference (group1)
+        #   reference (group0) and target (group1)
         #   even tho all neurons are pooled in one spiketrain in which
         #   the first N_0 clusters are group0 and the others are group1
 

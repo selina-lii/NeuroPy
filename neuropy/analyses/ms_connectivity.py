@@ -171,16 +171,16 @@ def ccg_jitter(
             symmetrize=False,
         )[0] # get row1 since there's only one reference neuron
 
-    # Debugging
-    debug = correlations.spike_correlations(
-            neurons=neuronsj,
-            neuron_inds=np.arange(njitter+2),
-            sample_rate=SampleRate,
-            bin_size=binsize,
-            window_size=duration,
-            use_cupy=use_cupy,
-            symmetrize=False,
-        )[0,1:]-ccg_all
+    # # Debugging
+    # debug = correlations.spike_correlations(
+    #         neurons=neuronsj,
+    #         neuron_inds=np.arange(njitter+2),
+    #         sample_rate=SampleRate,
+    #         bin_size=binsize,
+    #         window_size=duration,
+    #         use_cupy=use_cupy,
+    #         symmetrize=False,
+    #     )[0,1:]-ccg_all
    
     # import copy
     
@@ -194,7 +194,7 @@ def ccg_jitter(
 
     # significances = correlograms > thresholds
 
-    return ccg_all, debug, pval, significances
+    return ccg_all, pval, significances
 
 
 # def ccg_spike_assemble(spike_trains):
