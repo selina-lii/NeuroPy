@@ -75,7 +75,6 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
         the next (njitter) neurons are jitters of the non-reference cell
     """
     neurons = neurons.get_by_id(neuron_inds)
-    print(neurons.neuron_ids)
 
     neurons.neuron_ids[0]=0 # ref
     neurons.neuron_ids[1]=1 # non-ref
@@ -150,8 +149,6 @@ def ccg_jitter(
     # Now run on jittered spike-trains!
     # TODO: implement this in ALL cupy and compare times...does it matter if the spike jitter code is in numpy? Answer: it does 16ms with numpy vs 1 with cupy.
     # nspikes1 = len(spikes1)
-    print(neurons.n_neurons)
-    print(neurons.neuron_ids)
     neuronsj = add_jitter(neurons=neurons,
             njitter=njitter,
             neuron_inds=neuron_inds,
@@ -163,8 +160,7 @@ def ccg_jitter(
     # spikes_sorted, clus_sorted = ccg_spike_assemble(spike_trains)
 
     # re-run ccg
-    time.time()
-    ccg_all2=correlations.spike_correlations_2group(
+    ccg_all=correlations.spike_correlations_2group(
             neurons=neuronsj,
             ref_neuron_inds=0,
             neuron_inds=1+np.arange(njitter+1),
@@ -173,10 +169,10 @@ def ccg_jitter(
             window_size=duration,
             use_cupy=use_cupy,
             symmetrize=False,
-        )
+        )[0] # get row1 since there's only one reference neuron
 
-
-    ccg_all=correlations.spike_correlations(
+    # Debugging
+    debug = correlations.spike_correlations(
             neurons=neuronsj,
             neuron_inds=np.arange(njitter+2),
             sample_rate=SampleRate,
@@ -184,8 +180,8 @@ def ccg_jitter(
             window_size=duration,
             use_cupy=use_cupy,
             symmetrize=False,
-        )[0,:]
-    
+        )[0,1:]-ccg_all
+   
     # import copy
     
     # ccg_all = copy.deepcopy(ccgj)
@@ -198,7 +194,7 @@ def ccg_jitter(
 
     # significances = correlograms > thresholds
 
-    return ccg_all, ccg_all2, pval, significances
+    return ccg_all, debug, pval, significances
 
 
 # def ccg_spike_assemble(spike_trains):
