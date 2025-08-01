@@ -555,14 +555,12 @@ def cp_spike_correlations_2groups(
     if isinstance(ref_neuron_inds, int):
         ref_neuron_inds = [ref_neuron_inds]
     all_inds = np.concatenate([np.array(ref_neuron_inds),np.array(neuron_inds)])
-    print(all_inds)
 
     # SL get the threshold of which neuron indices are group0 vs group1
     N0=len(ref_neuron_inds)
     N1=len(neuron_inds)
     
     neurons = neurons.neuron_slice(neuron_inds=all_inds)
-    print(neurons.n_neurons)
 
     # Get spike times from neurons
     spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons, sample_rate)
@@ -580,7 +578,8 @@ def cp_spike_correlations_2groups(
     n_clusters = len(clusters)
 
     spike_clusters_i = _cp_index_of(spike_clusters, clusters)
-    print("spike_clusters_i",spike_clusters_i)
+
+    
 
     shift = 1
 
@@ -591,31 +590,19 @@ def cp_spike_correlations_2groups(
     # a matching spike.
     # SL shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
     while mask[:-shift].any():
-        print(shift)
         # Number of time samples between spike i and spike i+shift.
         spike_diff = _cp_diff_shifted(spike_samples, shift)
-        print("spike_diff",spike_diff)
 
         # Binarize the delays between spike i and spike i+shift.
         # SL spike_diff_b is which bin the spike_diff falls in 
         spike_diff_b = spike_diff // binsize
-        print("spike_diff_b",spike_diff_b)
 
         # Spikes with no matching spikes are masked.
         mask[:-shift][spike_diff_b > (winsize_bins // 2)] = False # SL exclude spike pairs that fall outside the ccg window after shifting
-        print("mask",mask)
 
         # Cache the masked spike delays.
         m = mask[:-shift].copy()
         d = spike_diff_b[m] # SL get which bins need to be incremented
-        print("d",d)
-        print("m",m)
-
-        # # Update the masks given the clusters to update.
-        # m0 = cp.in1d(spike_clusters[:-shift], clusters)
-        # m = m & m0
-        # d = spike_diff_b[m]
-        #TODO duplicated line, commenting it out
 
         # SL This function only computes intergroup ccgs between
         #   reference (group0) and non-reference (group1)
@@ -623,27 +610,23 @@ def cp_spike_correlations_2groups(
         #   the first N_0 clusters are group0 and the others are group1
 
         # SL group0->group1 forward connections. create an intergroup mask
-        group0 = (spike_clusters_i[:-shift][m] < N0)
-        group1 = (spike_clusters_i[+shift:][m] >= N0)
-        gm = group0 & group1
-        d = d[gm]
+        ref=spike_clusters_i[:-shift][m]
+        target=spike_clusters_i[+shift:][m]
+        gm = (ref < N0) & (target >= N0)
 
         # Find the indices in the raveled correlograms array that need
         # to be incremented, taking into account the spike clusters.
         indices = cp.ravel_multi_index(
-            (spike_clusters_i[:-shift][m][gm], spike_clusters_i[+shift:][m][gm], d, ),
+            (ref[gm], target[gm]-N0, d[gm], ),
             correlograms.shape,
         )
-        print(spike_clusters_i[:-shift][m][gm],spike_clusters_i[+shift:][m][gm],)
-        print(indices)
-        print(correlograms.shape)
 
         # Increment the matching spikes in the correlograms array.
         _cp_increment(correlograms.ravel(), indices)
-        print(correlograms)
 
         shift += 1
 
+    print("shift", shift)
     if symmetrize:
         return _cp_symmetrize_correlograms_2groups(correlograms).get()
     else:
