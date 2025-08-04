@@ -24,7 +24,7 @@ def eran_conv(ccg, window_width=5, wintype="gauss", hollow_frac=None):
     """Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
 
     :param ccg:
-    :param window_width:
+    :param window_width: Width of the convolution window, should be the same as jittering window if these two methods are to be compared
     :param wintype:
     :param hollow_frac:
     :return: pvals:
@@ -42,6 +42,10 @@ def eran_conv(ccg, window_width=5, wintype="gauss", hollow_frac=None):
             hollow_frac = 0.42
         elif wintype == "triang":
             hollow_frac = 0.63
+    # generate gaussian window
+    # convolve window with ccg
+    # return pvalues
+
 
     return pvals, pred, qvals
 
@@ -79,16 +83,16 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
     neurons.neuron_ids[0]=0 # ref
     neurons.neuron_ids[1]=1 # non-ref
 
-    ref_nspikes = neurons.n_spikes[0]
-    ref_type = neurons.neuron_type[0]
-    ref_spiketrain = neurons.spiketrains[0]
+    nonref_nspikes = neurons.n_spikes[1]
+    nonref_type = neurons.neuron_type[1]
+    nonref_spiketrain = neurons.spiketrains[1]
 
     if use_cupy:
         jittertrains = (
             cp.round(
                 (
-                    cp.array(ref_spiketrain)
-                    + 2 * jscale * cp.random.rand(njitter,ref_nspikes)
+                    cp.array(nonref_spiketrain)
+                    + 2 * jscale * cp.random.rand(njitter,nonref_nspikes)
                     - 1 * jscale
                 )
                 * neurons.sampling_rate
@@ -99,8 +103,8 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
         jittertrains = (
             np.round(
                 (
-                    ref_spiketrain
-                    + 2 * jscale * np.random.rand(njitter,ref_nspikes)
+                    nonref_spiketrain
+                    + 2 * jscale * np.random.rand(njitter,nonref_nspikes)
                     - 1 * jscale
                 )
                 * neurons.sampling_rate
@@ -113,7 +117,7 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
     jittered = Neurons(spiketrains=jittertrains,
         t_stop=neurons.t_stop,
         neuron_ids=np.arange(njitter)+len(neuron_inds),
-        neuron_type=[ref_type]*njitter
+        neuron_type=[nonref_type]*njitter
         ) # TODO not copying over other fields
     neurons.merge(jittered)
     return neurons
@@ -171,7 +175,7 @@ def ccg_jitter(
             symmetrize=False,
         )[0] # get row1 since there's only one reference neuron
 
-    # # Debugging
+    # Debugging - results should be all zeros (two methods are identical)
     # debug = correlations.spike_correlations(
     #         neurons=neuronsj,
     #         neuron_inds=np.arange(njitter+2),
@@ -188,9 +192,9 @@ def ccg_jitter(
     # ccg_all.append(correlograms)
     # ccg_all=np.array(ccg_all)
     # P value is where the real data is ranked among fake data; conservative when there are ties
-    pval = np.argsort(np.argsort(-ccg_all,axis=0,kind="stable"),axis=0)[-1]/njitter
-    thresholds = np.percentile(ccg_all[:-1],100*(1-alpha))
-    significances = ccg_all[-1] > thresholds
+    pval = np.argsort(np.argsort(-ccg_all,axis=0,kind="stable"),axis=0)[0]/njitter
+    thresholds = np.percentile(ccg_all[1:],100*(1-alpha))
+    significances = ccg_all[0] > thresholds
 
     # significances = correlograms > thresholds
 
