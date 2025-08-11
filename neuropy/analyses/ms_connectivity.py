@@ -2,8 +2,12 @@
  et al. (2017)"""
 
 import numpy as np
+import scipy.signal
+import scipy.stats
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
+from scipy.signal import windows, convolve
+from scipy.stats import poisson
 import cupy as cp
 # TODO ^
 # TODO was this outdated?
@@ -20,33 +24,81 @@ cuda = False
 
 import time
 
-def eran_conv(ccg, window_width=5, wintype="gauss", hollow_frac=None):
-    """Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
 
-    :param ccg:
-    :param window_width: Width of the convolution window, should be the same as jittering window if these two methods are to be compared
-    :param wintype:
-    :param hollow_frac:
-    :return: pvals:
-             pred:
-             qvals:
+def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     """
-    pvals, pred, qvals = None
+    Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
+    Referencing MATLAB script EranConv.m written by the authors
+
+    Parameters
+    ----------
+    ccg: np.array. 
+        1D or 2D. (CCGs in columns)
+        If 2D, elements in the first dimension are individual ccgs and second dimension are bins.
+    W: 
+        defines the width of the convolution window, should be equivalent to size of jitter window (in milliseconds)
+        `gauss`: W is standard deviation (sigma). Total window length will be 
+        `rect`: Half size of window = W, total length is always odd
+        `triang`: Window length is W rounded up to the nearest odd number
+
+    wintype: ["gauss", "rect", "triang"]
+        Type of convolution window.
+        `gauss`: Gaussian kernel
+        `rect`: rectangular kernel
+        `triang`: triangular kernel
+
+    hollow_frac: weight of the current bin
+    
+    Returns
+    -------
+    pvals: p-values (bin-wise)
+    pred: predictor (expected values) 
+    qvals: p-values (bin-wise) for inhibition
+    """
+    if len(ccg.shape)==1:
+        ccg=ccg[...,np.newaxis]
+
     assert wintype in ["gauss", "rect", "triang"]
+    assert W<=ccg.shape[0]
 
     # Auto-assign appropriate hollow fraction if not specified
-    if hollow_frac is None:
-        if wintype == "gauss":
-            hollow_frac = 0.6
-        elif wintype == "rect":
-            hollow_frac = 0.42
-        elif wintype == "triang":
-            hollow_frac = 0.63
-    # generate gaussian window
+    # generate window
+    # get center indices of window
+    if wintype == "gauss":
+        hollow_frac = hollow_frac or 0.6
+        sigma = W/2
+        W = int(6*sigma + (2 if W%2 else 1))
+        center = int(3*sigma + (0.5 if W%2 else 0))
+        print(center)
+        window = windows.gaussian(W,std=sigma)/(2*np.pi*sigma)
+    elif wintype == "rect":
+        hollow_frac = hollow_frac or 0.42
+        if W%2==0: W+=1
+        center = W//2
+        window = windows.boxcar(W)
+    elif wintype == "triang":
+        hollow_frac = hollow_frac or 0.63
+        W = 2*W+(-1 if W%2 else 1)
+        center = W//2
+        window = windows.triang(W)
+
+    # hollow and normalize window
+    window[center]*=(1-hollow_frac)
+    window /= np.sum(window)
+    # make window 2D if needed
+    window = np.repeat(window,ccg.shape[1])
+    if len(window.shape)==1:
+        window=window[...,np.newaxis]
+    # padding
+    ccg_pad=np.concatenate([ccg[:W][::-1],ccg,ccg[-W:][::-1]])
+
     # convolve window with ccg
-    # return pvalues
+    pred = convolve(ccg_pad, window, mode="same")
+    pred=pred[W:-W]
 
-
+    # two-tailed one-sample test of whether the two values are significantly different in Poisson distribution
+    pvals = 1 - poisson.cdf(ccg-1, pred) - poisson.pmf(ccg, pred)*0.5
+    qvals = 1 - pvals
     return pvals, pred, qvals
 
 
@@ -122,9 +174,81 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
     neurons.merge(jittered)
     return neurons
     
+def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
+    """
+    Inter-spike intervals jitter.
+    Randomly shuffled the spike time intervals in non-reference spike train
+    within local windows of +/-(jscale) intervals
 
-def ccg_jitter(
-    neurons: Neurons,
+    Parameters
+    ----------
+    njitter : int
+        number of jitters
+    neuron_inds : list
+        [a,b]
+        a: index of reference neuron
+        b: index of non-reference neuron
+    jscale: int
+        defines window within which intervals are grouped and shuffled
+    use_cupy: bool, optional
+        whether or not to use gpu acceleration
+
+    Returns
+    -------
+    neurons: Neurons
+        a Neurons object containing (njitter+2) neurons, with indices 0...njitter.
+        first neuron is the reference cell, index=0
+        second neuron is the non-reference cell with index=1
+        the next (njitter) neurons are jitters of the non-reference cell
+    """
+    neurons = neurons.get_by_id(neuron_inds)
+
+    neurons.neuron_ids[0]=0 # ref
+    neurons.neuron_ids[1]=1 # non-ref
+
+    nonref_nspikes = neurons.n_spikes[1]
+    nonref_type = neurons.neuron_type[1]
+    nonref_spiketrain = neurons.spiketrains[1]
+    intervals = cp.diff(nonref_spiketrain)
+
+
+    if use_cupy:
+        jittertrains = (
+            cp.round(
+                (
+                    cp.array(nonref_spiketrain)
+                    + 2 * jscale * cp.random.rand(njitter,nonref_nspikes)
+                    - 1 * jscale
+                )
+                * neurons.sampling_rate
+            )
+            / neurons.sampling_rate
+        ).get()
+    else:
+        jittertrains = (
+            np.round(
+                (
+                    nonref_spiketrain
+                    + 2 * jscale * np.random.rand(njitter,nonref_nspikes)
+                    - 1 * jscale
+                )
+                * neurons.sampling_rate
+            )
+            / neurons.sampling_rate
+        )
+
+    # Asign indices sequentially
+    jittertrains = list(jittertrains)
+    jittered = Neurons(spiketrains=jittertrains,
+        t_stop=neurons.t_stop,
+        neuron_ids=np.arange(njitter)+len(neuron_inds),
+        neuron_type=[nonref_type]*njitter
+        ) # TODO not copying over other fields
+    neurons.merge(jittered)
+    return neurons
+
+
+def ccg_jitter(neurons: Neurons,
     neuron_inds,
     SampleRate=30000,
     binsize=0.0005,
