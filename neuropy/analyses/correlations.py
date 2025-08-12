@@ -236,9 +236,10 @@ def _cp_create_correlograms_array(n_clusters, winsize_bins):
     """Create an empty correlograms array using CuPy."""
     return cp.zeros((n_clusters, n_clusters, winsize_bins // 2 + 1), dtype=cp.int32)
 
-def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bins):
+def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bin, symmetrize=False):
     """Create an empty correlograms array using CuPy."""
-    return cp.zeros((n_clusters1, n_clusters2, winsize_bins // 2 + 1), dtype=cp.int32)
+    nbins = winsize_bin if symmetrize else winsize_bin // 2 + 1
+    return cp.zeros((n_clusters1, n_clusters2, nbins), dtype=cp.int32)
 
 
 def _np_symmetrize_correlograms(correlograms):
@@ -264,7 +265,7 @@ def _cp_symmetrize_correlograms(correlograms):
     assert n_clusters == _
 
     # Symmetrize correlograms[..., 0]
-    correlograms[..., 0] = cp.maximum(correlograms[..., 0], correlograms[..., 0].T)
+    correlograms[..., 0] = cp.maximum(correlograms[..., 0], correlograms[..., 0])
 
     # Symmetrize the remaining bins
     sym = correlograms[..., 1:][..., ::-1]
@@ -497,6 +498,7 @@ def cp_spike_correlations(
         # m = m & m0
         # d = spike_diff_b[m]
         d = spike_diff_b[m]
+        # print("tag",d)
 
         # Find the indices in the raveled correlograms array that need
         # to be incremented, taking into account the spike clusters.
@@ -514,7 +516,6 @@ def cp_spike_correlations(
         return _cp_symmetrize_correlograms(correlograms).get()
     else:
         return correlograms.get()
-
 
 
 def cp_spike_correlations_2groups(
@@ -556,7 +557,7 @@ def cp_spike_correlations_2groups(
         ref_neuron_inds = [ref_neuron_inds]
     all_inds = np.concatenate([np.array(ref_neuron_inds),np.array(neuron_inds)])
 
-    # SL get the threshold of which neuron indices are group0 vs group1
+    # SL: get the threshold of which neuron indices are group0 vs group1
     N0=len(ref_neuron_inds)
     N1=len(neuron_inds)
     
@@ -582,11 +583,11 @@ def cp_spike_correlations_2groups(
     shift = 1
 
     mask = cp.ones_like(spike_samples, dtype=cp.bool_)
-    correlograms = _cp_create_correlograms_array_2groups(N0, N1, winsize_bins)
+    correlograms = _cp_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize)
 
     # The loop continues as long as there is at least one spike with
     # a matching spike.
-    # SL shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
+    # SL: shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
     while mask[:-shift].any():
         # Number of time samples between spike i and spike i+shift.
         spike_diff = _cp_diff_shifted(spike_samples, shift)
@@ -600,24 +601,38 @@ def cp_spike_correlations_2groups(
 
         # Cache the masked spike delays.
         m = mask[:-shift].copy()
-        d = spike_diff_b[m] # SL get which bins need to be incremented
+        d = spike_diff_b[m] # SL: get which bins need to be incremented
 
-        # SL This function only computes intergroup ccgs between
+        # SL: This function only computes intergroup ccgs between
         #   reference (group0) and target (group1)
         #   even tho all neurons are pooled in one spiketrain in which
         #   the first N_0 clusters are group0 and the others are group1
 
-        # SL group0->group1 forward connections. create an intergroup mask
+        # SL: group0->group1 forward connections. create an intergroup mask
         ref=spike_clusters_i[:-shift][m]
         target=spike_clusters_i[+shift:][m]
         gm = (ref < N0) & (target >= N0)
 
-        # Find the indices in the raveled correlograms array that need
-        # to be incremented, taking into account the spike clusters.
-        indices = cp.ravel_multi_index(
-            (ref[gm], target[gm]-N0, d[gm], ),
-            correlograms.shape,
-        )
+        if symmetrize:
+            center = winsize_bins//2
+            # Find the indices in the raveled correlograms array that need
+            # to be incremented, taking into account the spike clusters.
+            indices = cp.ravel_multi_index(
+                (ref[gm], target[gm]-N0, center+d[gm]),
+                correlograms.shape,
+            )
+            gm_sym = (ref >= N0) & (target < N0)
+
+            indices_sym= cp.ravel_multi_index(
+                (target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
+                correlograms.shape,
+            )
+            indices = np.concatenate([indices,indices_sym])
+        else:
+            indices = cp.ravel_multi_index(
+                (ref[gm], target[gm]-N0, d[gm]),
+                correlograms.shape,
+            )
 
         # Increment the matching spikes in the correlograms array.
         _cp_increment(correlograms.ravel(), indices)
@@ -625,10 +640,7 @@ def cp_spike_correlations_2groups(
         shift += 1
 
     print("shift", shift)
-    if symmetrize:
-        return _cp_symmetrize_correlograms_2groups(correlograms).get()
-    else:
-        return correlograms.get()
+    return correlograms.get()
 
 def spike_correlations_2group(
         neurons,

@@ -2,26 +2,16 @@
  et al. (2017)"""
 
 import numpy as np
-import scipy.signal
-import scipy.stats
+try:
+    import cupy as cp
+except ImportError:
+    print("Error importing CuPy")
+    cp = None
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows, convolve
 from scipy.stats import poisson
-import cupy as cp
-# TODO ^
-# TODO was this outdated?
-try:
-    import ccg_gpu as ccg
-    import cupy as cp
-
-    cuda = True
-except ModuleNotFoundError:
-    # import ccg
-
-    cuda = False
-cuda = False
-
+from scipy import ndimage
 import time
 
 
@@ -56,7 +46,7 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     qvals: p-values (bin-wise) for inhibition
     """
     if len(ccg.shape)==1:
-        ccg=ccg[...,np.newaxis]
+        ccg=ccg[np.newaxis,...]
 
     assert wintype in ["gauss", "rect", "triang"]
     assert W<=ccg.shape[0]
@@ -85,22 +75,17 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     # hollow and normalize window
     window[center]*=(1-hollow_frac)
     window /= np.sum(window)
-    # make window 2D if needed
-    window = np.repeat(window,ccg.shape[1])
-    if len(window.shape)==1:
-        window=window[...,np.newaxis]
     # padding
-    ccg_pad=np.concatenate([ccg[:W][::-1],ccg,ccg[-W:][::-1]])
+    ccg_pad=np.concatenate([ccg[...,:W][...,::-1],ccg,ccg[...,-W:][...,::-1]],axis=-1)
 
     # convolve window with ccg
-    pred = convolve(ccg_pad, window, mode="same")
-    pred=pred[W:-W]
+    pred = ndimage.convolve1d(ccg_pad, window, axis=-1)
+    pred=pred[...,W:-W]
 
     # two-tailed one-sample test of whether the two values are significantly different in Poisson distribution
     pvals = 1 - poisson.cdf(ccg-1, pred) - poisson.pmf(ccg, pred)*0.5
     qvals = 1 - pvals
     return pvals, pred, qvals
-
 
 # Analyes
 def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
@@ -247,11 +232,10 @@ def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=Fals
     neurons.merge(jittered)
     return neurons
 
-
 def ccg_jitter(neurons: Neurons,
     neuron_inds,
-    SampleRate=30000,
-    binsize=0.0005,
+    sample_rate=30000,
+    bin_size=0.0005,
     duration=0.02,
     jscale=5,
     njitter=100,
@@ -266,7 +250,7 @@ def ccg_jitter(neurons: Neurons,
 
     # set up variables
     # halfbins = ( TODO what are halfbins for...
-    #     cp.round(duration / binsize / 2) if cuda else np.round(duration / binsize / 2)
+    #     cp.round(duration / bin_size / 2) if cuda else np.round(duration / bin_size / 2)
     # )
     # spikes_sorted, clus_sorted = ccg_spike_assemble(spike_trains)
     # spikes1 = spikes_sorted[
@@ -292,23 +276,24 @@ def ccg_jitter(neurons: Neurons,
             neurons=neuronsj,
             ref_neuron_inds=0,
             neuron_inds=1+np.arange(njitter+1),
-            sample_rate=SampleRate,
-            bin_size=binsize,
+            sample_rate=sample_rate,
+            bin_size=bin_size,
             window_size=duration,
             use_cupy=use_cupy,
-            symmetrize=False,
+            symmetrize=True,
         )[0] # get row1 since there's only one reference neuron
 
-    # Debugging - results should be all zeros (two methods are identical)
-    # debug = correlations.spike_correlations(
-    #         neurons=neuronsj,
-    #         neuron_inds=np.arange(njitter+2),
-    #         sample_rate=SampleRate,
-    #         bin_size=binsize,
-    #         window_size=duration,
-    #         use_cupy=use_cupy,
-    #         symmetrize=False,
-    #     )[0,1:]-ccg_all
+    # Debugging - 'debug' should be all zeros (two methods are identical)
+    orig = correlations.spike_correlations(
+            neurons=neuronsj,
+            neuron_inds=np.arange(njitter+2),
+            sample_rate=sample_rate,
+            bin_size=bin_size,
+            window_size=duration,
+            use_cupy=use_cupy,
+            symmetrize=True,
+        )[0,1:]
+    debug = orig-ccg_all
    
     # import copy
     
@@ -322,7 +307,92 @@ def ccg_jitter(neurons: Neurons,
 
     # significances = correlograms > thresholds
 
-    return ccg_all, pval, significances
+    return ccg_all, pval, significances, orig
+
+
+def screen_pairwise_conn_fast(neurons: Neurons,
+    neuron_inds=None,
+    sample_rate=30000,
+    bin_size=1,
+    duration=20,
+    window_width=5,
+    wintype="gauss", 
+    hollow_frac=None,
+    alpha=0.05,
+    use_multi_correction=False,
+    use_cupy=False):
+
+    """
+    screening for neuronal pairs with significant CCG peaks using eran_conv
+    # um, should this start form neurons or ccgs?
+
+    window_width:
+        window witdth of the convolution kernel, unit is milliseconds
+        should be the same as jscale if jittering is to be applied later
+    """
+    ccgs = correlations.spike_correlations(
+            neurons=neurons,
+            neuron_inds=neuron_inds or np.arange(neurons.n_neurons),
+            sample_rate=sample_rate,
+            bin_size=bin_size*1e-3,
+            window_size=duration*1e-3,
+            use_cupy=use_cupy,
+            symmetrize=True,
+        )
+    pvals, pred, qvals = eran_conv(ccgs,
+                                   W=window_width,
+                                   wintype=wintype,
+                                   hollow_frac=hollow_frac)
+    if use_multi_correction: alpha=alpha/(len(neuron_inds)**2)
+    
+    
+    pvals=pvals.flatten()
+    pred=pred.flatten()
+    qvals=qvals.flatten()
+    
+
+    msconn_args = {
+        'min_lag':0,
+        'max_lag':1,
+        'min_spkcount':2.5,
+        'spkcount_scope':12,
+        'ignore_same_electrodes':False,
+        'ref_type':'pyr',
+        'target_type':'pyr',
+        'p':0.05,
+    }
+    excit_args = {
+        'min_lag':1,
+        'max_lag':3,
+        'min_spkcount':2.5,
+        'spkcount_scope':12,
+        'ignore_same_electrodes':True,
+        'ref_type':'pyr',
+        'target_type':['pyr','int'],
+        'p':0.05,
+    }
+    inhib_args = {
+        'min_lag':1,
+        'max_lag':3,
+        'min_span':2,
+        'min_spkcount':2.5,
+        'spkcount_scope':12,
+        'ignore_same_electrodes':False,
+        'ref_type':'int',
+        'target_type':'pyr',
+        'p':0.05,
+        'p2':0.1
+    }
+
+    C=int(duration/bin_size//2) # center bin
+    start=int(args['min_lag']/bin_size)
+    end=int(args['min_lag']/bin_size)
+    coords_sig = np.argwhere((pvals<alpha).any(axis=-1))
+
+
+    return pvals, pred, qvals, p_sig, q_sig
+
+
 
 
 # def ccg_spike_assemble(spike_trains):
