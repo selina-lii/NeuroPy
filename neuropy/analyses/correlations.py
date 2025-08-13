@@ -245,7 +245,7 @@ def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bin, 
     return cp.zeros((n_clusters1, n_clusters2, nbins), dtype=cp.int32)
 
 
-def _np_symmetrize_correlograms(correlograms):
+def _np_symmetrize_correlograms(correlograms,symmetrize_mode='odd'):
     """Return the symmetrized version of the CCG arrays."""
 
     n_clusters, _, n_bins = correlograms.shape
@@ -255,29 +255,37 @@ def _np_symmetrize_correlograms(correlograms):
     # This is necessary because the algorithm in correlograms()
     # is sensitive to the order of identical spikes.
     # correlograms[..., 0] = np.maximum(correlograms[..., 0], correlograms[..., 0].T)
+    # SL:  discrepencies still exist between ccg(i,j,0) and ccg(j,i,0) after removing identical spikes
+    #       I'm not sure that their statement is wrong, but we're splitting into even/odd cases instead of taking the maximum
 
-    sym = correlograms[..., 1:][..., ::-1]
+    if symmetrize_mode=='odd':
+        correlograms[..., 0] = np.add(correlograms[..., 0], correlograms[..., 0].T)
+        # Symmetrize the remaining bins
+        sym = correlograms[..., 1:][..., ::-1]
+    else:
+        sym = correlograms[..., ::-1]
+
     sym = np.transpose(sym, (1, 0, 2))
-
     return np.dstack((sym, correlograms))
 
 
-def _cp_symmetrize_correlograms(correlograms,merge_center=False):
+def _cp_symmetrize_correlograms(correlograms,symmetrize_mode='odd'):
     """Return the symmetrized version of the CCG arrays using CuPy."""
     n_clusters, _, n_bins = correlograms.shape
     assert n_clusters == _
 
     # # Symmetrize correlograms[..., 0]
     # TODO SL & NRK: maximum is wrong; either use half-bins and sum them, or do not combine the two values
-    if merge_center:
+    if symmetrize_mode=='odd':
         correlograms[..., 0] = cp.add(correlograms[..., 0], correlograms[..., 0].T)
         # Symmetrize the remaining bins
         sym = correlograms[..., 1:][..., ::-1]
-        sym = cp.transpose(sym, (1, 0, 2))
     else:
         sym = correlograms[..., ::-1]
-        sym = cp.transpose(sym, (1, 0, 2))
+
+    sym = cp.transpose(sym, (1, 0, 2))
     return cp.dstack((sym, correlograms))
+
 
 def firing_rate(spike_clusters, cluster_ids=None, bin_size=None, duration=None):
     """Compute the average number of spikes per cluster per bin."""
@@ -308,6 +316,7 @@ def np_spike_correlations(
         bin_size=None,
         window_size=None,
         symmetrize=True,
+        symmetrize_mode='even',
 ):
     """
     Compute all pairwise cross-correlations among neurons(clusters) given in neurons class.
@@ -343,14 +352,13 @@ def np_spike_correlations(
     # Get binsize
     bin_size = np.clip(bin_size, 1e-5, 1e5)
     binsize = int(sample_rate * bin_size)
-    assert binsize >= 1
+    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {sample_rate}"
 
     # Get window-size dependent bins
     window_size = np.clip(window_size, 1e-5, 1e5)
     winsize_bins = 2 * int(0.5 * window_size / bin_size)
-
     assert winsize_bins >= 1
-    assert winsize_bins % 2 == 1
+    # assert winsize_bins % 2 == 1 # TODO SL: winsize_bins will never be an odd number
 
     # Get unique neuron clusters
     clusters = _np_unique(spike_clusters)
@@ -374,6 +382,8 @@ def np_spike_correlations(
         spike_diff = _diff_shifted(spike_samples, shift)
 
         # Binarize the delays between spike i and spike i+shift.
+        if symmetrize_mode=='odd':
+            spike_diff+=binsize//2
         spike_diff_b = spike_diff // binsize
 
         # Spikes with no matching spikes are masked.
@@ -401,9 +411,9 @@ def np_spike_correlations(
         shift += 1
 
     if symmetrize:
-        return _np_symmetrize_correlograms(correlograms)
-    else:
-        return correlograms
+        correlograms=_np_symmetrize_correlograms(correlograms,symmetrize_mode)
+    
+    return correlograms
 
 
 def cp_spike_correlations(
@@ -451,8 +461,6 @@ def cp_spike_correlations(
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
 
-    assert bin_size>=1/sample_rate, f"Bin size {bin_size} is too small for sampling rate {sample_rate}. Bins must be longer than one sampling interval"
-    
     # Convert to array if int
     if isinstance(neuron_inds, int):
         neuron_inds = [neuron_inds]
@@ -465,6 +473,7 @@ def cp_spike_correlations(
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
     binsize = int(sample_rate * bin_size)  # in samples
+    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {sample_rate}"
 
     # Find `winsize_bins`.
     window_size = np.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -485,13 +494,13 @@ def cp_spike_correlations(
     # a matching spike.
     while mask[:-shift].any():
         # Number of time samples between spike i and spike i+shift.
-        spike_diff_tmp = _cp_diff_shifted(spike_samples, shift)
+        spike_diff = _cp_diff_shifted(spike_samples, shift)
         #TODO something wrong here
 
         # Binarize the delays between spike i and spike i+shift.
         if symmetrize_mode=='odd':
-            spike_diff_tmp+=binsize//2
-        spike_diff_b = spike_diff_tmp // binsize
+            spike_diff+=binsize//2
+        spike_diff_b = spike_diff // binsize
 
         # Spikes with no matching spikes are masked.
         mask[:-shift][spike_diff_b > (winsize_bins // 2)] = False
@@ -573,6 +582,8 @@ def cp_spike_correlations_2groups(
     correlograms : array
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
+
+    assert bin_size>=1/sample_rate, f"Bin size {bin_size} is too small for sampling rate {sample_rate}. Bins must be longer than one sampling interval"
 
     # Convert to array if int
     if isinstance(neuron_inds, int):
@@ -702,3 +713,4 @@ def spike_correlations(
     else:
         correlograms = np_spike_correlations(neurons, neuron_inds, sample_rate=sample_rate, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
     return correlograms
+
