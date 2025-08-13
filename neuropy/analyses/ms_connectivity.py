@@ -49,7 +49,7 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
         ccg=ccg[np.newaxis,...]
 
     assert wintype in ["gauss", "rect", "triang"]
-    assert W<=ccg.shape[0]
+    assert W<=ccg.shape[-1]
 
     # Auto-assign appropriate hollow fraction if not specified
     # generate window
@@ -310,7 +310,7 @@ def ccg_jitter(neurons: Neurons,
     return ccg_all, pval, significances, orig
 
 
-def screen_pairwise_conn_fast(neurons: Neurons,
+def pairwise_conn_fast(neurons: Neurons,
     neuron_inds=None,
     sample_rate=30000,
     bin_size=1,
@@ -320,36 +320,38 @@ def screen_pairwise_conn_fast(neurons: Neurons,
     hollow_frac=None,
     alpha=0.05,
     use_multi_correction=False,
-    use_cupy=False):
+    use_cupy=False,
+    symmetrize_mode='even'):
 
     """
-    screening for neuronal pairs with significant CCG peaks using eran_conv
+    Screen for neuronal pairs with significant CCG peaks using eran_conv
     # um, should this start form neurons or ccgs?
 
     window_width:
         window witdth of the convolution kernel, unit is milliseconds
-        should be the same as jscale if jittering is to be applied later
+        should be the same as `jscale` that you'd use later for jittering
     """
-    ccgs = correlations.spike_correlations(
+    neuron_inds = neuron_inds or np.arange(neurons.n_neurons)
+    ccg = correlations.spike_correlations(
             neurons=neurons,
-            neuron_inds=neuron_inds or np.arange(neurons.n_neurons),
+            neuron_inds=neuron_inds,
             sample_rate=sample_rate,
             bin_size=bin_size*1e-3,
             window_size=duration*1e-3,
             use_cupy=use_cupy,
             symmetrize=True,
+            symmetrize_mode=symmetrize_mode,
         )
-    pvals, pred, qvals = eran_conv(ccgs,
-                                   W=window_width,
+    W = window_width/bin_size # align conv kernel size to jitter timescale
+    pvals, pred, qvals = eran_conv(ccg,
+                                   W=W,
                                    wintype=wintype,
                                    hollow_frac=hollow_frac)
     if use_multi_correction: alpha=alpha/(len(neuron_inds)**2)
     
-    
-    pvals=pvals.flatten()
-    pred=pred.flatten()
-    qvals=qvals.flatten()
-    
+    # pvals=pvals.flatten()
+    # pred=pred.flatten()
+    # qvals=qvals.flatten()
 
     msconn_args = {
         'min_lag':0,
@@ -384,13 +386,12 @@ def screen_pairwise_conn_fast(neurons: Neurons,
         'p2':0.1
     }
 
-    C=int(duration/bin_size//2) # center bin
-    start=int(args['min_lag']/bin_size)
-    end=int(args['min_lag']/bin_size)
-    coords_sig = np.argwhere((pvals<alpha).any(axis=-1))
+    # C=int(duration/bin_size//2) # center bin
+    # start=int(args['min_lag']/bin_size)
+    # end=int(args['max_lag']/bin_size)
+    # coords_sig = np.argwhere((pvals<alpha).any(axis=-1))
 
-
-    return pvals, pred, qvals, p_sig, q_sig
+    return pvals, ccg, pred, qvals #, p_sig, q_sig
 
 
 
