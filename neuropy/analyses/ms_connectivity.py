@@ -234,7 +234,7 @@ def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=Fals
 def ccg_jitter(neurons: Neurons,
     neuron_inds,
     sample_rate=30000,
-    bin_size=0.0005,
+    bin_size=0.001,
     duration=0.02,
     jscale=5,
     njitter=100,
@@ -312,8 +312,8 @@ def ccg_jitter(neurons: Neurons,
 def pairwise_conn_fast(neurons: Neurons,
     neuron_inds=None,
     sample_rate=30000,
-    bin_size=1,
-    duration=20,
+    bin_size=0.001,
+    duration=0.02,
     window_width=5,
     wintype="gauss", 
     hollow_frac=None,
@@ -327,7 +327,8 @@ def pairwise_conn_fast(neurons: Neurons,
     # um, should this start form neurons or ccgs?
 
     window_width:
-        window witdth of the convolution kernel, unit is milliseconds
+        window witdth of the convolution kernel
+        unit is milliseconds
         should be the same as `jscale` that you'd use later for jittering
     """
     neuron_inds = neuron_inds or np.arange(neurons.n_neurons)
@@ -335,13 +336,13 @@ def pairwise_conn_fast(neurons: Neurons,
             neurons=neurons,
             neuron_inds=neuron_inds,
             sample_rate=sample_rate,
-            bin_size=bin_size*1e-3,
-            window_size=duration*1e-3,
+            bin_size=bin_size,
+            window_size=duration,
             use_cupy=use_cupy,
             symmetrize=True,
             symmetrize_mode=symmetrize_mode,
         )
-    W = window_width/bin_size # align conv kernel size to jitter timescale
+    W = window_width*1e-3/bin_size # align conv kernel size to jitter timescale
     pvals, pred, qvals = eran_conv(ccg,
                                    W=W,
                                    wintype=wintype,
