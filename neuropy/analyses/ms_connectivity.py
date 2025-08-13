@@ -59,7 +59,6 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
         sigma = W/2
         W = int(6*sigma + (2 if W%2 else 1))
         center = int(3*sigma + (0.5 if W%2 else 0))
-        print(center)
         window = windows.gaussian(W,std=sigma)/(2*np.pi*sigma)
     elif wintype == "rect":
         hollow_frac = hollow_frac or 0.42
