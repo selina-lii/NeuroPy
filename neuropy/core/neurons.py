@@ -188,6 +188,59 @@ class Neurons(DataWriter):
             peak_channels=neurons.peak_channels,
             shank_ids=neurons.shank_ids,
         )
+    
+    def time_multislices(self, intervals:list[list], t_start=None, t_stop=None, zero_spike_times=False):
+        """
+        Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
+        """
+        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        def _merge_intervals(intervals):
+            intervals = np.array(sorted(intervals))
+            merged = []
+            for s,e in intervals:
+                if not merged or s > merged[-1][1]:
+                    merged.append([s, e])
+                else:
+                    merged[-1][1] = max(merged[-1][1], e)
+            return intervals
+
+        # remove out of range intervals
+        intervals=_merge_intervals(intervals)
+        # align start/end
+        intervals=intervals[(intervals[:,0]<=t_stop) & (intervals[:,1]>=t_start)]
+        intervals[0,0]=max(t_start,intervals[0,0])
+        intervals[-1,-1]=min(t_stop,intervals[-1,-1])
+
+        # this is faster. 
+        # alternatively, use inds = np.any((spks >= intervals[:,0]) & (spks <= intervals[:,1]), axis=1)
+        def _filter_sorted(spks, intervals):
+            keep = []
+            for start, end in intervals:
+                i0 = np.searchsorted(spks, start, 'left')
+                i1 = np.searchsorted(spks, end, 'right')
+                keep.append(spks[i0:i1])
+            return np.concatenate(keep)
+        
+        neurons = deepcopy(self)
+        if zero_spike_times:
+            spiketrains = [_filter_sorted(spks,intervals)-t_start for spks in neurons.spiketrains]
+            t_stop = t_stop - t_start
+            t_start = 0
+        else:
+            spiketrains = [_filter_sorted(spks,intervals) for spks in neurons.spiketrains]
+
+        return Neurons(
+            spiketrains=spiketrains,
+            t_stop=t_stop,
+            t_start=t_start,
+            sampling_rate=neurons.sampling_rate,
+            neuron_ids=neurons.neuron_ids,
+            neuron_type=neurons.neuron_type,
+            waveforms=neurons.waveforms,
+            peak_channels=neurons.peak_channels,
+            shank_ids=neurons.shank_ids,
+        )
+    
 
     def neuron_slice(self, neuron_inds=None, neuron_ids=None):
         neurons = deepcopy(self)
@@ -473,7 +526,7 @@ class Neurons(DataWriter):
         """
         Combine another Neurons object with self
         """
-        def safe_extend(list1, list2):
+        def _safe_merge(list1, list2):
             if list1 is None and list2 is None:
                 return None
             if list2 is None:
@@ -481,7 +534,8 @@ class Neurons(DataWriter):
             if list1 is None:
                 list1=[None]*self.n_neurons
             return np.concatenate([list1,list2])
-        def safe_extend3d(list1, list2,):
+
+        def _safe_merge3d(list1, list2,):
             """
             Always returns (N1+N2, x, y) array, filling None with NaN
             """
@@ -492,16 +546,18 @@ class Neurons(DataWriter):
             if list1 is None:
                 list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
             return np.concatenate([list1,list2])
+        
 
-        self.spiketrains = safe_extend(self.spiketrains,neurons.spiketrains)
-        self.neuron_ids = safe_extend(self.neuron_ids,neurons.neuron_ids)
-        self.neuron_type = safe_extend(self.neuron_type,neurons.neuron_type)
-        self.neuron_type = safe_extend(self.neuron_type,neurons.neuron_type)
-        self.waveforms = safe_extend3d(self.waveforms,neurons.waveforms)
-        self.waveforms_amplitude = safe_extend(self.waveforms_amplitude,neurons.waveforms_amplitude)
-        self.peak_channels = safe_extend(self.peak_channels,neurons.peak_channels)
-        self.clu_q = safe_extend(self.clu_q,neurons.clu_q)
-        self.shank_ids = safe_extend(self.shank_ids,neurons.shank_ids)
+        assert self.t_start==neurons.t_start & self.t_stop==neurons.t_stop
+        self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
+        self.neuron_ids = _safe_merge(self.neuron_ids,neurons.neuron_ids)
+        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
+        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
+        self.waveforms = _safe_merge3d(self.waveforms,neurons.waveforms)
+        self.waveforms_amplitude = _safe_merge(self.waveforms_amplitude,neurons.waveforms_amplitude)
+        self.peak_channels = _safe_merge(self.peak_channels,neurons.peak_channels)
+        self.clu_q = _safe_merge(self.clu_q,neurons.clu_q)
+        self.shank_ids = _safe_merge(self.shank_ids,neurons.shank_ids)
 
     def get_neurons_in_epochs(self, epochs: Epoch):
         """Remove spikes that lie outside of given epochs and return a new Neurons object with t_start and t_stop changed to start of first epoch and stop of last epoch.
