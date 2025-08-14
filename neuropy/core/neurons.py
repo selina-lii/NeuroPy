@@ -239,6 +239,8 @@ class Neurons(DataWriter):
             waveforms=neurons.waveforms,
             peak_channels=neurons.peak_channels,
             shank_ids=neurons.shank_ids,
+            metadata={'intervals':intervals,
+                    'total_time':np.sum(intervals[:,1]-intervals[:,0])},
         )
     
 
@@ -377,6 +379,14 @@ class Neurons(DataWriter):
 
     @property
     def firing_rate(self):
+        # TODO temporary structure
+        if np.isin('total_time',list(self.metadata.keys())):
+            try:
+                total_time = self.metadata['total_time']
+                frate = self.n_spikes / total_time
+                return frate
+            except:
+                pass
         return self.n_spikes / (self.t_stop - self.t_start)
 
     def get_above_firing_rate(self, thresh: float):
@@ -758,8 +768,11 @@ class BinnedSpiketrain(DataWriter):
     def t_stop(self):
         return self.t_start + self.duration
 
-    def add_metadata(self):
-        pass
+    def add_metadata(self,data:dict):
+        if self.metadata is None:
+            self.metadata=data
+        else:
+            self.metadata.update(data)
 
     @property
     def time(self):
