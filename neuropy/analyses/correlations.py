@@ -284,7 +284,8 @@ def _cp_symmetrize_correlograms(correlograms,symmetrize_mode='odd'):
         sym = correlograms[..., ::-1]
 
     sym = cp.transpose(sym, (1, 0, 2))
-    return cp.dstack((sym, correlograms))
+    correlograms = cp.dstack((sym, correlograms))
+    return correlograms
 
 
 def firing_rate(spike_clusters, cluster_ids=None, bin_size=None, duration=None):
@@ -528,8 +529,7 @@ def cp_spike_correlations(
         shift += 1
 
     if symmetrize:
-        merge_center = symmetrize_mode=='odd'
-        correlograms=_cp_symmetrize_correlograms(correlograms,merge_center).get()
+        correlograms=_cp_symmetrize_correlograms(correlograms,symmetrize_mode).get()
     else:
         correlograms=correlograms.get()
 

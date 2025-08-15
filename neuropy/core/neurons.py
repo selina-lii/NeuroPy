@@ -380,14 +380,22 @@ class Neurons(DataWriter):
     @property
     def firing_rate(self):
         # TODO temporary structure
-        if np.isin('total_time',list(self.metadata.keys())):
-            try:
+        return self.n_spikes / self.effective_time
+    
+    @property
+    def effective_time(self):
+        # TODO temporary structure
+        print(self.metadata)
+        try:
+            if np.isin('total_time',list(self.metadata.keys())):
                 total_time = self.metadata['total_time']
-                frate = self.n_spikes / total_time
-                return frate
-            except:
-                pass
-        return self.n_spikes / (self.t_stop - self.t_start)
+            elif np.isin('intervals',list(self.metadata.keys())):
+                intervals = self.metadata['intervals']
+                total_time=np.sum(intervals[:,1]-intervals[:,0])
+        except:
+            pass
+        total_time = self.t_stop - self.t_start
+        return total_time
 
     def get_above_firing_rate(self, thresh: float):
         """Return neurons which have firing rate above thresh"""
