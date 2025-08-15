@@ -323,8 +323,8 @@ def pairwise_conn_fast(neurons: Neurons,
     symmetrize_mode='even'):
 
     """
-    Screen for neuronal pairs with significant CCG peaks using eran_conv
-    # um, should this start form neurons or ccgs?
+    A quick, rough screening for neuronal pairs with significant CCG peaks
+    Uses eran_conv
 
     window_width:
         window witdth of the convolution kernel

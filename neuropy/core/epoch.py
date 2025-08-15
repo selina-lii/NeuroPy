@@ -192,7 +192,8 @@ class Epoch(DataWriter):
         return f"{len(self.starts)} epochs\nSnippet: \n {self._epochs.head(5)}"
 
     def __str__(self) -> str:
-        pass
+        # TODO SL: filled so we can print paradigms from list of sessions
+        return f"{len(self.starts)} epochs\nSnippet: \n {self._epochs.head(5)}"
 
     def __getitem__(self, i):
         if isinstance(i, str):
