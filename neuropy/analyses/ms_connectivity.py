@@ -14,7 +14,6 @@ from scipy.stats import poisson
 from scipy import ndimage
 import time
 
-
 def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     """
     Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
@@ -394,7 +393,138 @@ def pairwise_conn_fast(neurons: Neurons,
     return pvals, ccg, pred, qvals #, p_sig, q_sig
 
 
+def _short_session_name(session):
+    sess_name = session.filePrefix.parts[-1].split('_')[:2]
+    sess_name='_'.join(sess_name)
+    return sess_name
 
+def routine_eranconv_pairs(sessions):
+    print("EranConv significant pairs")
+    neuron_types = ['pyr','inter'] # has to be 'inter'
+    conn_types_E = [['pyr','pyr'], ['pyr','int']]
+    conn_types_I = [['int','int'], ['int','pyr']]
+    all_connections = {}
+    for sess in sessions:
+        sess_connections = {"E":[],"I":[]}
+        # Get data
+        print(f"======={_short_session_name(sess)}=======")
+        sleep = sess.brainstates.label_slice(["REM","NREM"]) # "QW","AW"
+        paradigm = sess.paradigm
+        sess_neurons = sess.neurons.get_neuron_type(neuron_types)
+        
+        # Chunk into 3h slep sessions
+        n_chunks = 3
+        start=paradigm.starts[2]
+        stop=paradigm.stops[2]
+        chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(start,stop))[:-1]
+        chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(start,stop))[1:]
+
+        # Start filtering neurons by brain state
+        intervals = list(zip(sleep.starts,sleep.stops))
+        sleep_neurons=sess_neurons.time_multislices(intervals)
+        sleep_neurons_chunked = [sleep_neurons.time_slice(s,e) for s,e in zip(chunk_starts, chunk_stops)]
+
+        ################ CONFIG #################
+        duration=20*1e-3 # 20ms
+        bin_size=1*1e-3 # 1ms
+        window_width = 5
+        alpha = 0.05
+        C=int(duration/bin_size//2) # center bin
+
+        min_lag = 1*1e-3 # 1ms
+        max_lag = 3*1e-3 # 3ms
+        min_spkcount = 2.5
+        spkcount_scope = 12*1e-3 # 12ms total
+        ignore_same_electrodes = True
+
+        start=int(min_lag/bin_size)
+        end=int(max_lag/bin_size)
+        spkcount=int(spkcount_scope/2/bin_size)
+        ############# END OF CONFIG ##############
+
+        s=""
+        for i in neuron_types: # sleep chunk
+            s+=f"{i}={sleep_neurons_chunked[0].get_neuron_type(i).n_neurons} "
+        print(s)
+
+        for c in range(n_chunks):
+            neurons = sleep_neurons_chunked[c]
+            ids_by_type = {
+                'pyr':neurons.get_neuron_type('pyr').neuron_ids,
+                'int':neurons.get_neuron_type('inter').neuron_ids
+            }
+            n = neurons.n_neurons
+            corrected_alpha=alpha/(n**2) # multipl comparison
+
+            pvals, ccg, pred, qvals=pairwise_conn_fast(neurons,
+                neuron_inds=None,
+                sample_rate=neurons.sampling_rate,
+                bin_size=bin_size,
+                duration=duration,
+                window_width=window_width,
+                wintype="gauss", 
+                hollow_frac=None,
+                alpha=corrected_alpha,
+                use_multi_correction=True,
+                use_cupy=True,
+                symmetrize_mode='odd',
+            )
+
+            coords_excitatory = np.argwhere((pvals[...,C+start:C+end+1]<corrected_alpha).any(axis=-1))
+            coords_inhitibitory = np.argwhere((qvals[...,C+start:C+end+1]<corrected_alpha).any(axis=-1))
+            coords_spkcount = np.argwhere((ccg[...,C-spkcount:C+spkcount+1]>=min_spkcount).all(axis=-1))
+            
+            def _intersect2d(n,coords1,coords2):
+                # Intersection of coordinate lists
+                coords1 = coords1[:,0]*n+coords1[:,1]
+                coords2 = coords2[:,0]*n+coords2[:,1]
+                coords=np.intersect1d(coords1,coords2)
+                coords=np.array([[x//n,x%n] for x in coords])
+                return coords
+            
+            coordsE = _intersect2d(n, coords_excitatory, coords_spkcount)
+            coordsI = _intersect2d(n, coords_inhitibitory, coords_spkcount)
+            overview_str = f"SLEEP{c}: E/I pairs {coordsE.shape[0]:03d} / {coordsI.shape[0]:03d} | "
+
+            def _count_significant_pairs(coords,neurons,connection_types,EI="E"):
+                # Create a tally of significant neuronal connectoins by type
+                # Currently, the type is defined as 
+                # reference-target/[E,I]
+                # where reference is the presynaptic neuronal type, 
+                # target is the postsynaptic neuronal type, 
+                # and E/I indicates the connection being excitatory or inhibitory
+                s=""
+                list_empty=True 
+                significant_pairs = []
+                if coords.shape[0]:
+                    diff_channel=np.where(neurons.peak_channels[coords[:,0]]!=neurons.peak_channels[coords[:,1]])[0]
+                    coords = coords[diff_channel]
+                    for (ref,target) in connection_types:
+                        sig_pairs=np.where(np.isin(coords[:,0],ids_by_type[ref]) & 
+                                        np.isin(coords[:,1],ids_by_type[target]))[0]
+                        sig_pairs=coords[sig_pairs]
+                        significant_pairs.append(sig_pairs)
+                    # if any of these types of connections has a non-zero count
+                    if np.any([_.shape[0] for _ in significant_pairs]):
+                        list_empty=False 
+                        for sig_pairs,(ref,target) in zip(significant_pairs,connection_types):
+                            s+=f"{ref}-{target}/{EI} {f'{sig_pairs.shape[0]:02d}' if sig_pairs.shape[0] else '-'} | "
+                if s=="":
+                    s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
+                return significant_pairs,s,list_empty
+            excitatory_pairs, sE,list_emptyE = _count_significant_pairs(coordsE,neurons,conn_types_E,EI="E")
+            inhibitory_pairs, sI,list_emptyI = _count_significant_pairs(coordsI,neurons,conn_types_I,EI="I")
+            if list_emptyE and list_emptyI:
+                print(overview_str+"no connections")
+            else:
+                print(overview_str+sE+sI)
+            sess_connections['E']=excitatory_pairs
+            sess_connections['I']=inhibitory_pairs
+            ### end of chunks loop ###
+        all_connections[_short_session_name(sess)]=sess_connections
+        ### end of sessions loop ###
+    return all_connections
+    ### end of function ###
 
 # def ccg_spike_assemble(spike_trains):
 #     """Assemble an array of sorted spike times and cluIDs for the input cluster ids the list clus_use """
