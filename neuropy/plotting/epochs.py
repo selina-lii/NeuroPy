@@ -38,7 +38,7 @@ def plot_epochs(
     # assert isinstance(epochs, Epoch), "epochs must be neuropy.Epoch object"
 
     n_epochs = epochs.n_epochs
-
+    colors_dict=None
     if isinstance(colors, str):
         try:
             cmap = mpl.cm.get_cmap(colors)
@@ -47,6 +47,7 @@ def plot_epochs(
             colors = [colors] * n_epochs
     elif isinstance(colors, dict):
         # Define colors, sending those not in the colors dict to white
+        colors_dict = colors
         colors = [colors[label] if label in colors.keys() else "#ffffff" for label in epochs.to_dataframe()[colorby]]
 
     if epochs.has_labels or (len(epochs.to_dataframe().label) > 1):
@@ -95,7 +96,10 @@ def plot_epochs(
             alpha=alpha,
         )
         ax.set_ylim([0, 1])
-
+    if colors_dict:
+        for l, c in colors_dict.items():
+            ax.bar(0, 0, color=c, label=l)
+        ax.legend()
     return ax
 
 

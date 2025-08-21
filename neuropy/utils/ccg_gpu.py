@@ -176,6 +176,8 @@ def correlograms(
     correlograms : array
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
+    DeprecationWarning("Use neurpy.analysis.correlations.spike_correlations instead")
+
     assert sample_rate > 0.0
     assert cp.all(cp.diff(spike_times) >= 0), "The spike times must be " "increasing."
 

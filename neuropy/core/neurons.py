@@ -149,7 +149,41 @@ class Neurons(DataWriter):
             waveforms_amplitude=waveforms_amplitude,
             peak_channels=peak_channels,
             shank_ids=shank_ids,
+            metadata=self.metadata
         )
+
+    def t_shrink(self):
+        # shrink t_start/t_stop to tighest epoch boundaries
+        assert np.isin('intervals',list(self.metadata.keys())), "missing epochs data"
+        actual_start, actual_end = self.metadata['intervals'][0,0], self.metadata['intervals'][-1,-1]
+        self.t_start = max(self.t_start,actual_start)
+        self.t_stop = min(actual_end,self.t_stop)
+
+    def add_metadata(self,data:dict):
+        if self.metadata is None:
+            self.metadata=data
+        else:
+            self.metadata.update(data)
+
+    @property
+    def t_start(self):
+        return self._t_start
+
+    @t_start.setter
+    def t_start(self,v):
+        self._t_start = v
+        if np.isin('intervals',list(self.metadata.keys())):
+            self.metadata['intervals']=self._clip_intervals(self.metadata['intervals'],t_start=v)
+
+    @property
+    def t_stop(self):
+        return self._t_stop
+    
+    @t_stop.setter
+    def t_stop(self,v):
+        self._t_stop = v
+        if np.isin('intervals',list(self.metadata.keys())):
+            self.metadata['intervals']=self._clip_intervals(self.metadata['intervals'],t_stop=v)
 
     @property
     def sampling_rate(self):
@@ -172,6 +206,8 @@ class Neurons(DataWriter):
         neurons = deepcopy(self)
         if zero_spike_times:
             spiketrains = [t[(t >= t_start) & (t <= t_stop)] - t_start for t in neurons.spiketrains]
+            if np.isin('intervals',list(neurons.metadata.keys())):
+                neurons.metadata['intervals']=neurons.metadata['intervals']-t_start
             t_stop = t_stop - t_start
             t_start = 0
         else:
@@ -187,9 +223,25 @@ class Neurons(DataWriter):
             waveforms=neurons.waveforms,
             peak_channels=neurons.peak_channels,
             shank_ids=neurons.shank_ids,
+            metadata=neurons.metadata,
         )
     
-    def time_multislices(self, intervals:list[list], t_start=None, t_stop=None, zero_spike_times=False):
+    def _clip_intervals(self,intervals,t_start=None,t_stop=None):
+        # print("before",intervals[0],intervals[-1],t_start,t_stop)
+        # align start/end of a list of intervals
+        if len(intervals)==0:
+            return intervals
+        if t_start is not None:
+            intervals=intervals[intervals[:,1]>=t_start]
+            if len(intervals): intervals[0,0]=max(t_start,intervals[0,0])
+        if t_stop is not None:
+            intervals=intervals[intervals[:,0]<=t_stop]
+            if len(intervals): intervals[-1,-1]=min(t_stop,intervals[-1,-1])
+        # print("after",intervals[0],intervals[-1])
+        return intervals
+
+    def time_multislices(self, intervals:list[list], t_start=None, t_stop=None, zero_spike_times=False,
+                         shrink=False):
         """
         Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
         """
@@ -206,10 +258,6 @@ class Neurons(DataWriter):
 
         # remove out of range intervals
         intervals=_merge_intervals(intervals)
-        # align start/end
-        intervals=intervals[(intervals[:,0]<=t_stop) & (intervals[:,1]>=t_start)]
-        intervals[0,0]=max(t_start,intervals[0,0])
-        intervals[-1,-1]=min(t_stop,intervals[-1,-1])
 
         # this is faster. 
         # alternatively, use inds = np.any((spks >= intervals[:,0]) & (spks <= intervals[:,1]), axis=1)
@@ -229,7 +277,7 @@ class Neurons(DataWriter):
         else:
             spiketrains = [_filter_sorted(spks,intervals) for spks in neurons.spiketrains]
 
-        return Neurons(
+        neurons = Neurons(
             spiketrains=spiketrains,
             t_stop=t_stop,
             t_start=t_start,
@@ -239,9 +287,11 @@ class Neurons(DataWriter):
             waveforms=neurons.waveforms,
             peak_channels=neurons.peak_channels,
             shank_ids=neurons.shank_ids,
-            metadata={'intervals':intervals,
-                    'total_time':np.sum(intervals[:,1]-intervals[:,0])},
-        )
+            metadata={'intervals':intervals},
+            )
+        if shrink:
+            neurons.t_shrink()
+        return neurons
     
 
     def neuron_slice(self, neuron_inds=None, neuron_ids=None):
@@ -366,9 +416,6 @@ class Neurons(DataWriter):
     def __len__(self):
         return self.n_neurons
 
-    def add_metadata(self):
-        pass
-
     def get_all_spikes(self):
         return np.concatenate(self.spiketrains).astype("float")
 
@@ -385,16 +432,11 @@ class Neurons(DataWriter):
     @property
     def effective_time(self):
         # TODO temporary structure
-        print(self.metadata)
-        try:
-            if np.isin('total_time',list(self.metadata.keys())):
-                total_time = self.metadata['total_time']
-            elif np.isin('intervals',list(self.metadata.keys())):
-                intervals = self.metadata['intervals']
-                total_time=np.sum(intervals[:,1]-intervals[:,0])
-        except:
-            pass
-        total_time = self.t_stop - self.t_start
+        if np.isin('intervals',list(self.metadata.keys())):
+            intervals = self.metadata['intervals']
+            total_time=np.sum(intervals[:,1]-intervals[:,0])
+        else:
+            total_time = self.t_stop - self.t_start
         return total_time
 
     def get_above_firing_rate(self, thresh: float):
@@ -565,8 +607,8 @@ class Neurons(DataWriter):
                 list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
             return np.concatenate([list1,list2])
         
-
-        assert self.t_start==neurons.t_start & self.t_stop==neurons.t_stop
+        assert self.t_start==neurons.t_start
+        assert self.t_stop==neurons.t_stop
         self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
         self.neuron_ids = _safe_merge(self.neuron_ids,neurons.neuron_ids)
         self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)

@@ -15,7 +15,7 @@ _ACCEPTED_ARRAY_DTYPES = (
 
 
 # Assemble Spike Arrays
-def _np_assemble_spike_arrays(neurons, sample_rate):
+def _np_assemble_spike_arrays(neurons):
     """
     Assemble spike arrays for neurons from neurons object using NumPy.
     """
@@ -34,7 +34,7 @@ def _np_assemble_spike_arrays(neurons, sample_rate):
     # Get all sorted arrays
     spike_times = spike_times[sort_ind]
     spike_clusters = spike_clusters[sort_ind]
-    spike_samples = (spike_times * sample_rate).astype(int)
+    spike_samples = (spike_times * neurons.sampling_rate).astype(int)
 
     # Debug: effect of removing duplicate spike timings
     # spike_samples=np.unique(spike_samples)
@@ -42,7 +42,7 @@ def _np_assemble_spike_arrays(neurons, sample_rate):
     # assert spks.shape[0]==count.sum()
     return spike_times, spike_clusters, spike_samples
 
-def _cp_assemble_spike_arrays(neurons, sample_rate):
+def _cp_assemble_spike_arrays(neurons):
     """
     Assemble spike arrays for neurons from neurons object using CuPy.
 
@@ -67,7 +67,7 @@ def _cp_assemble_spike_arrays(neurons, sample_rate):
     # Get all sorted arrays
     spike_times = spike_times[sort_ind]
     spike_clusters = spike_clusters[sort_ind]
-    spike_samples = (spike_times * sample_rate).astype(cp.int32)
+    spike_samples = (spike_times * neurons.sampling_rate).astype(cp.int32)
 
     return spike_times, spike_clusters, spike_samples
 
@@ -313,7 +313,6 @@ def firing_rate(spike_clusters, cluster_ids=None, bin_size=None, duration=None):
 def np_spike_correlations(
         neurons,
         neuron_inds,
-        sample_rate=1.0,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -326,8 +325,6 @@ def np_spike_correlations(
     ----------
     neurons : core.neurons
         neurons obj containing spiketrains and related info
-    sample_rate : float
-        Sampling rate.
     bin_size : float
         Size of the bin, in seconds.
     window_size : float
@@ -348,12 +345,12 @@ def np_spike_correlations(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons, sample_rate)
+    spike_times, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons)
 
     # Get binsize
     bin_size = np.clip(bin_size, 1e-5, 1e5)
-    binsize = int(sample_rate * bin_size)
-    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {sample_rate}"
+    binsize = int(neurons.sampling_rate * bin_size)
+    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}"
 
     # Get window-size dependent bins
     window_size = np.clip(window_size, 1e-5, 1e5)
@@ -420,7 +417,6 @@ def np_spike_correlations(
 def cp_spike_correlations(
         neurons,
         neuron_inds,
-        sample_rate=1.0,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -433,8 +429,6 @@ def cp_spike_correlations(
     ----------
     neurons : core.neurons
         neurons obj containing spiketrains and related info
-    sample_rate : float
-        Sampling rate.
     bin_size : float
         Size of the bin, in seconds.
     window_size : float
@@ -469,12 +463,12 @@ def cp_spike_correlations(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons, sample_rate)
+    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
-    binsize = int(sample_rate * bin_size)  # in samples
-    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {sample_rate}"
+    binsize = int(neurons.sampling_rate * bin_size)  # in samples
+    assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}"
 
     # Find `winsize_bins`.
     window_size = np.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -496,7 +490,6 @@ def cp_spike_correlations(
     while mask[:-shift].any():
         # Number of time samples between spike i and spike i+shift.
         spike_diff = _cp_diff_shifted(spike_samples, shift)
-        #TODO something wrong here
 
         # Binarize the delays between spike i and spike i+shift.
         if symmetrize_mode=='odd':
@@ -536,11 +529,11 @@ def cp_spike_correlations(
     cp.get_default_memory_pool().free_all_blocks()
     return correlograms
 
+
 def cp_spike_correlations_2groups(
         neurons,
         ref_neuron_inds,
         neuron_inds,
-        sample_rate=1.0,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -554,8 +547,6 @@ def cp_spike_correlations_2groups(
     ----------
     neurons : core.neurons
         neurons obj containing spiketrains and related info
-    sample_rate : float
-        Sampling rate.
     bin_size : float
         Size of the bin, in seconds.
     window_size : float
@@ -583,12 +574,12 @@ def cp_spike_correlations_2groups(
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
 
-    assert bin_size>=1/sample_rate, f"Bin size {bin_size} is too small for sampling rate {sample_rate}. Bins must be longer than one sampling interval"
+    assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
 
     # Convert to array if int
-    if isinstance(neuron_inds, int):
+    if isinstance(neuron_inds, (int, np.integer)):
         neuron_inds = [neuron_inds]
-    if isinstance(ref_neuron_inds, int):
+    if isinstance(ref_neuron_inds, (int, np.integer)):
         ref_neuron_inds = [ref_neuron_inds]
     all_inds = np.concatenate([np.array(ref_neuron_inds),np.array(neuron_inds)])
 
@@ -599,15 +590,17 @@ def cp_spike_correlations_2groups(
     neurons = neurons.neuron_slice(neuron_inds=all_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons, sample_rate)
+    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
-    binsize = int(sample_rate * bin_size)  # in samples
+    binsize = int(neurons.sampling_rate * bin_size)  # in samples
 
     # Find `winsize_bins`.
     window_size = np.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
     winsize_bins = 2 * int(0.5 * window_size / bin_size) # total number of bins
+    if symmetrize_mode=='odd':
+        winsize_bins+=1
 
     # Get unique neuron clusters
     clusters = _unique_cupy(spike_clusters)
@@ -628,7 +621,9 @@ def cp_spike_correlations_2groups(
         spike_diff = _cp_diff_shifted(spike_samples, shift)
 
         # Binarize the delays between spike i and spike i+shift.
-        # SL spike_diff_b is which bin the spike_diff falls in 
+        # SL: spike_diff_b is which bin the spike_diff falls in 
+        if symmetrize_mode=='odd':
+            spike_diff+=binsize//2
         spike_diff_b = spike_diff // binsize
 
         # Spikes with no matching spikes are masked.
@@ -679,38 +674,29 @@ def cp_spike_correlations_2groups(
     cp.get_default_memory_pool().free_all_blocks()
     return correlograms
 
-def spike_correlations_2group(
-        neurons,
-        ref_neuron_inds,
-        neuron_inds,
-        sample_rate=1.0,
-        bin_size=None,
-        window_size=None,
-        symmetrize=True,
-        use_cupy=False
-):
-    if use_cupy:
-        correlograms = cp_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, sample_rate=sample_rate, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
-    else:
-        pass
-        # TODO write np version
-        # correlograms = np_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, sample_rate=sample_rate, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
-    return correlograms
-
 
 def spike_correlations(
         neurons,
         neuron_inds,
-        sample_rate=1.0,
+        ref_neuron_inds=None,
         bin_size=None,
         window_size=None,
         symmetrize=True,
         use_cupy=False,
         symmetrize_mode='even',
 ):
-    if use_cupy:
-        correlograms = cp_spike_correlations(neurons, neuron_inds, sample_rate=sample_rate, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
+    if ref_neuron_inds is not None:
+        if use_cupy:
+            correlograms = cp_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
+        else:
+            pass
+            # TODO write np version
+            # correlograms = np_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
+        return correlograms
     else:
-        correlograms = np_spike_correlations(neurons, neuron_inds, sample_rate=sample_rate, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
-    return correlograms
+        if use_cupy:
+            correlograms = cp_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
+        else:
+            correlograms = np_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, symmetrize_mode=symmetrize_mode)
+        return correlograms
 
