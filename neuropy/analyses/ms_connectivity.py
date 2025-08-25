@@ -114,7 +114,7 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
         second neuron is the target cell with index=1
         the next (njitter) neurons are jitters of the target cell
     """
-    neurons = neurons.get_by_id(neuron_inds)
+    neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
     nref=len(neuron_inds)-1
     new_ref_inds=np.arange(nref)
     new_target_ind=nref
@@ -159,6 +159,7 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
         neuron_type=[target_type]*njitter
         ) # TODO not copying over other fields
     neurons.merge(jittered)
+    cp.get_default_memory_pool().free_all_blocks()
     return neurons, new_ref_inds, new_target_ind, jitter_inds
     
 def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
@@ -232,6 +233,7 @@ def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=Fals
         neuron_type=[nonref_type]*njitter
         ) # TODO not copying over other fields
     neurons.merge(jittered)
+    cp.get_default_memory_pool().free_all_blocks()
     return neurons
 
 def ccg_jitter(neurons: Neurons,
@@ -286,7 +288,6 @@ def ccg_jitter(neurons: Neurons,
             symmetrize=True,
             symmetrize_mode=symmetrize_mode,
         )
-
     # Debugging - 'debug' should be all zeros (two methods are identical)
     # orig = correlations.spike_correlations(
     #         neurons=neuronsj,
@@ -301,16 +302,15 @@ def ccg_jitter(neurons: Neurons,
     # print(debug)
     
     #TODO fix this tomorrow!
-    # pval = where real data is ranked among fake data. conservative when there are ties
+    # pval = (N0,Nbins) where real data is ranked among fake data. conservative when there are ties
     pval = np.argsort(np.argsort(-ccg_all,axis=1,kind="stable"),axis=1)[:,0]/njitter
-    # threshold = 
-    thresholds = np.percentile(ccg_all[:,1:],100*(1-alpha), axis=0)
-    print(ccg_all[:,0].shape,thresholds.shape)
-    significances = pval<alpha
+    # threshold = (N0,Nbins)
+    thresholds = np.percentile(ccg_all[:,1:],100*(1-alpha), axis=1)
+    significances = pval<=alpha
 
     # significances = correlograms > thresholds
 
-    return ccg_all, pval, significances, # orig
+    return neuronsj, ccg_all, pval, significances, thresholds # orig
 
 
 def pairwise_conn_fast(neurons: Neurons,
@@ -471,8 +471,8 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
         for c in range(n_chunks):
             neurons = sess_neurons[c]
             ids_by_type = {
-                'pyr':neurons.get_neuron_type('pyr').neuron_ids,
-                'int':neurons.get_neuron_type('inter').neuron_ids
+                'pyr':np.argwhere(neurons.neuron_type=='pyr'),
+                'int':np.argwhere(neurons.neuron_type=='inter')
             }
             n = neurons.n_neurons
             corrected_alpha=alpha/(n**2) # multipl comparison
@@ -493,7 +493,6 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
             coords_excitatory = np.argwhere((pvals[...,C+start:C+end+1]<corrected_alpha).any(axis=-1))
             coords_inhitibitory = np.argwhere((qvals[...,C+start:C+end+1]<corrected_alpha).any(axis=-1))
             coords_spkcount = np.argwhere((ccg[...,C-spkcount:C+spkcount+1]>=min_spkcount).all(axis=-1))
-            
             def _intersect2d(n,coords1,coords2):
                 # Intersection of coordinate lists
                 coords1 = coords1[:,0]*n+coords1[:,1]
@@ -519,7 +518,7 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
                 """
                 s=""
                 list_empty=True 
-                significant_pairs = []
+                significant_pairs_ids = []
                 if coords.shape[0]:
                     # Condition 1: Ref/Target are never on the same electrode
                     if ignore_same_electrodes:
@@ -530,15 +529,15 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
                         sig_pairs=np.where(np.isin(coords[:,0],ids_by_type[ref]) & 
                                         np.isin(coords[:,1],ids_by_type[target]))[0]
                         sig_pairs=coords[sig_pairs]
-                        significant_pairs.append(sig_pairs)
+                        significant_pairs_ids.append(sig_pairs)
                     # if any type of connection under consideration has a non-zero count, print a summary
-                    if np.any([_.shape[0] for _ in significant_pairs]):
+                    if np.any([_.shape[0] for _ in significant_pairs_ids]):
                         list_empty=False 
-                        for sig_pairs,(ref,target) in zip(significant_pairs,conn_types_E):
+                        for sig_pairs,(ref,target) in zip(significant_pairs_ids,conn_types_E):
                             s+=f"{ref}-{target}/{EI} {f'{sig_pairs.shape[0]:02d}' if sig_pairs.shape[0] else '-'} | "
                 if s=="":
                     s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
-                return significant_pairs,s,list_empty
+                return significant_pairs_ids,s,list_empty
             ### start of celltype loop ###
             excitatory_pairs, sE, list_emptyE = _count_significant_pairs(coordsE,neurons,conn_types_E,EI="E",ignore_same_electrodes=ignore_same_electrodes)
             inhibitory_pairs, sI, list_emptyI = _count_significant_pairs(coordsI,neurons,conn_types_I,EI="I",ignore_same_electrodes=ignore_same_electrodes)
@@ -549,33 +548,46 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
             else:
                 overview_str=overview_str+sE+sI+"\n"
 
-            ## format values for return ##
+            # def _get_ind_from_id(v):
+            #     lookup = {nid: i for i, nid in enumerate(neurons.neuron_ids)}
+            #     arr = np.atleast_2d(v)
+            #     return np.array([[lookup[i] for i in row] for row in arr], dtype=int)
+            def ind_to_val(indices, arr):
+                return np.array([[arr[i] for i in row] for row in indices])
+            
             for conn_type,ep in zip(conn_types_E,excitatory_pairs):
+                if ep.any(): 
+                    ep_id = ind_to_val(ep,neurons.neuron_ids)
+                else: ep_id = ep
+                # if ep.any(): ep = _get_ind_from_id(ep)
                 sess_connections['E'][conn_type].append({
                     'ref':conn_type[0],'target':conn_type[1],
                     't':chunk_len,
-                    'ids':ep,
+                    'ids':ep_id,
+                    'inds':ep,
                     'ccg':ccg[ep[:,0],ep[:,1]],
                     'pred':pred[ep[:,0],ep[:,1]],
                     'pval':pvals[ep[:,0],ep[:,1]],
                     'qval':qvals[ep[:,0],ep[:,1]],
                     'neurons':{
-                        'ids':np.unique(ep),
-                        'frates':neurons.firing_rate[np.unique(ep)]
+                        'inds':np.unique(ep),
                     }
                 }) 
             for conn_type,ip in zip(conn_types_I,inhibitory_pairs):
+                if ip.any(): ip_id = ind_to_val(ip,neurons.neuron_ids)
+                else: ip_id = ip
+                # if ip.any(): ip = _get_ind_from_id(ip)
                 sess_connections['I'][conn_type].append({
                     'ref':conn_type[0],'target':conn_type[1],
                     't':chunk_len,
-                    'ids':ip,
+                    'ids':ip_id,
+                    'inds':ip,
                     'ccg':ccg[ip[:,0],ip[:,1]],
                     'pred':pred[ip[:,0],ip[:,1]],
                     'pval':pvals[ip[:,0],ip[:,1]],
                     'qval':qvals[ip[:,0],ip[:,1]],
                     'neurons':{
-                        'ids':np.unique(ep),
-                        'frates':neurons.firing_rate[np.unique(ep)]
+                        'inds':np.unique(ip),
                     }
                 })
             if return_neurons:
@@ -601,8 +613,6 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
 #     clus_sorted = clus_all[spikes_all.argsort()]
 
 #     return spikes_sorted, clus_sorted.astype("int")
-
-
 
 from scipy.stats import ttest_ind
 def routine_mean_firing_rates(sessions, epochs = "post", n_chunks = 3, 

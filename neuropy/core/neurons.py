@@ -452,6 +452,7 @@ class Neurons(DataWriter):
 
     def to_dataframe(self):
         """Generates a pandas dataframe with some descriptions about the neurons"""
+        # TODO deprecated
         print("Number of neurons:", self.n_neurons)
         return pd.DataFrame(
             dict(
@@ -618,6 +619,7 @@ class Neurons(DataWriter):
         self.peak_channels = _safe_merge(self.peak_channels,neurons.peak_channels)
         self.clu_q = _safe_merge(self.clu_q,neurons.clu_q)
         self.shank_ids = _safe_merge(self.shank_ids,neurons.shank_ids)
+        #TODO metadata
 
     def get_neurons_in_epochs(self, epochs: Epoch):
         """Remove spikes that lie outside of given epochs and return a new Neurons object with t_start and t_stop changed to start of first epoch and stop of last epoch.
