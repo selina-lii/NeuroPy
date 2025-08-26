@@ -14,6 +14,7 @@ from scipy.signal import windows, convolve
 from scipy.stats import poisson
 from scipy import ndimage
 import time
+from scipy.stats import ttest_ind
 
 def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     """
@@ -154,6 +155,7 @@ def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
     # Asign indices sequentially
     jittertrains = list(jittertrains)
     jittered = Neurons(spiketrains=jittertrains,
+        t_start=neurons.t_start,
         t_stop=neurons.t_stop,
         neuron_ids=jitter_inds,
         neuron_type=[target_type]*njitter
@@ -248,7 +250,7 @@ def ccg_jitter(neurons: Neurons,
 ):
 
     # SL: These were comments from Nat I guess - 
-    # most of these should naturally be fixed as I update the function
+    # most of these are naturally fixed as I update the function
     # TODO: make this take the same inputs as correlograms? e.g. spikes from both clusters sorted by time with corresponding cluster ids?
     # # Make spike trains into 1d numpy array
     # spikes0 = spike_trains[0]
@@ -267,10 +269,12 @@ def ccg_jitter(neurons: Neurons,
     # Now run on jittered spike-trains!
     # TODO: implement this in ALL cupy and compare times...does it matter if the spike jitter code is in numpy? Answer: it does 16ms with numpy vs 1 with cupy.
     # nspikes1 = len(spikes1)
+
+    # Add jitter to the last neuron in the list, which is the target neuron
     neuronsj,ref_inds,target_ind,jitter_inds = add_jitter(neurons=neurons,
             njitter=njitter,
             neuron_inds=neuron_inds,
-            jscale=jscale,
+            jscale=jscale*bin_size, # TODO Is the unit in ms, or in multiples of bins
             use_cupy=use_cupy,
         )
         # Jitter spikes in second cluster
@@ -344,6 +348,7 @@ def pairwise_conn_fast(neurons: Neurons,
             symmetrize=True,
             symmetrize_mode=symmetrize_mode,
         )
+    
     W = window_width*1e-3/bin_size # align conv kernel size to jitter timescale
     pvals, pred, qvals = eran_conv(ccg,
                                    W=W,
@@ -402,16 +407,17 @@ def _short_session_name(session):
     sess_name='_'.join(sess_name)
     return sess_name
 
-def _split_session(n_chunks, start,stop, neurons: Neurons):
+def _split_by_time(n_chunks, neurons: Neurons):
     """
     Evenly divide session into n chunks by recording time
     """
+    start,stop=neurons.t_start,neurons.t_stop
     chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(start,stop))[:-1]
     chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(start,stop))[1:]
-    chunked = [neurons.time_slice(s,e,zero_spike_times=True) for s,e in zip(chunk_starts, chunk_stops)]
+    chunked = [neurons.time_slice(s,e,zero_spike_times=False) for s,e in zip(chunk_starts, chunk_stops)]
     return chunked
 
-def _split_session_brainstate(bs_timing:Epoch, labels, neurons:Neurons, shrink=False):
+def _split_by_brainstate(bs_timing:Epoch, labels, neurons:Neurons, shrink=False):
     brainstates = bs_timing.label_slice(labels).duration_slice(min_dur=120) # "QW","AW","REM","NREM"
     intervals = list(zip(brainstates.starts,brainstates.stops))
     state_neurons=neurons.time_multislices(intervals,shrink=shrink)
@@ -435,11 +441,12 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
         overview_str = f"======={_short_session_name(sess)}=======\n"
         sess_neurons = sess.neurons.get_neuron_type(neuron_types) \
                                     .time_slice(start, stop)
-        sess_neurons = _split_session_brainstate(sess.brainstates,brainstates,sess_neurons,shrink=tight_bounds)
-        sess_neurons = _split_session(n_chunks,start,stop,sess_neurons)
+        sess_neurons = _split_by_brainstate(sess.brainstates,brainstates,sess_neurons,shrink=tight_bounds)
+        sess_neurons = _split_by_time(n_chunks,sess_neurons)
         
-        chunk_len = sess_neurons[0].effective_time/60/60
-        overview_str+=f"Each chunk is {chunk_len:.2f} hours  "
+        chunk_len_ef = [sess_neurons[_].effective_time/60/60 for _ in range(n_chunks)]
+        chunk_len = (sess_neurons[0].t_stop-sess_neurons[0].t_start)/60/60
+        overview_str+=f"Chunks are {chunk_len:.2f}h each and contain {[f'{cl:.2f}' for cl in chunk_len_ef]} hours of actual sleep "
         sess_connections = {"t":chunk_len,"E":{},"I":{}}
         for conn_type in conn_types_E:
             sess_connections['E'][conn_type]=[]
@@ -470,9 +477,9 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
 
         for c in range(n_chunks):
             neurons = sess_neurons[c]
-            ids_by_type = {
-                'pyr':np.argwhere(neurons.neuron_type=='pyr'),
-                'int':np.argwhere(neurons.neuron_type=='inter')
+            inds_by_type = {
+                'pyr':np.where(neurons.neuron_type=='pyr'),
+                'int':np.where(neurons.neuron_type=='inter')
             }
             n = neurons.n_neurons
             corrected_alpha=alpha/(n**2) # multipl comparison
@@ -526,8 +533,8 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
                         coords = coords[diff_channel]
                     # Conditoin 2: Specify Ref/Target cell types
                     for (ref,target) in conn_types_E:
-                        sig_pairs=np.where(np.isin(coords[:,0],ids_by_type[ref]) & 
-                                        np.isin(coords[:,1],ids_by_type[target]))[0]
+                        sig_pairs=np.where(np.isin(coords[:,0],inds_by_type[ref]) & 
+                                        np.isin(coords[:,1],inds_by_type[target]))[0]
                         sig_pairs=coords[sig_pairs]
                         significant_pairs_ids.append(sig_pairs)
                     # if any type of connection under consideration has a non-zero count, print a summary
@@ -542,7 +549,8 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
             excitatory_pairs, sE, list_emptyE = _count_significant_pairs(coordsE,neurons,conn_types_E,EI="E",ignore_same_electrodes=ignore_same_electrodes)
             inhibitory_pairs, sI, list_emptyI = _count_significant_pairs(coordsI,neurons,conn_types_I,EI="I",ignore_same_electrodes=ignore_same_electrodes)
             ### end of celltype loop ###
-            overview_str += f"SLEEP{c}: E/I pairs {coordsE.shape[0]:03d} / {coordsI.shape[0]:03d} | "
+            n_E, n_I = coordsE.shape[0], coordsI.shape[0]
+            overview_str += f"SLEEP{c}: E/I pairs {n_E:03d} / {n_I:03d} | "
             if list_emptyE and list_emptyI:
                 overview_str+="no connections\n"
             else:
@@ -555,6 +563,7 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
             def ind_to_val(indices, arr):
                 return np.array([[arr[i] for i in row] for row in indices])
             
+            sess_connections['E']['total']=n_E
             for conn_type,ep in zip(conn_types_E,excitatory_pairs):
                 if ep.any(): 
                     ep_id = ind_to_val(ep,neurons.neuron_ids)
@@ -573,6 +582,7 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
                         'inds':np.unique(ep),
                     }
                 }) 
+            sess_connections['I']['total']=n_I
             for conn_type,ip in zip(conn_types_I,inhibitory_pairs):
                 if ip.any(): ip_id = ind_to_val(ip,neurons.neuron_ids)
                 else: ip_id = ip
@@ -592,6 +602,8 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
                 })
             if return_neurons:
                 sess_connections['neurons']=neurons
+                sess_connections['neurons']=neurons
+
             ### end of chunks loop ###
         all_connections[_short_session_name(sess)]=sess_connections
         print(overview_str)
@@ -614,7 +626,6 @@ def routine_eranconv_pairs(sessions,epoch="post",brainstates=["REM","NREM"],n_ch
 
 #     return spikes_sorted, clus_sorted.astype("int")
 
-from scipy.stats import ttest_ind
 def routine_mean_firing_rates(sessions, epochs = "post", n_chunks = 3, 
                                  brainstates=["REM","NREM"], alpha=0.05):
     if isinstance(epochs,str):
@@ -633,11 +644,11 @@ def routine_mean_firing_rates(sessions, epochs = "post", n_chunks = 3,
         sess_name = _short_session_name(sess)
         overview_str=f"======={sess_name}=======\n"
         neurons = sess.neurons.get_neuron_type(neuron_types)
-        neurons=_split_session_brainstate(sess.brainstates,brainstates,neurons)
+        neurons=_split_by_brainstate(sess.brainstates,brainstates,neurons)
         neurons_chunked,labels=[],[]
         for epoch_name,n_chunk in zip(epochs,n_chunks):
             p=sess.paradigm.label_slice(epoch_name)
-            _ = _split_session(n_chunk, p.starts[0],p.stops[0], neurons)
+            _ = _split_by_time(n_chunk, p.starts[0],p.stops[0], neurons)
             neurons_chunked.append(_)
             labels+=[f"{epoch_name.capitalize()}{i+1}" for i in range(n_chunk)]
 

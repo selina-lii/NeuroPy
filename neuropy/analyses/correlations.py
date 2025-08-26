@@ -526,8 +526,13 @@ def cp_spike_correlations(
     else:
         correlograms=correlograms.get()
 
+    n_neurons=neurons.n_neurons
+    idxs = [np.where(neurons.neuron_ids == c)[0][0] for c in clusters.get()]
+    out = np.zeros((n_neurons, n_neurons, correlograms.shape[-1]), dtype=correlograms.dtype)
+    out[np.ix_(idxs, idxs)] = correlograms
+
     cp.get_default_memory_pool().free_all_blocks()
-    return correlograms
+    return out
 
 
 def cp_spike_correlations_2groups(
@@ -587,7 +592,10 @@ def cp_spike_correlations_2groups(
     N0=len(ref_neuron_inds)
     N1=len(neuron_inds)
     
+    # TODO! makeshift solution, shouldn't need to relabel neurons. Find out what's wrong-
     neurons = neurons.neuron_slice(neuron_inds=all_inds)
+    for i in range(neurons.n_neurons):
+        neurons.neuron_ids[i]=i
 
     # Get spike times from neurons
     spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
@@ -641,6 +649,7 @@ def cp_spike_correlations_2groups(
         # SL: group0->group1 forward connections. create an intergroup mask
         ref=spike_clusters_i[:-shift][m]
         target=spike_clusters_i[+shift:][m]
+        
         gm = (ref < N0) & (target >= N0)
 
         if symmetrize:
@@ -662,7 +671,7 @@ def cp_spike_correlations_2groups(
             indices = cp.ravel_multi_index(
                 (ref[gm], target[gm]-N0, d[gm]),
                 correlograms.shape,
-            )
+            ) # TODO! not right with binsize//2 shift
 
         # Increment the matching spikes in the correlograms array.
         _cp_increment(correlograms.ravel(), indices)
