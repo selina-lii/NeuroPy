@@ -9,7 +9,7 @@ from copy import deepcopy
 from joblib import Parallel, delayed
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
-from typing import Self
+from typing import Self, Union
 
 #TODO should we complicate Neurons with cuda?
 import numpy as np
@@ -152,8 +152,8 @@ class Neurons(DataWriter):
             metadata=self.metadata
         )
 
-    def t_shrink(self):
-        # shrink t_start/t_stop to tighest epoch boundaries
+    def t_tighten(self):
+        # shrink t_start/t_stop to tight boundaries
         assert np.isin('intervals',list(self.metadata.keys())), "missing epochs data"
         actual_start, actual_end = self.metadata['intervals'][0,0], self.metadata['intervals'][-1,-1]
         self.t_start = max(self.t_start,actual_start)
@@ -201,7 +201,12 @@ class Neurons(DataWriter):
         return f"{self.__class__.__name__}\n n_neurons: {self.n_neurons}\n t_start: {self.t_start}\n t_stop: {self.t_stop}\n neuron_type: {neuron_types}"
 
     def time_slice(self, t_start=None, t_stop=None, zero_spike_times=False):
-        """zero_spike_times = True will subtract t_start from all spike times"""
+        """
+        Time sclicing of the neuron
+
+        zero_spike_times = True will subtract t_start from all spike times
+        Default t_start and t_stop are neuron's own attributes
+        """
         t_start, t_stop = super()._time_slice_params(t_start, t_stop)
         neurons = deepcopy(self)
         if zero_spike_times:
@@ -221,11 +226,25 @@ class Neurons(DataWriter):
             neuron_ids=neurons.neuron_ids,
             neuron_type=neurons.neuron_type,
             waveforms=neurons.waveforms,
+            waveforms_amplitude=neurons.waveforms_amplitude,
             peak_channels=neurons.peak_channels,
             shank_ids=neurons.shank_ids,
+            clu_q=neurons.clu_q,
             metadata=neurons.metadata,
         )
-    
+
+    def time_split(self, n_chunks=1):
+        """
+        Evenly divide neuron into N chunks (equal length) by specifying n_chunks
+        """
+        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+
+        chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
+        chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
+        
+        neurons=deepcopy(self)
+        return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
+
     def _clip_intervals(self,intervals,t_start=None,t_stop=None):
         # print("before",intervals[0],intervals[-1],t_start,t_stop)
         # align start/end of a list of intervals
@@ -241,7 +260,7 @@ class Neurons(DataWriter):
         return intervals
 
     def time_multislices(self, intervals:list[list], t_start=None, t_stop=None, zero_spike_times=False,
-                         shrink=False):
+                         tighten=False):
         """
         Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
         """
@@ -261,7 +280,7 @@ class Neurons(DataWriter):
 
         # this is faster. 
         # alternatively, use inds = np.any((spks >= intervals[:,0]) & (spks <= intervals[:,1]), axis=1)
-        def _filter_sorted(spks, intervals):
+        def _mask(spks, intervals):
             keep = []
             for start, end in intervals:
                 i0 = np.searchsorted(spks, start, 'left')
@@ -271,29 +290,19 @@ class Neurons(DataWriter):
         
         neurons = deepcopy(self)
         if zero_spike_times:
-            spiketrains = [_filter_sorted(spks,intervals)-t_start for spks in neurons.spiketrains]
+            spiketrains = [_mask(spks,intervals)-t_start for spks in neurons.spiketrains]
             t_stop = t_stop - t_start
             t_start = 0
         else:
-            spiketrains = [_filter_sorted(spks,intervals) for spks in neurons.spiketrains]
+            spiketrains = [_mask(spks,intervals) for spks in neurons.spiketrains]
 
-        neurons = Neurons(
-            spiketrains=spiketrains,
-            t_stop=t_stop,
-            t_start=t_start,
-            sampling_rate=neurons.sampling_rate,
-            neuron_ids=neurons.neuron_ids,
-            neuron_type=neurons.neuron_type,
-            waveforms=neurons.waveforms,
-            peak_channels=neurons.peak_channels,
-            shank_ids=neurons.shank_ids,
-            metadata={'intervals':intervals},
-            )
-        if shrink:
-            neurons.t_shrink()
+        neurons.spiketrains=spiketrains
+        neurons.t_stop=t_stop
+        neurons.t_start=t_start
+        neurons.metadata={'intervals':intervals}
+        if tighten: neurons.t_tighten()
         return neurons
     
-
     def neuron_slice(self, neuron_inds=None, neuron_ids=None):
         neurons = deepcopy(self)
 
@@ -347,7 +356,25 @@ class Neurons(DataWriter):
             peak_channels=peak_channels,
             clu_q=clu_q,
             shank_ids=shank_ids,
+            metadata=neurons.metadata
         )
+
+    def behav_slice(self, b_times:Epoch, labels: Union[list[str], str], tighten=False, min_dur=120):
+        """
+        Return neurons with only spikes during specified behavioral or brain states
+        (for example, sleep/wake)
+
+        bs_times: Epoch
+            An epeoch object that specifies what brain states happened at when
+        label: name of the brainstates
+            Usually from ["QW","AW","REM","NREM"].
+        min_dur: minimum duration threshold in seconds
+        tighten: 
+        """
+        bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
+        intervals = list(zip(bstates.starts,bstates.stops))
+        state_neurons=self.time_multislices(intervals,tighten=tighten)
+        return state_neurons
 
     def concatenate(self, neurons_to_add, index_to_add=0):
         """Add two neuron spike trains together. Adds 'index_to_add' to neuron_ids, shank_ids, and peak_channels
@@ -449,6 +476,17 @@ class Neurons(DataWriter):
         # indices = np.isin(self.neuron_ids, ids, assume_unique=True)
         indices = np.array([np.where(self.neuron_ids == _)[0][0] for _ in ids])
         return self[indices]
+
+    def id2int(self, v):
+        """Receives indices from neuron ids
+        TODO not tested!!"""
+        lookup = {nid: i for i, nid in enumerate(self.neuron_ids)}
+        arr = np.atleast_2d(v)
+        return np.array([[lookup[i] for i in row] for row in arr])
+    
+    def ind2id(self, indices):
+        """Return neuron id from indices"""
+        return np.array([[self.neuron_ids[i] for i in row] for row in indices])
 
     def to_dataframe(self):
         """Generates a pandas dataframe with some descriptions about the neurons"""
@@ -1020,3 +1058,4 @@ def binned_pe_raster(
     )
 
     return fr_array, pe_times
+

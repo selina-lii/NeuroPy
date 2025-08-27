@@ -635,6 +635,7 @@ def cp_spike_correlations_2groups(
         spike_diff_b = spike_diff // binsize
 
         # Spikes with no matching spikes are masked.
+        # SL: If there are no matching spikes now, there wouldn't be any with a larger shift.
         mask[:-shift][spike_diff_b > (winsize_bins // 2)] = False # SL exclude spike pairs that fall outside the ccg window after shifting
 
         # Cache the masked spike delays.
