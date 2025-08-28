@@ -237,7 +237,7 @@ class Neurons(DataWriter):
         """
         Evenly divide neuron into N chunks (equal length) by specifying n_chunks
         """
-        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        t_start, t_stop = super()._time_slice_params()
 
         chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
         chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]

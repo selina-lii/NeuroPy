@@ -7,7 +7,6 @@ try:
 except ImportError:
     print("Error importing CuPy")
     cp = None
-from NeuroPy.neuropy.core.ca_neurons import _split_by_brainstate
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows, convolve
@@ -83,7 +82,7 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     pred = ndimage.convolve1d(ccg_pad, window, axis=-1)
     pred=pred[...,W:-W]
 
-    # two-tailed one-sample test of whether the two values are significantly different in Poisson distribution
+    # mid-p Poisson test: P( val<=pred ) + half of P ( val==pred )
     pvals = 1 - poisson.cdf(ccg-1, pred) - poisson.pmf(ccg, pred)*0.5
     qvals = 1 - pvals
     return pvals, pred, qvals
@@ -385,8 +384,8 @@ def routine_eranconv_pairs(neurons_dict):
         should be the same as `jscale` that you'd use for jittering
     """
     print("EranConv significant pairs")
-    conn_types_E = [('pyr','pyr'), ('pyr','int')]
-    conn_types_I = [('int','int'), ('int','pyr')]
+    conn_types_E = [('pyr','pyr'), ('pyr','inter')]
+    conn_types_I = [('inter','inter'), ('inter','pyr')]
     neuron_types =  neurons_dict['neuron_types']
     n_chunks= neurons_dict['n_chunks'][0]
     epoch = neurons_dict['epochs'][0] # there is only one epoch
@@ -394,7 +393,11 @@ def routine_eranconv_pairs(neurons_dict):
 
     # RETURN VALUES
     all_connections = {'session_names':session_names,
-                       'neuron_types':neuron_types}
+                       'neuron_types':neuron_types,
+                       'conn_types':{
+                           'E':conn_types_E,
+                           'I':conn_types_I,
+                       }}
 
     ### start of session loop ###
     for sess_name in session_names:
@@ -404,9 +407,11 @@ def routine_eranconv_pairs(neurons_dict):
         c_len = (sess_neurons[0].t_stop-sess_neurons[0].t_start)/3600
 
         ################ UPDATE RETURN VALUES #################       
-        sess_connections = {"t":c_len,
-                            "E":{'conn_types':conn_types_E},
-                            "I":{'conn_types':conn_types_I}}
+        sess_connections = {
+                                "t":c_len,
+                                "E":{'conn_types':conn_types_E},
+                                "I":{'conn_types':conn_types_I}
+                            }
         for conn_type in conn_types_E: sess_connections['E'][conn_type]=[]
         for conn_type in conn_types_I: sess_connections['I'][conn_type]=[]
         ############# END OF UPDATE RETURN VALUES ##############
@@ -445,7 +450,7 @@ def routine_eranconv_pairs(neurons_dict):
             neurons = sess_neurons[c]
             inds_by_type = {
                 'pyr':np.where(neurons.neuron_type=='pyr'),
-                'int':np.where(neurons.neuron_type=='inter')
+                'inter':np.where(neurons.neuron_type=='inter')
             }
             n = neurons.n_neurons
             if use_multi_correction: 
@@ -482,7 +487,7 @@ def routine_eranconv_pairs(neurons_dict):
                 'spkcount_scope':12,
                 'ignore_same_electrodes':True,
                 'ref_type':'pyr',
-                'target_type':['pyr','int'],
+                'target_type':['pyr','inter'],
                 'p':0.05,
             }
             inhib_args = {
@@ -492,7 +497,7 @@ def routine_eranconv_pairs(neurons_dict):
                 'min_spkcount':2.5,
                 'spkcount_scope':12,
                 'ignore_same_electrodes':False,
-                'ref_type':'int',
+                'ref_type':'inter',
                 'target_type':'pyr',
                 'p':0.05,
                 'p2':0.1
@@ -596,7 +601,7 @@ def routine_eranconv_pairs(neurons_dict):
             ############# END OF UPDATE RETURN VALUES ##############
 
             ### end of chunks loop ###
-        all_connections[sess_name]=sess_connections
+        all_connections[sess_name]= sess_connections
         print(overview_str)
         ### end of sessions loop ###
     return all_connections
@@ -704,47 +709,136 @@ def routine_eranconv_connection_info(info, neurons_dict):
     Print aggregated information of eranconv_pairs() outputs
 
     info: eranconv_pairs outputs
-
-    TODO TODO
     """
-    conn_types = np.concatenate([info['E']['conn_types'],info['I']['conn_types']])
+    results = {'E':{},'I':{}}
+    total_by_conntype = {'E':{},'I':{}}
+    total_by_EI = {'E':0,'I':0}
+    for EI in ['E','I']:
+        for conn_type in info['conn_types'][EI]:
+            results[EI][conn_type]={'sig_conv':0,'list':[]}
+            total_by_conntype[EI][conn_type] = 0
+        
     neuron_types = info['neuron_types']
-    ntypes = len(neuron_types)
-    
+    epoch = neurons_dict['epochs'][0]
+
     for sess_name in info['session_names']:
         x = info[sess_name]
-        neurons = neurons_dict[sess_name]
+        neurons = neurons_dict[sess_name][epoch][0]
 
-        count_by_conntype = np.zeros((ntypes, ntypes),int)
-        key_names = np.zeros((ntypes, ntypes),str)
-        sig_by_conn = np.zeros((ntypes, ntypes),int)
-        ls_sig_byy_conn = np.zeros((ntypes, ntypes),str)
+        n = {}
+        for _ in neuron_types: 
+            n[_] = neurons.get_neuron_type(_).n_neurons
+                
+        total_by_EI['E'] += x['E']['total']
+        total_by_EI['I'] += x['I']['total']
 
-        n = [neurons.get_neuron_type(_).n_neurons for _ in neuron_types]
-        for i, ti in enumerate(neuron_types):
-            for j, tj in enumerate(neuron_types):
-                if i == j:
-                    total_by_conntype[i,j] = n[ti]*(n[tj]-1)
+        for EI in ['E','I']:
+            for conn_type in info['conn_types'][EI]:
+                try:
+                    n_sig=len(x[EI][conn_type][0]['inds']) # Only has one session
+                except Exception as e:
+                    n_sig=0
+                ref,target=conn_type
+                if ref==target:
+                    total_by_conntype[EI][conn_type] += n[ref]*(n[ref]-1)
                 else:
-                    total_by_conntype[i,j] = n[ti]*n[tj]
-                key_names[i,j]=(ti,tj)
-        total_by_EI = np.array([x['E']['total'],x['I']['total']])
-
-        for conn_type in x['E']['conn_types']:
-
-        try:
-            sig_pyr_pyr=len(['pyr','pyr'][0]['inds'])
-        except:
-            sig_pyr_pyr=0
-        all_sig_pyr_pyr+=sig_pyr_pyr
-        ls_sig_pyr_pyr.append(sig_pyr_pyr)
-        all_pyr_pyr+=n_pyr_pyr
-        all_E+=E
-        all_I+=I    
+                    total_by_conntype[EI][conn_type] += n[ref]*n[target]
+                results[EI][conn_type]['sig_conv']+=n_sig
+                results[EI][conn_type]['list'].append(n_sig)
     
-    foreach
-    print(f"{np.mean(ls_sig_byy_conn[1:]):.2f}",f"{np.std(ls_sig_pyr_pyr[1:]):.2f}")
-    
+    overview_str = f"||______name_______||_sig___|_mean__|_std___|_mean/0|_std/0_||_EI____|_%_____||ref-tgt|_%_____||\n"
+    for EI in ['E','I']:
+        for conn_type in info['conn_types'][EI]:
+                typename = f"{conn_type[0]}-{conn_type[1]}/{EI}"
+                ls = np.array(results[EI][conn_type]['list'])
+                tEI = total_by_EI[EI]
+                tConn = total_by_conntype[EI][conn_type]
+                sig = results[EI][conn_type]['sig_conv']
+                mean = np.mean(ls)
+                std = np.std(ls)
+                print(ls)
+                meanN0 = np.mean(ls[ls!=0])
+                stdN0 = np.std(ls[ls!=0])
+                pEI = sig/tEI*100
+                pConn = sig/tConn*100
+                d = {f"total_{EI}": tEI,
+                    f"total_{conn_type[0]}_{conn_type[1]}": tConn,
+                    'sig_conv': sig,
+                    'list': ls,
+                    f'total_{EI}_percentage': pEI,
+                    f'total_{conn_type[0]}_{conn_type[1]}_percentage': pConn,
+                    }
+                results[EI][conn_type]=d
+                overview_str += f"|| {typename:>15} || {sig:>5} | {mean:5.2f} | {std:5.2f} | {meanN0:5.2f} | {stdN0:5.2f} || {tEI:>5} | {pEI:5.2f} || {tConn:>5} | {pConn:5.2f} || \n"
+    print(overview_str)
+    return results
+
+def routine_eranconv_save_plots(neurons_dict,sessions,conn_types):
+    # TODO: move to plotting
+    window_size = 0.02
+    bin_size = 0.001 # TODO pass from previous functions
+    jitter_significances = None # TODO
+    for s,sess_name in enumerate(neurons_dict['session_names']):
+        x = neurons_dict[sess_name]
+        for EI in ['E','I']:
+            for conn_type in conn_types[EI]:
+                k=x[sess_name][EI][conn_type][0]
+                coords=k['inds']
+                ids=k['ids']
+                s=np.argsort(coords[:,1])
+                coords=coords[s]
+                ccg=k['ccg'][s]
+                pvals=k['pval'][s]
+                pred=k['pred'][s]
+                uniqinds=np.unique(coords)
+                neurons_all = sessions[s].neurons.get_neuron_type(neurons_dict['neuron_types'])
+                frates_all = neurons_all.firing_rate
+                neurons = x[sess_name]['neurons']
+                frates = neurons.firing_rate[uniqinds]
+                plotdir=f"/home/selinali/Documents/NeuroPy/images/ccg_plots/{sess_name}-{conn_type[0]}-{conn_type[1]}"
+                import os
+                os.makedirs(plotdir, exist_ok=True)
+                cds=coords#[np.random.random_integers(0,coords.shape[0]-1,5)]
+                plot_ccg_eranconv(neurons, ccg,window_size=window_size,pvals=pvals,pred=pred,bin_size=bin_size,inds=cds,uniqinds=uniqinds,frates=frates,frates_all=frates_all,jitter_sigs=jitter_significances,mode='odd')
+
+
+def plot_ccg_eranconv(neurons, ccgs, window_size, bin_size, inds, pvals, pred, jitter_sigs, uniqinds, frates, frates_all, mode='even'):
+    # example result - submillisecond synchrony
+    window_size*=1e3
+    bin_size*=1e3
+    for (x,y),ccg, prd,pval,jsig in zip(inds, ccgs, pred, pvals,jitter_sigs):
+        X=neurons.neuron_ids[x]
+        Y=neurons.neuron_ids[y]
+        fig, axs = plt.subplots(1,3,figsize=(10,5),gridspec_kw={'width_ratios':[2,1,1]})
+        # generating even-numbered bins
+        if mode=='even':
+            bins = np.arange(-window_size / 2-bin_size, window_size / 2+bin_size/2, bin_size)+bin_size/2
+        else:
+            bins = np.arange(-window_size / 2, window_size / 2+bin_size, bin_size)
+        ax=axs[0]
+        ax.bar(bins, ccg, width=bin_size,alpha=0.5,label="ccg")
+        ax.bar(bins, prd, width=bin_size,alpha=0.5,label='ccg-smooth')
+        ax.plot(bins, pval*np.max(ccg), label='p')
+        ax.plot(bins, jsig*np.max(ccg),label='j-significance')
+        ax.set_xlabel("Time (millisecond)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"CCG, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
+        ax.legend()
+        sns.despine(ax=ax)
+        xx,yy=np.where(uniqinds==x)[0][0],np.where(uniqinds==y)[0][0]
+        ax=axs[1]
+        ax.imshow(neurons.waveforms[x].astype(float))
+        ax.set_title(f"ref: {neurons.neuron_type[x]}{X}")
+        ax.set_xlabel(f"{neurons_all.firing_rate[x]:.2f}Hz all | {frates[xx]:.2f}Hz sleep")
+        ax=axs[2]
+        ax.imshow(neurons.waveforms[y].astype(float))
+        ax.set_title(f"target: {neurons.neuron_type[y]}{Y}")
+        ax.set_xlabel(f"{neurons_all.firing_rate[y]:.2f}Hz all | {frates[yy]:.2f}Hz sleep")
+        fig.savefig(f"{plotdir}/ccg-inds{x}-{y}.png")
+        fig.tight_layout()
+        plt.close(fig)
+
+
 
 def get_jitter_inputs(coords):
     """
