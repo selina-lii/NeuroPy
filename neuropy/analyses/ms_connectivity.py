@@ -27,7 +27,7 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
         1D or 2D. (CCGs in columns)
         If 2D, elements in the first dimension are individual ccgs and second dimension are bins.
     W: 
-        defines the width of the convolution window, should be equivalent to size of jitter window (in milliseconds)
+        defines the width (unit: ms) of the convolution window, should be same as size of jitter window if were to use one
         `gauss`: W is standard deviation (sigma). Total window length will be 
         `rect`: Half size of window = W, total length is always odd
         `triang`: Window length is W rounded up to the nearest odd number
@@ -391,13 +391,56 @@ def routine_eranconv_pairs(neurons_dict):
     epoch = neurons_dict['epochs'][0] # there is only one epoch
     session_names = neurons_dict['session_names']
 
-    # RETURN VALUES
+    ################ CONFIG #################
+    duration=20*1e-3 # 20ms - must be multiples of bin_size
+    bin_size=1*1e-3 # 1ms
+    window_width = 5 # 5ms
+    alpha = 0.05
+    alpha2 = 0.1
+    use_multi_correction = True
+    C=int(duration/bin_size//2) # center bin
+    nbins = int(duration/bin_size)
+
+    min_lag = 1*1e-3 # 1ms
+    max_lag = 3*1e-3 # 3ms
+    min_spkcount = 2.5
+    spkcount_scope = 12*1e-3 # 12ms total
+    ignore_same_electrodes = True
+
+    start=int(min_lag/bin_size)
+    end=int(max_lag/bin_size)
+    spkcount=int(spkcount_scope/2/bin_size)
+    ############# END OF CONFIG ##############
+
+    ################ UPDATE RETURN VALUES #################
     all_connections = {'session_names':session_names,
-                       'neuron_types':neuron_types,
-                       'conn_types':{
-                           'E':conn_types_E,
-                           'I':conn_types_I,
-                       }}
+                    'neuron_types':neuron_types,
+                    'conn_types':{
+                        'E':conn_types_E,
+                        'I':conn_types_I,
+                    },
+                    'args': {
+                        'duration': duration,
+                        'bin_size': bin_size,
+                        'window_width': window_width,
+                        'alpha': alpha,
+                        'alpha2': alpha2,
+                        'use_multi_correction': use_multi_correction,
+                        'min_lag': min_lag,
+                        'max_lag': max_lag,
+                        'min_lag_bin': start,
+                        'max_lag_bin': end,
+                        'min_spkcount': min_spkcount,
+                        'spkcount_scope': spkcount_scope,
+                        'spkcount_scope_bin': spkcount,
+                        'ignore_same_electrodes': ignore_same_electrodes,
+                        'nbins': nbins,
+                        'center_bin': C,
+                    }
+                    
+                    
+                    }
+    ############# END OF UPDATE RETURN VALUES ##############
 
     ### start of session loop ###
     for sess_name in session_names:
@@ -415,26 +458,6 @@ def routine_eranconv_pairs(neurons_dict):
         for conn_type in conn_types_E: sess_connections['E'][conn_type]=[]
         for conn_type in conn_types_I: sess_connections['I'][conn_type]=[]
         ############# END OF UPDATE RETURN VALUES ##############
-
-        ################ CONFIG #################
-        duration=20*1e-3 # 20ms
-        bin_size=1*1e-3 # 1ms
-        window_width = 5
-        alpha = 0.05
-        alpha2 = 0.1
-        use_multi_correction = True
-        C=int(duration/bin_size//2) # center bin
-
-        min_lag = 1*1e-3 # 1ms
-        max_lag = 3*1e-3 # 3ms
-        min_spkcount = 2.5
-        spkcount_scope = 12*1e-3 # 12ms total
-        ignore_same_electrodes = True
-
-        start=int(min_lag/bin_size)
-        end=int(max_lag/bin_size)
-        spkcount=int(spkcount_scope/2/bin_size)
-        ############# END OF CONFIG ##############
 
         ################ UPDATE PRINT STRING #################
         overview_str = f"======={sess_name}=======\n"
@@ -454,8 +477,9 @@ def routine_eranconv_pairs(neurons_dict):
             }
             n = neurons.n_neurons
             if use_multi_correction: 
-                alpha=alpha/(n**2-n) # multiple comparison
-                alpha2=alpha2/(n**2-n)
+                alpha=alpha/(n**2-n)/nbins # local threshold
+                alpha2=alpha2/(n**2-n)/nbins 
+                # TODO global threshold
 
             ccg = correlations.spike_correlations(
                     neurons=neurons,
@@ -467,8 +491,7 @@ def routine_eranconv_pairs(neurons_dict):
                     symmetrize_mode='odd',
                 )
             
-            W = window_width*1e-3/bin_size # align conv kernel size to jitter timescale
-            pvals, pred, qvals = eran_conv(ccg,W=W,wintype="gauss",hollow_frac=None)
+            pvals, pred, qvals = eran_conv(ccg,W=window_width,wintype="gauss",hollow_frac=None)
 
             msconn_args = {
                 'min_lag':0,
@@ -773,39 +796,66 @@ def routine_eranconv_connection_info(info, neurons_dict):
     print(overview_str)
     return results
 
-def routine_eranconv_save_plots(neurons_dict,sessions,conn_types):
-    # TODO: move to plotting
+
+
+
+
+# TODO: move to plotting in the future!
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os
+
+def routine_eranconv_save_plots(neurons_dict,sessions,conv_dict,jitter_dict=None):
+    plotdir = f"/home/selinali/Documents/NeuroPy/images/ccg_plots"
     window_size = 0.02
     bin_size = 0.001 # TODO pass from previous functions
-    jitter_significances = None # TODO
     for s,sess_name in enumerate(neurons_dict['session_names']):
         x = neurons_dict[sess_name]
+        if jitter_dict is not None:
+            jitters = jitter_dict[sess_name]
+        neurons = neurons[sess_name]
+        convvars = conv_dict[sess_name]
+        neurons_all = sessions[s].neurons.get_neuron_type(neurons_dict['neuron_types'])
+        frates_all = neurons_all.firing_rate
         for EI in ['E','I']:
-            for conn_type in conn_types[EI]:
-                k=x[sess_name][EI][conn_type][0]
+            for conn_type in conv_dict[EI]['conn_types']:
+                if jitter_dict is not None:
+                    jitter = jitters[EI][conn_type]
+                else:
+                    jitter = None
+                k=convvars[EI][conn_type][0]
+                # s=np.argsort(coords[:,1])
+                # coords=coords[s]
                 coords=k['inds']
-                ids=k['ids']
-                s=np.argsort(coords[:,1])
-                coords=coords[s]
-                ccg=k['ccg'][s]
-                pvals=k['pval'][s]
-                pred=k['pred'][s]
                 uniqinds=np.unique(coords)
-                neurons_all = sessions[s].neurons.get_neuron_type(neurons_dict['neuron_types'])
-                frates_all = neurons_all.firing_rate
-                neurons = x[sess_name]['neurons']
                 frates = neurons.firing_rate[uniqinds]
-                plotdir=f"/home/selinali/Documents/NeuroPy/images/ccg_plots/{sess_name}-{conn_type[0]}-{conn_type[1]}"
-                import os
+                plotdir=f"{plotdir}/{sess_name}-{conn_type[0]}-{conn_type[1]}"
                 os.makedirs(plotdir, exist_ok=True)
                 cds=coords#[np.random.random_integers(0,coords.shape[0]-1,5)]
-                plot_ccg_eranconv(neurons, ccg,window_size=window_size,pvals=pvals,pred=pred,bin_size=bin_size,inds=cds,uniqinds=uniqinds,frates=frates,frates_all=frates_all,jitter_sigs=jitter_significances,mode='odd')
+                
+                plot_ccg_eranconv(neurons=neurons, 
+                                  ccg=k['ccg'], 
+                                  plotdir=plotdir, 
+                                  window_size=window_size,
+                                  pvals=k['pval'],
+                                  pred=k['pred'],
+                                  bin_size=bin_size,
+                                  inds=cds,
+                                  uniqinds=uniqinds,
+                                  frates=frates,
+                                  frates_all=frates_all,
+                                  jitter_sigs=jitter,
+                                  mode='odd')
 
 
-def plot_ccg_eranconv(neurons, ccgs, window_size, bin_size, inds, pvals, pred, jitter_sigs, uniqinds, frates, frates_all, mode='even'):
+def plot_ccg_eranconv(neurons, ccgs, plotdir, window_size, bin_size, inds, pvals, pred, uniqinds, frates, frates_all, jitter_sigs=None, mode='even'):
     # example result - submillisecond synchrony
     window_size*=1e3
     bin_size*=1e3
+    plot_jitter = (jitter_sigs is None)
+    if plot_jitter:
+        jitter_sigs = np.zeros(inds.shape[0])
     for (x,y),ccg, prd,pval,jsig in zip(inds, ccgs, pred, pvals,jitter_sigs):
         X=neurons.neuron_ids[x]
         Y=neurons.neuron_ids[y]
@@ -819,7 +869,8 @@ def plot_ccg_eranconv(neurons, ccgs, window_size, bin_size, inds, pvals, pred, j
         ax.bar(bins, ccg, width=bin_size,alpha=0.5,label="ccg")
         ax.bar(bins, prd, width=bin_size,alpha=0.5,label='ccg-smooth')
         ax.plot(bins, pval*np.max(ccg), label='p')
-        ax.plot(bins, jsig*np.max(ccg),label='j-significance')
+        if plot_jitter:
+            ax.plot(bins, jsig*np.max(ccg),label='j-significance')
         ax.set_xlabel("Time (millisecond)")
         ax.set_ylabel("Count")
         ax.set_title(f"CCG, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
@@ -829,15 +880,14 @@ def plot_ccg_eranconv(neurons, ccgs, window_size, bin_size, inds, pvals, pred, j
         ax=axs[1]
         ax.imshow(neurons.waveforms[x].astype(float))
         ax.set_title(f"ref: {neurons.neuron_type[x]}{X}")
-        ax.set_xlabel(f"{neurons_all.firing_rate[x]:.2f}Hz all | {frates[xx]:.2f}Hz sleep")
+        ax.set_xlabel(f"{frates_all[x]:.2f}Hz all | {frates[xx]:.2f}Hz sleep")
         ax=axs[2]
         ax.imshow(neurons.waveforms[y].astype(float))
         ax.set_title(f"target: {neurons.neuron_type[y]}{Y}")
-        ax.set_xlabel(f"{neurons_all.firing_rate[y]:.2f}Hz all | {frates[yy]:.2f}Hz sleep")
+        ax.set_xlabel(f"{frates_all[y]:.2f}Hz all | {frates[yy]:.2f}Hz sleep")
         fig.savefig(f"{plotdir}/ccg-inds{x}-{y}.png")
         fig.tight_layout()
         plt.close(fig)
-
 
 
 def get_jitter_inputs(coords):
