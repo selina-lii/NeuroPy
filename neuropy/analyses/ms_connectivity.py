@@ -15,6 +15,8 @@ from scipy import ndimage
 import time
 from scipy.stats import ttest_ind
 from typing import Union
+from datetime import datetime
+import h5py
 
 def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     """
@@ -247,6 +249,9 @@ def ccg_jitter(neurons: Neurons,
     use_cupy=False,
     symmetrize_mode='even',
 ):
+    """
+    CCGs are shaped (N0,N1,nbins)
+    """
 
     # SL: These were comments from Nat I guess - 
     # most of these are naturally fixed as I update the function
@@ -302,9 +307,10 @@ def ccg_jitter(neurons: Neurons,
     # threshold = (N0,Nbins)
     thresholds = np.percentile(ccg_all[:,1:],100*(1-alpha), axis=1)
     significances = pval<=alpha
-    # significances = correlograms > thresholds
+    # significances = correlograms > thresholds # either way they should be equivalent
+    jbsi_vals = jbsi(ccg_all)
 
-    return neuronsj, ccg_all, pval, significances, thresholds # orig
+    return neuronsj, ccg_all, pval, significances, thresholds, jbsi_vals # orig
 
 def jbsi(ccgs):
     pass
@@ -796,9 +802,52 @@ def routine_eranconv_connection_info(info, neurons_dict):
     print(overview_str)
     return results
 
+def get_jitter_inputs(coords):
+    """
+    Reshape coordinates of (ref,target) pairs into most efficient format for jittering
+    grouped by target indices
 
+    coords: np array with shape (n,2)
+    """
+    coords=np.argsort(coords[:,1])
+    keys, inv = np.unique(coords[:,1], return_inverse=True)
+    jitter_inputs = [coords[inv==i,0].tolist()+[k] for i,k in enumerate(keys)]
+    return jitter_inputs
 
-
+def routine_jitter_pairs_after_conv(eranconv_out,neurons_dict,njitter=100,jitter_type='spike_time'):
+    # where do i store jitters. npy? hdf5?
+    now = datetime.now()
+    filename = now.strftime("%Y-%m-%d-%H-%M")
+    datafolder = '~/Documents'
+    epoch = neurons_dict['epochs'][0]
+    for sess_name in eranconv_out['session_names']:
+        data_struct = {'njitter':njitter,
+                       'jitter_type':jitter_type,
+                       'E':{},
+                       'I':{}}
+        sess_coords = eranconv_out[sess_name]
+        neurons = neurons_dict[sess_name][epoch]
+        for EI in ['E','I']:
+            for conn_type in eranconv_out['conn_types'][EI]:
+                data_struct[EI][conn_type]={}
+                coords = sess_coords[EI][conn_type]['inds']
+                j_inds = get_jitter_inputs(coords)
+                for i,j in enumerate(j_inds):
+                    neuronsj, ccg_all, pval, significances, thresholds, jbsi = ccg_jitter(neurons=neurons,
+                                          neuron_inds=j,
+                                          njitter=njitter,
+                                          use_cupy=True,
+                                          symmetrize_mode='odd')
+                    data_struct[EI][conn_type][i]={
+                        'neuronsj':neuronsj, 
+                        'ccg':ccg_all, 
+                        'p':pval, 
+                        'sig':significances, 
+                        'thres':thresholds,
+                        'jbsi':jbsi,
+                    }
+        with h5py.File(f"{datafolder}/jitter-{filename}.h5", "a") as f:
+            f.create_dataset(f"{sess_name}", data=data_struct)   
 
 # TODO: move to plotting in the future!
 
@@ -890,14 +939,3 @@ def plot_ccg_eranconv(neurons, ccgs, plotdir, window_size, bin_size, inds, pvals
         plt.close(fig)
 
 
-def get_jitter_inputs(coords):
-    """
-    Reshape coordinates of (ref,target) pairs into most efficient format for jittering
-    grouped by target indices
-
-    coords: np array with shape (n,2)
-    """
-    coords=np.argsort(coords[:,1])
-    keys, inv = np.unique(coords[:,1], return_inverse=True)
-    jitter_inputs = [coords[inv==i,0].tolist()+[k] for i,k in enumerate(keys)]
-    return jitter_inputs
