@@ -143,3 +143,6 @@ dmypy.json
 #VScode
 .vscode
 *.vscode
+
+# Images
+images/*/test*

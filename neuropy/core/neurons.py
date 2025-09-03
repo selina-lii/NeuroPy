@@ -624,6 +624,7 @@ class Neurons(DataWriter):
     def merge(self, neurons: Self):
         """
         Combine another Neurons object with self
+        Doesn't sort cell ids.
         """
         def _safe_merge(list1, list2):
             if list1 is None and list2 is None:
@@ -646,6 +647,7 @@ class Neurons(DataWriter):
                 list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
             return np.concatenate([list1,list2])
         
+        # SL: Make sure the two groups being merged are aligned. Are there better conditions?
         assert self.t_start==neurons.t_start
         assert self.t_stop==neurons.t_stop
         self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
