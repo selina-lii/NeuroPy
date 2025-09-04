@@ -240,7 +240,7 @@ def ccg_jitter(neurons: Neurons,
     njitter=100,
     alpha=0.05,
     use_cupy=False,
-    symmetrize_mode='even',
+    bin_mode='even',
     EI = 'E'
 ):
     """
@@ -283,7 +283,7 @@ def ccg_jitter(neurons: Neurons,
             window_size=duration,
             use_cupy=use_cupy,
             symmetrize=True,
-            symmetrize_mode=symmetrize_mode,
+            bin_mode=bin_mode,
         )
     # Debugging - 'debug' should be all zeros (two methods are identical)
     # orig = correlations.spike_correlations(
@@ -293,7 +293,7 @@ def ccg_jitter(neurons: Neurons,
     #         window_size=duration,
     #         use_cupy=use_cupy,
     #         symmetrize=True,
-    #         symmetrize_mode=symmetrize_mode,
+    #         bin_mode=bin_mode,
     #     )
     # debug = orig[0,len(ref_inds):]-ccg_all[0]
     # print(debug)
@@ -369,7 +369,7 @@ def routine_jitter(neurons,jitter_inputs):
     sigs=[]
     for ji in jitter_inputs:
         sigs.append(ccg_jitter(neurons,neuron_inds=ji,use_cupy=True,
-                               njitter=100,alpha=1e-6,symmetrize_mode='odd')[2])
+                               njitter=100,alpha=1e-6,bin_mode='odd')[2])
     jitter_significances=np.array([xx for x in sigs for xx in x])#.astype(int)
     return jitter_significances
 
@@ -656,7 +656,7 @@ def routine_eranconv_pairs(neurons_dict,
                         window_size=duration,
                         use_cupy=True,
                         symmetrize=True,
-                        symmetrize_mode='odd',
+                        bin_mode='odd',
                     )
                 
                 pvals, pred, qvals = eran_conv(ccg,W=window_width,wintype="gauss",hollow_frac=None)
@@ -696,7 +696,8 @@ def routine_eranconv_pairs(neurons_dict,
 
                 def _multiple_correction(pvals,alpha):
                     p_flat = pvals.ravel()
-                    sig, p_corr, _, _ = multipletests(p_flat, alpha=alpha, method='fdr_bh')
+                    method = 'bonferroni' #'fdr_bh'
+                    sig, p_corr, _, _ = multipletests(p_flat, alpha=alpha, method=method)
                     sig = sig.reshape(pvals.shape)
                     p_corr = p_corr.reshape(pvals.shape)   
                     return sig,p_corr
@@ -919,7 +920,7 @@ def routine_jitter_pairs_after_conv(eranconv_out,neurons_dict,njitter=100,jitter
                                                 neuron_inds=j,
                                                 njitter=njitter,
                                                 use_cupy=True,
-                                                symmetrize_mode='odd')
+                                                bin_mode='odd')
                             data_struct[sess_name][EI][conn_type].append(jitter_out)
         with h5py.File(f"{datafolder}/jitter-{filename}.h5", "a") as f:
             f.create_dataset(f"{sess_name}", data=data_struct)   
@@ -996,9 +997,8 @@ def get_global_band(ccgs):
     else:
         ValueError("CCGs must be 2D or 3D to calculate global significance band")
 
-
 def plot_ccg_eranconv(neurons: Neurons, ccg, inds, plotdir, window_size, bin_size, 
-                      pval, pred, frates_all, jsig=None, mode='even'):
+                      pval, pred, frates_all, jsig=None, mode='even', ch_per_shank=16):
     """
     One CCG plot
     TODO This is defined in such a way that all plotting parameters are expanded. should i collapse and only pass in neurons?
@@ -1006,7 +1006,8 @@ def plot_ccg_eranconv(neurons: Neurons, ccg, inds, plotdir, window_size, bin_siz
     fig, axs = plt.subplots(1,3,figsize=(10,5),gridspec_kw={'width_ratios':[2,1,1]})
     # generating even-numbered bins
     if mode=='even':
-        bins = np.arange(-window_size / 2-bin_size, window_size / 2+bin_size/2, bin_size)+bin_size/2
+        bins = np.arange(-window_size / 2, window_size / 2, bin_size)+bin_size/2
+        # bins = np.arange(-window_size / 2-bin_size, window_size / 2+bin_size/2, bin_size)+bin_size/2
     else:
         bins = np.arange(-window_size / 2, window_size / 2+bin_size, bin_size)
     ax=axs[0]
@@ -1021,13 +1022,18 @@ def plot_ccg_eranconv(neurons: Neurons, ccg, inds, plotdir, window_size, bin_siz
     X,Y=neurons.neuron_ids
     ax.set_title(f"CCG, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
     ax.legend()
+    
     sns.despine(ax=ax)
     l = ['ref','target']
     for i in range(2):
+        max_ch = neurons.waveforms[i].shape[0]
         ax=axs[1+i]
         ax.imshow(neurons.waveforms[i].astype(float))
         ax.set_title(f"{l[i]}: {neurons.neuron_type[i]}{neurons.neuron_ids[i]}")
         ax.set_xlabel(f"{frates_all[i]:.2f}Hz all | {neurons.firing_rate[i]:.2f}Hz sleep")
+        # TODO shanks. ignoring that some channels may have been discarded
+        for k in range(max_ch//ch_per_shank):
+            ax.axhline((k+1)*ch_per_shank,c='w',alpha=0.5,linestyle='dashed')
     fig.savefig(f"{plotdir}/ccg-inds{x}-{y}.png")
     fig.tight_layout()
     plt.close(fig)

@@ -1,5 +1,7 @@
 import neuropy.analyses.ms_connectivity as msconn
 import numpy as np
+from neuropy.analyses import correlations 
+
 class Test:
     def __init__(self):
         
@@ -31,7 +33,7 @@ class Test:
             alpha=0.05,
             use_multi_correction=True,
             use_cupy=True,
-            symmetrize_mode='even',
+            bin_mode='even',
         )
         print(ccgsE[ind].sum(),ccgsE[ind])
 
@@ -45,7 +47,7 @@ class Test:
             alpha=0.05,
             use_multi_correction=True,
             use_cupy=True,
-            symmetrize_mode='odd',
+            bin_mode='odd',
         )
         print(ccgsO[ind].sum(),ccgsO[ind])
 
@@ -65,4 +67,25 @@ class Test:
         print("channel groups\t\t",sess.recinfo.channel_groups)
     
     def list_sess():
-        orubt(subjects.nsd.allsess)
+        print(subjects.nsd.allsess)
+
+    def test_ccg_plot(tmpdir):
+        neurons=subjects.nsd.allsess[5].neurons.get_neuron_type(['pyr','inter'])[[182,10]]
+        ccg=correlations.spike_correlations(neurons,[0,1],bin_size=0.001,window_size=0.02,use_cupy=True)[0,1]
+        pval=np.random.random(ccg.shape[0])
+        pred=np.clip(ccg-max(ccg)//10,min(ccg),np.inf)
+        frates_all=[1,2]
+        msconn.plot_ccg_eranconv(neurons, ccg, inds=[0,1], plotdir=tmpdir, window_size=0.02, bin_size=0.001, 
+                            pval=pval, pred=pred, frates_all=frates_all, jsig=None, mode='even')
+        
+    def test_ccg_2group():
+        neurons=subjects.nsd.allsess[5].neurons.get_neuron_type(['pyr','inter'])[[182,10]]
+        # for use_cupy in ['True','False']        
+        for symmetrize in ['True','False']:
+            for bin_mode in ['even', 'odd']:
+                ccg=correlations.spike_correlations(neurons,[0,1],bin_size=0.001,window_size=0.02,use_cupy=True,symmetrize=symmetrize,bin_mode='even')[0,1]
+                pred=correlations.spike_correlations(neurons,ref_neuron_inds=[0],neuron_inds=[1],bin_size=0.001,window_size=0.02,use_cupy=True,bin_mode='even')[0,0]
+                pval=np.random.random(ccg.shape[0])
+                frates_all=[1,2]
+                msconn.plot_ccg_eranconv(neurons, ccg, inds=[0,1], plotdir="./tests", window_size=0.02, bin_size=0.001, 
+                                    pval=pval, pred=pred, frates_all=frates_all, jsig=None, mode='even')
