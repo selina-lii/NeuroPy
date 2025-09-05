@@ -359,19 +359,32 @@ class Neurons(DataWriter):
             metadata=neurons.metadata
         )
 
-    def behav_slice(self, b_times:Epoch, labels: Union[list[str], str], tighten=False, min_dur=120):
+    def behav_slice(self, b_times:Epoch, 
+                    labels: Union[list[str], str]=None, 
+                    discard = False,
+                    tighten=False, min_dur=120):
         """
         Return neurons with only spikes during specified behavioral or brain states
         (for example, sleep/wake)
 
-        bs_times: Epoch
+        If no labels are provided, all epochs are kept by start/stop times
+
+        b_times: Epoch
             An epeoch object that specifies what brain states happened at when
         label: name of the brainstates
             Usually from ["QW","AW","REM","NREM"].
         min_dur: minimum duration threshold in seconds
         tighten: 
         """
-        bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
+        if labels is not None:
+            if discard: 
+                labels = list(set(b_times.get_unique_labels()) - set(labels))
+                # TODO inverse labels
+            bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
+        else:
+            if discard:
+                # TODO inverse time
+        
         intervals = list(zip(bstates.starts,bstates.stops))
         state_neurons=self.time_multislices(intervals,tighten=tighten)
         return state_neurons

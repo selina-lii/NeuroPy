@@ -248,6 +248,25 @@ class Epoch(DataWriter):
 
         return Epoch(epoch_df, metadata=self.metadata)
 
+    def invert_selection(self, t_start=None, t_stop=None):
+        """Return the complmentary intervals"""
+        starts = self.starts
+        stops = self.stostopsp
+        if t_start is None: t_start=starts[0]
+        if t_stop is None: t_stop=stops[-1]
+        keep = (starts <= t_stop) & (stops >= t_start)
+        starts = np.concatenate([[t_start-1], starts[keep], [t_stop]])
+        stops = np.concatenate([[t_start], stops[keep], [t_stop+1]])
+        inv_stops = starts[1:]
+        inv_starts = stops[:-1]
+        if inv_stops[0]<=inv_starts[0]:
+            inv_starts,inv_stops=inv_starts[1:],inv_stops[1:]
+        if inv_stops[-1]<=inv_starts[-1]:
+            inv_starts,inv_stops=inv_starts[:-1],inv_stops[:-1]
+        # TODO slow.
+        # NOTE returning no other columns now. only returning an epoch to keep to format
+        return Epoch(start=inv_starts,stop=inv_stops)
+    
     def duration_slice(self, min_dur=None, max_dur=None):
         """return epochs that have durations between given thresholds
 
@@ -799,6 +818,7 @@ class Epoch(DataWriter):
     @property
     def epochs(self):
         return self._epochs
+
 
 def add_epoch_buffer(epoch_df: pd.DataFrame, buffer_sec: float or int or tuple or list):
     """Extend each epoch by buffer_sec before/after start/stop of each epoch"""

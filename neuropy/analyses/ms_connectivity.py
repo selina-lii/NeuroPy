@@ -241,7 +241,7 @@ def ccg_jitter(neurons: Neurons,
     alpha=0.05,
     use_cupy=False,
     bin_mode='even',
-    EI = 'E'
+    EI = 'E',
 ):
     """
     CCGs are shaped (N0,1,nbins)
@@ -265,6 +265,8 @@ def ccg_jitter(neurons: Neurons,
     # TODO: implement this in ALL cupy and compare times...does it matter if the spike jitter code is in numpy? Answer: it does 16ms with numpy vs 1 with cupy.
 
     # Add jitter to the last neuron in the list, which is the target neuron
+    print("debug",neuron_inds)
+
     neuronsj = add_jitter(neurons=neurons,
             njitter=njitter,
             neuron_inds=neuron_inds,
@@ -320,7 +322,7 @@ def ccg_jitter(neurons: Neurons,
                   'thresholds':thresholds,
                   'JBSI':jbsi_vals
                   }
-    return jitter_out # orig    
+    return jitter_out # orig
 
 def jbsi(ccgs,frates,bin_size,jscale,):
     """
@@ -417,6 +419,7 @@ def routine_prep_neurons(sessions,
                          neuron_types:Union[list[str], str] = ['pyr', 'inter'], 
                          epochs:Union[list[str], str]="post",
                          brainstates:Union[list[str], str]=["REM","NREM"],
+                         exclude_bvars:Union[list[str], str, None]=None,
                          n_chunks:Union[list[str], str]=3,tight_epoch=False,):
     """
     sessions: subjects.ProcessData
@@ -431,6 +434,9 @@ def routine_prep_neurons(sessions,
     if not isinstance(epochs, list): epochs = [epochs]
     if not isinstance(brainstates, list): brainstates = [brainstates]
     if not isinstance(n_chunks, list): n_chunks = [n_chunks]
+    if ripples is not None: 
+        if not isinstance(ripples, list): ripples = [ripples]
+
     assert len(n_chunks)==len(epochs)
 
     neurons_dict={"session_names":[],
@@ -449,8 +455,10 @@ def routine_prep_neurons(sessions,
             p=sess.paradigm.label_slice(epoch)
             sess_neurons = sess.neurons.get_neuron_type(neuron_types) \
                     .time_slice(p.starts[0], p.stops[0]) \
-                    .behav_slice(sess.brainstates,brainstates,tighten=tight_epoch) \
-                    .time_split(n_chunks=n_chunk) # is a list  
+                    .behav_slice(sess.brainstates,brainstates,tighten=tight_epoch)
+            if ripples is not None:
+                sess_neurons = sess_neurons.behav_slice(sess.ripples,ripples,tighten=tight_epoch)
+            sess_neurons = sess_neurons.time_split(n_chunks=n_chunk) # is a list
             neurons_dict[sess_name][epoch]=sess_neurons
     return neurons_dict
 
@@ -903,6 +911,7 @@ def routine_jitter_pairs_after_conv(eranconv_out,neurons_dict,njitter=100,jitter
     conn_types = eranconv_out['conn_types']
 
     for sess_name in sess_names:
+        print(sess_name)
         for epoch, n_chunk in zip(epochs,n_chunks):
             data_struct = {'njitter':njitter,
                         'jitter_type':jitter_type,}
@@ -922,8 +931,10 @@ def routine_jitter_pairs_after_conv(eranconv_out,neurons_dict,njitter=100,jitter
                                                 use_cupy=True,
                                                 bin_mode='odd')
                             data_struct[sess_name][EI][conn_type].append(jitter_out)
-        with h5py.File(f"{datafolder}/jitter-{filename}.h5", "a") as f:
-            f.create_dataset(f"{sess_name}", data=data_struct)   
+                    with h5py.File(f"{datafolder}/jitter-{filename}.h5", "a") as f:
+                        f.create_dataset(f"{sess_name}", data=data_struct)
+                        print(f"saved {conn_type}")
+    
 
 # TODO: move to plotting in the future!
 import seaborn as sns
@@ -936,6 +947,7 @@ def routine_eranconv_save_plots(neurons_dict,sessions,conv_dict,jitter_dict=None
                                 chunk_ids=None,
                                 conn_types=None,
                                 epochs=None,
+                                conn_types_select=None,
                                 ):
     """
     TODO jitter p values are plotted, which should be similar to eran_conv p values.
@@ -944,9 +956,10 @@ def routine_eranconv_save_plots(neurons_dict,sessions,conv_dict,jitter_dict=None
     images_folder = f"/home/selinali/Documents/NeuroPy/images/ccg_plots/test"
     epochs = epochs or neurons_dict['epochs']
     n_chunks = chunk_ids or neurons_dict['n_chunks']
-    conn_types = conn_types or conv_dict['conn_types']
+    conn_types_dict = conv_dict['conn_types']
+    conn_types = conn_types or np.concatenate([conn_types['E'], conn_types['I']])
     session_names = session_names or neurons_dict['session_names']
-    prep_connectivity_plot_folders(images_folder, session_names, epochs, n_chunks, conn_types)
+    prep_connectivity_plot_folders(images_folder, session_names, epochs, n_chunks, conn_types_dict)
 
     # TODO pass from previous functions
     for s, sess_name in enumerate(session_names):
@@ -957,7 +970,8 @@ def routine_eranconv_save_plots(neurons_dict,sessions,conv_dict,jitter_dict=None
         conv = conv_dict[sess_name]
         frates_all = sessions[s].neurons.get_neuron_type(neurons_dict['neuron_types']).firing_rate
         for EI in ['E','I']:
-            for conn_type in conn_types[EI]:
+            for conn_type in conn_types_dict[EI]:
+                if conn_type not in conn_types: continue # not the best code, but...
                 for epoch,n_chunk in zip(epochs,n_chunks):
                     neurons = sess_neurons[epoch]
                     for c in range(n_chunk):
