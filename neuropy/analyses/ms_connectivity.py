@@ -14,7 +14,7 @@ from scipy.stats import poisson
 from scipy import ndimage
 import time
 from scipy.stats import ttest_ind
-from typing import Union
+from typing import Union, Optional, Dict
 from datetime import datetime
 import h5py
 from statsmodels.stats.multitest import multipletests
@@ -362,7 +362,6 @@ def routine_jitter(neurons,jitter_inputs):
     """
     Return neuronal pairs with valid CCG peaks (slow)
     Uses jittering
-
     """
 
     # TODO not a routine yet
@@ -375,31 +374,13 @@ def routine_jitter(neurons,jitter_inputs):
     jitter_significances=np.array([xx for x in sigs for xx in x])#.astype(int)
     return jitter_significances
 
-def prep_connectivity_dict(data_struct, session_names, epochs, conn_types):
-    # |_ session name:
-    #   |_ epoch:
-    #       |_ excitability:
-    #           |_ connection type:
-    #               |_ [connectivity data 1, ...]
-    # |_ metadata1
-    # |_ metadata2
-    # ...
-    for sn in session_names:
-        data_struct[sn]={}
-        for e in epochs:
-            data_struct[sn][e]={}
-            for EI in ['E','I']:
-                data_struct[sn][e][EI]={}
-                for ct in conn_types[EI]: 
-                    data_struct[sn][e][EI][ct]=[]
-    return data_struct
-
 def prep_connectivity_plot_folders(root, session_names, epochs, n_chunks, conn_types):
     # |_ session name:
     #   |_ epoch:
     #       |_ excitability:
     #           |_ connection type:
     #               |_ [connectivity data 1, ...]
+    # ...
     os.makedirs(root, exist_ok=True)
     for sn in session_names:
         sn_root = f"{root}/{sn}"
@@ -414,70 +395,6 @@ def prep_connectivity_plot_folders(root, session_names, epochs, n_chunks, conn_t
 
 def get_connectivity_plot_folder(root, session_name, epoch, chunk_id, conn_type, EI):
     return f"{root}/{session_name}/{session_name}-{epoch}{chunk_id}/{session_name}-{epoch}{chunk_id}-{conn_type[0]}-{conn_type[1]}-{EI}"
-
-def routine_prep_neurons(sessions,
-                         neuron_types:Union[list[str], str] = ['pyr', 'inter'], 
-                         epochs:Union[list[str], str]="post",
-                         brainstates:Union[list[str], str]=["REM","NREM"],
-                         exclude_bvars:Union[list[str], str, None]=None,
-                         n_chunks:Union[list[str], str]=3,tight_epoch=False,):
-    """
-    sessions: subjects.ProcessData
-        collection object of sessions
-
-    tight_time: bool
-        if true, try to shrink start and end of epoch to where brainstates are happening 
-    """
-
-    if not isinstance(neuron_types, list): neuron_types = [neuron_types]
-    if not isinstance(sessions, list): sessions = [sessions]
-    if not isinstance(epochs, list): epochs = [epochs]
-    if not isinstance(brainstates, list): brainstates = [brainstates]
-    if not isinstance(n_chunks, list): n_chunks = [n_chunks]
-    if ripples is not None: 
-        if not isinstance(ripples, list): ripples = [ripples]
-
-    assert len(n_chunks)==len(epochs)
-
-    neurons_dict={"session_names":[],
-                  'neuron_types':neuron_types,
-                  "epochs":epochs,
-                  "brainstates":brainstates,
-                  'n_chunks':n_chunks,
-                  'tight_epoch':tight_epoch,
-                  }
-
-    for sess in sessions: 
-        sess_name = _short_session_name(sess)
-        neurons_dict['session_names'].append(sess_name)
-        neurons_dict[sess_name]={}
-        for epoch,n_chunk in zip(epochs,n_chunks):
-            p=sess.paradigm.label_slice(epoch)
-            sess_neurons = sess.neurons.get_neuron_type(neuron_types) \
-                    .time_slice(p.starts[0], p.stops[0]) \
-                    .behav_slice(sess.brainstates,brainstates,tighten=tight_epoch)
-            if ripples is not None:
-                sess_neurons = sess_neurons.behav_slice(sess.ripples,ripples,tighten=tight_epoch)
-            sess_neurons = sess_neurons.time_split(n_chunks=n_chunk) # is a list
-            neurons_dict[sess_name][epoch]=sess_neurons
-    return neurons_dict
-
-"""
-# def ccg_spike_assemble(spike_trains):
-    #     Assemble an array of sorted spike times and cluIDs for the input cluster ids the list clus_use
-    #     spikes_all, clus_all = [], []
-    #     for ids, spike_train in enumerate(spike_trains):
-    #         spikes_all.append(spike_train),
-    #         clus_all.append(np.ones_like(spike_train) * ids)
-    #     if cuda:
-    #         spikes_all, clus_all = cp.concatenate(spikes_all), cp.concatenate(clus_all)
-    #     else:
-    #         spikes_all, clus_all = np.concatenate(spikes_all), np.concatenate(clus_all)
-    #     spikes_sorted = spikes_all[spikes_all.argsort()]
-    #     clus_sorted = clus_all[spikes_all.argsort()]
-
-    #     return spikes_sorted, clus_sorted.astype("int")
-"""
 
 def routine_mean_firing_rates(neurons_dict):
     n_chunks=neurons_dict['n_chunks']
@@ -558,268 +475,7 @@ def routine_mean_firing_rates(neurons_dict):
         ### end of sessions loop ###
     return effective_time, mean_firing_rates, sd_firing_rates, iqr, frates
     ### end of function ###
-
-def routine_eranconv_pairs(neurons_dict,
-                           conn_types_E= [('pyr','pyr'), ('pyr','inter')],
-                           conn_types_I = [('inter','inter'), ('inter','pyr')]
-                           ):
-    """
-    Return neuronal pairs with valid CCG peaks (fast)
-    Uses eran_conv
-
-    window_width
-        window width of the convolution kernel
-        unit is milliseconds
-        should be the same as `jscale` that you'd use for jittering
-    """
-    print("EranConv significant pairs")
-    neuron_types =  neurons_dict['neuron_types']
-    session_names = neurons_dict['session_names']
-    n_chunks = neurons_dict['n_chunks']
-    epochs = neurons_dict['epochs']
-    conn_types = {'E':conn_types_E, 'I':conn_types_I}
-
-    ################ CONFIG #################
-    duration=20*1e-3 # 20ms - must be multiples of bin_size
-    bin_size=1*1e-3 # 1ms
-    window_width = 5 # 5ms
-    alpha = 0.05
-    alpha2 = 0.1
-    use_multiple_correction = True
-    C=int(duration/bin_size//2) # center bin
-    nbins = int(duration/bin_size)
-
-    min_lag = 1*1e-3 # 1ms
-    max_lag = 3*1e-3 # 3ms
-    min_spkcount = 2.5
-    spkcount_scope = 12*1e-3 # 12ms total
-    ignore_same_electrodes = True
-
-    start=int(min_lag/bin_size)
-    end=int(max_lag/bin_size)
-    spkcount=int(spkcount_scope/2/bin_size)
-    ############# END OF CONFIG ##############
-
-    ################ UPDATE RETURN VALUES #################
-    out = {'session_names':session_names,
-                    'neuron_types':neuron_types,
-                    'conn_types': conn_types,
-                    'epochs': epochs,
-                    'n_chunks': n_chunks,
-                    'args': {
-                        'duration': duration,
-                        'bin_size': bin_size,
-                        'window_width': window_width,
-                        'alpha': alpha,
-                        'alpha2': alpha2,
-                        'use_multiple_correction': use_multiple_correction,
-                        'min_lag': min_lag,
-                        'max_lag': max_lag,
-                        'min_lag_bin': start,
-                        'max_lag_bin': end,
-                        'min_spkcount': min_spkcount,
-                        'spkcount_scope': spkcount_scope,
-                        'spkcount_scope_bin': spkcount,
-                        'ignore_same_electrodes': ignore_same_electrodes,
-                        'nbins': nbins,
-                        'center_bin': C,
-                    }
-                    }
-    out = prep_connectivity_dict(out, session_names, epochs, conn_types)
-    ############# END OF UPDATE RETURN VALUES ##############
-
-    ### start of session loop ###
-    for sess_name in session_names:
-        for n_chunk, epoch in zip(n_chunks,epochs):
-            sess_neurons = neurons_dict[sess_name][epoch]
-
-            c_len_ef = [sess_neurons[_].effective_time/3600 for _ in range(n_chunk)]
-            c_len = (sess_neurons[0].t_stop-sess_neurons[0].t_start)/3600
-
-            ################ UPDATE PRINT STRING #################
-            overview_str = f"======={sess_name}=======\n"
-            overview_str+=f"Chunks are {c_len:.2f}h each and contain {[f'{cl:.2f}' for cl in c_len_ef]} hours of actual sleep "
-            for _ in neuron_types: # sleep chunk
-                overview_str+=f"{_}={sess_neurons[0].get_neuron_type(_).n_neurons} "
-            overview_str+="\n"
-            ############# END OF UPDATE PRINT STRING ##############
-
-            ### start of chunks loop ###
-            for c in range(n_chunk):
-                ################ COMPUTATION #################
-                neurons = sess_neurons[c]
-                inds_by_type = {
-                    'pyr':np.where(neurons.neuron_type=='pyr'),
-                    'inter':np.where(neurons.neuron_type=='inter')
-                }
-                n = neurons.n_neurons
-                if use_multiple_correction: 
-                    corrected_alpha=alpha/(n**2-n)/nbins # local threshold
-                    corrected_alpha2=alpha2/(n**2-n)/nbins
-
-                ccg = correlations.spike_correlations(
-                        neurons=neurons,
-                        neuron_inds=np.arange(n), # all
-                        bin_size=bin_size,
-                        window_size=duration,
-                        use_cupy=True,
-                        symmetrize=True,
-                        bin_mode='odd',
-                    )
-                
-                pvals, pred, qvals = eran_conv(ccg,W=window_width,wintype="gauss",hollow_frac=None)
-                print(pvals.shape)
-                msconn_args = {
-                    'min_lag':0,
-                    'max_lag':1,
-                    'min_spkcount':2.5,
-                    'spkcount_scope':12,
-                    'ignore_same_electrodes':False,
-                    'ref_type':'pyr',
-                    'target_type':'pyr',
-                    'p':0.05,
-                }
-                excit_args = {
-                    'min_lag':1,
-                    'max_lag':3,
-                    'min_spkcount':2.5,
-                    'spkcount_scope':12,
-                    'ignore_same_electrodes':True,
-                    'ref_type':'pyr',
-                    'target_type':['pyr','inter'],
-                    'p':0.05,
-                }
-                inhib_args = {
-                    'min_lag':1,
-                    'max_lag':3,
-                    'min_span':2,
-                    'min_spkcount':2.5,
-                    'spkcount_scope':12,
-                    'ignore_same_electrodes':False,
-                    'ref_type':'inter',
-                    'target_type':'pyr',
-                    'p':0.05,
-                    'p2':0.1
-                }
-
-                def _multiple_correction(pvals,alpha):
-                    p_flat = pvals.ravel()
-                    method = 'bonferroni' #'fdr_bh'
-                    sig, p_corr, _, _ = multipletests(p_flat, alpha=alpha, method=method)
-                    sig = sig.reshape(pvals.shape)
-                    p_corr = p_corr.reshape(pvals.shape)   
-                    return sig,p_corr
-                
-                sig, p_corr = _multiple_correction(pvals, alpha)
-                coords_excitatory = np.argwhere((sig[...,C+start:C+end+1]).any(axis=-1))
-                # coords_inhitibitory = np.argwhere((qvals[...,C+start:C+end+1]<alpha).any(axis=-1))
-
-                sig1, q_corr1 = _multiple_correction(qvals, alpha)
-                sig2, q_corr2 = _multiple_correction(qvals, alpha2)
-
-                # sig1 = (qvals[...,C+start:C+end+1] < corrected_alpha)
-                # sig2 = (qvals[...,C+start:C+end+1] < corrected_alpha2)
-                neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1)) # significant bins might have a neighbor who's kinda significant
-                coords_inhitibitory = np.argwhere(neighbor.any(-1))
-
-                coords_spkcount = np.argwhere((ccg[...,C-spkcount:C+spkcount+1]>=min_spkcount).all(axis=-1))
-                def _intersect2d(n,coords1,coords2):
-                    # Intersection of coordinate lists
-                    coords1 = coords1[:,0]*n+coords1[:,1]
-                    coords2 = coords2[:,0]*n+coords2[:,1]
-                    coords=np.intersect1d(coords1,coords2)
-                    coords=np.array([[x//n,x%n] for x in coords])
-                    return coords
-                coordsE = _intersect2d(n, coords_excitatory, coords_spkcount)
-                coordsI = _intersect2d(n, coords_inhitibitory, coords_spkcount)
-
-                def _count_significant_pairs(coords,neurons,conn_types,EI="E",ignore_same_electrodes=True):
-                    """
-                    Create a tally of significant neuronal connectoins by type
-                    Currently, the type is defined as 
-                        reference-target/[E,I]
-                    where reference is presynaptic, and target is postsynaptic neuronal type, 
-                    and E/I indicates the connection being excitatory or inhibitory
-
-                    SL: If this helper function seems messy it's probably because 
-                    it pertains to our specific definition of significant pairs (see Diba 2014, Pairwise connections.)
-
-                    """
-                    s=""
-                    list_empty=True 
-                    significant_pairs_ids = []
-                    if coords.shape[0]:
-                        # Condition 1: Ref/Target are never on the same electrode
-                        if ignore_same_electrodes:
-                            diff_channel=np.where(neurons.peak_channels[coords[:,0]]!=neurons.peak_channels[coords[:,1]])[0]
-                            coords = coords[diff_channel]
-                        # Conditoin 2: Specify Ref/Target cell types
-                        for (ref,target) in conn_types:
-                            sig_pairs=np.where(np.isin(coords[:,0],inds_by_type[ref]) & 
-                                            np.isin(coords[:,1],inds_by_type[target]))[0]
-                            sig_pairs=coords[sig_pairs]
-                            significant_pairs_ids.append(sig_pairs)
-                        # if any type of connection under consideration has a non-zero count, print a summary
-                        if np.any([_.shape[0] for _ in significant_pairs_ids]):
-                            list_empty=False 
-                            for sig_pairs,(ref,target) in zip(significant_pairs_ids,conn_types):
-                                s+=f"{ref}-{target}/{EI} {f'{sig_pairs.shape[0]:02d}' if sig_pairs.shape[0] else '-'} | "
-                    if s=="":
-                        s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
-                    return significant_pairs_ids,s,list_empty
-                ### start of celltype loop ###
-                excitatory_pairs, sE, list_emptyE = _count_significant_pairs(coordsE,neurons,conn_types_E,EI="E",ignore_same_electrodes=ignore_same_electrodes)
-                inhibitory_pairs, sI, list_emptyI = _count_significant_pairs(coordsI,neurons,conn_types_I,EI="I",ignore_same_electrodes=ignore_same_electrodes)
-                ### end of celltype loop ###
-                n_E, n_I = coordsE.shape[0], coordsI.shape[0]
-                ################ END OF COMPUTATION #################
-
-                ################ UPDATE PRINT STRING #################
-                overview_str += f"SLEEP{c}: E/I pairs {n_E:03d} / {n_I:03d} | "
-                if list_emptyE and list_emptyI:
-                    overview_str+="no connections\n"
-                else:
-                    overview_str=overview_str+sE+sI+"\n"
-                ############# END OF UPDATE PRINT STRING ##############
-
-                ################ UPDATE RETURN VALUES #################       
-                out[sess_name][epoch]["per_chunk_len"] = c_len
-                out[sess_name][epoch]["effective_chunk_lens"] = c_len_ef
-
-                out[sess_name][epoch]['E']['total']=n_E
-                for conn_type,ep in zip(conn_types_E,excitatory_pairs):
-                    if ep.any(): 
-                        ep_id = neurons.ind2id(ep)
-                    else: ep_id = ep
-                    out[sess_name][epoch]['E'][conn_type].append({
-                        'ref':conn_type[0],'target':conn_type[1],
-                        'ids':ep_id,
-                        'inds':ep,
-                        'ccg':ccg[ep[:,0],ep[:,1]],
-                        'pred':pred[ep[:,0],ep[:,1]],
-                        'pval':pvals[ep[:,0],ep[:,1]],
-                    }) 
-                out[sess_name][epoch]['I']['total']=n_I
-                for conn_type,ip in zip(conn_types_I,inhibitory_pairs):
-                    if ip.any(): 
-                        ip_id = neurons.ind2id(ip)
-                    else: ip_id = ip
-                    out[sess_name][epoch]['I'][conn_type].append({
-                        'ref':conn_type[0],'target':conn_type[1],
-                        'ids':ip_id,
-                        'inds':ip,
-                        'ccg':ccg[ip[:,0],ip[:,1]],
-                        'pred':pred[ip[:,0],ip[:,1]],
-                        'pval':qvals[ip[:,0],ip[:,1]], # use qvals for inhibitory
-                    })
-                ############# END OF UPDATE RETURN VALUES ##############
-
-                ### end of chunks loop ###
-            print(overview_str)
-            ### end of sessions loop ###
-    return out
-    ### end of function ###
-
+ 
 def routine_eranconv_connection_info(info, neurons_dict, epoch_id=0,chunk_id=0):
     """
     Print aggregated information of eranconv_pairs() outputs
@@ -830,15 +486,15 @@ def routine_eranconv_connection_info(info, neurons_dict, epoch_id=0,chunk_id=0):
     total_by_conntype = {'E':{},'I':{}}
     total_by_EI = {'E':0,'I':0}
     for EI in ['E','I']:
-        for conn_type in info['conn_types'][EI]:
+        for conn_type in neurons_dict.conn_types[EI]:
             results[EI][conn_type]={'sig_conv':0,'list':[]}
             total_by_conntype[EI][conn_type] = 0
         
-    neuron_types = info['neuron_types']
-    epoch = neurons_dict['epochs'][epoch_id]
+    neuron_types = neurons_dict.conf.neuron_types
+    epoch = neurons_dict.conf.epochs[epoch_id]
 
-    for sess_name in info['session_names']:
-        x = info[sess_name][epoch]
+    for key,neurons in nd.data.items():
+        sess_name = key[0] if isinstance(key,tuple) else key
         neurons = neurons_dict[sess_name][epoch][chunk_id]
 
         n = {}
@@ -889,130 +545,614 @@ def routine_eranconv_connection_info(info, neurons_dict, epoch_id=0,chunk_id=0):
     print(overview_str)
     return results
 
-def get_jitter_inputs(coords):
+
+def _san(var):
+    """Sanitize """
+    if var is None: return var
+    if not isinstance(var, list): var = [var]
+    return var
+
+
+class NeuronsDatasetConfig:
     """
-    Reshape coordinates of (ref,target) pairs into most efficient format for jittering
-    grouped by target indices
+    Metadata of NeuronsDataset
 
-    coords: np array with shape (n,2)
+    tight_time: bool
+    if true, try to shrink start and end of epoch to where brainstates are happening 
+
+    chunks_per_session: int
+    Splits session time axis into equal-lengthed blocks if >1
+
     """
-    coords=np.argsort(coords[:,1])
-    keys, inv = np.unique(coords[:,1], return_inverse=True)
-    jitter_inputs = [coords[inv==i,0].tolist()+[k] for i,k in enumerate(keys)]
-    return jitter_inputs
+    def __init__(self,
+                 neuron_types:Union[list[str], str] = ['pyr', 'inter'], 
+                 epochs:Union[list[str], str]="post", 
+                 chunks_per_session:Union[list[int], int]=1, 
+                 sleep_selection:Union[list[str], str]=["REM","NREM"], 
+                 ripple_selection=None, tight_epoch=False):
 
-def routine_jitter_pairs_after_conv(eranconv_out,neurons_dict,njitter=100,jitter_type='spike_time',filename=None):
-    now = datetime.now()
-    filename = filename or now.strftime("%Y-%m-%d-%H-%M")
-    datafolder = '~/Documents/jitter_out'
-    epochs = neurons_dict['epochs']
-    n_chunks = neurons_dict['n_chunks']
-    sess_names = neurons_dict['session_names']
-    conn_types = eranconv_out['conn_types']
-
-    for sess_name in sess_names:
-        print(sess_name)
-        for epoch, n_chunk in zip(epochs,n_chunks):
-            data_struct = {'njitter':njitter,
-                        'jitter_type':jitter_type,}
-            data_struct = prep_connectivity_dict(data_struct, sess_name, epochs, conn_types)
-            sess_coords = eranconv_out[sess_name][epoch]
-            sess_neurons = neurons_dict[sess_name][epoch]
-            for EI in ['E','I']:
-                for conn_type in conn_types[EI]:
-                    for c in range(n_chunk):
-                        coords = sess_coords[EI][conn_type][c]['inds']
-                        neurons = sess_neurons[c]
-                        j_inds = get_jitter_inputs(coords)
-                        for _,j in enumerate(j_inds):
-                            jitter_out = ccg_jitter(neurons=neurons,
-                                                neuron_inds=j,
-                                                njitter=njitter,
-                                                use_cupy=True,
-                                                bin_mode='odd')
-                            data_struct[sess_name][EI][conn_type].append(jitter_out)
-                    with h5py.File(f"{datafolder}/jitter-{filename}.h5", "a") as f:
-                        f.create_dataset(f"{sess_name}", data=data_struct)
-                        print(f"saved {conn_type}")
+        self.session_names = []
+        self.neuron_types = _san(neuron_types)
+        self.epochs = _san(epochs)
+        self.sleep_selection = _san(sleep_selection)
+        self.ripple_selection = ripple_selection
+        self.chunks_per_session = _san(chunks_per_session)
+        self.tight_epoch = tight_epoch
     
+        assert len(self.chunks_per_session)==len(self.epochs)
+
+    def save(self):
+        with h5py.File(self.filepath, "w") as f:
+            for k, v in self.__dict__.items():
+                try:
+                    f.create_dataset(k, data=v)
+                except TypeError:
+                    f.attrs[k] = str(v)  # fallback for non-array data
+
+    @classmethod
+    def load(cls, path):
+        obj = cls.__new__(cls)  # bypass __init__
+        with h5py.File(path, "r") as f:
+            for k, v in f.items():
+                obj.__dict__[k] = np.array(v)
+            for k, v in f.attrs.items():
+                obj.__dict__[k] = v
+        return obj    
+
+class NeuronsDataset:
+    """
+    A collection of neurons created for analysis
+    Arguments of the analysis should be provided completely in an NeuronsDatasetConfig instance
+
+    sessions: subjects.ProcessData
+        collection object of sessions
+    """
+    def __init__(self, sessions, conf:NeuronsDatasetConfig):
+        
+        self.conf = conf
+        self.data = {}
+        
+        sessions = _san(sessions)
+        lenS = len(sessions)
+        
+        for s in sessions: 
+            ssn = _short_session_name(s)
+            self.conf.session_names.append(ssn)
+            for e,cps in zip(self.conf.epochs,self.conf.chunks_per_session):
+                p = s.paradigm.label_slice(e)
+                neus = s.neurons.get_neuron_type(self.conf.neuron_types) \
+                    .time_slice(p.starts[0], p.stops[0])
+                if self.conf.sleep_selection is not None:
+                    neus = neus.behav_slice(s.brainstates,self.conf.sleep_selection,tighten=self.conf.tight_epoch)
+
+                if self.conf.ripple_selection is not None:
+                    neus = neus.behav_slice(s.ripples,self.conf.ripple_selection,tighten=self.conf.tight_epoch)
+                if cps>1:
+                    neus = neus.time_split(n_chunks=cps) # is a list
+
+                if lenS==1:
+                    self.data=neus
+                elif len(self.conf.epochs)==1:
+                    key = ssn
+                    self.data[key]=neus
+                else:
+                    key = (ssn,e)
+                    self.data[key]=neus
+                
+    def __iter__(self):
+        for key, value in self.data.items():
+            yield value
+
+    def __getitem__(self, i):
+        return self.data[list(self.data.keys())[i]]
+
+
+class CCGData:
+    """Like Neurons, but for CCGs"""
+    def __init__(self, ids, inds, ccg, pred, pval, 
+                 ref:Optional[str]=None, target:Optional[str]=None,
+                 excitability:Optional[str]=None,
+                 pval_source:Optional[str]=None):
+        self.ids=ids
+        self.inds=inds
+        self.ccg=ccg
+        self.pred=pred
+        self.pval=pval
+        self.ref=ref
+        self.target=target
+        self.excitability=excitability
+        self.pval_source=pval_source
+
+    def get_data(self, session, epoch, excitability, conn_type):
+        return self.ccg[(session, epoch, excitability, conn_type)]
+
+
+class CCGConfig:
+    def __init__(self, 
+                name="default",
+                conn_types_E:Union[list[list], list]=[('pyr','pyr'), ('pyr','inter')],
+                conn_types_I:Union[list[list], list]=[('inter','inter'), ('inter','pyr')],
+                duration:float=20*1e-3,
+                bin_size:float=1*1e-3,
+                bin_align = 'center',
+                jscale = 5,
+                alpha:float = 0.05,
+                alpha2:float = 0.1,
+                min_lag:float = 1*1e-3,
+                max_lag:float = 3*1e-3,
+                min_spkcount = 2.5,
+                spkcount_scope = 12*1e-3,
+                multiple_correction_method:str = None,
+                ignore_same_electrodes = True,
+                use_cupy = True,
+                symmetrize_ccg = True,
+                ):
+        self.conn_types = {'E':conn_types_E, 'I':conn_types_I}
+
+        self.name = name
+
+        self.duration = duration
+        self.bin_size = bin_size
+        self.jscale = jscale # 
+        self.alpha = alpha
+        self.alpha2 = alpha2
+        self.use_mc = multiple_correction_method is not None
+        self.mc_method = multiple_correction_method
+        self.C = int(self.duration/self.bin_size//2)
+        self.nbins = int(self.duration/self.bin_size)
+
+        self.min_lag = min_lag
+        self.max_lag = max_lag
+        self.min_spkcount = min_spkcount
+        self.spkcnt_scope = spkcount_scope
+        self.spkcnt_bins = int(self.spkcnt_scope/self.bin_size)
+        self.ignore_same_electrodes = ignore_same_electrodes
+
+        self.min_lag_bin = self.C+int(self.min_lag/self.bin_size) # leftmost bin for p value test
+        self.max_lag_bin = self.C+int(self.max_lag/self.bin_size)+1 # rightmost bin for p value test
+        self.min_spkcnt_bin = self.C-self.spkcnt_bins//2 # leftmost bin requiring minimum spike count 
+        self.max_spkcnt_bin = self.C+self.spkcnt_bins//2+1 # rightmost bin requiring minimum spike count
+
+        self.use_cupy = use_cupy
+        self.symmetrize_ccg = symmetrize_ccg
+        self.bin_align = bin_align # 'center', 'edge'
+
+        # if self.use_mc: 
+        #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
+        #     self.corrected_alpha2=alpha2/(n**2-n)/self.nbins
+
+
+        # example configs
+        msconn_args = {
+            'min_lag':0,
+            'max_lag':1,
+            'min_spkcount':2.5,
+            'spkcount_scope':12,
+            'ignore_same_electrodes':False,
+            'ref_type':'pyr',
+            'target_type':'pyr',
+            'p':0.05,
+        }
+        excit_args = {
+            'min_lag':1,
+            'max_lag':3,
+            'min_spkcount':2.5,
+            'spkcount_scope':12,
+            'ignore_same_electrodes':True,
+            'ref_type':'pyr',
+            'target_type':['pyr','inter'],
+            'p':0.05,
+        }
+        inhib_args = {
+            'min_lag':1,
+            'max_lag':3,
+            'min_span':2,
+            'min_spkcount':2.5,
+            'spkcount_scope':12,
+            'ignore_same_electrodes':False,
+            'ref_type':'inter',
+            'target_type':['pyr','inter'],
+            'p':0.05,
+            'p2':0.1
+        }
+
+    @property
+    def center_bin(self):
+        return self.C
+    
+    @property
+    def use_mutiple_correction(self):
+        return self.use_mc
+        
+    @property
+    def conn_types_E(self):
+        return self.conn_types['E']
+    
+    @property
+    def conn_types_I(self):
+        return self.conn_types['I']
+    
+    @property
+    def conn_types_flat(self):
+        return np.concatenate(self.conn_types_E,self.conn_types_I)
+    
+    @property
+    def filepath(self):
+        return f"~/Documents/jitter_out/{self.name}.ccg.meta.h5"
+    
+    def save(self):
+        with h5py.File(self.filepath, "w") as f:
+            for k, v in self.__dict__.items():
+                try:
+                    f.create_dataset(k, data=v)
+                except TypeError:
+                    f.attrs[k] = str(v)  # fallback for non-array data
+
+    @classmethod
+    def load(cls, path):
+        obj = cls.__new__(cls)  # bypass __init__
+        with h5py.File(path, "r") as f:
+            for k, v in f.items():
+                obj.__dict__[k] = np.array(v)
+            for k, v in f.attrs.items():
+                obj.__dict__[k] = v
+        return obj
+
+
+def _intersect2d(coords1,coords2,n):
+    # Intersection of coordinate lists
+    coords1 = coords1[:,0]*n+coords1[:,1]
+    coords2 = coords2[:,0]*n+coords2[:,1]
+    coords=np.intersect1d(coords1,coords2)
+    coords=np.array([[x//n,x%n] for x in coords])
+    return coords
+
+def _setdiff2d(coords1,coords2,n):
+    # Set difference of coordinate lists
+    coords1 = coords1[:,0]*n+coords1[:,1]
+    coords2 = coords2[:,0]*n+coords2[:,1]
+    coords=np.setdiff1d(coords1,coords2)
+    coords=np.array([[x//n,x%n] for x in coords])
+    return coords
+
+class CCGDataset:
+    def __init__(self,conf:CCGConfig):
+        self.ccg={}
+        self.conf=conf
+        self.spurious={}
+
+    def excitability_slice(self,E):
+        return {k: v for k, v in self.data.items() if k[-2] == E}
+
+    def ref_slice(self,ref):
+        return {k: v for k, v in self.data.items() if k[-1][0] == ref}
+
+    def target_slice(self,target):
+        return {k: v for k, v in self.data.items() if k[-1][1] == target}
+
+    def merge_ccg(self, var:Dict[tuple, CCGData], key:tuple):
+        if isinstance(key, str):
+            key = (key,)
+        self.ccg = {**{key + k: v for k, v in var.items()}, **self.ccg}
+
+    def merge_spurious(self, var:Dict[tuple, CCGData], key:tuple):
+        if isinstance(key, str):
+            key = (key,)
+        self.spurious = {**{key + k: v for k, v in var.items()}, **self.spurious}
+
+    def plot_ccg(self,):
+        pass
+    def plot_spurious(self,):
+        pass
+
+    @property
+    def filepath(self):
+        return f"~/Documents/jitter_out/{self.conf.name}.ccg.h5"
+
+    def save(self):
+        self.conf.save()
+        with h5py.File(self.filepath, "w") as f:
+            for k in ['ccg','spurious']:
+                grp = f.create_group(k)
+                for kk, vv in self.__dict__[k].items():
+                    grp.create_dataset(str(kk), data=vv)
+
+    def load(self):
+        try:
+            self.conf.load()
+            with h5py.File(self.filepath, "r") as f:
+                for k in ['ccg','spurious']:
+                    grp = f[k]
+                    self.__dict__[k] = {kk: grp[kk][:] for kk in grp.keys()}
+        except Exception as e:
+            print(f"Load failed: {e}")
+
+
+class JitterDataset():
+    def __init__(self, session_name:str, inds:np.ndarray, njitter:int=None, jitter_type:str=None,
+                 epoch:str=None, chunk_id:int=1, EI:str=None, conn_type:tuple=None):
+        self.session_name = session_name
+        self.epoch = epoch
+        self.chunk_id = chunk_id
+        self.EI = EI
+        self.conn_type = conn_type
+        self.inds = inds
+        self.njitter = njitter
+        self.jitter_type = jitter_type
+        self.data = {} # data key is pair indices
+    
+    @property
+    def filepath(self):
+        return f'~/Documents/jitter_out/jitter-{self.session_name}_{self.epoch}{self.chunk_id}_{self.conn_type}-{self.EI}.h5'
+
+    def save(self):
+        with h5py.File(self.filepath, "a") as f:
+            f.create_dataset(self.session_name, data=self.data)
+            print(f"saved {self.conn_type}")
+
+    def load(self):
+        with h5py.File(self.filepath, "r") as f:
+            self.data = f[self.session_name][:]
+            print(f"loaded jitter data {self.conn_type}")
+
+    @property
+    def jitter_inputs(self):
+        """
+        Reshape coordinates of (ref,target) pairs into most efficient format for jittering
+        grouped by target indices
+
+        coords: np array with shape (n,2)
+        """
+        jinds=np.argsort(self.inds[:,1])
+        keys, inv = np.unique(jinds[:,1], return_inverse=True)
+        jitter_inputs = [jinds[inv==i,0].tolist()+[k] for i,k in enumerate(keys)]
+        return jitter_inputs
+
+def routine_jitter_pairs_after_conv_wrapper(cd:CCGDataset,nd:NeuronsDataset,njitter=100,jitter_type='spike_time',filename=None):
+    filename = filename or datetime.now().strftime("%Y-%m-%d-%H-%M")
+    conf = cd.conf
+    cd.conf.njitter = njitter
+    cd.conf.jitter_type = jitter_type
+
+    for key, ccgs in cd.ccg.items():
+        if isinstance(key,tuple) and len(key)==4:
+            sess_name, epoch, EI, conn_type = key
+            nkey = (sess_name, epoch)
+        elif isinstance(key,tuple) and len(key)==3:
+            sess_name, EI, conn_type = key
+            epoch = nd.conf.epochs[0]
+            nkey = sess_name
+        else:
+            sess_name = key
+            epoch = nd.conf.epochs[0]
+            conn_type = cd.conf.conn_types['E'][0] or cd.conf.conn_types['I'][0]
+            EI = 'E' if len(cd.conf.conn_types['E'][0])>0 else 'I'
+            nkey = None
+
+        print("jitter",sess_name)
+        neurons = nd.data[nkey] if nkey else nd.data
+        _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons,njitter,jitter_type)
+
+
+def _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons,njitter,jitter_type):
+        if not isinstance(ccgs,list):
+            ccgs=[ccgs]
+        if not isinstance(neurons,list):
+            neurons=[neurons]
+        for c,neu,ccg in enumerate(zip(neurons,ccgs)):
+            jd = JitterDataset(session_name=sess_name,
+                                epoch=epoch,
+                                chunk_id=c,
+                                EI=EI,
+                                conn_type=conn_type,
+                                njitter = njitter,
+                                jitter_type = jitter_type,
+                                inds=ccg.inds)
+            for _,j in enumerate(jd.jitter_inputs):
+                jitter_out = ccg_jitter(neurons=neu,
+                                    neuron_inds=j,
+                                    njitter=njitter,
+                                    jitter_type=jitter_type,
+                                    use_cupy=True,
+                                    bin_mode='odd')
+                jd.data[j]=jitter_out
+            jd.save()
+
+
+def _routine_eranconv_pairs(chunk_neurons:Neurons, conf:CCGConfig, nconf:NeuronsDatasetConfig,):
+        """
+        Helper of routine_eranconv_pairs_wrapper
+
+        chunk_neurons: list of Neurons that were sliced from the same session.
+        """
+        overview_str = ""
+        ccg_out, spurious_out={},{}
+        ### start of chunks loop ###
+        for c, neurons in enumerate(chunk_neurons):
+            n=neurons.n_neurons
+            inds_by_type = {}
+            for t in nconf.neuron_types:
+                inds_by_type[t]=np.where(neurons.neuron_type==t)
+
+            ccg = correlations.spike_correlations(
+                    neurons=neurons,
+                    neuron_inds=np.arange(n), # all
+                    bin_size=conf.bin_size,
+                    window_size=conf.duration,
+                    use_cupy=conf.use_cupy,
+                    symmetrize=conf.symmetrize_ccg,
+                    bin_mode='odd' if conf.bin_align=='center' else 'even',
+                )
+            
+            pvals, pred, qvals = eran_conv(ccg,W=conf.jscale,wintype="gauss",hollow_frac=None)
+
+            def _multiple_correction(pvals,alpha,method='bonferroni'):
+                # TODO should bump this to utils or something
+                # methods: 'fdr_bh', 'bonferroni'
+                p_flat = pvals.ravel()
+                sig, p_corr, _, _ = multipletests(p_flat, alpha=alpha, method=method)
+                sig = sig.reshape(pvals.shape)
+                p_corr = p_corr.reshape(pvals.shape)   
+                # sig = (pvals[...,C+start:C+end+1] < corrected_alpha)
+                return sig,p_corr
+            
+            sig, p_correct = _multiple_correction(pvals, conf.alpha)
+            coords_excitatory = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1))
+
+            sig1, q_correct1 = _multiple_correction(qvals, conf.alpha)
+            sig2, q_correct2 = _multiple_correction(qvals, conf.alpha2)
+            neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1)) # significant bins must have a semi-significant neighbor
+            coords_inhitibitory = np.argwhere(neighbor.any(-1))
+ 
+            coords_spkcount = np.argwhere((ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1))
+            
+            coordsE = _intersect2d(coords_excitatory, coords_spkcount, n)
+            coordsI = _intersect2d(coords_inhitibitory, coords_spkcount, n)
+
+            def _count_significant_pairs(coords,neurons,conn_types,ignore_same_electrodes=True):
+                """
+                Create a tally of significant neuronal connectoins by type
+                Currently, the type is defined as 
+                    reference-target/[E,I]
+                where reference is presynaptic, and target is postsynaptic neuronal type, 
+                and E/I indicates the connection being excitatory or inhibitory
+
+                SL: If this helper function seems messy it's probably because 
+                it pertains to our specific definition of significant pairs (see Diba 2014, Pairwise connections.)
+                """
+                all_sig_pairs = []
+                list_empty = True
+                if coords.shape[0]:
+                    # Condition 1: Ref/Target are never on the same electrode
+                    if ignore_same_electrodes:
+                        diff_channel=np.where(neurons.peak_channels[coords[:,0]]!=neurons.peak_channels[coords[:,1]])[0]
+                        coords = coords[diff_channel]
+                    # Condition 2: Specify Ref/Target cell types
+                    for (ref,target) in conn_types:
+                        sig_pairs=np.where(np.isin(coords[:,0],inds_by_type[ref]) & 
+                                            np.isin(coords[:,1],inds_by_type[target]))[0]
+                        all_sig_pairs.append(coords[sig_pairs])
+                    list_empty = not np.any([_.shape[0] for _ in all_sig_pairs])
+                return all_sig_pairs,list_empty
+
+            ### start of celltype loop ###
+            excitatory_pairs,list_emptyE = _count_significant_pairs(coordsE,neurons,conf.conn_types_E,ignore_same_electrodes=conf.ignore_same_electrodes)
+            inhibitory_pairs,list_emptyI = _count_significant_pairs(coordsI,neurons,conf.conn_types_I,ignore_same_electrodes=conf.ignore_same_electrodes)
+            ### end of celltype loop ###
+            n_E, n_I = coordsE.shape[0], coordsI.shape[0]
+
+            ################ UPDATE PRINT STRING #################
+            def _printstr_sig(all_sig_pairs, conn_types, EI):
+                # if any type of connection under consideration has a non-zero count, print a summary
+                s=""
+                if np.any([_.shape[0] for _ in all_sig_pairs]):
+                    for sig_pairs,(ref,target) in zip(all_sig_pairs,conn_types):
+                        s+=f"{ref}-{target}/{EI} {f'{sig_pairs.shape[0]:02d}' if sig_pairs.shape[0] else '-'} | "
+                if s=="":
+                    s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
+                return s
+            sE = _printstr_sig(excitatory_pairs, conf.conn_types_E, 'E')
+            sI = _printstr_sig(inhibitory_pairs, conf.conn_types_I, 'I')
+            overview_str += f"SLEEP{c}: E/I pairs {n_E:03d} / {n_I:03d} | "
+            if list_emptyE and list_emptyI:
+                overview_str+="no connections\n"
+            else:
+                overview_str=overview_str+sE+sI+"\n"
+
+            ################ UPDATE RETURN VALUES #################
+            for excitability, conn_types, pair_inds, coords in zip(['E','I'],[conf.conn_types_E,conf.conn_types_I],[excitatory_pairs,inhibitory_pairs],[coordsE,coords_inhitibitory]):
+                significance = pvals if excitability=='E' else qvals
+                if not pair_inds:
+                    continue #TODO append none
+                spurious_inds = coords
+                for conn_type,inds in zip(conn_types,pair_inds):
+                    ckey = (excitability,conn_type)
+                    skey = (excitability,)
+                    if len(chunk_neurons)>1 and c==1:
+                        ccg_out[ckey]=[]
+                        spurious_out[skey]=[]
+
+                    spurious_inds = _setdiff2d(spurious_inds,inds,n)
+                    ids = neurons.ind2id(inds) if np.any(inds) else inds
+                    _ = CCGData(inds=inds, 
+                                ids=ids, 
+                                ccg=ccg[inds[:,0],inds[:,1]], 
+                                pred=pred[inds[:,0],inds[:,1]], 
+                                pval=significance[inds[:,0],inds[:,1]], 
+                                ref=conn_type[0], 
+                                target=conn_type[1],
+                                excitability=excitability)
+                    if len(chunk_neurons)==1:
+                        ccg_out[ckey] = _
+                    else:
+                        ccg_out[ckey].append(_)
+                
+                inds = np.asarray(spurious_inds)
+                ids = neurons.ind2id(inds) if np.any(inds) else inds
+                _ = CCGData(inds=inds, 
+                            ids=ids, 
+                            ccg=ccg[inds[:,0],inds[:,1]], 
+                            pred=pred[inds[:,0],inds[:,1]], 
+                            pval=pvals[inds[:,0],inds[:,1]], 
+                            ref=neurons.neuron_type[inds[:,0]],
+                            target=neurons.neuron_type[inds[:,1]],
+                            excitability=excitability)
+                if len(chunk_neurons)==1:
+                    spurious_out[skey] = _
+                else:
+                    spurious_out[skey].append(_)
+        ### end of chunks loop ###
+        return ccg_out, spurious_out, overview_str
+
+def routine_eranconv_pairs_wrapper(ccg_config:CCGConfig, nd:NeuronsDataset,):
+    """
+    Run CCG and convolution based significance test for all neurons
+
+    Params
+    -----
+    ccg_config: Parameters for CCG, contains all configurations
+    nd: Neurons dataset, contains all input data
+    """
+    print("EranConv significant pairs")
+    cd = CCGDataset(ccg_config)
+    if isinstance(nd.data,dict):
+        for key,neurons in nd.data.items():
+            if not isinstance(neurons, list): 
+                neurons=[neurons]
+
+            sess_name = key[0] if isinstance(key,tuple) and len(key)>1 else key
+            overview_str = f"======={sess_name}=======\n"
+            overview_str+=f"Chunk(s) are {neurons[0].total_time_hours:.2f}h each and contain {[f'{_.effective_time_hours:.2f}' for _ in neurons]} hours of actual sleep "
+            for _ in nd.conf.neuron_types: # sleep chunk
+                overview_str+=f"{_}={neurons[0].get_neuron_type(_).n_neurons} "
+            overview_str+="\n"
+
+            ccgs, spurs, printstr = _routine_eranconv_pairs(neurons, ccg_config, nd.conf)
+            cd.merge_ccg(ccgs, key)
+            cd.merge_spurious(spurs, key)
+            print(overview_str+printstr)
+    else:
+        neurons = nd.data
+        if not isinstance(neurons, list): 
+            neurons=[neurons]
+        overview_str = f"======={nd.conf.session_names[0]}=======\n"
+        overview_str+=f"Chunk(s) are {neurons[0].total_time_hours:.2f}h each and contain {[f'{_.effective_time_hours:.2f}' for _ in neurons]} hours of actual sleep "
+        for _ in nd.conf.neuron_types: # sleep chunk
+            overview_str+=f"{_}={neurons[0].get_neuron_type(_).n_neurons} "
+        overview_str+="\n"
+
+        cd.ccgs, cd.spurs, printstr = _routine_eranconv_pairs(neurons, ccg_config, nd.conf)
+        overview_str+=printstr
+
+    print(overview_str)
+    return cd
 
 # TODO: move to plotting in the future!
 import seaborn as sns
 import matplotlib.pyplot as plt
 import os
-
-def routine_eranconv_save_plots(neurons_dict,sessions,conv_dict,jitter_dict=None,
-                                window_size = 0.02,bin_size = 0.001,
-                                session_names=None,
-                                chunk_ids=None,
-                                conn_types=None,
-                                epochs=None,
-                                conn_types_select=None,
-                                ):
-    """
-    TODO jitter p values are plotted, which should be similar to eran_conv p values.
-    no way to specify which field of jitter_dict is plotted yet
-    """
-    images_folder = f"/home/selinali/Documents/NeuroPy/images/ccg_plots/test"
-    epochs = epochs or neurons_dict['epochs']
-    n_chunks = chunk_ids or neurons_dict['n_chunks']
-    conn_types_dict = conv_dict['conn_types']
-    conn_types = conn_types or np.concatenate([conn_types['E'], conn_types['I']])
-    session_names = session_names or neurons_dict['session_names']
-    prep_connectivity_plot_folders(images_folder, session_names, epochs, n_chunks, conn_types_dict)
-
-    # TODO pass from previous functions
-    for s, sess_name in enumerate(session_names):
-        print(sess_name)
-        if jitter_dict is not None:
-            jitters = jitter_dict[sess_name]
-        sess_neurons = neurons_dict[sess_name]
-        conv = conv_dict[sess_name]
-        frates_all = sessions[s].neurons.get_neuron_type(neurons_dict['neuron_types']).firing_rate
-        for EI in ['E','I']:
-            for conn_type in conn_types_dict[EI]:
-                if conn_type not in conn_types: continue # not the best code, but...
-                for epoch,n_chunk in zip(epochs,n_chunks):
-                    neurons = sess_neurons[epoch]
-                    for c in range(n_chunk):
-                        try:
-                            k=conv[epoch][EI][conn_type][c]
-                        except:
-                            print(f"{sess_name}: No {conn_type} connections")
-                            continue
-                        if jitter_dict is not None:
-                            jitter = jitters[EI][conn_type]
-                        else:
-                            jitter = None
-                        coords=k['inds']#[np.random.random_integers(0,coords.shape[0]-1,5)]
-                        s=np.argsort(coords[:,1])
-                        coords=coords[s]
-                        plotdir = get_connectivity_plot_folder(images_folder,sess_name,epoch,c,conn_type,EI)
-                        for i,cd in enumerate(coords):
-                            j = jitter[i] if jitter is not None else None
-                            neurons_slice = neurons[c][cd]
-                            plot_ccg_eranconv(neurons = neurons_slice,
-                                            inds=cd,
-                                            ccg=k['ccg'][s][i], 
-                                            plotdir=plotdir, 
-                                            window_size=window_size*1e3,
-                                            bin_size=bin_size*1e3,
-                                            pval=k['pval'][s][i],
-                                            pred=k['pred'][s][i],
-                                            jsig=j,
-                                            frates_all=frates_all[cd],
-                                            mode='odd')
-
-def get_global_band(ccgs):
-    if len(ccgs.shape==2):
-        return np.min(ccgs[1:],axis=-1),np.max(ccgs[1:],axis=-1)
-    elif len(ccgs.shape==3):
-        return np.min(ccgs[:,1:],axis=-1),np.max(ccgs[:,1:],axis=-1)
-    else:
-        ValueError("CCGs must be 2D or 3D to calculate global significance band")
-
-def plot_ccg_eranconv(neurons: Neurons, ccg, inds, plotdir, window_size, bin_size, 
-                      pval, pred, frates_all, jsig=None, mode='even', ch_per_shank=16):
+def plot_ccg_eranconv(ccg, ids, inds, neuron_types, plotdir, window_size, bin_size, 
+                      pval, pred, waveforms, frates_all, frate_cut, jsig=None, mode='even', ch_per_shank=16):
     """
     One CCG plot
     TODO This is defined in such a way that all plotting parameters are expanded. should i collapse and only pass in neurons?
@@ -1033,21 +1173,86 @@ def plot_ccg_eranconv(neurons: Neurons, ccg, inds, plotdir, window_size, bin_siz
     ax.set_xlabel("Time (millisecond)")
     ax.set_ylabel("Count")
     x,y=inds
-    X,Y=neurons.neuron_ids
+    X,Y=ids
     ax.set_title(f"CCG, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
     ax.legend()
     
     sns.despine(ax=ax)
     l = ['ref','target']
     for i in range(2):
-        max_ch = neurons.waveforms[i].shape[0]
+        max_ch = waveforms[i].shape[0]
         ax=axs[1+i]
-        ax.imshow(neurons.waveforms[i].astype(float))
-        ax.set_title(f"{l[i]}: {neurons.neuron_type[i]}{neurons.neuron_ids[i]}")
-        ax.set_xlabel(f"{frates_all[i]:.2f}Hz all | {neurons.firing_rate[i]:.2f}Hz sleep")
-        # TODO shanks. ignoring that some channels may have been discarded
+        ax.imshow(waveforms[i].astype(float))
+        ax.set_title(f"{l[i]}: {neuron_types[i]}{ids[i]}")
+        ax.set_xlabel(f"{frates_all[i]:.2f}Hz all | {frate_cut[i]:.2f}Hz sleep")
+        # shanks. ignoring that some channels may have been discarded
         for k in range(max_ch//ch_per_shank):
             ax.axhline((k+1)*ch_per_shank,c='w',alpha=0.5,linestyle='dashed')
     fig.savefig(f"{plotdir}/ccg-inds{x}-{y}.png")
     fig.tight_layout()
     plt.close(fig)
+
+def routine_eranconv_save_plots(neurons, ccgs,conf,cd,frates_all, plotdir):
+    s=np.argsort(ccgs.inds[:,1]) #[np.random.random_integers(0,coords.shape[0]-1,5)]
+    for i,cd in enumerate(ccgs.inds[s]):
+        plot_ccg_eranconv(ids = neurons.neuron_ids[cd],
+                        inds=cd,
+                        neuron_types= neurons.neuron_type[cd],
+                        frate_cut=neurons.firing_rate[cd],
+                        frates_all=frates_all[cd],
+                        waveforms=neurons.waveforms[cd],
+                        ccg=ccgs.ccg[s][i], 
+                        plotdir=plotdir, 
+                        window_size=conf.duration*1e3,
+                        bin_size=conf.bin_size*1e3,
+                        pval=ccgs.pval[s][i],
+                        pred=ccgs.pred[s][i],
+                        jsig=ccgs.jsig[s][i] if ccgs.jsig else None,
+                        mode='odd')
+
+def get_global_band(ccgs):
+    if len(ccgs.shape==2):
+        return np.min(ccgs[1:],axis=-1),np.max(ccgs[1:],axis=-1)
+    elif len(ccgs.shape==3):
+        return np.min(ccgs[:,1:],axis=-1),np.max(ccgs[:,1:],axis=-1)
+    else:
+        ValueError("CCGs must be 2D or 3D to calculate global significance band")
+
+def routine_eranconv_save_plots_wrapper(nd:NeuronsDataset,ccgd:CCGDataset,jitter_dict=None,
+                                session_names_select=None,
+                                epochs_select=None,
+                                conn_types_select=None,
+                                ):
+    """
+    TODO jitter p values are plotted, which should be similar to eran_conv p values.
+    no way to specify which field of jitter_dict is plotted yet
+    """
+    nconf = nd.conf
+    images_folder = f"/home/selinali/Documents/NeuroPy/images/ccg_plots/test"
+    session_names = session_names_select or nconf.session_names
+    epochs = epochs_select or nconf.epochs
+    chunks_per_session = nconf.chunks_per_session[np.where(nconf.epochs==epochs)[0]]
+    conn_types = conn_types_select or nconf.conn_types_flat
+    prep_connectivity_plot_folders(images_folder, session_names, 
+                                   epochs, chunks_per_session, conn_types)
+
+    # TODO pass from previous functions
+    for s, key, neurons in nd.data.items():
+        sess_name = {}
+        print(sess_name)
+        if jitter_dict is not None:
+            jitters = jitter_dict[sess_name]
+        frates_all = neurons.get_neuron_type(nconf.neuron_types).firing_rate
+        for conn_type in nconf.conn_types_flat:
+            if conn_type not in conn_types_select: continue # not the best code, but...
+            cd = ccgd(key+conn_type)
+            for epoch,n_chunk in zip(epochs,chunks_per_session):
+                neurons = neurons
+                for c in range(n_chunk):
+                    try:
+                        k=cd[c]
+                    except:
+                        print(f"{sess_name}: No {conn_type} connections")
+                        continue
+                    plotdir = get_connectivity_plot_folder(images_folder,sess_name,epoch,c,conn_type,EI)
+                    routine_eranconv_save_plots(plotdir)

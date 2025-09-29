@@ -72,7 +72,6 @@ class Neurons(DataWriter):
         self.spiketrains = np.array(spiketrains, dtype="object")
         #TODO keep the list structure when spiketrain lengths happen to be the same
         if len(self.spiketrains.shape)==2:
-            #self.spiketrains=spiketrains
             result = np.empty(self.spiketrains.shape[0], dtype="object")
             result[:] = [np.asarray(self.spiketrains[i],dtype=float) for i in range(self.spiketrains.shape[0])]
             self.spiketrains=result
@@ -296,7 +295,7 @@ class Neurons(DataWriter):
         else:
             spiketrains = [_mask(spks,intervals) for spks in neurons.spiketrains]
 
-        neurons.spiketrains=spiketrains
+        neurons.spiketrains=np.asarray(spiketrains,dtype='object')
         neurons.t_stop=t_stop
         neurons.t_start=t_start
         neurons.metadata={'intervals':intervals}
@@ -384,7 +383,7 @@ class Neurons(DataWriter):
         else:
             if discard:
                 # TODO inverse time
-        
+                pass        
         intervals = list(zip(bstates.starts,bstates.stops))
         state_neurons=self.time_multislices(intervals,tighten=tighten)
         return state_neurons
@@ -434,21 +433,21 @@ class Neurons(DataWriter):
             indices = np.any(
                 np.vstack([ntype == self.neuron_type for ntype in neuron_type]), axis=0
             )
+        indices = np.flatnonzero(np.array(indices))
         return self[indices]
 
     def _check_integrity(self):
-        assert isinstance(self.spiketrains, np.ndarray)
-        # n_neurons = self.n_neurons
-        # assert all(
-        #     len(arr) == n_neurons
-        #     for arr in [
-        #         self.shankid,
-        #         self.labels,
-        #         self.ids,
-        #         self.waveforms,
-        #         self.instfiring,
-        #     ]
-        # )
+        n_neurons = self.n_neurons
+        assert all(
+            len(arr) == n_neurons
+            for arr in [
+                self.shankid,
+                self.labels,
+                self.ids,
+                self.waveforms,
+                self.instfiring,
+            ]
+        )
 
     def __str__(self) -> str:
         return f"# neurons = {self.n_neurons}"
@@ -470,14 +469,27 @@ class Neurons(DataWriter):
         return self.n_spikes / self.effective_time
     
     @property
+    def total_time(self):
+        return self.t_stop - self.t_start
+    
+    @property
     def effective_time(self):
         # TODO temporary structure
         if np.isin('intervals',list(self.metadata.keys())):
             intervals = self.metadata['intervals']
             total_time=np.sum(intervals[:,1]-intervals[:,0])
+            return total_time
         else:
-            total_time = self.t_stop - self.t_start
-        return total_time
+            return self.total_time
+    
+    @property
+    def total_time_hours(self):
+        return self.total_time/3600
+    
+    @property
+    def effective_time_hours(self):
+        return self.effective_time/3600
+
 
     def get_above_firing_rate(self, thresh: float):
         """Return neurons which have firing rate above thresh"""

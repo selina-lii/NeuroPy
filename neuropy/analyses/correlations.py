@@ -476,6 +476,7 @@ def cp_spike_correlations(
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
     binsize = int(neurons.sampling_rate * bin_size)  # in samples
+    print(f"Bin size is {binsize}")
     assert binsize >= 1, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}"
 
     # Find `winsize_bins`.
