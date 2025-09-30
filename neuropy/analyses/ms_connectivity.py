@@ -90,268 +90,6 @@ def eran_conv(ccg, W=5, wintype="gauss", hollow_frac=None):
     qvals = 1 - pvals
     return pvals, pred, qvals
 
-def add_jitter(neurons: Neurons, njitter, neuron_inds, jscale=5, use_cupy=False):
-    """
-    Spike timing jitter.
-    Randomly shift each spike in target spike train
-
-    Parameters
-    ----------
-    njitter : int
-        number of jitters
-    neuron_inds : list
-        [a1, ..., an, b]
-        a1~an: indices of reference neurons (total of N0)
-        b: index of target neuron (just one)
-    jscale: int
-        maximum spiking time shift in ms (default is +-5ms)
-    use_cupy: bool, optional
-        whether or not to use gpu acceleration
-
-    Returns
-    -------
-    neurons: Neurons=
-        a Neurons object containing (N0+1+njitter) neurons, with ids 0,1,2,....
-        reference: 0, 1, ..., N0-1
-        target: N0
-        jitter: N0+1, ..., N0+njitter
-    """
-    b = neuron_inds[-1]
-    id = neurons.neuron_ids[b]
-    target_nspikes = neurons.n_spikes[b]
-    target_type = neurons.neuron_type[b]
-    target_spiketrain = neurons.spiketrains[b]
-
-    if use_cupy:
-        jittertrains = (
-            cp.round(
-                (
-                    cp.array(target_spiketrain)
-                    + 2 * jscale * 1e-3 * cp.random.rand(njitter,target_nspikes)
-                    - 1 * jscale * 1e-3
-                )
-                * neurons.sampling_rate
-            )
-            / neurons.sampling_rate
-        ).get()
-    else:
-        jittertrains = (
-            np.round(
-                (
-                    target_spiketrain
-                    + 2 * jscale * 1e-3 * np.random.rand(njitter,target_nspikes)
-                    - 1 * jscale * 1e-3
-                )
-                * neurons.sampling_rate
-            )
-            / neurons.sampling_rate
-        )
-    jittertrains = list(jittertrains)
-    jittered = Neurons(spiketrains=jittertrains,
-        t_start=neurons.t_start,
-        t_stop=neurons.t_stop,
-        neuron_ids=[id]*njitter,
-        neuron_type=[target_type]*njitter
-        ) # TODO not copying over other fields
-    neurons.neuron_slice(neuron_inds=neuron_inds) \
-            .merge(jittered)
-    cp.get_default_memory_pool().free_all_blocks()
-    return neurons
-    
-def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
-    """
-    Inter-spike intervals jitter.
-    Randomly shuffled the spike time intervals in non-reference spike train
-    within local windows of +/-(jscale) intervals
-
-    Parameters
-    ----------
-    njitter : int
-        number of jitters
-    neuron_inds : list
-        [a,b]
-        a: index of reference neuron
-        b: index of non-reference neuron
-    jscale: int
-        defines window within which intervals are grouped and shuffled
-    use_cupy: bool, optional
-        whether or not to use gpu acceleration
-
-    Returns
-    -------
-    neurons: Neurons
-        a Neurons object containing (njitter+2) neurons, with indices 0...njitter.
-        first neuron is the reference cell, index=0
-        second neuron is the non-reference cell with index=1
-        the next (njitter) neurons are jitters of the non-reference cell
-    """
-    neurons = neurons.get_by_id(neuron_inds)
-
-    neurons.neuron_ids[0]=0 # ref
-    neurons.neuron_ids[1]=1 # non-ref
-
-    nonref_nspikes = neurons.n_spikes[1]
-    nonref_type = neurons.neuron_type[1]
-    nonref_spiketrain = neurons.spiketrains[1]
-    intervals = cp.diff(nonref_spiketrain)
-
-
-    if use_cupy:
-        jittertrains = (
-            cp.round(
-                (
-                    cp.array(nonref_spiketrain)
-                    + 2 * jscale * 1e-3 * cp.random.rand(njitter,nonref_nspikes)
-                    - 1 * jscale * 1e-3
-                )
-                * neurons.sampling_rate
-            )
-            / neurons.sampling_rate
-        ).get()
-    else:
-        jittertrains = (
-            np.round(
-                (
-                    nonref_spiketrain
-                    + 2 * jscale * 1e-3 * np.random.rand(njitter,nonref_nspikes)
-                    - 1 * jscale * 1e-3
-                )
-                * neurons.sampling_rate
-            )
-            / neurons.sampling_rate
-        )
-
-    # Asign indices sequentially
-    jittertrains = list(jittertrains)
-    jittered = Neurons(spiketrains=jittertrains,
-        t_stop=neurons.t_stop,
-        neuron_ids=np.arange(njitter)+len(neuron_inds),
-        neuron_type=[nonref_type]*njitter
-        ) # TODO not copying over other fields
-    neurons.merge(jittered)
-    cp.get_default_memory_pool().free_all_blocks()
-    return neurons
-
-def ccg_jitter(neurons: Neurons,
-    neuron_inds,
-    bin_size=0.001,
-    duration=0.02,
-    jscale=5,
-    njitter=100,
-    alpha=0.05,
-    use_cupy=False,
-    bin_mode='even',
-    EI = 'E',
-):
-    """
-    CCGs are shaped (N0,1,nbins)
-
-    EI: if 'E', use p-vals for peaks, else use q-vals for troughs
-    """
-
-    # SL: These were comments from Nat I guess - 
-    # most of these are naturally fixed as I update the function
-
-    # set up variables
-    # halfbins = ( TODO what are halfbins for...
-    #     cp.round(duration / bin_size / 2) if cuda else np.round(duration / bin_size / 2)
-    # )
-    # spikes_sorted, clus_sorted = ccg_spike_assemble(spike_trains)
-    # spikes1 = spikes_sorted[
-    #     clus_sorted == 1
-    # ]  # keep all spike times from cluster 1 for easy manipulation during jitter step
-
-    # Now run on jittered spike-trains!
-    # TODO: implement this in ALL cupy and compare times...does it matter if the spike jitter code is in numpy? Answer: it does 16ms with numpy vs 1 with cupy.
-
-    # Add jitter to the last neuron in the list, which is the target neuron
-    print("debug",neuron_inds)
-
-    neuronsj = add_jitter(neurons=neurons,
-            njitter=njitter,
-            neuron_inds=neuron_inds,
-            jscale=jscale,
-            use_cupy=use_cupy,
-        )
-        # Jitter spikes in second cluster
-
-    # run ccg
-    N0 = len(neuron_inds)-1
-    ccg_all=correlations.spike_correlations(
-            neurons=neuronsj,
-            ref_neuron_inds=np.arange(N0),
-            neuron_inds=N0+np.arange(njitter+1),
-            bin_size=bin_size,
-            window_size=duration,
-            use_cupy=use_cupy,
-            symmetrize=True,
-            bin_mode=bin_mode,
-        )
-    # Debugging - 'debug' should be all zeros (two methods are identical)
-    # orig = correlations.spike_correlations(
-    #         neurons=neuronsj,
-    #         neuron_inds=np.arange(neuronsj.n_neurons),
-    #         bin_size=bin_size,
-    #         window_size=duration,
-    #         use_cupy=use_cupy,
-    #         symmetrize=True,
-    #         bin_mode=bin_mode,
-    #     )
-    # debug = orig[0,len(ref_inds):]-ccg_all[0]
-    # print(debug)
-    
-    # TODO
-    # ccg_all: (N0, njitter+1, Nbins)
-    # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
-    # thresholds = (N0, Nbins)
-    if EI=='E':
-        pval = np.argsort(np.argsort(-ccg_all,axis=1,kind="stable"),axis=1)[:,0]/njitter
-        thresholds = np.percentile(ccg_all[:,1:], 100*(1-alpha), axis=1)
-    else:
-        pval = np.argsort(np.argsort(ccg_all,axis=1,kind="stable"),axis=1)[:,0]/njitter
-        thresholds = np.percentile(ccg_all[:,1:], 100*(alpha), axis=1)
-    significances = pval<=alpha
-    jbsi_vals = jbsi(ccg_all,
-                     frates = neurons.firing_rate[neuron_inds],
-                     bin_size=bin_size,
-                     jscale=jscale)
-    jitter_out = {'neuronsj':neuronsj,
-                  'ccg_all':ccg_all,
-                  'pval':pval,
-                  'significances':significances,
-                  'thresholds':thresholds,
-                  'JBSI':jbsi_vals
-                  }
-    return jitter_out # orig
-
-def jbsi(ccgs,frates,bin_size,jscale,):
-    """
-    Can be batched, but only for one neuron vs group of neurons
-    frates = [ref1, ref2, ..., refN0, target]
-    ccgs = (N0, Njitters+1, Nbins) or (Njitters+1, Nbins)
-    Real ccg should be at the beginning of the array, before jitters
-
-    return shape = (N0, Nbins) or (Nbins,)
-    """
-    if len(ccgs.shape)==3:
-        N0 = ccgs.shape[0] 
-        Nreal =ccgs[:,0] # (N0, Nbins)
-        Nj_avg = np.mean(ccgs[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
-    else:
-        N0 = 1
-        Nreal =ccgs[0] # (1, Nbins)
-        Nj_avg = np.mean(ccgs[1:],axis=0) # (1, Nbins) averaged over Njitter rows
-    assert len(frates)==N0+1
-    comp_frates = np.zeros((2,N0))
-    comp_frates[0]=frates[-1]
-    comp_frates[1]=frates[:-1]
-    n1 = np.min(comp_frates,axis=0)[...,np.newaxis] # (N0,1) or (1,1)
-
-    ts = bin_size
-    tj = jscale
-    b = tj/(tj-ts) if tj/ts>2 else 2
-    return b/n1*(Nreal - Nj_avg) # (N0, Nbins) or (1, Nbins)
-    
 def _short_session_name(session):
     """get short printable session name in the format of ANIMAL_DayX"""
     sess_name = session.filePrefix.parts[-1].split('_')[:2]
@@ -867,9 +605,257 @@ class CCGDataset:
         except Exception as e:
             print(f"Load failed: {e}")
 
+class JitterData():
+    def __init__(self, neurons:Neurons, ref_inds:Union[int,list[int]], target_ind:int,
+                njitter,jitter_type,jscale):
+        self.ref_inds = _san(ref_inds)
+        self.target_ind = target_ind
+        self.neurons = neurons
+        self.jitters = []
+        self.jsigs = []
+        self._njitter = njitter
+        self._jtype = jitter_type
+        self._jscale = jscale
+        self.ccg = []
+        self.pval = 0
+        self.significances = 0
+        self.thresholds = 0
+        self.JBSI = 0
+
+        # All reference neurons should be somewhat 'similar',
+        # meaning the same operation can be applied on them.
+        # Here we require them to have the same neuronal type
+        assert len(set(neurons.neuron_type[self.ref_inds]))==1
+    
+    @property
+    def njitter(self):
+        return self._njitter
+
+    @njitter.setter
+    def njitter(self, v):
+        self._njitter=v
+        self.clear()
+
+    @property
+    def jitter_type(self):
+        return self._jtype
+    
+    @jitter_type.setter
+    def jitter_type(self, v):
+        self._jtype=v
+        self.clear()
+
+    def clear(self):
+        self.jitters = None
+        self.jsigs = None
+        self.ccg=None
+        self.pval = None
+        self.significances = None
+        self.thresholds = None
+        self.JBSI=None
+
+    @property
+    def jscale(self):
+        return self.jscale
+
+    @jscale.setter
+    def jscale(self, v):
+        self._jscale=v
+        self.clear()
+
+    @property
+    def filepath(self):
+        return ""     
+
+    @property
+    def inds(self):
+        return np.concatenate([self.ref_inds, self.target_ind])
+
+    @property
+    def n_ref(self):
+        return len(self.ref_inds)
+    
+    @property
+    def target_type(self):
+        return self.neurons.neuron_type[self.target_ind][0]
+    
+    @property
+    def target_id(self):
+        return self.neurons.neuron_ids[self.target_ind]
+
+    @property
+    def ref_type(self):
+        return self.neurons.neuron_type[self.ref_inds[0]][0]
+
+    def routine(self, ccg_conf):
+        self.add_jitter()
+        self.jitter_ccg(ccg_conf)
+        self.jbsi(ccg_conf)
+
+    def add_jitter(self):
+        """
+        Spike timing jitter.
+        Randomly shift each spike in target spike train
+
+        Parameters
+        ----------
+        njitter : int
+            number of jitters
+        jscale: int
+            maximum spiking time shift in ms (default is +-5ms)
+        use_cupy: bool, optional
+            whether or not to use gpu acceleration
+
+        Returns
+        -------
+        neurons: Neurons=
+            a Neurons object containing (N0+1+njitter) neurons, with ids 0,1,2,....
+            reference: 0, 1, ..., N0-1
+            target: N0
+            jitter: N0+1, ..., N0+njitter
+        """
+        b = self.target_ind
+        target_nspikes = self.neurons.n_spikes[b]
+        target_spiketrain = self.neurons.spiketrains[b]
+
+        jscale = self.conf.jscale
+        njitter = self.njitter
+        sampling_rate = self.neurons.sampling_rate
+
+        if self.conf.use_cupy:
+            jittertrains = (
+                cp.round(
+                    (
+                        cp.array(target_spiketrain)
+                        + 2 * jscale * 1e-3 * cp.random.rand(njitter,target_nspikes)
+                        - 1 * jscale * 1e-3
+                    )
+                    * sampling_rate
+                )
+                / sampling_rate
+            ).get()
+        else:
+            jittertrains = (
+                np.round(
+                    (
+                        target_spiketrain
+                        + 2 * jscale * 1e-3 * np.random.rand(njitter,target_nspikes)
+                        - 1 * jscale * 1e-3
+                    )
+                    * sampling_rate
+                )
+                / sampling_rate
+            )
+        self.jitters = list(jittertrains)
+        cp.get_default_memory_pool().free_all_blocks()
+
+    def jitter_ccg(self, cconf:CCGConfig):
+        """
+        CCGs are shaped (N0,1,nbins)
+        """
+        print("debug",self.ref_inds,self.target_ind)
+        
+        neurons = self.neurons.neuron_slice(neuron_inds=self.inds)
+        j = Neurons(spiketrains=self.jitters,
+            t_start=self.neurons.t_start,
+            t_stop=self.neurons.t_stop,
+            neuron_ids=[self.target_id]*self.njitter,
+            neuron_type=[self.target_type]*self.njitter
+            ) # TODO not copying over other fields
+        neurons.merge(j)
+
+        # run ccg
+        self.ccg=correlations.spike_correlations(
+                neurons=neurons,
+                ref_neuron_inds=np.arange(self.n_ref),
+                neuron_inds=self.n_ref+np.arange(self.njitter+1),
+                bin_size=cconf.bin_size,
+                window_size=cconf.duration,
+                use_cupy=cconf.use_cupy,
+                symmetrize=cconf.symmetrize_ccg,
+                bin_mode=cconf.bin_align,
+            )
+        # Debugging - 'debug' should be all zeros (two methods are identical)
+        # orig = correlations.spike_correlations(
+        #         neurons=neurons,
+        #         neuron_inds=np.arange(neurons.n_neurons),
+        #         bin_size=bin_size,
+        #         window_size=duration,
+        #         use_cupy=use_cupy,
+        #         symmetrize=True,
+        #         bin_mode=bin_mode,
+        #     )
+        # debug = orig[0,len(ref_inds):]-ccg_all[0]
+        # print(debug)
+
+    def jitter_significance(self, cconf):
+        """
+                EI: if 'E', use p-vals for peaks, else use q-vals for troughs
+        # TODO
+        # ccg_all: (N0, njitter+1, Nbins)
+        # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
+        # thresholds = (N0, Nbins)
+
+        """
+        if (self.ref_type, self.target_type) in cconf.conn_types_E:
+            pval = np.argsort(np.argsort(-self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            thresholds = np.percentile(self.ccg[:,1:], 100*(1-cconf.alpha), axis=1)
+        elif (self.ref_type, self.target_type) in cconf.conn_types_I:
+            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            thresholds = np.percentile(self.ccg[:,1:], 100*(cconf.alpha), axis=1)
+        else:
+            Warning("Connection type is not in config. Default to excitatory.")
+            pval = np.argsort(np.argsort(-self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            thresholds = np.percentile(self.ccg[:,1:], 100*(1-cconf.alpha), axis=1)
+
+        self.significances = pval<=cconf.alpha
+        self.thresholds=thresholds
+
+    def jbsi(self,cconf:CCGConfig):
+        """
+        Can be batched, but only for one neuron vs group of neurons
+        frates = [ref1, ref2, ..., refN0, target]
+        ccgs = (N0, Njitters+1, Nbins) or (Njitters+1, Nbins)
+        Real ccg should be at the beginning of the array, before jitters
+
+        return shape = (N0, Nbins) or (Nbins,)
+        """
+        assert self.ccg is not None
+
+        frates = self.neurons.firing_rate[self.inds]
+
+        if len(self.ccg.shape)==3:
+            N0 = self.ccg.shape[0] 
+            Nreal =self.ccg[:,0] # (N0, Nbins)
+            Nj_avg = np.mean(self.ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
+        else:
+            N0 = 1
+            Nreal =self.ccg[0] # (1, Nbins)
+            Nj_avg = np.mean(self.ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
+        comp_frates = np.zeros((2,N0))
+        comp_frates[0]=frates[-1]
+        comp_frates[1]=frates[:-1]
+        n1 = np.min(comp_frates,axis=0)[...,np.newaxis] # (N0,1) or (1,1)
+
+        ts = cconf.bin_size
+        tj = self.jscale
+        b = tj/(tj-ts) if tj/ts>2 else 2
+        self.JBSI =  b/n1*(Nreal - Nj_avg) # (N0, Nbins) or (1, Nbins)
+        
+
+
+class JitterConfig():
+    def __init__(self, njitter:int=None, jitter_type:str=None, jscale:int=None, use_cupy=True,
+                 ):
+        self.njitter = njitter
+        self.jitter_type = jitter_type
+        self.jscale = jscale
+        self.use_cupy = use_cupy
+
 
 class JitterDataset():
     def __init__(self, session_name:str, inds:np.ndarray, njitter:int=None, jitter_type:str=None,
+                 jscale:int=None, 
                  epoch:str=None, chunk_id:int=1, EI:str=None, conn_type:tuple=None):
         self.session_name = session_name
         self.epoch = epoch
@@ -877,9 +863,8 @@ class JitterDataset():
         self.EI = EI
         self.conn_type = conn_type
         self.inds = inds
-        self.njitter = njitter
-        self.jitter_type = jitter_type
         self.data = {} # data key is pair indices
+        self.significance = {}
     
     @property
     def filepath(self):
@@ -907,6 +892,85 @@ class JitterDataset():
         keys, inv = np.unique(jinds[:,1], return_inverse=True)
         jitter_inputs = [jinds[inv==i,0].tolist()+[k] for i,k in enumerate(keys)]
         return jitter_inputs
+    
+    
+
+        
+    def add_jitter_ISI(neurons: Neurons, njitter, neuron_inds, jscale, use_cupy=False):
+        """
+        Inter-spike intervals jitter.
+        Randomly shuffled the spike time intervals in non-reference spike train
+        within local windows of +/-(jscale) intervals
+
+        Parameters
+        ----------
+        njitter : int
+            number of jitters
+        neuron_inds : list
+            [a,b]
+            a: index of reference neuron
+            b: index of non-reference neuron
+        jscale: int
+            defines window within which intervals are grouped and shuffled
+        use_cupy: bool, optional
+            whether or not to use gpu acceleration
+
+        Returns
+        -------
+        neurons: Neurons
+            a Neurons object containing (njitter+2) neurons, with indices 0...njitter.
+            first neuron is the reference cell, index=0
+            second neuron is the non-reference cell with index=1
+            the next (njitter) neurons are jitters of the non-reference cell
+        """
+        neurons = neurons.get_by_id(neuron_inds)
+
+        neurons.neuron_ids[0]=0 # ref
+        neurons.neuron_ids[1]=1 # non-ref
+
+        nonref_nspikes = neurons.n_spikes[1]
+        nonref_type = neurons.neuron_type[1]
+        nonref_spiketrain = neurons.spiketrains[1]
+        intervals = cp.diff(nonref_spiketrain)
+
+
+        if use_cupy:
+            jittertrains = (
+                cp.round(
+                    (
+                        cp.array(nonref_spiketrain)
+                        + 2 * jscale * 1e-3 * cp.random.rand(njitter,nonref_nspikes)
+                        - 1 * jscale * 1e-3
+                    )
+                    * neurons.sampling_rate
+                )
+                / neurons.sampling_rate
+            ).get()
+        else:
+            jittertrains = (
+                np.round(
+                    (
+                        nonref_spiketrain
+                        + 2 * jscale * 1e-3 * np.random.rand(njitter,nonref_nspikes)
+                        - 1 * jscale * 1e-3
+                    )
+                    * neurons.sampling_rate
+                )
+                / neurons.sampling_rate
+            )
+
+        # Asign indices sequentially
+        jittertrains = list(jittertrains)
+        jittered = Neurons(spiketrains=jittertrains,
+            t_stop=neurons.t_stop,
+            neuron_ids=np.arange(njitter)+len(neuron_inds),
+            neuron_type=[nonref_type]*njitter
+            ) # TODO not copying over other fields
+        neurons.merge(jittered)
+        cp.get_default_memory_pool().free_all_blocks()
+        return neurons
+
+
 
 def routine_jitter_pairs_after_conv_wrapper(cd:CCGDataset,nd:NeuronsDataset,njitter=100,jitter_type='spike_time',filename=None):
     filename = filename or datetime.now().strftime("%Y-%m-%d-%H-%M")
@@ -932,7 +996,6 @@ def routine_jitter_pairs_after_conv_wrapper(cd:CCGDataset,nd:NeuronsDataset,njit
         print("jitter",sess_name)
         neurons = nd.data[nkey] if nkey else nd.data
         _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons,njitter,jitter_type)
-
 
 def _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons,njitter,jitter_type):
         if not isinstance(ccgs,list):
@@ -1237,7 +1300,7 @@ def routine_eranconv_save_plots_wrapper(nd:NeuronsDataset,ccgd:CCGDataset,jitter
                                    epochs, chunks_per_session, conn_types)
 
     # TODO pass from previous functions
-    for s, key, neurons in nd.data.items():
+    for key, neurons in nd.data.items():
         sess_name = {}
         print(sess_name)
         if jitter_dict is not None:
