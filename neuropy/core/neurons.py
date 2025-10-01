@@ -490,7 +490,6 @@ class Neurons(DataWriter):
     def effective_time_hours(self):
         return self.effective_time/3600
 
-
     def get_above_firing_rate(self, thresh: float):
         """Return neurons which have firing rate above thresh"""
         indices = self.firing_rate > thresh
