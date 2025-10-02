@@ -591,6 +591,8 @@ def cp_spike_correlations_2groups(
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
 
+    #TODO TODO this is returning NxN I need one that's Nx1
+
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
 
     # Convert to array if int

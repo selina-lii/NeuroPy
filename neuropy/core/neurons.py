@@ -190,7 +190,7 @@ class Neurons(DataWriter):
 
     @property
     def n_neurons(self):
-        return len(self.spiketrains)
+        return self.spiketrains.shape[0]
 
     def __repr__(self) -> str:
         try:
