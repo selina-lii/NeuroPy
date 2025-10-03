@@ -510,18 +510,19 @@ class NeuronsDataset(AnalysisDataset):
 
 class Jitter:
     def __init__(self, neurons:Neurons, ref_inds:Union[int,list[int]], target_ind:int,
-                 conf:JitterConfig):
+                 jscale=5,njitter=100):
         self.ref_inds = _san(ref_inds)
         self.target_ind = target_ind
         self.neurons = neurons
         self.jitters = []
         self.jsigs = []
-        self._conf = conf
         self.ccg = []
         self.pval = 0
         self.significances = 0
         self.thresholds = 0
         self.JBSI = 0
+        self.jscale = jscale
+        self.njitter = njitter
 
         # All reference neurons should be somewhat 'similar',
         # meaning the same operation can be applied on them.
@@ -530,15 +531,6 @@ class Jitter:
     
     def print_config(self):
         print(self._conf)
-    
-    @property
-    def conf(self):
-        return self._conf
-    
-    @conf.setter
-    def conf(self, v):
-        self._conf=v
-        self.clear()
 
     def clear(self):
         self.jitters = None
@@ -582,7 +574,6 @@ class Jitter:
         b = self.target_ind
         target_nspikes = self.neurons.n_spikes[b]
         target_spiketrain = self.neurons.spiketrains[b]
-
         sampling_rate = self.neurons.sampling_rate
 
         if self.use_cupy:
@@ -612,8 +603,24 @@ class Jitter:
         self.jitters = list(jittertrains)
         cp.get_default_memory_pool().free_all_blocks()
     
-    def add_jitter_ISI(self):
-        n1_jitt_int=(self.jscale*2)*floor( n1/(self.jscale*2) ) + (self.jscale*2)*rand( 1,length(n1) );
+    def add_jitter_ISI(self):        
+        # TODO jscale is number of samples
+        sampling_rate = self.neurons.sampling_rate
+        b = self.target_ind
+        target_nspikes = self.neurons.n_spikes[b]
+
+        if self.use_cupy:
+            # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
+            jittertrains = (
+                cp.round(
+                    cp.floor(
+                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                        / self.jscale
+                    ) + cp.random.rand(self.njitter,target_nspikes) * self.jscale
+                )
+                / sampling_rate
+                ).get()
+      
 
     def jitter_ccg(self, cconf:CCGConfig):
         """
@@ -974,13 +981,15 @@ class CCGDataset(AnalysisDataset):
             neurons = self.nd.data[key.parent()]
             ccgs = eranconv_rescale(neurons=neurons,conf=self.conf,inds=spur.inds)
             self.spur[key].ccg = ccgs
+            self.data[key].pval=None
+            self.data[key].pred=None
+            self.data[key].jsig=None # TODO these are temporary
         print("rescale of spurious CCG completed")
         
     def save_plots(self, jd: JitterDataset = None,
                    root="/home/selinali/Documents/NeuroPy/images/ccg_plots",
                    frates_all=None):
         for key, ccg in self.data.items():
-            print(key,key)
             neurons = self.nd.data[key.parent()]
             frates = frates_all[key.parent()] if frates_all else None
             for EI in ['E', 'I']:

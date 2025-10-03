@@ -89,3 +89,36 @@ class Test:
                 frates_all=[1,2]
                 msconn.plot_ccg_eranconv(neurons, ccg, inds=[0,1], plotdir="./tests", window_size=0.02, bin_size=0.001, 
                                     pval=pval, pred=pred, frates_all=frates_all, jsig=None, mode='even')
+                
+    def test_example_inter_spike_interval_jitter():
+        # i came up w this method (histogram) but Han's code was more efficient
+        # do we allow spikes with identical times?
+        start = time.time()
+        njitters = 1
+        nbins = 10
+        x = 5
+        size = np.random.randint(nbins*x//3,2*nbins*x//3)
+        # assume no duplicate spikes
+        simulated_spikes = cp.random.choice(nbins*x,size=size,replace=False)
+        hist,_ = cp.histogram(simulated_spikes, bins=edges)
+        print(hist)
+        # hist = cp.random.randint(0, x, size=nbins, dtype=int)
+        edges = cp.arange(0, (nbins+1)*x, x)
+        jittertrains = cp.zeros((njitters,size))
+        for i in range(njitters):
+            perms = cp.array([cp.random.permutation(x) for _ in range(nbins)])
+            print([perms[j,:int(hist[j])]+j*x for j in range(nbins)])
+            tmp = cp.sort(cp.concatenate([perms[j,:int(hist[j])]+j*x for j in range(nbins)]))
+            print(cp.histogram(tmp, bins=edges)[0]-hist)
+            jittertrains[i] = tmp
+        end = time.time()
+        print("Execution time:", end - start, "seconds")
+        """
+                    max_edge = x*((target_spiketrain.max()+x-1)//x)
+                    edges = cp.arange(0, max_edge+x, x)
+                    n_bins = edges.shape[0]-1
+                    hist,_ = cp.histogram(target_spiketrain, bins=edges)
+                    indices = [cp.random.permutation(x) for _ in range(n_bins*self.njitter)]
+                    jittertrains = indices
+                    bin_indices = np.random.choice(len(hist),size=target_nspikes,p=hist/target_nspikes)
+        """
