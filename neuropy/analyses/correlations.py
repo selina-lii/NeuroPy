@@ -13,6 +13,11 @@ _ACCEPTED_ARRAY_DTYPES = (
     bool,
 )
 
+def _san(var):
+    """Sanitize """
+    if var is None: return var
+    if not isinstance(var, list): var = [var]
+    return var
 
 # Assemble Spike Arrays
 def _np_assemble_spike_arrays(neurons):
@@ -235,22 +240,22 @@ def _np_create_correlograms_array(n_clusters, winsize_bins):
     return np.zeros((n_clusters, n_clusters, winsize_bins // 2 + 1), dtype=np.int32)
 
 
-def _cp_create_correlograms_array(n_clusters, winsize_bins, bin_mode):
+def _cp_create_correlograms_array(n_clusters, winsize_bins, bin_align):
     """Create an empty correlograms array using CuPy."""
-    if bin_mode=='odd':
+    if bin_align=='center':
         return cp.zeros((n_clusters, n_clusters, winsize_bins // 2 + 1), dtype=cp.int32)
     else:
         return cp.zeros((n_clusters, n_clusters, winsize_bins // 2), dtype=cp.int32)
 
 
-def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bins, symmetrize, bin_mode):
+def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bins, symmetrize, bin_align):
     """Create an empty correlograms array using CuPy."""
     nbins = winsize_bins if symmetrize else winsize_bins//2
-    if bin_mode=='odd': nbins+=1
+    if bin_align=='center': nbins+=1
     return cp.zeros((n_clusters1, n_clusters2, nbins), dtype=cp.int32)
 
 
-def _np_symmetrize_correlograms(correlograms,bin_mode='odd'):
+def _np_symmetrize_correlograms(correlograms,bin_align='center'):
     """Return the symmetrized version of the CCG arrays."""
 
     n_clusters, _, n_bins = correlograms.shape
@@ -263,7 +268,7 @@ def _np_symmetrize_correlograms(correlograms,bin_mode='odd'):
     # SL:  discrepencies still exist between ccg(i,j,0) and ccg(j,i,0) after removing identical spikes
     #       I'm not sure that their statement is wrong, but we're splitting into even/odd cases instead of taking the maximum
 
-    if bin_mode=='odd':
+    if bin_align=='center':
         correlograms[..., 0] = np.add(correlograms[..., 0], correlograms[..., 0].T)
         # Symmetrize the remaining bins
         sym = correlograms[..., 1:][..., ::-1]
@@ -274,14 +279,14 @@ def _np_symmetrize_correlograms(correlograms,bin_mode='odd'):
     return np.dstack((sym, correlograms))
 
 
-def _cp_symmetrize_correlograms(correlograms,bin_mode='odd'):
+def _cp_symmetrize_correlograms(correlograms,bin_align='center'):
     """Return the symmetrized version of the CCG arrays using CuPy."""
     n_clusters, _, n_bins = correlograms.shape
     assert n_clusters == _
 
     # # Symmetrize correlograms[..., 0]
     # TODO SL & NRK: maximum is wrong; either use half-bins and sum them, or do not combine the two values
-    if bin_mode=='odd':
+    if bin_align=='center':
         correlograms[..., 0] = cp.add(correlograms[..., 0], correlograms[..., 0].T)
         # Symmetrize the remaining bins
         sym = correlograms[..., 1:][..., ::-1]
@@ -321,7 +326,7 @@ def np_spike_correlations(
         bin_size=None,
         window_size=None,
         symmetrize=True,
-        bin_mode='even',
+        bin_align='edge',
 ):
     """
     Compute all pairwise cross-correlations among neurons(clusters) given in neurons class.
@@ -344,8 +349,7 @@ def np_spike_correlations(
     """
 
     # Convert to array if int
-    if isinstance(neuron_inds, int):
-        neuron_inds = [neuron_inds]
+    neuron_inds = _san(neuron_inds)
 
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
@@ -373,13 +377,13 @@ def np_spike_correlations(
     # Shift between the two copies of the spike trains.
     shift = 1
 
-    # 'odd' mode has one more bin at the center
-    max_d = winsize_bins//2 if bin_mode=='even' else winsize_bins//2+1
+    # 'center' mode has one more bin
+    max_d = winsize_bins//2 if bin_align=='edge' else winsize_bins//2+1
 
     # At a given shift, the mask precises which spikes have matching spikes
     # within the correlogram time window.
     mask = np.ones_like(spike_samples, dtype=bool)
-    correlograms = _np_create_correlograms_array(n_clusters, winsize_bins, bin_mode)
+    correlograms = _np_create_correlograms_array(n_clusters, winsize_bins, bin_align)
 
     # The loop continues as long as there is at least one spike with
     # a matching spike.
@@ -388,7 +392,7 @@ def np_spike_correlations(
         spike_diff = _diff_shifted(spike_samples, shift)
 
         # Binarize the delays between spike i and spike i+shift.
-        if bin_mode=='odd':
+        if bin_align=='center':
             spike_diff+=binsize//2
         spike_diff_b = spike_diff // binsize
 
@@ -417,7 +421,7 @@ def np_spike_correlations(
         shift += 1
 
     if symmetrize:
-        correlograms=_np_symmetrize_correlograms(correlograms,bin_mode)
+        correlograms=_np_symmetrize_correlograms(correlograms,bin_align)
     
     return correlograms
 
@@ -428,7 +432,7 @@ def cp_spike_correlations(
         bin_size=None,
         window_size=None,
         symmetrize=True,
-        bin_mode='even',
+        bin_align='edge',
 ):
     """
     Compute all pairwise cross-correlations among neurons(clusters) given in neurons class.
@@ -443,20 +447,20 @@ def cp_spike_correlations(
         Size of the window, in seconds.
     symmetrize : boolean (True)
         Whether the output matrix should be symmetrized or not.
-    bin_mode: ['even', 'odd']
+    bin_align: ['edge', 'center']
         let N = window_size / bin_size
-        'even': 
+        'edge': 
             N+2 bins with *edges* aligned to the integer multiples of bin sizes
             nth bin is centered at (n+0.5)*(bin_size) millisecond
-        'odd':
+        'center':
             N+1 bins with *centers* aligned to the integer multiples of bin sizes
             nth bin is centered at n*bin_size milliseconds
 
         for 1ms bins, for example
-        'even' bin edges are ..., -1, 0, 1, ... 
-        'even' bin centers are at ..., -0.5, 0.5, ...
-        'odd' bin edges are ..., -1.5, -0.5, 0.5, 1.5, ... 
-        'odd' bin centers are at ..., -1, 0, 1, ...
+        'edge' bin edges are ..., -1, 0, 1, ... 
+        'edge' bin centers are at ..., -0.5, 0.5, ...
+        'center' bin edges are ..., -1.5, -0.5, 0.5, 1.5, ... 
+        'center' bin centers are at ..., -1, 0, 1, ...
 
     Returns
     -------
@@ -465,8 +469,7 @@ def cp_spike_correlations(
     """
 
     # Convert to array if int
-    if isinstance(neuron_inds, int):
-        neuron_inds = [neuron_inds]
+    neuron_inds = _san(neuron_inds)
 
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
@@ -491,11 +494,11 @@ def cp_spike_correlations(
 
     shift = 1
 
-    # 'odd' mode has one more bin at the center
-    max_d = winsize_bins//2 if bin_mode=='even' else winsize_bins//2+1
+    # 'center' mode has one more bin at the center
+    max_d = winsize_bins//2 if bin_align=='edge' else winsize_bins//2+1
 
     mask = cp.ones_like(spike_samples, dtype=cp.bool_)
-    correlograms = _cp_create_correlograms_array(n_clusters, winsize_bins, bin_mode)
+    correlograms = _cp_create_correlograms_array(n_clusters, winsize_bins, bin_align)
 
     # The loop continues as long as there is at least one spike with
     # a matching spike.
@@ -504,7 +507,7 @@ def cp_spike_correlations(
         spike_diff = _cp_diff_shifted(spike_samples, shift)
 
         # Binarize the delays between spike i and spike i+shift.
-        if bin_mode=='odd':
+        if bin_align=='center':
             spike_diff+=binsize//2
         spike_diff_b = spike_diff // binsize
 
@@ -534,7 +537,7 @@ def cp_spike_correlations(
         shift += 1
 
     if symmetrize:
-        correlograms=_cp_symmetrize_correlograms(correlograms,bin_mode).get()
+        correlograms=_cp_symmetrize_correlograms(correlograms,bin_align).get()
     else:
         correlograms=correlograms.get()
 
@@ -554,7 +557,7 @@ def cp_spike_correlations_2groups(
         bin_size=None,
         window_size=None,
         symmetrize=True,
-        bin_mode='even',
+        bin_align='edge',
 ):
     """
     Compute pairwise cross-correlations between reference neuron(s) and all
@@ -570,20 +573,20 @@ def cp_spike_correlations_2groups(
         Size of the window, in seconds.
     symmetrize : boolean (True)
         Whether the output matrix should be symmetrized or not.
-    bin_mode: ['even', 'odd']
+    bin_align: ['edge', 'center']
         let N = window_size / bin_size
-        'even': 
+        'edge': 
             N+2 bins with *edges* aligned to the integer multiples of bin sizes
             nth bin is centered at (n+0.5)*(bin_size) millisecond
-        'odd':
+        'center':
             N+1 bins with *centers* aligned to the integer multiples of bin sizes
             nth bin is centered at n*bin_size milliseconds
 
         for 1ms bins, for example
-        'even' bin edges are ..., -1, 0, 1, ... 
-        'even' bin centers are at ..., -0.5, 0.5, ...
-        'odd' bin edges are ..., -1.5, -0.5, 0.5, 1.5, ... 
-        'odd' bin centers are at ..., -1, 0, 1, ...
+        'edge' bin edges are ..., -1, 0, 1, ... 
+        'edge' bin centers are at ..., -0.5, 0.5, ...
+        'center' bin edges are ..., -1.5, -0.5, 0.5, 1.5, ... 
+        'center' bin centers are at ..., -1, 0, 1, ...
 
     Returns
     -------
@@ -591,15 +594,13 @@ def cp_spike_correlations_2groups(
         A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
     """
 
-    #TODO TODO this is returning NxN I need one that's Nx1
+    #TODO TODO this is returning NxN I need one that's 1->1
 
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
 
     # Convert to array if int
-    if isinstance(target_inds, (int, np.integer)):
-        target_inds = [target_inds]
-    if isinstance(ref_inds, (int, np.integer)):
-        ref_inds = [ref_inds]
+    target_inds = _san(target_inds)
+    ref_inds = _san(ref_inds)
     all_inds = np.concatenate([np.array(ref_inds),np.array(target_inds)])
 
     # SL: get the threshold of which neuron indices are group0 vs group1
@@ -631,10 +632,10 @@ def cp_spike_correlations_2groups(
     shift = 1
 
     mask = cp.ones_like(spike_samples, dtype=cp.bool_)
-    correlograms = _cp_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize, bin_mode)
+    correlograms = _cp_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize, bin_align)
     
-    # 'odd' mode has one more bin at the center
-    max_d = winsize_bins//2 if bin_mode=='even' else winsize_bins//2+1
+    # 'center' mode has one more bin at the center
+    max_d = winsize_bins//2 if bin_align=='edge' else winsize_bins//2+1
 
     # The loop continues as long as there is at least one spike with
     # a matching spike.
@@ -645,10 +646,9 @@ def cp_spike_correlations_2groups(
 
         # Binarize the delays between spike i and spike i+shift.
         # SL: spike_diff_b is which bin the spike_diff falls in 
-        if bin_mode=='odd':
-            spike_diff_b = (spike_diff+binsize//2) // binsize
-        else:
-            spike_diff_b = spike_diff // binsize
+        if bin_align=='center':
+            spike_diff+=binsize//2
+        spike_diff_b = spike_diff // binsize
 
         # Spikes with no matching spikes are masked.
         # SL: If there are no matching spikes now, there wouldn't be any with a larger shift.
@@ -680,10 +680,10 @@ def cp_spike_correlations_2groups(
             gm_sym = (ref >= N0) & (target < N0)
             
             indices_sym= cp.ravel_multi_index(
-                (target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]-(bin_mode=='even')),
+                (target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]-(bin_align=='edge')),
                 correlograms.shape,
             )
-            indices = np.concatenate([indices,indices_sym])
+            indices = cp.concatenate([indices,indices_sym])
         else:
             indices = cp.ravel_multi_index(
                 (ref[gm], target[gm]-N0, d[gm]),
@@ -709,20 +709,20 @@ def spike_correlations(
         window_size=None,
         symmetrize=True,
         use_cupy=False,
-        bin_mode='even',
+        bin_align='edge',
 ):
     if ref_neuron_inds is not None:
         if use_cupy:
-            correlograms = cp_spike_correlations_2groups(neurons, ref_inds=ref_neuron_inds, target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_mode=bin_mode)
+            correlograms = cp_spike_correlations_2groups(neurons, ref_inds=ref_neuron_inds, target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_align=bin_align)
         else:
             pass
             # TODO write np version
-            # correlograms = np_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_mode=bin_mode)
+            # correlograms = np_spike_correlations_2groups(neurons, ref_neuron_inds, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_align=bin_align)
         return correlograms
     else:
         if use_cupy:
-            correlograms = cp_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_mode=bin_mode)
+            correlograms = cp_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_align=bin_align)
         else:
-            correlograms = np_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_mode=bin_mode)
+            correlograms = np_spike_correlations(neurons, neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize, bin_align=bin_align)
         return correlograms
 

@@ -3,16 +3,17 @@ import numpy as np
 from neuropy.analyses import correlations 
 
 class Test:
-    def __init__(self):
+    def __init__(self,neurons):
         
         # Universal example neurons
-        self.neurons=subjects.nsd.allsess[5].neurons
+        self.neurons=neurons#subjects.nsd.allsess[5].neurons
 
         # Indices sorted by length of spiketrain
         self.indices = np.argsort([self.neurons.spiketrains[_].shape[0] for _ in range(self.neurons.n_neurons)])
         
         # Short testing neurons
         self.short_neurons = self.neurons.time_slice(t_start=10000,t_stop=10550)
+
 
     def test_ccg(self):
         # test equivalence of ccgs. 

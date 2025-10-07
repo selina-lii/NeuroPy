@@ -516,13 +516,15 @@ class Jitter:
         self.neurons = neurons
         self.jitters = []
         self.jsigs = []
-        self.ccg = []
+        self.real_ccg = []
+        self.jitter_ccg = []
         self.pval = 0
         self.significances = 0
         self.thresholds = 0
         self.JBSI = 0
         self.jscale = jscale
         self.njitter = njitter
+        self.jtype = "interval"
 
         # All reference neurons should be somewhat 'similar',
         # meaning the same operation can be applied on them.
@@ -535,7 +537,8 @@ class Jitter:
     def clear(self):
         self.jitters = None
         self.jsigs = None
-        self.ccg=None
+        self.real_ccg = None
+        self.jitter_ccg = None
         self.pval = None
         self.significances = None
         self.thresholds = None
@@ -562,8 +565,11 @@ class Jitter:
         return self.neurons.neuron_type[self.ref_inds[0]][0]
 
     def routine(self, ccg_conf):
-        self.add_jitter()
-        self.jitter_ccg(ccg_conf)
+        if self.jtype == 'interval':
+            self.add_interval_jitter()
+        else:
+            self.add_jitter()
+        self.run_ccg_jitter(ccg_conf)
         self.jbsi(ccg_conf)
 
     def add_jitter(self):
@@ -603,32 +609,43 @@ class Jitter:
         self.jitters = list(jittertrains)
         cp.get_default_memory_pool().free_all_blocks()
     
-    def add_jitter_ISI(self):        
-        # TODO jscale is number of samples
+    def add_interval_jitter(self):        
         sampling_rate = self.neurons.sampling_rate
         b = self.target_ind
         target_nspikes = self.neurons.n_spikes[b]
-
+        jscale_samples = int(self.jscale * sampling_rate)
+        # example: jscale = 5ms, sampling rate = 30KHz, jscale in samples = 150
+        
+        # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
         if self.use_cupy:
-            # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
             jittertrains = (
-                cp.round(
-                    cp.floor(
+                cp.sort(cp.floor(
+                    (cp.floor(
                         cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
-                        / self.jscale
-                    ) + cp.random.rand(self.njitter,target_nspikes) * self.jscale
-                )
+                        / jscale_samples
+                    ) + cp.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                ))
                 / sampling_rate
-                ).get()
-      
+            ).get()
+        else:
+            jittertrains = (
+                np.sort(np.floor(
+                    (np.floor(
+                        np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                        / jscale_samples
+                    ) + np.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                ))
+                / sampling_rate
+            ).get()            
+        self.jitters = list(jittertrains)
 
-    def jitter_ccg(self, cconf:CCGConfig):
+    def run_ccg_jitter(self, cconf:CCGConfig):
         """
         CCGs are shaped (N0,1,nbins)
         """
         print("debug",self.ref_inds,self.target_ind)
         
-        neurons = self.neurons.neuron_slice(neuron_inds=self.inds)
+        neurons = self.neurons.neuron_slice(neuron_inds=self.ref_inds)
         j = Neurons(spiketrains=self.jitters,
             t_start=self.neurons.t_start,
             t_stop=self.neurons.t_stop,
@@ -638,10 +655,21 @@ class Jitter:
         neurons.merge(j)
 
         # run ccg
-        self.ccg=correlations.spike_correlations(
+        self.real_ccg=correlations.spike_correlations(
+                neurons=self.neurons,
+                ref_neuron_inds=self.ref_inds,
+                neuron_inds=self.target_ind,
+                bin_size=cconf.bin_size,
+                window_size=cconf.duration,
+                use_cupy=cconf.use_cupy,
+                symmetrize=cconf.symmetrize_ccg,
+                bin_mode=cconf.bin_align,
+            )
+        
+        self.jitter_ccg=correlations.spike_correlations(
                 neurons=neurons,
                 ref_neuron_inds=np.arange(self.n_ref),
-                neuron_inds=self.n_ref+np.arange(self.njitter+1),
+                neuron_inds=self.n_ref+np.arange(self.njitter),
                 bin_size=cconf.bin_size,
                 window_size=cconf.duration,
                 use_cupy=cconf.use_cupy,
@@ -682,35 +710,21 @@ class Jitter:
 
     def jbsi(self,cconf:CCGConfig):
         """
-        Can be batched, but only for one neuron vs group of neurons
-        frates = [ref1, ref2, ..., refN0, target]
-        ccgs = (N0, Njitters+1, Nbins) or (Njitters+1, Nbins)
-        Real ccg should be at the beginning of the array, before jitters
-
-        return shape = (N0, Nbins) or (Nbins,)
+        Jitter-based synchrony index  Agmon (2012)
         """
-        assert self.ccg is not None
+        assert self.real_ccg is not None and self.jitter_ccg is not None
 
-        frates = self.neurons.firing_rate[self.inds]
-
-        if len(self.ccg.shape)==3:
-            N0 = self.ccg.shape[0] 
-            Nreal =self.ccg[:,0] # (N0, Nbins)
-            Nj_avg = np.mean(self.ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
+        if self.n_ref>1:
+            jitter_ccg_avg = np.mean(self.jitter_ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
         else:
-            N0 = 1
-            Nreal =self.ccg[0] # (1, Nbins)
-            Nj_avg = np.mean(self.ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
-        comp_frates = np.zeros((2,N0))
-        comp_frates[0]=frates[-1]
-        comp_frates[1]=frates[:-1]
-        n1 = np.min(comp_frates,axis=0)[...,np.newaxis] # (N0,1) or (1,1)
+            jitter_ccg_avg = np.mean(self.jitter_ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
+        n1 = np.minimum(self.neurons.firing_rate[self.target_ind],
+                            self.neurons.firing_rate[self.ref_inds])[..., None] # (N0,1) or (1,1)
 
         ts = cconf.bin_size
         tj = self.jscale
         b = tj/(tj-ts) if tj/ts>2 else 2
-        self.JBSI =  b/n1*(Nreal - Nj_avg) # (N0, Nbins) or (1, Nbins)
-
+        self.JBSI =  b/n1*(self.real_ccg - jitter_ccg_avg) # (N0, Nbins) or (1, Nbins)
 
 class JitterDataset:
     def __init__(self, neurons: Neurons, session_name:str, inds:np.ndarray, conf:JitterConfig, 
