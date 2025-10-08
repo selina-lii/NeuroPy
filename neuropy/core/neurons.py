@@ -262,6 +262,7 @@ class Neurons(DataWriter):
                          tighten=False):
         """
         Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
+        TODO slow (if num intervals are large)
         """
         t_start, t_stop = super()._time_slice_params(t_start, t_stop)
         def _merge_intervals(intervals):
@@ -359,7 +360,7 @@ class Neurons(DataWriter):
         )
 
     def behav_slice(self, b_times:Epoch, 
-                    labels: Union[list[str], str]=None, 
+                    labels: Union[list[str], str]=None,
                     discard = False,
                     tighten=False, min_dur=120):
         """
@@ -375,18 +376,55 @@ class Neurons(DataWriter):
         min_dur: minimum duration threshold in seconds
         tighten: 
         """
-        if labels is not None:
+        if labels is None:
+            if min_dur==0 or min_dur is None:
+                bstates=b_times # If no conditions are specified, this function just cuts neurons by intervals in b_times 
+            else:
+                bstates = b_times.duration_slice(min_dur=min_dur)
+        else:
             if discard: 
                 labels = list(set(b_times.get_unique_labels()) - set(labels))
-                # TODO inverse labels
             bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
-        else:
-            if discard:
-                # TODO inverse time
-                pass        
         intervals = list(zip(bstates.starts,bstates.stops))
         state_neurons=self.time_multislices(intervals,tighten=tighten)
         return state_neurons
+
+    def burst_slice(self,k:int=1,threshold=1e-4):
+        """
+        k: keep the first k spike in a burst
+        """
+        def limit_cluster(arr, threshold, k):
+            arr = np.sort(np.asarray(arr))
+            keep = [arr[0]]
+            cluster = [arr[0]]
+            for x in arr[1:]:
+                if x - cluster[-1] <= threshold:
+                    cluster.append(x)
+                    if len(cluster) <= k:
+                        keep.append(x)
+                else:
+                    cluster = [x]
+                    keep.append(x)
+            return np.array(keep)
+        neurons = deepcopy(self)
+        neurons.spiketrains = [limit_cluster(st,threshold,k) for st in self.spiketrains]
+        return neurons # TODO burst criteria TODO untested
+
+    def isi_slice(self,threshold=0):
+        # TODO untested
+        """Remove as few spikes as possible to achieve minimum ISI"""
+        def minimal_removal(x, threshold):
+            mask = np.zeros_like(x, dtype=bool)
+            mask[0] = True
+            last = x[0]
+            for i, _ in enumerate(np.diff(x), 1):
+                if x[i] - last > threshold:
+                    mask[i] = True
+                    last = x[i]
+            return x[mask]
+        neurons = deepcopy(self)
+        neurons.spiketrains = [minimal_removal(st,threshold) for st in self.spiketrains]
+        return neurons
 
     def concatenate(self, neurons_to_add, index_to_add=0):
         """Add two neuron spike trains together. Adds 'index_to_add' to neuron_ids, shank_ids, and peak_channels
@@ -503,14 +541,17 @@ class Neurons(DataWriter):
 
     def id2int(self, v):
         """Receives indices from neuron ids
-        TODO not tested!!"""
+        Fits any array shape
+        TODO untested"""
         lookup = {nid: i for i, nid in enumerate(self.neuron_ids)}
-        arr = np.atleast_2d(v)
-        return np.array([[lookup[i] for i in row] for row in arr])
-    
+        f = np.vectorize(lambda x: lookup[x])
+        return f(v)
+
     def ind2id(self, indices):
-        """Return neuron id from indices"""
-        return np.array([[self.neuron_ids[i] for i in row] for row in indices])
+        """Return neuron id from indices
+        Fits any array shape"""
+        f = np.vectorize(lambda i: self.neuron_ids[i])
+        return f(indices)
 
     def to_dataframe(self):
         """Generates a pandas dataframe with some descriptions about the neurons"""
@@ -525,25 +566,16 @@ class Neurons(DataWriter):
             )
         )
 
-    def get_isi(self, bin_size=0.001, n_bins=200):
-        """Interspike interval
+    def get_low_isi(self, high_thres=2e-3):
+        """Return count of super short spike intervals
 
         Parameters
         ----------
-        bin_size : float, optional
-            [description], by default 0.001
-        n_bins : int, optional
-            [description], by default 200
 
         Returns
         -------
-        [type]
-            [description]
         """
-        bins = np.arange(n_bins + 1) * bin_size
-        return np.asarray(
-            [np.histogram(np.diff(spktrn), bins=bins)[0] for spktrn in self.spiketrains]
-        )
+        return [np.count_nonzero(np.diff(spktrn)<high_thres) for spktrn in self.spiketrains]
 
     def get_waveform_similarity(self):
         waveforms = np.reshape(self.waveforms, (self.n_neurons, -1)).astype(float)
