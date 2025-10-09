@@ -164,6 +164,46 @@ class Neurons(DataWriter):
         else:
             self.metadata.update(data)
 
+    def merge(self, neurons: Self):
+        """
+        Combine another Neurons object with self
+        Doesn't sort cell ids.
+        """
+        def _safe_merge(list1, list2):
+            if list1 is None and list2 is None:
+                return None
+            if list2 is None:
+                list2=[None]*neurons.n_neurons
+            if list1 is None:
+                list1=[None]*self.n_neurons
+            return np.concatenate([list1,list2])
+
+        def _safe_merge3d(list1, list2,):
+            """
+            Always returns (N1+N2, x, y) array, filling None with NaN
+            """
+            if list1 is None and list2 is None:
+                return None
+            if list2 is None:
+                list2 = np.full((neurons.n_neurons,list1[0].shape[0],list1[0].shape[1]), np.nan)
+            if list1 is None:
+                list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
+            return np.concatenate([list1,list2])
+        
+        # SL: Make sure the two groups being merged are aligned. Are there better conditions?
+        assert self.t_start==neurons.t_start
+        assert self.t_stop==neurons.t_stop
+        self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
+        self.neuron_ids = _safe_merge(self.neuron_ids,neurons.neuron_ids)
+        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
+        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
+        self.waveforms = _safe_merge3d(self.waveforms,neurons.waveforms)
+        self.waveforms_amplitude = _safe_merge(self.waveforms_amplitude,neurons.waveforms_amplitude)
+        self.peak_channels = _safe_merge(self.peak_channels,neurons.peak_channels)
+        self.clu_q = _safe_merge(self.clu_q,neurons.clu_q)
+        self.shank_ids = _safe_merge(self.shank_ids,neurons.shank_ids)
+        #TODO metadata
+
     @property
     def t_start(self):
         return self._t_start
@@ -676,46 +716,6 @@ class Neurons(DataWriter):
         )
 
         return np.vstack(psths)
-
-    def merge(self, neurons: Self):
-        """
-        Combine another Neurons object with self
-        Doesn't sort cell ids.
-        """
-        def _safe_merge(list1, list2):
-            if list1 is None and list2 is None:
-                return None
-            if list2 is None:
-                list2=[None]*neurons.n_neurons
-            if list1 is None:
-                list1=[None]*self.n_neurons
-            return np.concatenate([list1,list2])
-
-        def _safe_merge3d(list1, list2,):
-            """
-            Always returns (N1+N2, x, y) array, filling None with NaN
-            """
-            if list1 is None and list2 is None:
-                return None
-            if list2 is None:
-                list2 = np.full((neurons.n_neurons,list1[0].shape[0],list1[0].shape[1]), np.nan)
-            if list1 is None:
-                list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
-            return np.concatenate([list1,list2])
-        
-        # SL: Make sure the two groups being merged are aligned. Are there better conditions?
-        assert self.t_start==neurons.t_start
-        assert self.t_stop==neurons.t_stop
-        self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
-        self.neuron_ids = _safe_merge(self.neuron_ids,neurons.neuron_ids)
-        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
-        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
-        self.waveforms = _safe_merge3d(self.waveforms,neurons.waveforms)
-        self.waveforms_amplitude = _safe_merge(self.waveforms_amplitude,neurons.waveforms_amplitude)
-        self.peak_channels = _safe_merge(self.peak_channels,neurons.peak_channels)
-        self.clu_q = _safe_merge(self.clu_q,neurons.clu_q)
-        self.shank_ids = _safe_merge(self.shank_ids,neurons.shank_ids)
-        #TODO metadata
 
     def get_neurons_in_epochs(self, epochs: Epoch):
         """Remove spikes that lie outside of given epochs and return a new Neurons object with t_start and t_stop changed to start of first epoch and stop of last epoch.

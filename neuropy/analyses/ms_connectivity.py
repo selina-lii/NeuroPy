@@ -21,6 +21,7 @@ from statsmodels.stats.multitest import multipletests
 from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
+import time
 
 def _short_session_name(session):
     """get short printable session name in the format of ANIMAL_DayX"""
@@ -59,15 +60,15 @@ class Key:
     session: Optional[str] = None
     epoch: Optional[str] = None
     chunk: Optional[int] = None
-    excitability: Optional[tuple[str,str]] = None
-    conn_type: Optional[str] = None
+    excitability: Optional[str] = None
+    conn_type: Optional[tuple[str,str]] = None
 
     """
     Dependencies
     tuple(session, epoch, chunk) should alway be present
     conn_type -> excitability
     """
-    
+
     def __str__(self):
         parts = []
         if self.session: parts.append(f"{self.session}")
@@ -80,10 +81,14 @@ class Key:
     def matches(self, **kwargs) -> bool:
         """Check if this key matches given criteria (for filtering)"""
         for k, v in kwargs.items():
-            if v is not None and getattr(self, k, None) != v:
-                return False
+            if isinstance(v, list):
+                if getattr(self, k, None) not in v:
+                    return False
+            else:
+                if v is not None and getattr(self, k, None) != v:
+                    return False
         return True
-    
+
     def parent(self) -> 'Key':
         """Get parent key (one level up in hierarchy)"""
         if self.excitability is not None: # conn_type goes with excitability
@@ -179,6 +184,7 @@ class Toggle(Enum):
     SELECT = 1
     REMOVE = 2
 
+
 class NeuronsDatasetConfig:
     """
     Metadata of NeuronsDataset
@@ -240,6 +246,7 @@ class NeuronsDatasetConfig:
     def get_chunks_from_epoch(self,epoch):
         idx = self.epochs.index(epoch)
         return self.chunks_per_session[idx]
+
 
 class Ignore(Enum):
     """Config for CCG and other analysis
@@ -377,7 +384,7 @@ class JitterType(Enum):
 
 
 class JitterConfig:
-    def __init__(self, njitter:int=None, jitter_type:JitterType=JitterType.INTERVAL, jscale:int=None, alpha:float=.05, use_cupy=True,):
+    def __init__(self, ccg:CCGConfig,njitter:int=100, jitter_type:JitterType=JitterType.INTERVAL, jscale:int=5, alpha:float=.05, use_cupy=True,):
         """
         Parameters
         ----------
@@ -393,6 +400,7 @@ class JitterConfig:
         self.jscale = jscale
         self.alpha = alpha
         self.use_cupy = use_cupy
+        self.ccg = ccg
 
     def __str__(self):
         return f"njitter:{self.njitter}, jitter_type:{self.jitter_type}, jscale:{self.jscale}, p:{self.alpha}, use_cupy:{self.use_cupy}"
@@ -536,306 +544,10 @@ class NeuronsDatasetChange(NeuronsDataset):
         pass # TODO maybe in a new class that has all 3 types of data, bc jitter and ccg are involved
 
 
-class Jitter:
-    def __init__(self, neurons:Neurons, ref_inds:Union[int,list[int]], target_ind:int,conf:JitterConfig):
-        self.ref_inds = _san(ref_inds)
-        self.target_ind = target_ind
-        self.neurons = neurons
-        self.jitters = []
-        self.jsigs = []
-        self.real_ccg = []
-        self.jitter_ccg = []
-        self.pval = 0
-        self.significances = 0
-        self.thresholds = 0
-        self.JBSI = 0
-        self._conf = conf
-
-        # All reference neurons should be somewhat 'similar',
-        # meaning the same operation can be applied on them.
-        # Here we require them to have the same neuronal type
-        assert len(set(neurons.neuron_type[self.ref_inds]))==1
-
-    @property
-    def jscale(self):
-        return self._conf.jscale
-    @property
-    def njitter(self):
-        return self._conf.njitter
-    @property
-    def jitter_type(self):
-        return self._conf.jitter_type
-    @property
-    def alpha(self):
-        return self._conf.alpha
-    
-
-    def print_config(self):
-        print(self._conf)
-
-    def clear(self):
-        self.jitters = None
-        self.jsigs = None
-        self.real_ccg = None
-        self.jitter_ccg = None
-        self.pval = None
-        self.significances = None
-        self.thresholds = None
-        self.JBSI=None
-
-    @property
-    def inds(self):
-        return np.concatenate([self.ref_inds, self.target_ind])
-
-    @property
-    def n_ref(self):
-        return len(self.ref_inds)
-    
-    @property
-    def target_type(self):
-        return self.neurons.neuron_type[self.target_ind][0]
-    
-    @property
-    def target_id(self):
-        return self.neurons.neuron_ids[self.target_ind]
-
-    @property
-    def ref_type(self):
-        return self.neurons.neuron_type[self.ref_inds[0]][0]
-
-    def routine(self, ccg_conf):
-        if self.jtype == JitterType.INTERVAL:
-            self.add_interval_jitter()
-        else: # JitterType.SPIKE_TIMING
-            self.add_jitter()
-        self.run_ccg_jitter(ccg_conf)
-        self.jbsi(ccg_conf)
-
-    def add_jitter(self):
-        """
-        Spike timing jitter.
-        Randomly shift each spike in target spike train
-        """
-        b = self.target_ind
-        target_nspikes = self.neurons.n_spikes[b]
-        target_spiketrain = self.neurons.spiketrains[b]
-        sampling_rate = self.neurons.sampling_rate
-
-        if self.use_cupy:
-            jittertrains = (
-                cp.round(
-                    (
-                        cp.array(target_spiketrain)
-                        + 2 * self.jscale * 1e-3 * cp.random.rand(self.njitter,target_nspikes)
-                        - 1 * self.jscale * 1e-3
-                    )
-                    * sampling_rate
-                )
-                / sampling_rate
-            ).get()
-        else:
-            jittertrains = (
-                np.round(
-                    (
-                        target_spiketrain
-                        + 2 * self.jscale * 1e-3 * np.random.rand(self.njitter,target_nspikes)
-                        - 1 * self.jscale * 1e-3
-                    )
-                    * sampling_rate
-                )
-                / sampling_rate
-            )
-        self.jitters = list(jittertrains)
-        cp.get_default_memory_pool().free_all_blocks()
-    
-    def add_interval_jitter(self):        
-        sampling_rate = self.neurons.sampling_rate
-        b = self.target_ind
-        target_nspikes = self.neurons.n_spikes[b]
-        jscale_samples = int(self.jscale * sampling_rate)
-        # example: jscale = 5ms, sampling rate = 30KHz, jscale in samples = 150
-        
-        # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
-        if self.use_cupy:
-            jittertrains = (
-                cp.sort(cp.floor(
-                    (cp.floor(
-                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
-                        / jscale_samples
-                    ) + cp.random.rand(self.njitter,target_nspikes)) * jscale_samples 
-                ))
-                / sampling_rate
-            ).get()
-        else:
-            jittertrains = (
-                np.sort(np.floor(
-                    (np.floor(
-                        np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
-                        / jscale_samples
-                    ) + np.random.rand(self.njitter,target_nspikes)) * jscale_samples 
-                ))
-                / sampling_rate
-            ).get()            
-        self.jitters = list(jittertrains)
-
-    def run_ccg_jitter(self, cconf:CCGConfig):
-        """
-        CCGs are shaped (N0,1,nbins)
-        """
-        print("debug",self.ref_inds,self.target_ind)
-        
-        neurons = self.neurons.neuron_slice(neuron_inds=self.ref_inds)
-        j = Neurons(spiketrains=self.jitters,
-            t_start=self.neurons.t_start,
-            t_stop=self.neurons.t_stop,
-            neuron_ids=[self.target_id]*self.njitter,
-            neuron_type=[self.target_type]*self.njitter
-            ) # TODO not copying over other fields
-        neurons.merge(j)
-
-        # run ccg
-        self.real_ccg=correlations.spike_correlations(
-                neurons=self.neurons,
-                ref_neuron_inds=self.ref_inds,
-                neuron_inds=self.target_ind,
-                bin_size=cconf.bin_size,
-                window_size=cconf.duration,
-                use_cupy=cconf.use_cupy,
-                symmetrize=cconf.symmetrize_ccg,
-            )
-        
-        self.jitter_ccg=correlations.spike_correlations(
-                neurons=neurons,
-                ref_neuron_inds=np.arange(self.n_ref),
-                neuron_inds=self.n_ref+np.arange(self.njitter),
-                bin_size=cconf.bin_size,
-                window_size=cconf.duration,
-                use_cupy=cconf.use_cupy,
-                symmetrize=cconf.symmetrize_ccg,
-            )
-        # Debugging - 'debug' should be all zeros (two methods are identical)
-        # orig = correlations.spike_correlations(
-        #         neurons=neurons,
-        #         neuron_inds=np.arange(neurons.n_neurons),
-        #         bin_size=bin_size,
-        #         window_size=duration,
-        #         use_cupy=use_cupy,
-        #         symmetrize=True,
-        #     )
-        # debug = orig[0,len(ref_inds):]-ccg_all[0]
-        # print(debug)
-
-    def jitter_significance(self, EI):
-        """
-                EI: if 'E', use p-vals for peaks, else use q-vals for troughs
-        # TODO
-        # ccg_all: (N0, njitter+1, Nbins)
-        # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
-        # thresholds = (N0, Nbins)
-
-        """
-        if EI=='E':
-            pval = np.argsort(np.argsort(-self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
-            thresholds = np.percentile(self.ccg[:,1:], 100*(1-self.alpha), axis=1)
-        else:
-            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
-            thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
-
-        self.significances = pval<=self.alpha
-        self.thresholds=thresholds
-
-    def jbsi(self,cconf:CCGConfig):
-        """
-        Jitter-based synchrony index  Agmon (2012)
-        """
-        assert self.real_ccg is not None and self.jitter_ccg is not None
-
-        if self.n_ref>1:
-            jitter_ccg_avg = np.mean(self.jitter_ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
-        else:
-            jitter_ccg_avg = np.mean(self.jitter_ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
-        n1 = np.minimum(self.neurons.firing_rate[self.target_ind],
-                            self.neurons.firing_rate[self.ref_inds])[..., None] # (N0,1) or (1,1)
-
-        ts = cconf.bin_size
-        tj = self.jscale
-        b = tj/(tj-ts) if tj/ts>2 else 2
-        self.JBSI =  b/n1*(self.real_ccg - jitter_ccg_avg) # (N0, Nbins) or (1, Nbins)
-
-
-class JitterDataset:
-    def __init__(self, neurons: Neurons, session_name:str, inds:np.ndarray, conf:JitterConfig, 
-                 epoch:str=None, chunk_id:int=1, EI:str=None, conn_type:tuple=None,
-                 ):
-        """Note that jitter dataset stores single session/epoch data because jitter computation is memory consuming"""
-        self.neurons = neurons
-        self.session_name = session_name
-        self.epoch = epoch
-        self.chunk_id = chunk_id
-        self.EI = EI
-        self.conn_type = conn_type
-        self.inds = inds # (n,2)
-        self.significance = []
-        self._conf = conf
-        self.data = [] # data key is target index
-        self.jref_inds = []
-        self.jtgt_inds = []
-        self.get_jitter_inputs()
-
-    @property
-    def conf(self):
-        return self._conf
-
-    @conf.setter
-    def conf(self,conf):
-        ans = input("Changing configuration will remove existing jitters. Proceed? [y/n]").lower()
-        if ans=='n' or ans=='no':
-            print("Aborted")
-            return
-        self._conf = conf
-        self.significance = []
-        self.data = []
-        self.jref_inds = []
-        self.jtgt_inds = []
-
-    @property
-    def filepath(self):
-        return f'~/Documents/jitter_out/jitter-{self.session_name}_{self.epoch}{self.chunk_id}_{self.conn_type}-{self.EI}.h5'
-
-    def save(self):
-        with h5py.File(self.filepath, "a") as f:
-            f.create_dataset(self.session_name, data=self.data)
-            print(f"saved {self.conn_type}")
-
-    def load(self):
-        with h5py.File(self.filepath, "r") as f:
-            self.data = f[self.session_name][:]
-            print(f"loaded jitter data {self.conn_type}")
-
-    @property
-    def get_jitter_inputs(self):
-        """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
-        grouped by target indices"""
-        keys, inv = np.unique(self.inds[:,1], return_inverse=True)
-        self.jref_inds = [self.inds[inv==i,0].tolist() for i in range(len(keys))]
-        self.jtgt_inds = keys
-    
-    def run_jitter(self):
-        for refs,tgt in zip(self.jref_inds,self.jtgt_inds):
-            jd = Jitter(neurons=self.neurons,
-                            ref_inds=refs,
-                            target_ind=tgt,
-                            conf=self.conf).routine()
-            self.data.append(jd)
-
-    def routine(self):
-        self.get_jitter_inputs()
-        self.run_jitter()
-
 class CCG:
     """Like Neurons, but for CCGs
     Static dataclass, not mean for reuse"""
-    def __init__(self, key, ccg, ids, inds, pred=None, pval=None, jsig=None,
+    def __init__(self, key, ccg, ids, inds, pred=None, pval=None, j_sig=None,
                  conf:CCGConfig=None):
         self.key=key
         self.ids=ids
@@ -843,7 +555,7 @@ class CCG:
         self.ccg=ccg
         self.pred=pred
         self.pval=pval
-        self.jsig=jsig
+        self.j_sig=j_sig
         self._conf=conf
 
     def __str__(self):
@@ -872,14 +584,14 @@ class CCG:
         assert inds in self.inds
         pval = self.pval[inds] if self.pval else None
         pred = self.pred[inds] if self.pred else None
-        jsig = self.jsig[inds] if self.jsig else None
+        j_sig = self.j_sig[inds] if self.j_sig else None
         plot_ccg_only(
             ccg=self.ccg[inds], 
             ids=self.ids[inds], 
             inds=inds, 
             window_size=self.conf.duration, 
             bin_size=self.conf.bin_size, 
-            pval=pval, pred=pred, jsig=jsig,
+            pval=pval, pred=pred, j_sig=j_sig,
         )
 
     def save_plots(self, neuron_types, waveforms, firing_rate, frates_all, root):
@@ -890,6 +602,7 @@ class CCG:
 
         s=np.argsort(self.inds[:,1]) #[np.random.random_integers(0,inds.shape[0]-1,5)]
         for i,inds in enumerate(self.inds[s]):
+            print(i,inds)
             #TODO self doesn't have all the indices so the they're overflowing
             # might be better to use ids?
             # TODO Think I fixed this, but I don't remember the fix
@@ -905,18 +618,14 @@ class CCG:
                             bin_size=self.conf.bin_size*1e3,
                             pval=self.pval[s][i] if self.pval is not None else None,
                             pred=self.pred[s][i] if self.pred is not None else None,
-                            jsig=self.jsig[s][i] if self.jsig else None,
+                            j_sig=self.j_sig[s][i] if self.j_sig else None,
                             show=False,save=True)
 
     def normalize(self,factor):
         if self.ccg is not None:
             self.ccg/=factor
 
-
-class CCGRolling(CCG):
-    pass # TODO
-
-
+        
 class CCGDataset(AnalysisDataset):
     def __init__(self, nd:NeuronsDataset, conf:CCGConfig=None):
         self.nd = nd
@@ -1012,63 +721,71 @@ class CCGDataset(AnalysisDataset):
         old_bin_size = self._conf.bin_size
         self._conf.bin_size = bin_size
         if duration: self._conf.duration = duration
-        if jscale: self._conf.jscale = jscale # 
+        if jscale: self._conf.jscale = jscale
         print(f"recalculated CCG from binsize={old_bin_size} to binsize={bin_size}")
 
         for key, ccg in self.data.items():
             if ccg is not None:
                 neurons = self.nd.data[key.parent()]
-                self.data[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=ccg.inds,ccg_key=key)
+                self.data[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=ccg.inds,ccg_key=key,run_conv=run_conv)
         print("rescale completed")
 
-        if not include_spurious:
-            return
+        if not include_spurious: return
 
         for key, spur in self.spurious.items():
             if spur is not None:
                 neurons = self.nd.data[key.parent()]
-                self.spur[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=spur.inds,ccg_key=key)
+                self.spur[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=spur.inds,ccg_key=key,run_conv=run_conv)
         print("rescale of spurious CCG completed")
         
-    def save_plots(self, jd: JitterDataset = None,
-                   root="/home/selinali/Documents/NeuroPy/images/ccg_plots",
-                   frates_all=None):
-        for key, ccg in self.data.items():
+    def save_plots(self, jd = 'JitterDataset', root="~/Documents/NeuroPy/images/ccg_plots",
+                   frates_all:dict=None,
+                   conn_types:list=None):
+        assert os.path.isdir(root)
+        if isinstance(jd,str): jd == None # TODO ugly. to avoid circular imports
+        keys = self.keys_matching(conn_type=conn_types) if conn_types else self.data.keys()
+        print(keys)
+        print(f"Saving plots under {root}")
+        for key in keys:
+            ccg = self.data[key]
             neurons = self.nd.data[key.parent()]
             frates = frates_all[key.parent()] if frates_all else None
-            for EI in ['E', 'I']:
-                for ct in self.conf.conn_types[EI]:
-                    try:
-                        if jd is not None:
-                            ccg.jsig = jd.data[key].significance
-                        ccg.save_plots(
-                            neuron_types=neurons.neuron_type[ccg.inds],
-                            waveforms=neurons.waveforms[ccg.inds] if neurons.waveforms is not None else None,
-                            firing_rate=neurons.firing_rate[ccg.inds] if neurons.firing_rate is not None else None,
-                            frates_all=frates[ccg.inds] if frates is not None else None,
-                            root=root
-                        )
-                    except Exception as e:
-                        print(f"{key.session}: No {ct} connections {e}")
-                        continue
+            print(f"ccg {key.session} {key.conn_type}")
+            try:
+                if jd is not None:
+                    ccg.j_sig = jd.data[key].significance
+                ccg.save_plots(
+                    neuron_types=neurons.neuron_type[ccg.inds],
+                    waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
+                    firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
+                    frates_all=None if frates is None else frates[ccg.inds],
+                    root=root
+                )
+            except Exception as e:
+                print(f"No {key.conn_type} connections: {e}")
+                continue
         print("done")
 
-    def save_plots_spurious(self, root="/home/selinali/Documents/NeuroPy/images/ccg_plots", frates_all=None):
-        for key, ccg in self.spurious.items():
+    def save_plots_spurious(self, root="~/Documents/NeuroPy/images/ccg_plots", frates_all=None, EI:list=None):
+        assert os.path.isdir(root)
+        keys = self.keys_matching(excitability=EI) if EI else self.spurious.keys()
+        print(f"Saving plots under {root}")
+        for key in keys:
+            ccg = self.spurious[key]
             neurons = self.nd[key.parent()]
+            if EI is not None and key.excitability not in EI: continue
+            print(f"spurious {key.session} {key.conn_type}")
             frates = frates_all[key.parent()] if frates_all else None
-            for EI in ['E', 'I']:
-                for ct in self.conf.conn_types[EI]:
-                    try:
-                        ccg.save_plots(
-                            neuron_types=neurons.neuron_type[ccg.inds],
-                            waveforms=neurons.waveforms[ccg.inds] if neurons.waveforms is not None else None,
-                            firing_rate=neurons.firing_rate[ccg.inds] if neurons.firing_rate is not None else None,
-                            frates_all=frates[ccg.inds] if frates is not None else None,
-                            root=root)
-                    except Exception as e:
-                        print(f"{key.session}: No {ct} connections {e}")
-                        continue
+            try:
+                ccg.save_plots(
+                    neuron_types=neurons.neuron_type[ccg.inds],
+                    waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
+                    firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
+                    frates_all=None if frates is None else frates[ccg.inds],
+                    root=root)
+            except Exception as e:
+                print(f"{key.session}: No {key.excitability} spurious connections {e}")
+                continue
         print("done")
 
     def normalize_by_ref(self):
@@ -1080,6 +797,389 @@ class CCGDataset(AnalysisDataset):
             d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
         for d in self.spurious:
             d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
+
+
+class CCGRolling(CCG):
+    pass # TODO
+
+
+class DataState(Enum):
+    DEFAULT = 0
+    READONLY = 1
+
+
+class Jitterlet:
+    def __init__(self, key:Key, neurons:Neurons, noj_inds:Union[int,list[int]], j_ind:int, conf:JitterConfig):
+        """
+        A set of neuronal pairs defined for efficient computation. 
+
+        Pairs are required to have:
+
+        1. The same target neuron
+            (we jitter the target neuron spiketrain)
+
+        2. The same reference neuronal type 
+            Multiple references are okay.
+            this is to ensure significance criteria are uniform 
+            i.e. we test for either excitation or inhibition.
+        
+        You should never have to create instances of this class because it will be 
+        taken care of by Jitter().
+        """
+        self.key = key
+        self.noj_inds = _san(noj_inds)
+        self.j_ind = j_ind
+        self.neurons = neurons
+        self.j_spktrains = []
+        self.j_ccg = []
+        self.conf = conf
+        self.__datastate = DataState.DEFAULT
+        assert len(set(neurons.neuron_type[self.noj_inds]))==1
+    
+    @property
+    def datastate(self):
+        return self.__datastate
+    @datastate.setter
+    def datastate(self,v:DataState):
+        if self.__datastate==DataState.READONLY: return
+        self.__datastate=v
+    
+    @property
+    def jscale(self):
+        return self.conf.jscale
+    @property
+    def njitter(self):
+        return self.conf.njitter
+    @property
+    def jitter_type(self):
+        return self.conf.jitter_type
+    @property
+    def alpha(self):
+        return self.conf.alpha
+    
+    @property
+    def inds(self):
+        return np.concatenate([self.noj_inds, self.j_ind])
+    @property
+    def ref_inds(self):
+        return self.noj_inds
+    @property
+    def target_ind(self):
+        return self.j_ind
+
+    @property
+    def n_ref(self):
+        return len(self.noj_inds)
+    
+    @property
+    def target_type(self):
+        return self.neurons.neuron_type[self.j_ind][0]
+    
+    @property
+    def target_id(self):
+        return self.neurons.neuron_ids[self.j_ind]
+
+    @property
+    def ref_type(self):
+        return self.neurons.neuron_type[self.noj_inds[0]][0]
+
+    def add_jitter(self):
+        if self.jitter_type == JitterType.INTERVAL:
+            self.add_interval_jitter()
+        else: # JitterType.SPIKE_TIMING
+            self.add_jitter_spike_timing()
+
+    def add_jitter_spike_timing(self):
+        """
+        Spike timing jitter.
+        Randomly shift each spike in target spike train
+        """
+        b = self.j_ind
+        target_nspikes = self.neurons.n_spikes[b]
+        target_spiketrain = self.neurons.spiketrains[b]
+        sampling_rate = self.neurons.sampling_rate
+
+        if self.conf.use_cupy:
+            jittertrains = (
+                cp.round(
+                    (
+                        cp.array(target_spiketrain)
+                        + 2 * self.jscale * 1e-3 * cp.random.rand(self.njitter,target_nspikes)
+                        - 1 * self.jscale * 1e-3
+                    )
+                    * sampling_rate
+                )
+                / sampling_rate
+            ).get()
+        else:
+            jittertrains = (
+                np.round(
+                    (
+                        target_spiketrain
+                        + 2 * self.jscale * 1e-3 * np.random.rand(self.njitter,target_nspikes)
+                        - 1 * self.jscale * 1e-3
+                    )
+                    * sampling_rate
+                )
+                / sampling_rate
+            )
+        self.j_spktrains = list(jittertrains)
+        cp.get_default_memory_pool().free_all_blocks()
+    
+    def add_interval_jitter(self):        
+        sampling_rate = self.neurons.sampling_rate
+        b = self.j_ind
+        target_nspikes = self.neurons.n_spikes[b]
+        jscale_samples = int(self.jscale * sampling_rate)
+        # example: jscale = 5ms, sampling rate = 30KHz, jscale in samples = 150
+        
+        # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
+        if self.conf.use_cupy:
+            jittertrains = (
+                cp.sort(cp.floor(
+                    (cp.floor(
+                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                        / jscale_samples
+                    ) + cp.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                ))
+                / sampling_rate
+            ).get()
+        else:
+            jittertrains = (
+                np.sort(np.floor(
+                    (np.floor(
+                        np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                        / jscale_samples
+                    ) + np.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                ))
+                / sampling_rate
+            ).get()            
+        self.j_spktrains = list(jittertrains)
+
+    def run_ccg_jitter(self):
+        """
+        CCGs are shaped (N0,1,nbins)
+        """
+        print("debug",self.noj_inds,self.j_ind)
+
+        neurons = self.neurons.neuron_slice(neuron_inds=self.noj_inds)
+        j = Neurons(spiketrains=self.j_spktrains,
+            t_start=self.neurons.t_start,
+            t_stop=self.neurons.t_stop,
+            neuron_ids=[self.target_id]*self.njitter,
+            neuron_type=[self.target_type]*self.njitter
+            ) # TODO not copying over other fields
+        neurons.merge(j)
+        
+        self.j_ccg=correlations.spike_correlations(
+                neurons=neurons,
+                ref_neuron_inds=np.arange(self.n_ref),
+                neuron_inds=self.n_ref+np.arange(self.njitter),
+                bin_size=self.conf.ccg.bin_size,
+                window_size=self.conf.ccg.duration,
+                use_cupy=self.conf.ccg.use_cupy,
+                symmetrize=self.conf.ccg.symmetrize_ccg,
+            )
+        # Debugging - 'debug' should be all zeros (two methods are identical)
+        # orig = correlations.spike_correlations(
+        #         neurons=neurons,
+        #         neuron_inds=np.arange(neurons.n_neurons),
+        #         bin_size=bin_size,
+        #         window_size=duration,
+        #         use_cupy=use_cupy,
+        #         symmetrize=True,
+        #     )
+        # debug = orig[0,len(noj_inds):]-ccg_all[0]
+        # print(debug)
+
+    def jitter_significance(self, EI):
+        """
+                EI: if 'E', use p-vals for peaks, else use q-vals for troughs
+        # TODO
+        # ccg_all: (N0, njitter+1, Nbins)
+        # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
+        # thresholds = (N0, Nbins)
+
+        """
+        if EI=='E':
+            pval = np.argsort(np.argsort(-self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            thresholds = np.percentile(self.ccg[:,1:], 100*(1-self.alpha), axis=1)
+        else:
+            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
+
+        self.j_sig = pval<=self.alpha
+        self.thresholds=thresholds
+
+    def jbsi(self,real_ccg):
+        """
+        Jitter-based synchrony index  Agmon (2012)
+        """
+        assert self.j_ccg is not None
+        print(self.j_ccg.shape,real_ccg.shape)
+
+        if self.n_ref>1:
+            j_ccg_avg = np.mean(self.j_ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
+        else:
+            j_ccg_avg = np.mean(self.j_ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
+        n1 = np.minimum(self.neurons.firing_rate[self.j_ind],
+                            self.neurons.firing_rate[self.noj_inds])[..., None] # (N0,1) or (1,1)
+
+        ts = self.conf.ccg.bin_size
+        tj = self.jscale
+        b = tj/(tj-ts) if tj/ts>2 else 2
+        JBSI =  b/n1*(real_ccg - j_ccg_avg) # (N0, Nbins) or (1, Nbins)
+
+        return JBSI
+    
+    def spktrain_path(self): # TODO
+        get_path_from_key(self.key)
+        pass
+    def ccg_path(self):
+        get_path_from_key(self.key)
+        pass
+
+    def save(self):
+        with h5py.File(self.spktrain_path, "a") as f:
+            f.create_dataset(self.j_ind, data=self.j_spktrains)
+            print(f"saved jitter spiketrains {self.key}:{self.j_ind}")
+        with h5py.File(self.ccg_path, "a") as f:
+            f.create_dataset(self.j_ind, data=self.j_ccg)
+            print(f"saved jitter ccgs {self.key}:{self.j_ind}")
+
+    def load(self):
+        # loaded data 
+        with h5py.File(self.spktrain_path, "r") as f:
+            self.j_spktrains = f[self.j_ind][:]
+            print(f"loaded jitter spiketrains {self.key}:{self.j_ind}")
+        with h5py.File(self.ccg_path, "r") as f:
+            self.ccg_path = f[self.j_ind][:]
+            print(f"loaded jitter ccgs {self.key}:{self.j_ind}")
+        self.neurons = None
+        self.conf = None
+        self.datastate=DataState.READONLY # data was loaded not computed. cannot recompute bc neurons/conf will not be saved
+
+
+class Jitter:
+    def __init__(self, key:Key, neurons: Neurons, conf:JitterConfig, ccg:CCG, root:str=None):
+        """Single session/epoch jitters
+        Note: Jitter computation is time and memory consuming!"""
+        self.key = key
+        self.conf = conf
+
+        self.jref_inds = []
+        self.jtgt_inds = []
+        self.pos = {} # TODO name
+        self.pval = []
+        self.significance = []
+        self.threshold = []
+        self.JBSI = []
+        self.jitterlets = {}
+
+        self.neurons = neurons
+        self.ccg = ccg
+
+        self.root = root or f"~/Documents/jitter_out"
+        self.get_jitter_inputs()
+
+    def get_jitter_inputs(self):
+        """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
+        grouped by target indices"""
+        keys, inv = np.unique(self.ccg.inds[:,1], return_inverse=True)
+        self.jref_inds = [self.ccg.inds[inv==i,0].tolist() for i in range(len(keys))]
+        self.jtgt_inds = keys
+        self.pos = {k: np.where(inv == i)[0] for i, k in enumerate(keys)}
+    
+    def get(self,ref,tgt,field='jitters'):
+        # TODO untested
+        return getattr(self.data[tgt], field)[np.where(self.data[tgt].noj_inds==ref)[0]]
+
+    def run(self,save_progress=False):
+        for refs, tgt in zip(self.jref_inds,self.jtgt_inds):
+            self.jitterlets[tgt] = Jitterlet(key=self.key,
+                                        neurons=self.neurons,
+                                       noj_inds=refs,
+                                       j_ind=tgt,
+                                       conf=self.conf)
+        for tgt,j in self.jitterlets.items():
+            j.add_jitter()
+            j.run_ccg_jitter()
+            self.JBSI = j.jbsi(self.ccg.ccg[self.pos[tgt]]) # TODO indexing
+        if save_progress:
+            self.save()
+
+    @property
+    def filepath(self):
+        return f'{self.root}/jitter-{str(self.key)}.h5'
+
+    def save(self,intermediates=False):
+        if intermediates:
+            for k,v in self.jitterlets.items():
+                v.save()
+        with h5py.File(self.filepath, "a") as f:
+                f.create_dataset((self.session_name,field), data=getattr(self, field, None))
+        print(f"saved {self.key}")
+
+    def load(self,intermediates=False):
+        if intermediates:
+            for k,v in self.jitterlets.items():
+                v.load()
+        with h5py.File(self.filepath, "r") as f:
+            for field in ['key','pval','JBSI','conf']:
+                d = f[(self.session_name,field)][:]
+                setattr(self, field, d)
+        print(f"loaded jitter data {self.key}")
+   
+
+class JitterDataset:
+    def __init__(self, nd: Neurons, cd: CCGDataset, conf:JitterConfig):
+        """Note that jitter dataset stores single session/epoch data because jitter computation is memory consuming"""
+        self._conf = conf
+        self.conf.ccg=cd.conf
+        self.nd = nd
+        self.cd = cd
+        self.data = {} # data key is target index
+
+    @property
+    def conf(self):
+        return self._conf
+
+    @conf.setter
+    def conf(self,conf):
+        ans = input("Changing configuration will remove existing jitters. Proceed? [y/n]").lower()
+        if ans=='n' or ans=='no':
+            print("Aborted")
+            return
+        self._conf = conf
+        self.significance = []
+        self.data = []
+        self.jref_inds = []
+        self.jtgt_inds = []
+
+    @property
+    def filepath(self):
+        return f'~/Documents/jitter_out/'
+
+    def save(self):
+        for k,v in self.data.items():
+            v.save(root=self.filepath)
+
+    def load(self):
+        for k,v in self.data.items():
+            v.load(root=self.filepath)
+           
+    def run_jitter(self,save_progress=True):
+        for key, ccg in self.cd.data.items():
+            if ccg is None: 
+                self.data[key] = None
+            else:
+                neurons = self.nd.data[key.parent()]
+                self.data[key]=Jitter(key=key,
+                                    neurons=neurons,
+                                    conf=self.conf,
+                                    ccg=ccg)
+        for _,j in self.data.items():
+            if j is not None: j.run(save_progress=save_progress)
 
 
 def routine_mean_firing_rates(nd:NeuronsDataset):
@@ -1359,12 +1459,13 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
     if run_conv: 
     # TODO is eranconv jscale also milliseconds?
         pvals, pred, qvals = eranconv(ccg,W=conf.jscale,wintype="gauss",hollow_frac=None)
-        significance = pvals if ccg_key.excitability=='E' else qvals
+        # significance = pvals if ccg_key.excitability=='E' else qvals
+        print("completed conv")
         return CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
                 ccg=ccg, 
                 pred=pred, 
-                pval=significance, 
+                pval=None, 
                 conf=conf,
                 key=ccg_key)
     else:
@@ -1438,9 +1539,8 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
             for ct in conn_types: sig_pairs[ct]=None
             return sig_pairs
 
-        x,y = pairs[:,0],pairs[:,1]
-
         # Condition 2: Ref/Target are not too close by
+        x,y = pairs[:,0],pairs[:,1]
         if ignore==Ignore.SAME_CHANNEL:
             assert neurons.peak_channels is not None
             inds=np.where(neurons.peak_channels[x]!=neurons.peak_channels[y])[0]
@@ -1452,8 +1552,8 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
             
         # Condition 3: Ref/Target are specific cell types
         for ct in conn_types:
-            inds=np.where(np.isin(x,np.where(neurons.neuron_type==ct[0])) & 
-                                np.isin(y,np.where(neurons.neuron_type==ct[1])))[0]
+            inds=np.where(np.isin(pairs[:,0],np.where(neurons.neuron_type==ct[0])) & 
+                                np.isin(pairs[:,1],np.where(neurons.neuron_type==ct[1])))[0]
             sig_pairs[ct]=pairs[inds] if inds.shape[0] else None
         return sig_pairs
 
@@ -1534,7 +1634,7 @@ import matplotlib.pyplot as plt
 import os
 
 def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, 
-                   pval=None, pred=None, jsig=None):
+                   pval=None, pred=None, j_sig=None):
     """Single CCG plot into provided axis"""
     bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
 
@@ -1543,8 +1643,8 @@ def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size,
         ax.bar(bins, pred, width=bin_size, alpha=0.5, label="ccg-smooth")
     if pval is not None:
         ax.plot(bins, pval * np.max(ccg), label='p')
-    if jsig is not None:
-        ax.plot(bins, jsig * np.max(ccg), label='j-significance')
+    if j_sig is not None:
+        ax.plot(bins, j_sig * np.max(ccg), label='j-significance')
     ax.set_xlabel("Time (ms)")
     ax.set_ylabel("Count")
     X, Y = ids; x, y = inds
@@ -1555,7 +1655,7 @@ def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size,
 
 
 def plot_waveform_panel(ax, waveform, neuron_type, neuron_id, 
-                        frate_all=None, frate_cut=None, ch_per_shank=16):
+                        frate_all=None, frate_cut=None, n_shanks=12, ch_per_shank=16, discard_channels=None):
     """Single waveform panel into provided axis"""
     max_ch = waveform.shape[0]
     ax.imshow(waveform.astype(float))
@@ -1566,28 +1666,37 @@ def plot_waveform_panel(ax, waveform, neuron_type, neuron_id,
     elif frate_cut is not None:
         xlabel += f"{frate_cut:.2f}Hz cut "
     ax.set_xlabel(xlabel)
-    for k in range(max_ch // ch_per_shank):
-        ax.axhline((k + 1) * ch_per_shank, c='w', alpha=0.5, linestyle='dashed')
+    
+    edges = (np.array(range(n_shanks))+1)*ch_per_shank+1
+    if discard_channels is not None:
+        shanks = discard_channels // ch_per_shank
+        edges = edges - np.cumsum(np.histogram(shanks,np.arange(n_shanks))[0])
+        
+    for k in edges:
+        ax.axhline(k * ch_per_shank, c='w', alpha=0.5, linestyle='dashed')
     return ax
 
 
-def plot_waveform_same_shank():
+def plot_waveform_same_shank(ax, waveform, shank_id, neuron_type, neuron_id,
+                        frate_all=None, frate_cut=None, n_shanks=12, ch_per_shank=16):
+    
     pass # TODO
 
 
 def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
-                    window_size, bin_size, pval=None, pred=None, jsig=None, 
-                    frates_all=None, frate_cut=None, 
+                    window_size, bin_size, pval=None, pred=None, j_sig=None, 
+                    frates_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None,
                     show=True, save=False, plotdir=None):
     """Full figure: CCG + 2 waveforms"""
     fig, axs = plt.subplots(1, 3, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 1, 1]})
 
-    plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval, pred, jsig)
+    plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval, pred, j_sig)
     labels = ['ref', 'target']
     for i in range(2):
         plot_waveform_panel(axs[1+i], waveforms[i], neuron_types[i], ids[i],
                             frates_all[i] if frates_all is not None else None,
-                            frate_cut[i] if frate_cut is not None else None)
+                            frate_cut[i] if frate_cut is not None else None,
+                            n_shanks=n_shanks,ch_per_shank=ch_per_shank)
 
     fig.tight_layout()
     if save and plotdir:
@@ -1595,14 +1704,15 @@ def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
     if show:
         plt.show()
     plt.close(fig)
+    assert os.path.exists(f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.png") #TODO why do we need this?
     return fig
 
 
-def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, jsig=None, 
+def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, j_sig=None, 
                   show=True, save=False, plotdir=None):
     """Save only the CCG plot without waveforms"""
     fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, pval, pred, jsig)
+    plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, pval, pred, j_sig)
     
     fig.tight_layout()
     if save and plotdir:
