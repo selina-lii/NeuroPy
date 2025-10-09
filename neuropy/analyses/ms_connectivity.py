@@ -1345,26 +1345,24 @@ def eranconv(ccg, W=5, wintype="gauss", hollow_frac=None):
 
 
 def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], run_conv=False):
-    ccgs = []
-    for x,y in inds:
-        ccg = correlations.spike_correlations(
+    ccg = correlations.spike_correlations(
                 neurons=neurons,
-                ref_neuron_inds=x,
-                neuron_inds=y,
+                ref_neuron_inds=inds[:,0],
+                neuron_inds=inds[:,1],
                 bin_size=conf.bin_size,
                 window_size=conf.duration,
                 use_cupy=conf.use_cupy,
                 symmetrize=conf.symmetrize_ccg,
+                paired=True
             )
-        ccgs.append(ccg)
     print("completed rerun")
     if run_conv: 
     # TODO is eranconv jscale also milliseconds?
-        pvals, pred, qvals = eranconv(ccgs,W=conf.jscale,wintype="gauss",hollow_frac=None)
+        pvals, pred, qvals = eranconv(ccg,W=conf.jscale,wintype="gauss",hollow_frac=None)
         significance = pvals if ccg_key.excitability=='E' else qvals
         return CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
-                ccg=ccgs, 
+                ccg=ccg, 
                 pred=pred, 
                 pval=significance, 
                 conf=conf,
@@ -1372,7 +1370,7 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
     else:
         return CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
-                ccg=ccgs, 
+                ccg=ccg, 
                 pred=None, 
                 pval=None, 
                 conf=conf,
@@ -1388,7 +1386,6 @@ def _multiple_correction(pvals,alpha,method='bonferroni'):
     p_corr = p_corr.reshape(pvals.shape)   
     # sig = (pvals[...,C+start:C+end+1] < corrected_alpha)
     return sig,p_corr
-
 
 
 def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
