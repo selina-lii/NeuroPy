@@ -261,15 +261,15 @@ class CCGConfig:
                 name="default",
                 conn_types_E:Union[list[list], list]=[('pyr','pyr'), ('pyr','inter')],
                 conn_types_I:Union[list[list], list]=[('inter','inter'), ('inter','pyr')],
-                duration:float=20*1e-3,
-                bin_size:float=1*1e-3,
-                jscale = 5,
+                duration:float = 20e-3,
+                bin_size:float = 1e-3,
+                conv_window:float = 5e-3,
                 alpha:float = 0.05,
                 alpha2:float = 0.1,
-                min_lag:float = 1*1e-3,
-                max_lag:float = 3*1e-3,
+                min_lag:float = 1e-3,
+                max_lag:float = 3e-3,
                 min_spkcount = 2.5,
-                spkcount_scope = 12*1e-3,
+                spkcount_scope = 12e-3,
                 multiple_correction_method:str = None,
                 ignore:Ignore = Ignore.SAME_CHANNEL,
                 use_cupy = True,
@@ -281,13 +281,13 @@ class CCGConfig:
         self.conn_types_I = conn_types_I
         self.duration = duration
         self.bin_size = bin_size
-        self.jscale = jscale # 
+        self.conv_window = conv_window
         self.alpha = alpha
         self.alpha2 = alpha2
         self.use_multiple_correction = multiple_correction_method is not None
         self.mc_method = multiple_correction_method
         self.center_bin = int(self.duration/self.bin_size//2)
-        self.nbins = int(self.duration/self.bin_size)
+        self.nbins = int(self.duration/self.bin_size)+1 # NOTE
 
         self.min_lag = min_lag
         self.max_lag = max_lag
@@ -354,7 +354,10 @@ class CCGConfig:
     def conn_types(self):
         return {'E':self.conn_types_E, 
                 'I':self.conn_types_I}
-    
+    @property
+    def conv_window_bins(self):
+        return self.conv_window/self.bin_size
+
     @property
     def filepath(self):
         return f"~/Documents/jitter_out/{self.name}.ccg.meta.h5"
@@ -384,14 +387,14 @@ class JitterType(Enum):
 
 
 class JitterConfig:
-    def __init__(self, ccg:CCGConfig,njitter:int=100, jitter_type:JitterType=JitterType.INTERVAL, jscale:int=5, alpha:float=.05, use_cupy=True,):
+    def __init__(self, ccg:CCGConfig,njitter:int=100, jitter_type:JitterType=JitterType.INTERVAL, jscale:float=5e-3, alpha:float=.05, use_cupy=True,):
         """
         Parameters
         ----------
         njitter : int
             number of jitters
-        jscale: int
-            maximum spiking time shift in ms (default is +-5ms)
+        jscale: float
+            maximum spiking time shift in seconds (default is +-5ms)
         use_cupy: bool, optional
             whether or not to use gpu acceleration
         """
@@ -405,6 +408,13 @@ class JitterConfig:
     def __str__(self):
         return f"njitter:{self.njitter}, jitter_type:{self.jitter_type}, jscale:{self.jscale}, p:{self.alpha}, use_cupy:{self.use_cupy}"
 
+    @property
+    def jscale_ms(self):
+        return self.jscale*1e3
+    
+    @property
+    def jscale_bins(self):
+        return self.jscale/self.ccg.bin_size
 
 class KeySlicing:
     data = None
@@ -843,20 +853,7 @@ class Jitterlet:
     def datastate(self,v:DataState):
         if self.__datastate==DataState.READONLY: return
         self.__datastate=v
-    
-    @property
-    def jscale(self):
-        return self.conf.jscale
-    @property
-    def njitter(self):
-        return self.conf.njitter
-    @property
-    def jitter_type(self):
-        return self.conf.jitter_type
-    @property
-    def alpha(self):
-        return self.conf.alpha
-    
+        
     @property
     def inds(self):
         return np.concatenate([self.noj_inds, self.j_ind])
@@ -884,7 +881,7 @@ class Jitterlet:
         return self.neurons.neuron_type[self.noj_inds[0]][0]
 
     def add_jitter(self):
-        if self.jitter_type == JitterType.INTERVAL:
+        if self.conf.jitter_type == JitterType.INTERVAL:
             self.add_interval_jitter()
         else: # JitterType.SPIKE_TIMING
             self.add_jitter_spike_timing()
@@ -904,8 +901,8 @@ class Jitterlet:
                 cp.round(
                     (
                         cp.array(target_spiketrain)
-                        + 2 * self.jscale * 1e-3 * cp.random.rand(self.njitter,target_nspikes)
-                        - 1 * self.jscale * 1e-3
+                        + 2 * self.conf.jscale * cp.random.rand(self.conf.njitter,target_nspikes)
+                        - 1 * self.conf.jscale
                     )
                     * sampling_rate
                 )
@@ -916,22 +913,22 @@ class Jitterlet:
                 np.round(
                     (
                         target_spiketrain
-                        + 2 * self.jscale * 1e-3 * np.random.rand(self.njitter,target_nspikes)
-                        - 1 * self.jscale * 1e-3
+                        + 2 * self.conf.jscale * np.random.rand(self.conf.njitter,target_nspikes)
+                        - 1 * self.conf.jscale
                     )
                     * sampling_rate
                 )
                 / sampling_rate
             )
         self.j_spktrains = list(jittertrains)
-        cp.get_default_memory_pool().free_all_blocks()
+        if self.conf.use_cupy: cp.get_default_memory_pool().free_all_blocks()
     
     def add_interval_jitter(self):        
         sampling_rate = self.neurons.sampling_rate
         b = self.j_ind
         target_nspikes = self.neurons.n_spikes[b]
-        jscale_samples = int(self.jscale * sampling_rate)
-        # example: jscale = 5ms, sampling rate = 30KHz, jscale in samples = 150
+        jscale_samples = int(self.conf.jscale * sampling_rate)
+        # example: jscale_ms = 5ms, sampling rate = 30KHz, jscale in samples = 150
         
         # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
         if self.conf.use_cupy:
@@ -940,7 +937,7 @@ class Jitterlet:
                     (cp.floor(
                         cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
                         / jscale_samples
-                    ) + cp.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                    ) + cp.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
                 ))
                 / sampling_rate
             ).get()
@@ -950,11 +947,12 @@ class Jitterlet:
                     (np.floor(
                         np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
                         / jscale_samples
-                    ) + np.random.rand(self.njitter,target_nspikes)) * jscale_samples 
+                    ) + np.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
                 ))
                 / sampling_rate
-            ).get()            
+            )            
         self.j_spktrains = list(jittertrains)
+        if self.conf.use_cupy: cp.get_default_memory_pool().free_all_blocks()
 
     def run_ccg_jitter(self):
         """
@@ -966,15 +964,15 @@ class Jitterlet:
         j = Neurons(spiketrains=self.j_spktrains,
             t_start=self.neurons.t_start,
             t_stop=self.neurons.t_stop,
-            neuron_ids=[self.target_id]*self.njitter,
-            neuron_type=[self.target_type]*self.njitter
+            neuron_ids=[self.target_id]*self.conf.njitter,
+            neuron_type=[self.target_type]*self.conf.njitter
             ) # TODO not copying over other fields
         neurons.merge(j)
         
         self.j_ccg=correlations.spike_correlations(
                 neurons=neurons,
                 ref_neuron_inds=np.arange(self.n_ref),
-                neuron_inds=self.n_ref+np.arange(self.njitter),
+                neuron_inds=self.n_ref+np.arange(self.conf.njitter),
                 bin_size=self.conf.ccg.bin_size,
                 window_size=self.conf.ccg.duration,
                 use_cupy=self.conf.ccg.use_cupy,
@@ -1002,13 +1000,13 @@ class Jitterlet:
 
         """
         if EI=='E':
-            pval = np.argsort(np.argsort(-self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
-            thresholds = np.percentile(self.ccg[:,1:], 100*(1-self.alpha), axis=1)
+            pval = np.argsort(np.argsort(-self.j_ccg,axis=1,kind="stable"),axis=1)[:,0]/self.conf.njitter
+            thresholds = np.percentile(self.j_ccg[:,1:], 100*(1-self.conf.alpha), axis=1)
         else:
             pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
             thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
 
-        self.j_sig = pval<=self.alpha
+        self.j_sig = pval<=self.conf.alpha
         self.thresholds=thresholds
 
     def jbsi(self,real_ccg):
@@ -1016,20 +1014,16 @@ class Jitterlet:
         Jitter-based synchrony index  Agmon (2012)
         """
         assert self.j_ccg is not None
-        print(self.j_ccg.shape,real_ccg.shape)
 
-        if self.n_ref>1:
-            j_ccg_avg = np.mean(self.j_ccg[:,1:],axis=1) # (N0, Nbins) averaged over Njitter columns
-        else:
-            j_ccg_avg = np.mean(self.j_ccg[1:],axis=0) # (1, Nbins) averaged over Njitter rows
+        j_ccg_avg = np.mean(self.j_ccg,axis=1) # (N0, Nbins) averaged over Njitter columns
         n1 = np.minimum(self.neurons.firing_rate[self.j_ind],
                             self.neurons.firing_rate[self.noj_inds])[..., None] # (N0,1) or (1,1)
 
         ts = self.conf.ccg.bin_size
-        tj = self.jscale
+        tj = self.conf.jscale
+
         b = tj/(tj-ts) if tj/ts>2 else 2
         JBSI =  b/n1*(real_ccg - j_ccg_avg) # (N0, Nbins) or (1, Nbins)
-
         return JBSI
     
     def spktrain_path(self): # TODO
@@ -1081,6 +1075,10 @@ class Jitter:
 
         self.root = root or f"~/Documents/jitter_out"
         self.get_jitter_inputs()
+    
+    @property
+    def n_inds(self):
+        return len(self.ccg.inds)
 
     def get_jitter_inputs(self):
         """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
@@ -1095,6 +1093,7 @@ class Jitter:
         return getattr(self.data[tgt], field)[np.where(self.data[tgt].noj_inds==ref)[0]]
 
     def run(self,save_progress=False):
+        self.JBSI = np.zeros((self.n_inds,self.ccg.conf.nbins))
         for refs, tgt in zip(self.jref_inds,self.jtgt_inds):
             self.jitterlets[tgt] = Jitterlet(key=self.key,
                                         neurons=self.neurons,
@@ -1104,7 +1103,7 @@ class Jitter:
         for tgt,j in self.jitterlets.items():
             j.add_jitter()
             j.run_ccg_jitter()
-            self.JBSI = j.jbsi(self.ccg.ccg[self.pos[tgt]]) # TODO indexing
+            self.JBSI[self.pos[tgt]] = j.jbsi(self.ccg.ccg[self.pos[tgt]]) # TODO indexing
         if save_progress:
             self.save()
 
@@ -1151,10 +1150,7 @@ class JitterDataset:
             print("Aborted")
             return
         self._conf = conf
-        self.significance = []
         self.data = []
-        self.jref_inds = []
-        self.jtgt_inds = []
 
     @property
     def filepath(self):
@@ -1167,7 +1163,7 @@ class JitterDataset:
     def load(self):
         for k,v in self.data.items():
             v.load(root=self.filepath)
-           
+
     def run_jitter(self,save_progress=True):
         for key, ccg in self.cd.data.items():
             if ccg is None: 
@@ -1330,48 +1326,6 @@ def routine_eranconv_connection_info(info, nd:NeuronsDataset, cd:CCGDataset, epo
     return results
 
 
-def routine_jitter_pairs_after_conv_wrapper(cd:CCGDataset,nd:NeuronsDataset,njitter:int=100,jitter_type:JitterType=JitterType.SPIKE_TIMING,use_cupy=True,jscale=None,filename=None):
-    # filename = filename or datetime.now().strftime("%Y-%m-%d-%H-%M")
-    jconf = JitterConfig(njitter=njitter,
-                            jitter_type=jitter_type,
-                            jscale=jscale or cd.conf.jscale,
-                            use_cupy=use_cupy)
-
-    for key, ccgs in cd.data.items():
-        if isinstance(key,tuple) and len(key)==4:
-            sess_name, epoch, EI, conn_type = key
-            nkey = (sess_name, epoch)
-        elif isinstance(key,tuple) and len(key)==3:
-            sess_name, EI, conn_type = key
-            epoch = nd.conf.epochs[0]
-            nkey = sess_name
-        else:
-            sess_name = key
-            epoch = nd.conf.epochs[0]
-            conn_type = cd.conf.conn_types['E'][0] or cd.conf.conn_types['I'][0]
-            EI = 'E' if len(cd.conf.conn_types['E'][0])>0 else 'I'
-            nkey = None
-
-        print("jitter",sess_name)
-        neurons = nd.data[nkey] if nkey else nd.data
-        _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons,conf=jconf,inds=ccgs.inds,ccg_conf=ccgs.conf)
-
-
-def _routine_jitter_pairs_after_conv(sess_name,epoch,EI,conn_type,neurons:Neurons,conf:JitterConfig,inds,ccg_conf:CCGConfig):
-        neurons=_san(neurons)
-        for c,neu in enumerate(neurons):
-            jd = JitterDataset(neurons=neu,
-                            session_name=sess_name,
-                            inds=inds,
-                            conf=conf,
-                            epoch=epoch,
-                            chunk_id=c,
-                            EI=EI,
-                            conn_type=conn_type,)
-            jd.routine(ccg_conf)
-            jd.save()
-
-
 def eranconv(ccg, W=5, wintype="gauss", hollow_frac=None):
     """
     Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
@@ -1457,8 +1411,8 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
             )
     print("completed rerun")
     if run_conv: 
-    # TODO is eranconv jscale also milliseconds?
-        pvals, pred, qvals = eranconv(ccg,W=conf.jscale,wintype="gauss",hollow_frac=None)
+        # TODO i think W should be number of bins. not actual jitter scale
+        pvals, pred, qvals = eranconv(ccg,W=conf.jscale_bins,wintype="gauss",hollow_frac=None)
         # significance = pvals if ccg_key.excitability=='E' else qvals
         print("completed conv")
         return CCG(inds=inds,
@@ -1508,7 +1462,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
             symmetrize=conf.symmetrize_ccg,
         )
     
-    pvals, pred, qvals = eranconv(ccg,W=conf.jscale,wintype="gauss",hollow_frac=None)
+    pvals, pred, qvals = eranconv(ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
     # Universal, basic criteria for significance
     # These indices pairs are kept as a baseline; anything not fitting downstream criteria is put under 'spurious'
