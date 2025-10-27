@@ -3,10 +3,16 @@
 
 import numpy as np
 try:
-    import cupy as cp
+    # import os, platform
+    # if platform.system() == "Darwin":
+    #     os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
+    import jax.numpy as jnp
+    import jax.random as jr
 except ImportError:
-    print("Error importing CuPy")
-    cp = None
+    print("Error importing JAX. No GPU acceleration available.") # Was CuPy
+    jnp = None
+    jr = None
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows, convolve
@@ -22,6 +28,9 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
 import time
+
+def KEY():
+    return jr.PRNGKey(np.random.randint(0,1e10))
 
 def _short_session_name(session):
     """get short printable session name in the format of ANIMAL_DayX"""
@@ -272,7 +281,7 @@ class CCGConfig:
                 spkcount_scope = 12e-3,
                 multiple_correction_method:str = None,
                 ignore:Ignore = Ignore.SAME_CHANNEL,
-                use_cupy = True,
+                use_acceleration = True,
                 symmetrize_ccg = True,
                 ):
         self.name = name
@@ -301,7 +310,7 @@ class CCGConfig:
         self.min_spkcnt_bin = self.center_bin-self.spkcnt_bins//2 # leftmost bin requiring minimum spike count 
         self.max_spkcnt_bin = self.center_bin+self.spkcnt_bins//2+1 # rightmost bin requiring minimum spike count
 
-        self.use_cupy = use_cupy
+        self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
         # if self.use_multiple_correction: 
@@ -387,7 +396,7 @@ class JitterType(Enum):
 
 
 class JitterConfig:
-    def __init__(self, ccg:CCGConfig,njitter:int=100, jitter_type:JitterType=JitterType.INTERVAL, jscale:float=5e-3, alpha:float=.05, use_cupy=True,):
+    def __init__(self, ccg:CCGConfig,njitter:int=100, jitter_type:JitterType=JitterType.INTERVAL, jscale:float=5e-3, alpha:float=.05, use_acceleration=True,):
         """
         Parameters
         ----------
@@ -395,18 +404,18 @@ class JitterConfig:
             number of jitters
         jscale: float
             maximum spiking time shift in seconds (default is +-5ms)
-        use_cupy: bool, optional
+        use_acceleration: bool, optional
             whether or not to use gpu acceleration
         """
         self.njitter = njitter
         self.jitter_type = jitter_type
         self.jscale = jscale
         self.alpha = alpha
-        self.use_cupy = use_cupy
+        self.use_acceleration = use_acceleration
         self.ccg = ccg
 
     def __str__(self):
-        return f"njitter:{self.njitter}, jitter_type:{self.jitter_type}, jscale:{self.jscale}, p:{self.alpha}, use_cupy:{self.use_cupy}"
+        return f"njitter:{self.njitter}, jitter_type:{self.jitter_type}, jscale:{self.jscale}, p:{self.alpha}, use_acceleration:{self.use_acceleration}"
 
     @property
     def jscale_ms(self):
@@ -896,12 +905,12 @@ class Jitterlet:
         target_spiketrain = self.neurons.spiketrains[b]
         sampling_rate = self.neurons.sampling_rate
 
-        if self.conf.use_cupy:
+        if self.conf.use_acceleration:
             jittertrains = (
-                cp.round(
+                jnp.round(
                     (
-                        cp.array(target_spiketrain)
-                        + 2 * self.conf.jscale * cp.random.rand(self.conf.njitter,target_nspikes)
+                        jnp.array(target_spiketrain)
+                        + 2 * self.conf.jscale *jr.uniform(KEY(),(self.conf.njitter,target_nspikes))
                         - 1 * self.conf.jscale
                     )
                     * sampling_rate
@@ -921,7 +930,7 @@ class Jitterlet:
                 / sampling_rate
             )
         self.j_spktrains = list(jittertrains)
-        if self.conf.use_cupy: cp.get_default_memory_pool().free_all_blocks()
+        if self.conf.use_acceleration: jnp.get_default_memory_pool().free_all_blocks()
     
     def add_interval_jitter(self):        
         sampling_rate = self.neurons.sampling_rate
@@ -931,13 +940,13 @@ class Jitterlet:
         # example: jscale_ms = 5ms, sampling rate = 30KHz, jscale in samples = 150
         
         # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
-        if self.conf.use_cupy:
+        if self.conf.use_acceleration:
             jittertrains = (
-                cp.sort(cp.floor(
-                    (cp.floor(
-                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                jnp.sort(jnp.floor(
+                    (jnp.floor(
+                        jnp.round(jnp.array(self.neurons.spiketrains[b]) * sampling_rate) 
                         / jscale_samples
-                    ) + cp.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
+                    ) + jr.uniform(KEY(),(self.conf.njitter,target_nspikes))) * jscale_samples 
                 ))
                 / sampling_rate
             ).get()
@@ -952,7 +961,7 @@ class Jitterlet:
                 / sampling_rate
             )            
         self.j_spktrains = list(jittertrains)
-        if self.conf.use_cupy: cp.get_default_memory_pool().free_all_blocks()
+        if self.conf.use_acceleration: jnp.get_default_memory_pool().free_all_blocks()
 
     def run_ccg_jitter(self):
         """
@@ -975,7 +984,7 @@ class Jitterlet:
                 neuron_inds=self.n_ref+np.arange(self.conf.njitter),
                 bin_size=self.conf.ccg.bin_size,
                 window_size=self.conf.ccg.duration,
-                use_cupy=self.conf.ccg.use_cupy,
+                use_acceleration=self.conf.ccg.use_acceleration,
                 symmetrize=self.conf.ccg.symmetrize_ccg,
             )
         # Debugging - 'debug' should be all zeros (two methods are identical)
@@ -984,7 +993,7 @@ class Jitterlet:
         #         neuron_inds=np.arange(neurons.n_neurons),
         #         bin_size=bin_size,
         #         window_size=duration,
-        #         use_cupy=use_cupy,
+        #         use_acceleration=use_acceleration,
         #         symmetrize=True,
         #     )
         # debug = orig[0,len(noj_inds):]-ccg_all[0]
@@ -1405,7 +1414,7 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
                 neuron_inds=inds[:,1],
                 bin_size=conf.bin_size,
                 window_size=conf.duration,
-                use_cupy=conf.use_cupy,
+                use_acceleration=conf.use_acceleration,
                 symmetrize=conf.symmetrize_ccg,
                 paired=True
             )
@@ -1458,7 +1467,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
             neuron_inds=np.arange(n), # all
             bin_size=conf.bin_size,
             window_size=conf.duration,
-            use_cupy=conf.use_cupy,
+            use_acceleration=conf.use_acceleration,
             symmetrize=conf.symmetrize_ccg,
         )
     

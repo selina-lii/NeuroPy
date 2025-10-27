@@ -135,7 +135,7 @@ def plot_correlograms(
         bin_size=0.001,
         window_size=0.05,
         ax=None,
-        use_cupy=False,
+        use_acceleration=False,
         ref_p=False,
         ref_t=0.002
 ):
@@ -156,7 +156,7 @@ def plot_correlograms(
         sample_rate=sample_rate,
         bin_size=bin_size,
         window_size=window_size,
-        use_cupy=use_cupy)
+        use_acceleration=use_acceleration)
 
 
     # Check the shape of ccgs to determine if it’s an ACG or CCG
@@ -183,7 +183,7 @@ def plot_correlograms(
     bins = np.linspace(-window_size / 2, window_size / 2, winsize_bins)
 
     # Plot
-    if use_cupy:
+    if use_acceleration:
         for a, ccg in zip(ax.reshape(-1), ccgs.reshape(-1, ccgs.shape[2])):
             ccg_cpu = ccg.get()
 

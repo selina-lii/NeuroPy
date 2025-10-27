@@ -224,7 +224,6 @@ class ProcessData:
                     n_channels=self.recinfo.n_channels,
                     sampling_rate=self.recinfo.eeg_sampling_rate,
                 )
-
             if self.recinfo.dat_filename.is_file():
                 self.datfile = BinarysignalIO(
                     self.recinfo.dat_filename,
@@ -671,7 +670,8 @@ def data_table(sessions: list):
 # minimally processed
 class Group:
     tag = None
-    basedir = Path("/home/selinali/Documents/ms_synchrony/sessions")
+    basedir = Path("/Users/selinl/Documents/sessions")
+    # basedir = Path("/home/selinali/Documents/ms_synchrony/sessions") # Tower
     # basedir = Path("/data/Clustering/sessions/")
 
     def _process(self, rel_path, use_relaligned_pos=False):

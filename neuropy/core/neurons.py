@@ -13,12 +13,6 @@ from typing import Self, Union
 
 #TODO should we complicate Neurons with cuda?
 import numpy as np
-try:
-    import cupy as cp
-except ImportError:
-    print("Error importing CuPy")
-    cp = None
-
 
 class Neurons(DataWriter):
     """Class to hold a group of spiketrains and their labels, ids etc."""

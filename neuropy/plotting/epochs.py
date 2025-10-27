@@ -263,3 +263,4 @@ def plot_artifact_epochs(epochs: Epoch, signal: Signal, downsample_factor: int =
     ax.set_ylabel("Absolute zscore")
 
     return ax
+
