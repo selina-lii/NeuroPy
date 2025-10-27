@@ -29,7 +29,7 @@ from collections import defaultdict
 from enum import Enum
 import time
 
-def KEY():
+def RAND_KEY():
     return jr.PRNGKey(np.random.randint(0,1e10))
 
 def _short_session_name(session):
@@ -71,6 +71,7 @@ class Key:
     chunk: Optional[int] = None
     excitability: Optional[str] = None
     conn_type: Optional[tuple[str,str]] = None
+    sliding_window: Optional[int] = None
 
     """
     Dependencies
@@ -82,9 +83,10 @@ class Key:
         parts = []
         if self.session: parts.append(f"{self.session}")
         if self.epoch: parts.append(f"{self.epoch}")
-        if self.chunk is not None: parts.append(f"c:{self.chunk}")
+        if self.chunk is not None: parts.append(f"c{self.chunk}")
         if self.excitability: parts.append(f"{self.excitability}")
         if self.conn_type: parts.append(f"{self.conn_type[0]}-{self.conn_type[1]}")
+        if self.sliding_window: parts.append(f"sw{self.sliding_window}")
         return "_".join(parts) if parts else "root"
 
     def matches(self, **kwargs) -> bool:
@@ -100,6 +102,8 @@ class Key:
 
     def parent(self) -> 'Key':
         """Get parent key (one level up in hierarchy)"""
+        if self.sliding_window is not None:
+            return Key(self.session, self.epoch, self.chunk, self.excitability, self.conn_type)            
         if self.excitability is not None: # conn_type goes with excitability
             return Key(self.session, self.epoch, self.chunk)
         if self.chunk is not None:
@@ -366,6 +370,14 @@ class CCGConfig:
     @property
     def conv_window_bins(self):
         return self.conv_window/self.bin_size
+    
+    def time2bin(self,x):
+        """time in SECONDS to bin#"""
+        return x/self.bin_size
+    
+    def bin2time(self,x):
+        """bin# to time in SECONDS"""
+        return x*self.bin_size
 
     @property
     def filepath(self):
@@ -562,6 +574,17 @@ class NeuronsDatasetChange(NeuronsDataset):
         # self.conf.n_chunks
         pass # TODO maybe in a new class that has all 3 types of data, bc jitter and ccg are involved
 
+class ACG:
+    """Like Neurons, but for auto-correlograms
+    Static dataclass, not mean for reuse"""
+    def __init__(self, key, acg, ids, inds,
+                 conf:CCGConfig=None):
+        self.key=key
+        self.ids=ids
+        self.inds=inds
+        self.acg=acg
+        self._conf=conf
+
 
 class CCG:
     """Like Neurons, but for CCGs
@@ -572,7 +595,7 @@ class CCG:
         self.ids=ids
         self.inds=inds
         self.ccg=ccg
-        self.pred=pred
+        self.pred=pred # baseline
         self.pval=pval
         self.j_sig=j_sig
         self._conf=conf
@@ -593,7 +616,28 @@ class CCG:
     @property
     def total(self):
         return self.ccg.shape[0]
-    
+
+    @property
+    def effect_size(self,norm_factor):
+        """
+        Area under CCG curve minus baseline, within ROI
+        Can be negative
+        """
+        auc = self.ccg-self.pred # area under curve
+        auc = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin])
+        auc /= norm_factor
+        return auc
+
+    def set_pred_as_tail(self):
+        """TODO
+        Baseline by 'tail' (|t|>11ms)
+        'Tail' is accurate when coupled with eran_deconv
+        """
+        l = self.conf.time2bin(-11e-3)
+        r = self.conf.time2bin(11e-3)
+        baseline = np.mean([self.ccg[:l],self.ccg[r+1:]])
+        self.pred = np.ones_like(self.ccg)*baseline
+
     def plotdir(self, root):
         if self.key.conn_type is None:
             return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.chunk}/{self.key.excitability}_any"
@@ -644,13 +688,70 @@ class CCG:
         if self.ccg is not None:
             self.ccg/=factor
 
+    def deconv_autocorr(self,acgs,nspks,target=True,ref=True):
+        for i,(ref,tgt) in enumerate(self.inds):
+            if ref and target:
+                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref], acgs[tgt], nspks[tgt])
+            elif ref:
+                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref])
+            elif target:
+                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[tgt], nspks[tgt])
+            else:
+                Warning("_deconv_autocorr: No effect")
+                return
+
+    def _deconv_autocorr(ccg, acg1=None, nspks1=None, acg2=None, nspks2=None):
+        """
+        Deconvolve acgs from ccg using FFT-based method.
+        Translated from MATLAB
+        https://github.com/EranStarkLab/CCH-deconvolution/cchdeconv.m
         
+        Parameters
+        ----------
+        acg1, acg2 : ndarray
+            Autocorrelograms for neurons 1 and 2
+        nspks1, nspks2 : int or float
+            Number of spikes for neurons 1 and 2
+        
+        Returns
+        -------
+        dcccg : ndarray
+            Deconvolved cross-correlogram
+        """
+        # Preparations
+        m = ccg.shape[-1]
+        assert m%2==1 # CCG must have an odd number of bins
+        hw = (m - 1) // 2 # midpoint
+        
+        # Scale acg1
+        acg1 = (acg1 - np.mean(acg1)) / nspks1  # remove mean of clipped, divide by nspks1
+        hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])  # [0:hw, (hw+1):m]
+        acg1[hw] = 1 - np.sum(acg1[hidx])  # set zero-lag bin s.t. sum of 1
+        den = np.fft.fft(acg1)
+
+        if acg2 is not None:
+            # Scale acg2
+            acg2 = (acg2 - np.mean(acg2)) / nspks2  # remove mean of clipped, divide by nspks2
+            hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
+            acg2[hw] = 1 - np.sum(acg2[hidx])  # set zero-lag bin s.t. sum of 1
+            den = den * np.fft.fft(acg2)
+
+        # Deconvolve acgs from the ccg
+        dcccg = np.real(np.fft.ifft(np.fft.fft(ccg) / den))
+        
+        # Set my CCG to deconvCCG
+        dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])  # shift DC to end
+        dcccg[dcccg < 0] = 0  # clip negatives to zero
+        return dcccg
+    
+
 class CCGDataset(AnalysisDataset):
     def __init__(self, nd:NeuronsDataset, conf:CCGConfig=None):
         self.nd = nd
         self.data={}
         self._conf=conf
         self.spurious={}
+        self.auto={}
 
     @property
     def conf(self):
@@ -665,6 +766,7 @@ class CCGDataset(AnalysisDataset):
         self._conf = conf
         self.data={}
         self.spurious={}
+        self.auto={}
     
     def filter_excitability(self, E):
         return self.filter(excitability=E)
@@ -680,6 +782,9 @@ class CCGDataset(AnalysisDataset):
 
     def append_spurious(self, base_key: Key, spurs: Dict[Key, CCG]):
         self.spurious.update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in spurs.items()})
+
+    def append_auto(self, base_key: Key, spurs: Dict[Key, CCG]):
+        self.auto.update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in spurs.items()})
     
     @property
     def filepath(self):
@@ -723,9 +828,10 @@ class CCGDataset(AnalysisDataset):
             return s
                 
         for key, neurons in self.nd.data.items():
-            ccgs, spurs, printstr = eranconv_group(neurons=neurons,conf=self.conf,key=key)
+            ccgs, spurs, autos, printstr = eranconv_group(neurons=neurons,conf=self.conf,key=key)
             self.append_ccg(key, ccgs)
             self.append_spurious(key, spurs)
+            self.append_auto(key, autos)
             print(_s(key.session,neurons)+printstr)
 
     def time_rescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False):
@@ -817,6 +923,13 @@ class CCGDataset(AnalysisDataset):
         for d in self.spurious:
             d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
 
+    def deconv_autocorr(self,ref=True,tgt=True):
+        #TODO untested
+        for key, ccg in self.data.items():
+            spikecount = self.nd[key.parent].n_spikes
+            acg = self.auto[key.parent]
+            ccg.deconv_autocorr(acg,spikecount)
+       
 
 class CCGRolling(CCG):
     pass # TODO
@@ -910,7 +1023,7 @@ class Jitterlet:
                 jnp.round(
                     (
                         jnp.array(target_spiketrain)
-                        + 2 * self.conf.jscale *jr.uniform(KEY(),(self.conf.njitter,target_nspikes))
+                        + 2 * self.conf.jscale *jr.uniform(RAND_KEY(),(self.conf.njitter,target_nspikes))
                         - 1 * self.conf.jscale
                     )
                     * sampling_rate
@@ -946,7 +1059,7 @@ class Jitterlet:
                     (jnp.floor(
                         jnp.round(jnp.array(self.neurons.spiketrains[b]) * sampling_rate) 
                         / jscale_samples
-                    ) + jr.uniform(KEY(),(self.conf.njitter,target_nspikes))) * jscale_samples 
+                    ) + jr.uniform(RAND_KEY(),(self.conf.njitter,target_nspikes))) * jscale_samples 
                 ))
                 / sampling_rate
             ).get()
@@ -1459,7 +1572,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     chunked_neurons: list[Neurons] or Neurons, sliced from the same session.
     """
     overview_str = ""
-    ccgs_by_type,spurs_by_type = {},{} # 1 neuron group -> many connection types
+    ccgs_by_type,spurs_by_type,autos = {},{},{} # 1 neuron group -> many connection types
     n=neurons.n_neurons
 
     ccg = correlations.spike_correlations(
@@ -1476,6 +1589,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     # Universal, basic criteria for significance
     # These indices pairs are kept as a baseline; anything not fitting downstream criteria is put under 'spurious'
     autocorr_locations = np.eye(pvals.shape[0], dtype=bool)
+    autos[key] = ccg[autocorr_locations]
     
     sig, p_correct = _multiple_correction(pvals, conf.alpha)
     pairs_E = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1) & ~autocorr_locations)
@@ -1588,7 +1702,12 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
                             key=key)
 
     ### end of chunks loop ###
-    return ccgs_by_type, spurs_by_type, overview_str
+    return ccgs_by_type, spurs_by_type, autos, overview_str
+
+
+def deconv_group(ac1,ac2):
+    ndimage.deconvolve2d()
+    
 
 
 # NOTE move to plotting in the future!
@@ -1640,12 +1759,6 @@ def plot_waveform_panel(ax, waveform, neuron_type, neuron_id,
     return ax
 
 
-def plot_waveform_same_shank(ax, waveform, shank_id, neuron_type, neuron_id,
-                        frate_all=None, frate_cut=None, n_shanks=12, ch_per_shank=16):
-    
-    pass # TODO
-
-
 def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
                     window_size, bin_size, pval=None, pred=None, j_sig=None, 
                     frates_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None,
@@ -1684,3 +1797,5 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, j
         plt.show()
     plt.close(fig)
     return fig
+
+

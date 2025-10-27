@@ -58,7 +58,7 @@ def plot_on_probe(probe: ProbeGroup, probe_id: int, ):
     """
     pass
 
-def plot_waveform_on_channel(ref_waveform,target_waveform,ref_color="orange"):
+def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange"):
     # units are um (micron)
     # For Cambridge Neurotech F-8. Specs are from their brochure
     # and adjusted based on plotting effects.
@@ -161,23 +161,22 @@ def plot_waveform_on_channel(ref_waveform,target_waveform,ref_color="orange"):
 
         # Scale waveform for display
         wf1 = ref_waveform[ch] * y_scale
-        wf2 = target_waveform[ch] * y_scale
-
         # Left or right of shank
         if ch < n_channels_per_side:
             x_center = -x_offset-shank_width
         else:
             x_center = x_offset-5
-
-        # Left or right of shank
-        if ch < n_channels_per_side:
-            x_center_ref = x_center-window/x_scale-2
-        else:
-            x_center_ref = x_center+window/x_scale+2
-
         ax.plot(x_center + np.zeros_like(wf1)+np.arange(window)/x_scale, y_center + wf1,  color="black", lw=1.2)
-        ax.plot(x_center_ref + np.zeros_like(wf2)+np.arange(window)/x_scale, y_center + wf2, color=ref_color, lw=1.2)
 
+        if target_waveform is not None:
+            # Scale waveform for display
+            wf2 = target_waveform[ch] * y_scale
+            # Left or right of shank
+            if ch < n_channels_per_side:
+                x_center_ref = x_center-window/x_scale-2
+            else:
+                x_center_ref = x_center+window/x_scale+2
+            ax.plot(x_center_ref + np.zeros_like(wf2)+np.arange(window)/x_scale, y_center + wf2, color=ref_color, lw=1.2)
 
     wavewidth = window/x_scale*2
 
