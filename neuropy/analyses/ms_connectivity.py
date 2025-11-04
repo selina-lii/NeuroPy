@@ -13,6 +13,7 @@ except ImportError:
     print("Error importing JAX. No GPU acceleration available.") # Was CuPy
     jnp = None
     jr = None
+
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows, convolve
@@ -193,6 +194,9 @@ class AnalysisDataset:
 
 
 class Toggle(Enum):
+    """
+    Set operation on a variable during filtering of neural data
+    """
     NONE = 0
     SELECT = 1
     REMOVE = 2
@@ -261,7 +265,7 @@ class NeuronsDatasetConfig:
         return self.chunks_per_session[idx]
 
 
-class Ignore(Enum):
+class IgnoreLevel(Enum):
     """Config for CCG and other analysis
     Do we ignore neurons on the same peak channel / shank?"""
     NONE = 0
@@ -269,7 +273,20 @@ class Ignore(Enum):
     SAME_SHANK = 2
 
 
+class NormalizeBy(Enum):
+    """Config for CCG and other analysis
+    Do we ignore neurons on the same peak channel / shank?"""
+    NONE = 0
+    REF_FRATE = 1
+    REF_SPKS = 2
+    # TGT_FRATE = 3
+    # TGT_SPKS = 4 # I don't think we're doing those yet
+
+
 class CCGConfig:
+    """
+    All the details of CCG computation need to be predefined, kinda like a batch run
+    """
     def __init__(self, 
                 name="default",
                 conn_types_E:Union[list[list], list]=[('pyr','pyr'), ('pyr','inter')],
@@ -284,9 +301,10 @@ class CCGConfig:
                 min_spkcount = 2.5,
                 spkcount_scope = 12e-3,
                 multiple_correction_method:str = None,
-                ignore:Ignore = Ignore.SAME_CHANNEL,
+                ignore:IgnoreLevel = IgnoreLevel.SAME_CHANNEL,
                 use_acceleration = True,
                 symmetrize_ccg = True,
+                normalize:NormalizeBy = NormalizeBy.NONE,
                 ):
         self.name = name
 
@@ -317,6 +335,8 @@ class CCGConfig:
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
+        self.normalize = normalize
+
         # if self.use_multiple_correction: 
         #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
         #     self.corrected_alpha2=alpha2/(n**2-n)/self.nbins
@@ -328,7 +348,7 @@ class CCGConfig:
             'max_lag':1,
             'min_spkcount':2.5,
             'spkcount_scope':12,
-            'ignore':Ignore.NONE,
+            'ignore':IgnoreLevel.NONE,
             'ref_type':'pyr',
             'target_type':'pyr',
             'p':0.05,
@@ -338,7 +358,7 @@ class CCGConfig:
             'max_lag':3,
             'min_spkcount':2.5,
             'spkcount_scope':12,
-            'ignore':Ignore.NONE,
+            'ignore':IgnoreLevel.NONE,
             'ref_type':'pyr',
             'target_type':['pyr','inter'],
             'p':0.05,
@@ -349,7 +369,7 @@ class CCGConfig:
             'min_span':2,
             'min_spkcount':2.5,
             'spkcount_scope':12,
-            'ignore':Ignore.NONE,
+            'ignore':IgnoreLevel.NONE,
             'ref_type':'inter',
             'target_type':['pyr','inter'],
             'p':0.05,
@@ -436,6 +456,7 @@ class JitterConfig:
     @property
     def jscale_bins(self):
         return self.jscale/self.ccg.bin_size
+
 
 class KeySlicing:
     data = None
@@ -559,7 +580,7 @@ class NeuronsDataset(AnalysisDataset):
                                             min_dur=0) # NOTE not selecting ripple duration for now
                 
                 if n_chunks > 1:
-                    neus_list = neus.time_split(n_chunks=n_chunks)  # Returns list
+                    neus_list = neus.time_multiview(n_chunks=n_chunks)  # Returns list
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
@@ -574,6 +595,7 @@ class NeuronsDatasetChange(NeuronsDataset):
         # self.conf.n_chunks
         pass # TODO maybe in a new class that has all 3 types of data, bc jitter and ccg are involved
 
+
 class ACG:
     """Like Neurons, but for auto-correlograms
     Static dataclass, not mean for reuse"""
@@ -585,21 +607,22 @@ class ACG:
         self.acg=acg
         self._conf=conf
 
-
 class CCG:
     """Like Neurons, but for CCGs
-    Static dataclass, not mean for reuse"""
+    * Static dataclass, not mean for reuse
+    * Shouldn't really be called on its own. Wrap in a CCGDataset!"""
     def __init__(self, key, ccg, ids, inds, pred=None, pval=None, j_sig=None,
                  conf:CCGConfig=None):
         self.key=key
         self.ids=ids
         self.inds=inds
         self.ccg=ccg
-        self.pred=pred # baseline
+        self.pred=pred # 'baseline', or jittered, chance level CCG
         self.pval=pval
         self.j_sig=j_sig
         self._conf=conf
-
+        self.conn_strength
+ 
     def __str__(self):
         s = self.conf.__str__()
         for key, val in self.__dict__.items():
@@ -610,6 +633,14 @@ class CCG:
         return s
     
     @property
+    def ref_inds(self):
+        return self.inds[:,0]
+    
+    @property
+    def target_inds(self):
+        return self.inds[:,1]
+    
+    @property
     def conf(self):
         return self._conf
 
@@ -617,21 +648,39 @@ class CCG:
     def total(self):
         return self.ccg.shape[0]
 
-    @property
-    def effect_size(self,norm_factor):
+    def _set_cs_eranconv(self, norm_factor:np.ndarray=None):
         """
-        Area under CCG curve minus baseline, within ROI
+        Connection strength:
+        
+            Area under CCG curve minus baseline, within temporal ROI
+            The ROI is by default the same as the interval tested for peak/trough signficance
+
         Can be negative
         """
         auc = self.ccg-self.pred # area under curve
-        auc = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin])
-        auc /= norm_factor
-        return auc
+        cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins
+        if norm_factor: cs /= norm_factor # e.g. presynaptic element firing rate
+        self.conn_strength = cs
 
-    def set_pred_as_tail(self):
-        """TODO
+    def _set_cs_tail(self, acgs:ACG, nspks:list, norm_factor:np.ndarray=False):
+        """
+        Connection strength:
+
+                Area under CCG curve minus a 'tailed' baseline after deconvolving autocorrelograms
+        
+        Can be negative
+        """
+        self.deconv_autocorr(acgs, nspks, target=True, ref=True)
+        self._set_baseline_by_tail()
+        auc = self.ccg-self.pred # area under curve
+        cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins 
+        if norm_factor: cs /= norm_factor
+        self.conn_strength = cs
+    
+    def _set_baseline_by_tail(self):
+        """
         Baseline by 'tail' (|t|>11ms)
-        'Tail' is accurate when coupled with eran_deconv
+        'Tail' is accurate when coupled with deconv_autocorr
         """
         l = self.conf.time2bin(-11e-3)
         r = self.conf.time2bin(11e-3)
@@ -643,7 +692,7 @@ class CCG:
             return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.chunk}/{self.key.excitability}_any"
         return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.chunk}/{self.key.excitability}_{self.key.conn_type[0]}-{self.key.conn_type[1]}"    
 
-    def sample_plot(self,inds):
+    def sample_plot(self, inds):
         assert inds in self.inds
         pval = self.pval[inds] if self.pval else None
         pred = self.pred[inds] if self.pred else None
@@ -684,74 +733,79 @@ class CCG:
                             j_sig=self.j_sig[s][i] if self.j_sig else None,
                             show=False,save=True)
 
-    def normalize(self,factor):
-        if self.ccg is not None:
-            self.ccg/=factor
+    def deconv_autocorr(self, acgs, nspks, target=True, ref=True):
+        """
+        Remove auto-correlograms (ACG) from CCG
+        target/ref is set to true if corresponding ACG is to be removed
+        """
 
-    def deconv_autocorr(self,acgs,nspks,target=True,ref=True):
+        def _deconv_autocorr(ccg, acg1=None, nspks1=None, acg2=None, nspks2=None):
+            """
+            Deconvolve acgs from ccg using FFT-based method.
+            Translated from MATLAB
+            https://github.com/EranStarkLab/CCH-deconvolution/cchdeconv.m
+            
+            Parameters
+            ----------
+            acg1, acg2 : ndarray
+                Autocorrelograms for neurons 1 and 2
+            nspks1, nspks2 : int or float
+                Number of spikes for neurons 1 and 2
+            
+            Returns
+            -------
+            dcccg : ndarray
+                Deconvolved cross-correlogram
+            """
+            # Preparations
+            m = ccg.shape[-1]
+            assert m%2==1 # CCG must have an odd number of bins
+            hw = (m - 1) // 2 # midpoint
+            
+            # Scale acg1
+            acg1 = (acg1 - np.mean(acg1)) / nspks1  # remove mean of clipped, divide by nspks1
+            hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])  # [0:hw, (hw+1):m]
+            acg1[hw] = 1 - np.sum(acg1[hidx])  # set zero-lag bin s.t. sum of 1
+            den = np.fft.fft(acg1)
+
+            if acg2 is not None:
+                # Scale acg2
+                acg2 = (acg2 - np.mean(acg2)) / nspks2  # remove mean of clipped, divide by nspks2
+                hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
+                acg2[hw] = 1 - np.sum(acg2[hidx])  # set zero-lag bin s.t. sum of 1
+                den = den * np.fft.fft(acg2)
+
+            # Deconvolve acgs from the ccg
+            dcccg = np.real(np.fft.ifft(np.fft.fft(ccg) / den))
+            
+            # Set my CCG to deconvCCG
+            dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])  # shift DC to end
+            dcccg[dcccg < 0] = 0  # clip negatives to zero
+            return dcccg
+    
         for i,(ref,tgt) in enumerate(self.inds):
             if ref and target:
-                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref], acgs[tgt], nspks[tgt])
+                self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref], acgs[tgt], nspks[tgt])
             elif ref:
-                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref])
+                self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref])
             elif target:
-                self.ccg[i] = self._deconv_autocorr(self.ccg[i], acgs[tgt], nspks[tgt])
+                self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[tgt], nspks[tgt])
             else:
                 Warning("_deconv_autocorr: No effect")
                 return
 
-    def _deconv_autocorr(ccg, acg1=None, nspks1=None, acg2=None, nspks2=None):
-        """
-        Deconvolve acgs from ccg using FFT-based method.
-        Translated from MATLAB
-        https://github.com/EranStarkLab/CCH-deconvolution/cchdeconv.m
-        
-        Parameters
-        ----------
-        acg1, acg2 : ndarray
-            Autocorrelograms for neurons 1 and 2
-        nspks1, nspks2 : int or float
-            Number of spikes for neurons 1 and 2
-        
-        Returns
-        -------
-        dcccg : ndarray
-            Deconvolved cross-correlogram
-        """
-        # Preparations
-        m = ccg.shape[-1]
-        assert m%2==1 # CCG must have an odd number of bins
-        hw = (m - 1) // 2 # midpoint
-        
-        # Scale acg1
-        acg1 = (acg1 - np.mean(acg1)) / nspks1  # remove mean of clipped, divide by nspks1
-        hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])  # [0:hw, (hw+1):m]
-        acg1[hw] = 1 - np.sum(acg1[hidx])  # set zero-lag bin s.t. sum of 1
-        den = np.fft.fft(acg1)
-
-        if acg2 is not None:
-            # Scale acg2
-            acg2 = (acg2 - np.mean(acg2)) / nspks2  # remove mean of clipped, divide by nspks2
-            hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
-            acg2[hw] = 1 - np.sum(acg2[hidx])  # set zero-lag bin s.t. sum of 1
-            den = den * np.fft.fft(acg2)
-
-        # Deconvolve acgs from the ccg
-        dcccg = np.real(np.fft.ifft(np.fft.fft(ccg) / den))
-        
-        # Set my CCG to deconvCCG
-        dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])  # shift DC to end
-        dcccg[dcccg < 0] = 0  # clip negatives to zero
-        return dcccg
-    
 
 class CCGDataset(AnalysisDataset):
+    """
+    Data and operations on CCGs from an experiment
+    Requires a NeuronsDataset to be processed first, and a configuration object (see CCGConfig)
+    """
     def __init__(self, nd:NeuronsDataset, conf:CCGConfig=None):
-        self.nd = nd
-        self.data={}
-        self._conf=conf
-        self.spurious={}
-        self.auto={}
+        self.nd = nd # neurons
+        self.data={} # CCGs
+        self._conf=conf # config
+        self.spurious={} # rest of pairwise CCG that failed the significance checks
+        self.auto={} # autocorrelograms 
 
     @property
     def conf(self):
@@ -923,21 +977,28 @@ class CCGDataset(AnalysisDataset):
         for d in self.spurious:
             d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
 
-    def deconv_autocorr(self,ref=True,tgt=True):
+    def set_connection_strengths(self,method="eranconv"):
         #TODO untested
         for key, ccg in self.data.items():
-            spikecount = self.nd[key.parent].n_spikes
-            acg = self.auto[key.parent]
-            ccg.deconv_autocorr(acg,spikecount)
-       
+            if self.conf.normalize==NormalizeBy.REF_FRATE:
+                norm_factors = self.nd[key.parent].firing_rate[ccg.ref_inds][...,np.newaxis]
+            elif self.conf.normalize==NormalizeBy.REF_SPKS:
+                norm_factors = self.nd[key.parent].n_spikes[ccg.ref_inds][...,np.newaxis]
+            else:
+                norm_factors = None
 
-class CCGRolling(CCG):
-    pass # TODO
-
+            if method=="eranconv":
+                ccg._set_cs_eranconv(norm_factors)
+            elif method=="tail":
+                spikecount = self.nd[key.parent].n_spikes
+                acg = self.auto[key.parent]
+                ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
+                return NotImplementedError("Unknown connection strength method")
 
 class DataState(Enum):
     DEFAULT = 0
     READONLY = 1
+    #TODO hopefully get rid of this
 
 
 class Jitterlet:
@@ -1300,86 +1361,6 @@ class JitterDataset:
             if j is not None: j.run(save_progress=save_progress)
 
 
-def routine_mean_firing_rates(nd:NeuronsDataset):
-    n_chunks=nd.conf.chunks_per_session
-    epochs=nd.conf.epochs
-    total_n_chunks = np.sum(n_chunks)
-    neuron_types = nd.conf.neuron_types
-    ntypes = len(neuron_types)
-    alpha = 0.05
-
-    print("Mean firing rates P VALUES")
-    for key,sess_neurons in nd.data.items():
-        
-        overview_str=f"======={key.session}=======\n"
-        for epoch, n_chunk in zip(epochs, n_chunks):
-            labels+=[f"{epoch.capitalize()}{i+1}" for i in range(n_chunk)]
-
-        for itype in range(ntypes):
-            ################ UPDATE RETURN VALUES #################       
-            nneurons = 0
-            mean_firing_rates,\
-            sd_firing_rates,\
-            iqr,\
-            frates,\
-            effective_time = [],[],[],[],[]
-            ############# END OF UPDATE RETURN VALUES ##############
-
-            ### start of epochs loop ###
-            for ie, epoch, n_chunk in enumerate(zip(epochs, n_chunks)):
-                ################ UPDATE RETURN VALUES #################       
-                mean_firing_rates.append([])
-                sd_firing_rates.append([])
-                iqr.append([])
-                frates.append([])
-                effective_time.append([])
-                ############# END OF UPDATE RETURN VALUES ##############
-
-                ### start of chunks loop ###
-                for ic in range(n_chunk):
-                    neus = sess_neurons[epoch][ic]
-                    neus = neus.get_neuron_type(neuron_types[itype])
-                    nneurons=neus.n_neurons
-                    frate = neus.firing_rate if nneurons>0 else 0
-                    frates[ie].append(frate)
-                    mean_firing_rates[ie].append(np.mean(frate))
-                    sd_firing_rates[ie].append(np.std(frate))
-                    effective_time[ie].append(neus.effective_time_hours) # time in hours
-                    if neus.n_neurons>5:
-                        iqr[ie].append(np.percentile(frate, 75)-np.percentile(frate, 25))
-                ### end of chunks loop ###
-
-            ################ UPDATE PRINT STRING #################
-            overview_str+=f"{itype+1}. {neuron_types[itype]}\t"
-            overview_str+=f"n={int(nneurons)}\t"
-            overview_str+=f"mean firing rates (Hz)|effective time (h)\n"
-            for ts,mfrs in zip(effective_time,mean_firing_rates):
-                for t,mfr in zip(ts,mfrs):
-                    overview_str+=f"{mfr:.02f}|{t:.02f}  "
-            overview_str+="\n"
-            if nneurons<2:
-                overview_str+="Too few neurons in this category\n"
-            else:
-                decimal_places=int(2+-np.floor(np.log10(alpha)))
-                frates = [xx for x in frates for xx in x]
-                flag = False
-                for j in range(total_n_chunks):
-                    for k in range(j):
-                        p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
-                        if p<alpha:
-                            flag = True
-                            overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
-                        # Standard t-test,  check if mean firing rate changes over sleep per cell type
-                if not flag: overview_str+="No significant difference between chunks\n"
-            ############# END OF UPDATE PRINT STRING ##############
-            ### end of celltype loop ###
-            
-        print(overview_str)
-        ### end of sessions loop ###
-    return effective_time, mean_firing_rates, sd_firing_rates, iqr, frates
-    ### end of function ###
- 
-
 def routine_eranconv_connection_info(info, nd:NeuronsDataset, cd:CCGDataset, epoch_id=0):
     """
     Print aggregated information of eranconv_pairs() outputs
@@ -1599,7 +1580,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
     pairs_I = np.argwhere(neighbor.any(-1) & ~autocorr_locations)
     
-    def _count_significant_pairs(pairs,neurons,conn_types,ignore:Ignore=Ignore.SAME_CHANNEL):
+    def _count_significant_pairs(pairs,neurons,conn_types,ignore:IgnoreLevel=IgnoreLevel.SAME_CHANNEL):
         """
         Create a tally of significant neuronal connectoins by type
         Currently, the type is defined as 
@@ -1618,11 +1599,11 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
 
         # Condition 2: Ref/Target are not too close by
         x,y = pairs[:,0],pairs[:,1]
-        if ignore==Ignore.SAME_CHANNEL:
+        if ignore==IgnoreLevel.SAME_CHANNEL:
             assert neurons.peak_channels is not None
             inds=np.where(neurons.peak_channels[x]!=neurons.peak_channels[y])[0]
             pairs = pairs[inds]
-        elif ignore==Ignore.SAME_SHANK:
+        elif ignore==IgnoreLevel.SAME_SHANK:
             assert neurons.shank_ids is not None
             inds=np.where(neurons.shank_ids[x]!=neurons.shank_ids[y])[0]
             pairs = pairs[inds]
@@ -1705,15 +1686,11 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     return ccgs_by_type, spurs_by_type, autos, overview_str
 
 
-def deconv_group(ac1,ac2):
-    ndimage.deconvolve2d()
-    
-
-
 # NOTE move to plotting in the future!
 import seaborn as sns
 import matplotlib.pyplot as plt
 import os
+
 
 def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, 
                    pval=None, pred=None, j_sig=None):
@@ -1799,3 +1776,96 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, j
     return fig
 
 
+class WindowSweep:
+    """
+    Wrapper over a CCG, a neuron dataset, etc to split each item of the object into several windows of arbitrary step size
+    and compare statistics on them. 
+
+    Probably specific to the CCG project only, TBD how large the scope is
+    """
+    data = {}
+    # sweep by window size, or number pre-syn spikes, 
+
+
+
+# will fall under WindowSweep
+def routine_mean_firing_rates(nd:NeuronsDataset):
+    n_chunks=nd.conf.chunks_per_session
+    epochs=nd.conf.epochs
+    total_n_chunks = np.sum(n_chunks)
+    neuron_types = nd.conf.neuron_types
+    ntypes = len(neuron_types)
+    alpha = 0.05
+
+    print("Mean firing rates P VALUES")
+    for key,sess_neurons in nd.data.items():
+        
+        overview_str=f"======={key.session}=======\n"
+        for epoch, n_chunk in zip(epochs, n_chunks):
+            labels+=[f"{epoch.capitalize()}{i+1}" for i in range(n_chunk)]
+
+        for itype in range(ntypes):
+            ################ UPDATE RETURN VALUES #################       
+            nneurons = 0
+            mean_firing_rates,\
+            sd_firing_rates,\
+            iqr,\
+            frates,\
+            effective_time = [],[],[],[],[]
+            ############# END OF UPDATE RETURN VALUES ##############
+
+            ### start of epochs loop ###
+            for ie, epoch, n_chunk in enumerate(zip(epochs, n_chunks)):
+                ################ UPDATE RETURN VALUES #################       
+                mean_firing_rates.append([])
+                sd_firing_rates.append([])
+                iqr.append([])
+                frates.append([])
+                effective_time.append([])
+                ############# END OF UPDATE RETURN VALUES ##############
+
+                ### start of chunks loop ###
+                for ic in range(n_chunk):
+                    neus = sess_neurons[epoch][ic]
+                    neus = neus.get_neuron_type(neuron_types[itype])
+                    nneurons=neus.n_neurons
+                    frate = neus.firing_rate if nneurons>0 else 0
+                    frates[ie].append(frate)
+                    mean_firing_rates[ie].append(np.mean(frate))
+                    sd_firing_rates[ie].append(np.std(frate))
+                    effective_time[ie].append(neus.effective_time_hours) # time in hours
+                    if neus.n_neurons>5:
+                        iqr[ie].append(np.percentile(frate, 75)-np.percentile(frate, 25))
+                ### end of chunks loop ###
+
+            ################ UPDATE PRINT STRING #################
+            overview_str+=f"{itype+1}. {neuron_types[itype]}\t"
+            overview_str+=f"n={int(nneurons)}\t"
+            overview_str+=f"mean firing rates (Hz)|effective time (h)\n"
+            for ts,mfrs in zip(effective_time,mean_firing_rates):
+                for t,mfr in zip(ts,mfrs):
+                    overview_str+=f"{mfr:.02f}|{t:.02f}  "
+            overview_str+="\n"
+            if nneurons<2:
+                overview_str+="Too few neurons in this category\n"
+            else:
+                decimal_places=int(2+-np.floor(np.log10(alpha)))
+                frates = [xx for x in frates for xx in x]
+                flag = False
+                for j in range(total_n_chunks):
+                    for k in range(j):
+                        p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
+                        if p<alpha:
+                            flag = True
+                            overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
+                        # Standard t-test,  check if mean firing rate changes over sleep per cell type
+                if not flag: overview_str+="No significant difference between chunks\n"
+            ############# END OF UPDATE PRINT STRING ##############
+            ### end of celltype loop ###
+            
+        print(overview_str)
+        ### end of sessions loop ###
+    return effective_time, mean_firing_rates, sd_firing_rates, iqr, frates
+    ### end of function ###
+ 
+routine_connection_strength

@@ -199,6 +199,15 @@ class Neurons(DataWriter):
         #TODO metadata
 
     @property
+    def spiketrains(self):
+        return self._spiketrains
+    
+    @spiketrains.setter
+    def spiketrains(self,v):
+        self._spiketrains=v
+        self._n_spikes=np.asarray([len(_) for _ in self._spiketrains]) # to reduce overhead of counting spiketrain lengths
+
+    @property
     def t_start(self):
         return self._t_start
 
@@ -266,7 +275,7 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
 
-    def time_split(self, n_chunks=1):
+    def time_multiview(self, n_chunks=1, stepsize=None,):
         """
         Evenly divide neuron into N chunks (equal length) by specifying n_chunks
         """
@@ -533,11 +542,11 @@ class Neurons(DataWriter):
     @property
     def n_spikes(self):
         "number of spikes within each spiketrain"
-        return np.asarray([len(_) for _ in self.spiketrains])
-
+        return self._n_spikes
+    
     @property
     def firing_rate(self):
-        # TODO temporary structure
+        # TODO right now it's always effective frate, if imaging time is segmented
         return self.n_spikes / self.effective_time
     
     @property
@@ -546,7 +555,7 @@ class Neurons(DataWriter):
     
     @property
     def effective_time(self):
-        # TODO temporary structure
+        # TODO temporary
         if np.isin('intervals',list(self.metadata.keys())):
             intervals = self.metadata['intervals']
             total_time=np.sum(intervals[:,1]-intervals[:,0])
