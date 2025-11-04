@@ -275,17 +275,40 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
 
-    def time_multiview(self, n_chunks=1, stepsize=None,):
+    def time_split(self, n_chunks=1, stride=None):
         """
         Evenly divide neuron into N chunks (equal length) by specifying n_chunks
+
+        stride in seconds, e.g. 5min will be 300
+
+        n_spikes_per_chunk e.g. 1000
         """
         t_start, t_stop = super()._time_slice_params()
 
-        chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
-        chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
+        if stride is not None: # overwrite number of chunks
+            chunk_starts = np.arange(start=t_start,stop=t_stop,step=stride)
+            chunk_stops = chunk_starts+stride
+            chunk_stops[-1]=t_stop
+        else:
+            chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
+            chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
         
-        neurons=deepcopy(self)
+        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
+    
+    def slice_edges_by_spikecount(self, X = 1000):
+        """
+        Returns the bin edges to slice spiketrain so that each bin has X spikes for neuron i
+        e.g. t_starts[i] are the starting timepoints of slices where neuron i always has X spikes in each chunk
+        TODO for CCG binned by number of presynaptic spikes
+        """
+        t_starts,t_ends = [],[]
+        for spkt in self.spiketrains:
+            t_starts = np.append(spkt[::X],spkt[-1]+1)
+            k=np.append(t_starts[::2],t_starts[-1]+1)-1e-8
+            t_starts.append(k[:-1])
+            t_ends.append(k[1:])
+        return t_starts,t_ends
 
     def _clip_intervals(self,intervals,t_start=None,t_stop=None):
         # print("before",intervals[0],intervals[-1],t_start,t_stop)
