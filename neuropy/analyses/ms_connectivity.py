@@ -580,7 +580,7 @@ class NeuronsDataset(AnalysisDataset):
                                             min_dur=0) # NOTE not selecting ripple duration for now
                 
                 if n_chunks > 1:
-                    neus_list = neus.time_multiview(n_chunks=n_chunks)  # Returns list
+                    neus_list = neus.time_multiview(n_chunks=n_chunks)  # Returns list 
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
