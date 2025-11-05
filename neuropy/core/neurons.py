@@ -275,27 +275,43 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
 
-    def time_split(self, n_chunks=1, stride=None):
+    def time_split(self, n_chunks=1):
         """
         Evenly divide neuron into N chunks (equal length) by specifying n_chunks
-
-        stride in seconds, e.g. 5min will be 300
-
-        n_spikes_per_chunk e.g. 1000
         """
         t_start, t_stop = super()._time_slice_params()
 
-        if stride is not None: # overwrite number of chunks
-            chunk_starts = np.arange(start=t_start,stop=t_stop,step=stride)
-            chunk_stops = chunk_starts+stride
-            chunk_stops[-1]=t_stop
-        else:
-            chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
-            chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
+        chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
+        chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
         
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
-    
+
+    def time_windows(self, stride=None, chunk_len=None, keep_incomplete=False):
+        """
+        Evenly divide neuron into time chunks (equal length, except the last chunk can be short) by specifying length and stride
+
+        stride in seconds, e.g. 5min will be 300
+        """
+        t_start, t_stop = super()._time_slice_params()
+
+        chunk_starts = np.arange(start=t_start,stop=t_stop-chunk_len+1,step=stride)
+        chunk_stops = chunk_starts+chunk_len
+
+        # Remainder
+        if keep_incomplete and chunk_stops[-1]<t_stop:
+            start = chunk_starts[-1]+stride
+            stop = start+chunk_len
+            chunk_starts=np.append(chunk_starts,start)
+            chunk_stops=np.append(chunk_stops,min(t_stop,stop))
+            print(f"length of last bin is {chunk_stops[-1]-chunk_starts[-1]} while all other bins are {chunk_len}")        
+        
+        print(chunk_starts)
+        print(chunk_stops)
+        
+        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
+        return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
+
     def slice_edges_by_spikecount(self, X = 1000):
         """
         Returns the bin edges to slice spiketrain so that each bin has X spikes for neuron i

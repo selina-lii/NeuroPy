@@ -16,19 +16,15 @@ except ImportError:
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
-from scipy.signal import windows, convolve
-from scipy.stats import poisson
+from scipy.signal import windows
+from scipy.stats import poisson, ttest_ind
 from scipy import ndimage
-import time
-from scipy.stats import ttest_ind
 from typing import Union, Optional, Dict, Any, Tuple
-from datetime import datetime
 import h5py
 from statsmodels.stats.multitest import multipletests
 from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
-import time
 
 def RAND_KEY():
     return jr.PRNGKey(np.random.randint(0,1e10))
@@ -192,6 +188,11 @@ class AnalysisDataset:
         
         return "\n".join(lines)
 
+    @property
+    def keys(self):
+        for k in self.data.keys():
+            print(k)
+
 
 class Toggle(Enum):
     """
@@ -218,6 +219,8 @@ class NeuronsDatasetConfig:
                  neuron_types:Union[list[str], str] = ['pyr', 'inter'], 
                  epochs:Union[list[str], str]="post", 
                  chunks_per_session:Union[list[int], int]=1, 
+                 chunk_stride:int=None,
+                 chunk_len:int=None,
                  sleep_labels:Union[list[str], str]=["REM","NREM"], 
                  ripple:Toggle=Toggle.NONE, tight_epoch=False):
         self.name = name
@@ -228,6 +231,8 @@ class NeuronsDatasetConfig:
         self.ripple = ripple
         self.chunks_per_session = _san(chunks_per_session)
         self.tight_epoch = tight_epoch
+        self.chunk_stride = chunk_stride
+        self.chunk_len = chunk_len
 
         assert len(self.chunks_per_session)==len(self.epochs)
 
@@ -522,10 +527,9 @@ class NeuronsDataset(AnalysisDataset):
         collection object of sessions
     """
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
-        
-        self.conf = conf
-        self.data = {}
-        
+        self.conf = conf        
+        self.data={}
+
         self.prep(sessions)
 
     def __str__(self):
@@ -579,21 +583,22 @@ class NeuronsDataset(AnalysisDataset):
                                             tighten=self.conf.tight_epoch,
                                             min_dur=0) # NOTE not selecting ripple duration for now
                 
-                if n_chunks > 1:
-                    neus_list = neus.time_fracture(n_chunks=n_chunks)  # Returns list 
+                if self.conf.chunk_stride is not None and self.conf.chunk_len is not None:
+                    neus_list = neus.time_windows(stride=self.conf.chunk_stride,
+                                                chunk_len=self.conf.chunk_len)  # Returns list 
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
-                        self[key] = chunk_neus
+                        self.data[key] = chunk_neus
+                elif self.conf.n_chunks > 1:
+                    neus_list = neus.time_split(n_chunks=n_chunks)  # Returns list 
+                    # Store each chunk separately
+                    for chunk_id, chunk_neus in enumerate(neus_list):
+                        key = Key(session=ssn, epoch=e, chunk=chunk_id)
+                        self.data[key] = chunk_neus
                 else:
                     key = Key(session=ssn, epoch=e,chunk=0)
-                    self[key] = neus
-
-
-class NeuronsDatasetChange(NeuronsDataset):
-    def change_within_epoch(self):
-        # self.conf.n_chunks
-        pass # TODO maybe in a new class that has all 3 types of data, bc jitter and ccg are involved
+                    self.data[key] = neus
 
 
 class ACG:
@@ -927,7 +932,7 @@ class CCGDataset(AnalysisDataset):
         print(f"Saving plots under {root}")
         for key in keys:
             ccg = self.data[key]
-            neurons = self.nd.data[key.parent()]
+            neurons = self.nd[key.parent()]
             frates = frates_all[key.parent()] if frates_all else None
             print(f"ccg {key.session} {key.conn_type}")
             try:
@@ -1212,6 +1217,7 @@ class Jitterlet:
     def spktrain_path(self): # TODO
         get_path_from_key(self.key)
         pass
+
     def ccg_path(self):
         get_path_from_key(self.key)
         pass
@@ -1776,15 +1782,24 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, j
     return fig
 
 
-class WindowSweep:
+class GroupwiseDiff:
     """
     Wrapper over a CCG, a neuron dataset, etc to split each item of the object into several windows of arbitrary step size
     and compare statistics on them. 
 
     Probably specific to the CCG project only, TBD how large the scope is
     """
-    data = {}
-    # sweep by window size, or number pre-syn spikes, 
+    data:NeuronsDataset
+
+    def mean(self):
+        return self.data.mean()
+    def sd(self):
+        return self.data.std()
+    def iqr(self):
+        return np.percentile(self.data, 75)-np.percentile(self.data, 25)
+    def p_ttest(self):
+        return ttest_ind(self.data[k],self.data[j],equal_var=True).pvalue 
+    
 
 
 
@@ -1868,4 +1883,4 @@ def routine_mean_firing_rates(nd:NeuronsDataset):
     return effective_time, mean_firing_rates, sd_firing_rates, iqr, frates
     ### end of function ###
  
-routine_connection_strength
+# routine_connection_strength
