@@ -68,7 +68,6 @@ class Key:
     chunk: Optional[int] = None
     excitability: Optional[str] = None
     conn_type: Optional[tuple[str,str]] = None
-    sliding_window: Optional[int] = None
 
     """
     Dependencies
@@ -83,7 +82,6 @@ class Key:
         if self.chunk is not None: parts.append(f"c{self.chunk}")
         if self.excitability: parts.append(f"{self.excitability}")
         if self.conn_type: parts.append(f"{self.conn_type[0]}-{self.conn_type[1]}")
-        if self.sliding_window: parts.append(f"sw{self.sliding_window}")
         return "_".join(parts) if parts else "root"
 
     def matches(self, **kwargs) -> bool:
@@ -99,8 +97,6 @@ class Key:
 
     def parent(self) -> 'Key':
         """Get parent key (one level up in hierarchy)"""
-        if self.sliding_window is not None:
-            return Key(self.session, self.epoch, self.chunk, self.excitability, self.conn_type)            
         if self.excitability is not None: # conn_type goes with excitability
             return Key(self.session, self.epoch, self.chunk)
         if self.chunk is not None:
@@ -590,7 +586,7 @@ class NeuronsDataset(AnalysisDataset):
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
                         self.data[key] = chunk_neus
-                elif self.conf.n_chunks > 1:
+                elif n_chunks > 1:
                     neus_list = neus.time_split(n_chunks=n_chunks)  # Returns list 
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
@@ -612,21 +608,22 @@ class ACG:
         self.acg=acg
         self._conf=conf
 
+
 class CCG:
     """Like Neurons, but for CCGs
     * Static dataclass, not mean for reuse
     * Shouldn't really be called on its own. Wrap in a CCGDataset!"""
-    def __init__(self, key, ccg, ids, inds, pred=None, pval=None, j_sig=None,
+    def __init__(self, key, ccg, ids, inds, ccg_null=None, pval=None, j_sig=None, conn_strength=None,
                  conf:CCGConfig=None):
         self.key=key
         self.ids=ids
         self.inds=inds
         self.ccg=ccg
-        self.pred=pred # 'baseline', or jittered, chance level CCG
+        self.ccg_null=ccg_null # 'baseline', or jittered, chance level CCG
         self.pval=pval
         self.j_sig=j_sig
+        self.conn_strength = conn_strength # 
         self._conf=conf
-        self.conn_strength
  
     def __str__(self):
         s = self.conf.__str__()
@@ -662,8 +659,8 @@ class CCG:
 
         Can be negative
         """
-        auc = self.ccg-self.pred # area under curve
-        cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins
+        auc = self.ccg-self.ccg_null # area under curve
+        cs = np.sum(auc[:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=1) # inds,nbins
         if norm_factor: cs /= norm_factor # e.g. presynaptic element firing rate
         self.conn_strength = cs
 
@@ -677,7 +674,7 @@ class CCG:
         """
         self.deconv_autocorr(acgs, nspks, target=True, ref=True)
         self._set_baseline_by_tail()
-        auc = self.ccg-self.pred # area under curve
+        auc = self.ccg-self.ccg_null # area under curve
         cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins 
         if norm_factor: cs /= norm_factor
         self.conn_strength = cs
@@ -690,9 +687,10 @@ class CCG:
         l = self.conf.time2bin(-11e-3)
         r = self.conf.time2bin(11e-3)
         baseline = np.mean([self.ccg[:l],self.ccg[r+1:]])
-        self.pred = np.ones_like(self.ccg)*baseline
+        self.ccg_null = np.ones_like(self.ccg)*baseline
 
     def plotdir(self, root):
+        root=os.path.expanduser(root)
         if self.key.conn_type is None:
             return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.chunk}/{self.key.excitability}_any"
         return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.chunk}/{self.key.excitability}_{self.key.conn_type[0]}-{self.key.conn_type[1]}"    
@@ -700,7 +698,7 @@ class CCG:
     def sample_plot(self, inds):
         assert inds in self.inds
         pval = self.pval[inds] if self.pval else None
-        pred = self.pred[inds] if self.pred else None
+        ccg_null = self.ccg_null[inds] if self.ccg_null else None
         j_sig = self.j_sig[inds] if self.j_sig else None
         plot_ccg_only(
             ccg=self.ccg[inds], 
@@ -708,7 +706,7 @@ class CCG:
             inds=inds, 
             window_size=self.conf.duration, 
             bin_size=self.conf.bin_size, 
-            pval=pval, pred=pred, j_sig=j_sig,
+            pval=pval, ccg_null=ccg_null, j_sig=j_sig,
         )
 
     def save_plots(self, neuron_types, waveforms, firing_rate, frates_all, root):
@@ -734,7 +732,7 @@ class CCG:
                             window_size=self.conf.duration*1e3,
                             bin_size=self.conf.bin_size*1e3,
                             pval=self.pval[s][i] if self.pval is not None else None,
-                            pred=self.pred[s][i] if self.pred is not None else None,
+                            ccg_null=self.ccg_null[s][i] if self.ccg_null is not None else None,
                             j_sig=self.j_sig[s][i] if self.j_sig else None,
                             show=False,save=True)
 
@@ -804,11 +802,12 @@ class CCGDataset(AnalysisDataset):
     """
     Data and operations on CCGs from an experiment
     Requires a NeuronsDataset to be processed first, and a configuration object (see CCGConfig)
+    Test CCGs and stores them separately by significance criteria
     """
     def __init__(self, nd:NeuronsDataset, conf:CCGConfig=None):
         self.nd = nd # neurons
-        self.data={} # CCGs
-        self._conf=conf # config
+        self.data={} # CCGs of interest
+        self._conf=conf or CCGConfig() # config
         self.spurious={} # rest of pairwise CCG that failed the significance checks
         self.auto={} # autocorrelograms 
 
@@ -867,7 +866,15 @@ class CCGDataset(AnalysisDataset):
         except Exception as e:
             print(f"Load failed: {e}")
 
-    def run_eranconv(self):
+    def get_CCG_with_baseline(self,method="eran_conv"):
+        if method=="eran_conv":
+            self._ccg_eranconv()
+        elif method=="jitter":
+            NotImplementedError("CCG & Jitter must be run in the Jitter object, due to generating a ton of extra data. Nothing is run...")
+        else:
+            ValueError("Unknown method")
+
+    def _ccg_eranconv(self):
         """
         Run CCG and convolution based significance test for all neurons
 
@@ -877,7 +884,7 @@ class CCGDataset(AnalysisDataset):
         nd: Neurons dataset, contains all input data
         """
         print("EranConv significant pairs")
-        def _s(sess_name, neurons):
+        def _s(sess_name, neurons): # print helper
             neurons=_san(neurons)
             s = f"======={sess_name}=======\n"
             s+=f"Chunk(s) are {neurons[0].total_time_hours:.2f}h each and contain {[f'{_.effective_time_hours:.2f}' for _ in neurons]} hours of actual sleep "
@@ -923,10 +930,9 @@ class CCGDataset(AnalysisDataset):
         print("rescale of spurious CCG completed")
         
     def save_plots(self, jd = 'JitterDataset', root="~/Documents/NeuroPy/images/ccg_plots",
-                   frates_all:dict=None,
-                   conn_types:list=None):
-        assert os.path.isdir(root)
-        if isinstance(jd,str): jd == None # TODO ugly. to avoid circular imports
+                   frates_all:dict=None, conn_types:list=None):
+        assert os.path.isdir(os.path.expanduser(root))
+        if isinstance(jd,str): jd = None # TODO ugly. to avoid circular imports
         keys = self.keys_matching(conn_type=conn_types) if conn_types else self.data.keys()
         print(keys)
         print(f"Saving plots under {root}")
@@ -935,19 +941,19 @@ class CCGDataset(AnalysisDataset):
             neurons = self.nd[key.parent()]
             frates = frates_all[key.parent()] if frates_all else None
             print(f"ccg {key.session} {key.conn_type}")
-            try:
-                if jd is not None:
-                    ccg.j_sig = jd.data[key].significance
-                ccg.save_plots(
-                    neuron_types=neurons.neuron_type[ccg.inds],
-                    waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
-                    firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
-                    frates_all=None if frates is None else frates[ccg.inds],
-                    root=root
-                )
-            except Exception as e:
-                print(f"No {key.conn_type} connections: {e}")
-                continue
+            # try:
+            if jd is not None:
+                ccg.j_sig = jd.data[key].significance
+            ccg.save_plots(
+                neuron_types=neurons.neuron_type[ccg.inds],
+                waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
+                firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
+                frates_all=None if frates is None else frates[ccg.inds],
+                root=root,
+            )
+            # except Exception as e:
+            #     print(f"No {key.conn_type} connections: {e}")
+            #     continue
         print("done")
 
     def save_plots_spurious(self, root="~/Documents/NeuroPy/images/ccg_plots", frates_all=None, EI:list=None):
@@ -978,27 +984,30 @@ class CCGDataset(AnalysisDataset):
         """
         # TODO modifies data TODO untested TODO normalize to reference firing rate
         for d in self.data:
-            d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
+            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,0]])
         for d in self.spurious:
-            d.normalize(self.nd.data[d.key.parent].n_spikes[d.inds[:,0]])
+            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,0]])
 
-    def set_connection_strengths(self,method="eranconv"):
+    def get_connection_strengths(self, method="eran_conv"):
         #TODO untested
         for key, ccg in self.data.items():
             if self.conf.normalize==NormalizeBy.REF_FRATE:
-                norm_factors = self.nd[key.parent].firing_rate[ccg.ref_inds][...,np.newaxis]
+                norm_factors = self.nd[key.parent()].firing_rate[ccg.ref_inds][...,np.newaxis]
             elif self.conf.normalize==NormalizeBy.REF_SPKS:
-                norm_factors = self.nd[key.parent].n_spikes[ccg.ref_inds][...,np.newaxis]
+                norm_factors = self.nd[key.parent()].n_spikes[ccg.ref_inds][...,np.newaxis]
             else:
                 norm_factors = None
 
-            if method=="eranconv":
+            if method=="eran_conv":
                 ccg._set_cs_eranconv(norm_factors)
             elif method=="tail":
-                spikecount = self.nd[key.parent].n_spikes
-                acg = self.auto[key.parent]
+                spikecount = self.nd[key.parent()].n_spikes
+                acg = self.auto[key.parent()]
                 ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
                 return NotImplementedError("Unknown connection strength method")
+
+    def pool_connection_strengths(self):
+        pass        
 
 class DataState(Enum):
     DEFAULT = 0
@@ -1527,7 +1536,7 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
         return CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
                 ccg=ccg, 
-                pred=pred, 
+                ccg_null=pred, 
                 pval=None, 
                 conf=conf,
                 key=ccg_key)
@@ -1535,7 +1544,7 @@ def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], ru
         return CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
                 ccg=ccg, 
-                pred=None, 
+                ccg_null=None, 
                 pval=None, 
                 conf=conf,
                 key=ccg_key)
@@ -1554,7 +1563,7 @@ def _multiple_correction(pvals,alpha,method='bonferroni'):
 
 def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     """
-    Helper of eranconv
+    Helper of CCGDataset
 
     chunked_neurons: list[Neurons] or Neurons, sliced from the same session.
     """
@@ -1667,7 +1676,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
                 ccgs_by_type[key] = CCG(inds=pairs, 
                                     ids=neurons.ind2id(pairs), 
                                     ccg=ccg[x,y], 
-                                    pred=pred[x,y], 
+                                    ccg_null=pred[x,y], 
                                     pval=significance[x,y], 
                                     conf=conf,
                                     key=key)
@@ -1683,7 +1692,7 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
             spurs_by_type[key] = CCG(inds=pairs, 
                             ids=neurons.ind2id(pairs), 
                             ccg=ccg[x,y], 
-                            pred=pred[x,y], 
+                            ccg_null=pred[x,y], 
                             pval=significance[x,y], 
                             conf=conf,
                             key=key)
@@ -1699,13 +1708,13 @@ import os
 
 
 def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, 
-                   pval=None, pred=None, j_sig=None):
+                   pval=None, ccg_null=None, j_sig=None):
     """Single CCG plot into provided axis"""
     bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
 
     ax.bar(bins, ccg, width=bin_size, alpha=0.5, label="ccg")
-    if pred is not None:
-        ax.bar(bins, pred, width=bin_size, alpha=0.5, label="ccg-smooth")
+    if ccg_null is not None:
+        ax.bar(bins, ccg_null, width=bin_size, alpha=0.5, label="ccg-smooth")
     if pval is not None:
         ax.plot(bins, pval * np.max(ccg), label='p')
     if j_sig is not None:
@@ -1720,8 +1729,10 @@ def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size,
 
 
 def plot_waveform_panel(ax, waveform, neuron_type, neuron_id, 
-                        frate_all=None, frate_cut=None, n_shanks=12, ch_per_shank=16, discard_channels=None):
+                        frate_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None, discard_channels=None):
     """Single waveform panel into provided axis"""
+    n_shanks = n_shanks or 12
+    ch_per_shank = ch_per_shank or 16 # TODO put hardcoded values elsewhere?
     max_ch = waveform.shape[0]
     ax.imshow(waveform.astype(float))
     ax.set_title(f"{neuron_type}{neuron_id}")
@@ -1738,21 +1749,21 @@ def plot_waveform_panel(ax, waveform, neuron_type, neuron_id,
         edges = edges - np.cumsum(np.histogram(shanks,np.arange(n_shanks))[0])
         
     for k in edges:
-        ax.axhline(k * ch_per_shank, c='w', alpha=0.5, linestyle='dashed')
+        ax.axhline(k, c='w', alpha=0.5, linestyle='dashed')
     return ax
 
 
 def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
-                    window_size, bin_size, pval=None, pred=None, j_sig=None, 
+                    window_size, bin_size, pval=None, ccg_null=None, j_sig=None, 
                     frates_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None,
                     show=True, save=False, plotdir=None):
     """Full figure: CCG + 2 waveforms"""
     fig, axs = plt.subplots(1, 3, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 1, 1]})
 
-    plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval, pred, j_sig)
+    plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval, ccg_null, j_sig)
     labels = ['ref', 'target']
     for i in range(2):
-        plot_waveform_panel(axs[1+i], waveforms[i], neuron_types[i], ids[i],
+        axs[1+i] = plot_waveform_panel(axs[1+i], waveforms[i], neuron_types[i], ids[i],
                             frates_all[i] if frates_all is not None else None,
                             frate_cut[i] if frate_cut is not None else None,
                             n_shanks=n_shanks,ch_per_shank=ch_per_shank)
@@ -1767,11 +1778,11 @@ def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
     return fig
 
 
-def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, pred=None, j_sig=None, 
+def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, ccg_null=None, j_sig=None, 
                   show=True, save=False, plotdir=None):
     """Save only the CCG plot without waveforms"""
     fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, pval, pred, j_sig)
+    plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, pval, ccg_null, j_sig)
     
     fig.tight_layout()
     if save and plotdir:

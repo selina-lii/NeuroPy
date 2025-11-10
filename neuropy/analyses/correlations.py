@@ -162,11 +162,13 @@ def _cp_index_of(arr, lookup):
     tmp = jnp.zeros(int(m + 1), dtype=jnp.int32)  # Ensure size is an integer
 
     # Ensure that -1 values are kept
-    tmp[-1] = -1
+    tmp = tmp.at[-1].set(-1)
+    # tmp[-1] = -1
 
     # Map lookup values to their indices
     if len(lookup):
-        tmp[lookup] = jnp.arange(len(lookup), dtype=jnp.int32)
+        tmp = tmp.at[lookup].set(jnp.arange(len(lookup), dtype=jnp.int32))
+        # tmp[lookup] = jnp.arange(len(lookup), dtype=jnp.int32)
 
     # Convert arr to CuPy array and return mapped indices
     arr = jnp.asarray(arr, dtype=jnp.int32)
@@ -199,8 +201,8 @@ def _unique_cupy(x):
     # cluster=-1 means "unclustered".
     x = _cp_as_array(x)
     x = x[x >= 0]
-    bc = np.bincount(x)
-    return np.nonzero(bc)[0]
+    bc = jnp.bincount(x)
+    return jnp.nonzero(bc)[0]
 
 
 
@@ -219,10 +221,12 @@ def _cp_increment(arr, indices):
     Repeated indices are taken into account."""
     arr = _cp_as_array(arr)
     indices = _cp_as_array(indices)
-    bbins = jnp.asarray(
-        np.bincount(jnp.asnumpy(indices))
-    )  # NRK can you make this cupy? Maybe add in try/except statement?
-    arr[: len(bbins)] += bbins
+    bbins = jnp.bincount(indices)
+    # bbins = jnp.asarray(
+    #     np.bincount(jnp.asnumpy(indices))
+    # )  # NRK can you make this cupy? Maybe add in try/except statement?
+    arr = arr.get[:len(bbins)].add(bbins) 
+    # arr[: len(bbins)] += bbins
     return arr
 
 
@@ -411,8 +415,14 @@ def np_spike_correlations(
 
     if symmetrize:
         correlograms=_np_symmetrize_correlograms(correlograms)
-    
-    return correlograms
+
+    # Fill in neurons with zero spikes
+    n_neurons=neurons.n_neurons
+    idxs = [np.where(neurons.neuron_ids == c)[0][0] for c in clusters]
+    out = np.zeros((n_neurons, n_neurons, correlograms.shape[-1]), dtype=correlograms.dtype)
+    out[np.ix_(idxs, idxs)] = correlograms
+
+    return out
 
 
 def cp_spike_correlations(
@@ -513,6 +523,7 @@ def cp_spike_correlations(
     else:
         correlograms=correlograms.get()
 
+    # Fill in neurons with zero spikes
     n_neurons=neurons.n_neurons
     idxs = [np.where(neurons.neuron_ids == c)[0][0] for c in clusters.get()]
     out = np.zeros((n_neurons, n_neurons, correlograms.shape[-1]), dtype=correlograms.dtype)
