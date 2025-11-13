@@ -312,7 +312,7 @@ class Neurons(DataWriter):
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
 
-    def slice_edges_by_spikecount(self, X = 1000):
+    def slice_edges_by_spikecount(self, N=1000):
         """
         Returns the bin edges to slice spiketrain so that each bin has X spikes for neuron i
         e.g. t_starts[i] are the starting timepoints of slices where neuron i always has X spikes in each chunk
@@ -320,11 +320,19 @@ class Neurons(DataWriter):
         """
         t_starts,t_ends = [],[]
         for spkt in self.spiketrains:
-            t_starts = np.append(spkt[::X],spkt[-1]+1)
-            k=np.append(t_starts[::2],t_starts[-1]+1)-1e-8
+            t_start = np.append(spkt[::N],spkt[-1]+1)
+            k=np.append(t_start[::2],t_start[-1]+1)-1e-8
             t_starts.append(k[:-1])
             t_ends.append(k[1:])
+        
         return t_starts,t_ends
+
+    def nspike_split(self, n_spikes=1000, overlap=0):
+        t_starts, t_ends = self.slice_edges_by_spikecount(overlap)
+        
+
+
+
 
     def _clip_intervals(self,intervals,t_start=None,t_stop=None):
         # print("before",intervals[0],intervals[-1],t_start,t_stop)

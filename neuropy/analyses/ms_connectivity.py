@@ -105,6 +105,9 @@ class Key:
             return Key(self.session)
         return Key()
 
+    def subkey(self, *dimensions) -> 'Key':
+        return Key(**{dim: getattr(self, dim, None) for dim in dimensions})
+ 
 
 class AnalysisDataset:
     """
@@ -139,7 +142,7 @@ class AnalysisDataset:
         """Get all keys matching criteria"""
         return [k for k in self.data.keys() if k.matches(**criteria)]
     
-    def group_by(self, *dimensions) -> Dict[Tuple, Dict[Key, Any]]:
+    def group_by(self, *dimensions) -> Dict[Key, Dict[Key, Any]]:
         """
         Group data by specified dimensions.
         
@@ -149,8 +152,8 @@ class AnalysisDataset:
         """
         groups = defaultdict(dict)
         for key, value in self.data.items():
-            group_key = tuple(getattr(key, dim, None) for dim in dimensions)
-            groups[group_key][key] = value
+            # group_key = tuple(getattr(key, dim, None) for dim in dimensions)
+            groups[key.subkey(*dimensions)][key] = value
         return dict(groups)
     
     def iter_sessions(self):
@@ -169,21 +172,6 @@ class AnalysisDataset:
     def __len__(self):
         return len(self.data)
     
-    def __str__(self):
-        lines = [f"AnalysisDataset with {len(self.data)} entries:"]
-        
-        # Group by session and epoch for readable output
-        by_session = self.group_by('session')
-        for session, session_data in sorted(by_session.items()):
-            lines.append(f"  Session {session[0]}:")
-            by_epoch = defaultdict(list)
-            for key in session_data.keys():
-                by_epoch[key.epoch].append(key)
-            for epoch, keys in sorted(by_epoch.items()):
-                lines.append(f"    Epoch {epoch}: {len(keys)} entries")
-        
-        return "\n".join(lines)
-
     @property
     def keys(self):
         for k in self.data.keys():
@@ -389,6 +377,9 @@ class CCGConfig:
         return {'E':self.conn_types_E, 
                 'I':self.conn_types_I}
     @property
+    def conn_types_flat(self):
+        return self.conn_types_E+self.conn_types_I
+    @property
     def conv_window_bins(self):
         return self.conv_window/self.bin_size
     
@@ -525,20 +516,18 @@ class NeuronsDataset(AnalysisDataset):
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
         self.conf = conf        
         self.data={}
+        self.n_chunks={} # TODO kinda redundant. but... added for normalizing connection strengths
 
         self.prep(sessions)
 
-    def __str__(self):
+    def __str__(self): #TODO untested
         s = str(self.conf) + "\ndata:\n"
-        # Group by session for organized display
         by_session = self.group_by('session')
-        for (session,), session_data in sorted(by_session.items()):
-            s += f"  Session {session}:\n"
-            by_epoch = self.group_by('epoch')
-            for (epoch,), epoch_data in sorted(by_epoch.items()):
-                matching = [k for k in session_data.keys() if k.epoch == epoch]
-                if matching:
-                    s += f"    Epoch {epoch}: {len(matching)} entries\n"
+        for k1, session_data in sorted(by_session.items()):
+            s += f"  Session {k1.session}:\n"
+            by_epoch = session_data.group_by('epoch')
+            for k2, epoch_data in sorted(by_epoch.items()):
+                s += f"    Epoch {k2.epoch}: {len(epoch_data)} entries\n"
         return s
 
     def get_neurons(self, session: str = None, epoch: str = None, 
@@ -580,21 +569,25 @@ class NeuronsDataset(AnalysisDataset):
                                             min_dur=0) # NOTE not selecting ripple duration for now
                 
                 if self.conf.chunk_stride is not None and self.conf.chunk_len is not None:
+                    self.conf.chunks_per_session = []
                     neus_list = neus.time_windows(stride=self.conf.chunk_stride,
                                                 chunk_len=self.conf.chunk_len)  # Returns list 
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
                         self.data[key] = chunk_neus
+                    self.n_chunks[Key(session=ssn, epoch=e,)]=len(neus_list)
                 elif n_chunks > 1:
                     neus_list = neus.time_split(n_chunks=n_chunks)  # Returns list 
                     # Store each chunk separately
                     for chunk_id, chunk_neus in enumerate(neus_list):
                         key = Key(session=ssn, epoch=e, chunk=chunk_id)
                         self.data[key] = chunk_neus
+                    self.n_chunks[Key(session=ssn, epoch=e,)]=n_chunks
                 else:
                     key = Key(session=ssn, epoch=e,chunk=0)
                     self.data[key] = neus
+                    self.n_chunks[Key(session=ssn, epoch=e,)]=1
 
 
 class ACG:
@@ -661,7 +654,7 @@ class CCG:
         """
         auc = self.ccg-self.ccg_null # area under curve
         cs = np.sum(auc[:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=1) # inds,nbins
-        if norm_factor: cs /= norm_factor # e.g. presynaptic element firing rate
+        if norm_factor is not None: cs /= norm_factor # e.g. presynaptic element firing rate
         self.conn_strength = cs
 
     def _set_cs_tail(self, acgs:ACG, nspks:list, norm_factor:np.ndarray=False):
@@ -1006,8 +999,57 @@ class CCGDataset(AnalysisDataset):
                 ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
                 return NotImplementedError("Unknown connection strength method")
 
-    def pool_connection_strengths(self):
-        pass        
+    def pool_connection_strengths(self, conn_types=None, sessions=None, epochs=None):
+        conn_types = _san(conn_types) or self.conf.conn_types_flat
+        sessions = _san(sessions) or self.nd.conf.session_names
+        epochs = _san(epochs) or self.nd.conf.epochs
+
+        grouped = self.group_by('conn_type','session','epoch')
+        conn_strengths = {}
+        for ct in conn_types:
+            for s in sessions:
+                for e in epochs:
+                    cs = {}
+                    k=Key(session=s,epoch=e,conn_type=ct)
+                    n=self.nd.n_chunks[Key(session=s,epoch=e)]
+                    for keyy, _ in grouped[k].items():
+                        i_chunk = keyy.chunk
+                        if keyy.conn_type in conn_types:
+                            ccg=self.data[keyy]
+                            for ind,strength in zip(ccg.inds,ccg.conn_strength):
+                                pair = tuple(ind)
+                                if pair not in list(cs.keys()):
+                                    cs[pair]={}
+                                    cs[pair]['exist']=[]
+                                    cs[pair]['strengths']=np.zeros(n)
+                                cs[pair]['exist'].append(i_chunk)
+                                cs[pair]['strengths'][i_chunk]=strength
+                            # TODO decoupling btw EI and conn_type is kinda annoying
+                    cs_key = Key(session=s,epoch=e,conn_type=ct,excitability=keyy.excitability)
+                    conn_strengths[cs_key] = cs
+                    print(cs_key)
+                    for pair, v in cs.items():
+                        print(f"{str(pair):<15}\tIn chunks {str(v['exist']):<20}\tstrengths: {v['strengths']}")
+        return conn_strengths
+
+    # TODO move to plotting
+    def plot_connection_strengths_integrate(self,conn_strengths,n_chunks_threshold=None,save=False):
+        for k1, cs in conn_strengths.items():
+            n_chunks_threshold=n_chunks_threshold or self.nd.n_chunks[k1.parent()]
+            print(k1)
+            plt.figure()
+            for k2, v in cs.items():
+                print(f"{k2}\t\tIn chunks {v['exist']}\t\t strengths: {v['strengths']}")
+                if len(v['exist'])>=n_chunks_threshold: 
+                    plt.plot(v['strengths']/np.sum(v['strengths']))  # normalized
+            plt.title(f"{k1.conn_type} {k1.session} {k1.epoch}")
+            plt.xlabel("epoch id")
+            n=np.arange(n_chunks_threshold)
+            plt.xticks(n,n)
+            plt.ylabel("normalized\nconnection\nstrength")
+            plt.show()
+            #TODO save
+
 
 class DataState(Enum):
     DEFAULT = 0
