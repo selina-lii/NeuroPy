@@ -312,27 +312,30 @@ class Neurons(DataWriter):
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
 
-    def slice_edges_by_spikecount(self, N=1000):
+    def slice_edges_by_spikecount(self, i, k=1000,):
         """
-        Returns the bin edges to slice spiketrain so that each bin has X spikes for neuron i
+        Returns bin starts to slice spiketrain so that each bin has k spikes for neuron i
         e.g. t_starts[i] are the starting timepoints of slices where neuron i always has X spikes in each chunk
         TODO for CCG binned by number of presynaptic spikes
+        i: index of the neuron whose spiketrain is used to divide time bins
         """
-        t_starts,t_ends = [],[]
-        for spkt in self.spiketrains:
-            t_start = np.append(spkt[::N],spkt[-1]+1)
-            k=np.append(t_start[::2],t_start[-1]+1)-1e-8
-            t_starts.append(k[:-1])
-            t_ends.append(k[1:])
-        
-        return t_starts,t_ends
+        spkt = self.spiketrains[i]
+        edges = np.arange(0, spkt.shape[-1], k)
+        edges = np.append(edges, spkt[-1])
+        t_starts = spkt[edges[:-1]]
+        t_ends = spkt[edges[1:]]
+        return t_starts, t_ends
 
-    def nspike_split(self, n_spikes=1000, overlap=0):
-        t_starts, t_ends = self.slice_edges_by_spikecount(overlap)
-        
-
-
-
+    def nspike_split(self, i, k=1000, discard_tail=False):
+        """
+        Returns neuron split in time such that each split has an equal amount of presynaptic spikes = k
+        with neuron[i] as the presynaptic reference.
+        """
+        t_starts, t_ends = self.slice_edges_by_spikecount(i=i,k=k)
+        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
+        splits = [neurons.time_slice(s,e) for s,e in zip(t_starts, t_ends)]
+        if discard_tail: return splits[:-1] # last chunk likely has shorter time
+        return splits
 
     def _clip_intervals(self,intervals,t_start=None,t_stop=None):
         # print("before",intervals[0],intervals[-1],t_start,t_stop)
