@@ -36,10 +36,11 @@ def _short_session_name(session):
     return sess_name
 
 
-def _san(var):
+def _san(var,as_np=False):
     """Sanitize """
     if var is None: return var
     if not isinstance(var, list): var = [var]
+    if as_np: var = np.array(var)
     return var
 
 
@@ -636,7 +637,7 @@ class CCG:
     * Static dataclass, not mean for reuse
     * Shouldn't really be called on its own. Wrap in a CCGDataset!"""
     def __init__(self, key, ccg, ids, inds, ccg_null=None, pval=None, j_sig=None, conn_strength=None,
-                 conf:CCGConfig=None):
+                 conf:CCGConfig=None,significant=True):
         self.key=key
         self.ids=ids
         self.inds=inds
@@ -646,7 +647,15 @@ class CCG:
         self.j_sig=j_sig
         self.conn_strength = conn_strength # 
         self._conf=conf
- 
+        n=self.inds.shape[0]
+        if type(significant)==bool and significant == True:
+            self.significant=np.ones(n) # by default, all ccgs in this variable are significant
+        elif type(significant)==bool and significant == False:
+            self.significant=np.zeros(n)
+        else:
+            assert significant.shape==(n,)
+            self.significant=significant
+
     def __str__(self):
         s = self.conf.__str__()
         for key, val in self.__dict__.items():
@@ -820,15 +829,16 @@ class CCG:
                 return
 
 class Connectivity:
-    def __init__(self, key, n_chunks, ccgs, inds, exist:np.ndarray[bool], strength:np.ndarray[float]):
+    def __init__(self, key, n_chunks, ccgs, inds, ids, exist:np.ndarray[bool], strength:np.ndarray[float]):
         self.key=key
-        self.inds=inds
+        self.inds=_san(inds,as_np=True)
         self.ccgs=ccgs
         self.exist=exist # has to be a separate field, cannot be inferred from strength because a strength might not be significant
         self.strength = strength # 
         self.coordinates = None #TODO physical neuron coordinates
         self.n_chunks = n_chunks
-
+        self.ids = ids
+        
     def __repr__(self):
         s = str(self.key) + "\n"
         for i,inds in enumerate(self.inds):
@@ -837,10 +847,13 @@ class Connectivity:
         
 
     def filter(self,min_n_chunk=None,skips=None):
-        inds = np.array(self.inds)[np.sum(self.exist,axis=1)>=min_n_chunk]
-        if skips is not None: inds = [i for i in inds if i not in skips]
+        if skips is not None: 
+            inds = [int(i) for i,(v,e)in enumerate(zip(self.inds,self.exist)) if (v not in skips) and (np.sum(e)>=min_n_chunk)]
+        else:
+            inds = np.where(np.sum(self.exist,axis=1)>=min_n_chunk)[0].astype(int)
         return inds
     
+
     def plot_strength(self,
                       n_chunks_threshold=None,save=False,
                         norm_by_n_sess=False,
@@ -850,8 +863,9 @@ class Connectivity:
                         skips=None):
         n_chunks_threshold=n_chunks_threshold if n_chunks_threshold is not None else self.n_chunks
         plt.figure()
-        inds=self.filter(min_n_chunks=n_chunks_threshold,skips=skips)
+        inds = self.filter(min_n_chunk=n_chunks_threshold,skips=skips)
         plot_data = self.strength[inds]
+        print(type(self.inds),type(inds[0]))
         pairs = self.inds[inds]
 
         if norm_by_total_strength:
@@ -867,7 +881,7 @@ class Connectivity:
             if show_legend: legend_keys.append(f"{i}:{pair}")
         plt.title(f"{self.key}")
         plt.xlabel("epoch id")
-        plt.xticks(np.arange(self.n),np.arange(self.n))
+        plt.xticks(np.arange(self.n_chunks),np.arange(self.n_chunks))
         plt.ylabel("normalized connection strength")
         if show_legend: 
             # spacing
@@ -880,6 +894,12 @@ class Connectivity:
 
     def plot_network(self):
         pass
+
+
+class CCGIndexSource(Enum):
+    SIGNIFICANT=0
+    SPURIOUS=1
+    SIGNIFICANT_ANY=2
 
 class CCGDataset(AnalysisDataset):
     """
@@ -987,7 +1007,7 @@ class CCGDataset(AnalysisDataset):
                 s+=f"{_}={neurons[0].get_neuron_type(_).n_neurons} "
             s+="\n"
             return s
-                
+
         for key, neurons in self.nd.data.items():
             ccgs, spurs, autos, printstr = eranconv_group(neurons=neurons,conf=self.conf,key=key)
             self.append_ccg(key, ccgs)
@@ -995,10 +1015,63 @@ class CCGDataset(AnalysisDataset):
             self.append_auto(key, autos)
             print(_s(key.session,neurons)+printstr)
 
-    def from_inds(self):
-        pass # 'rescale' from list of indices, no looking at current data
+    def _reCCG(self,ccg_key:Key,
+               indices_source=CCGIndexSource.SIGNIFICANT,
+               significance_method=None):
+        if indices_source==CCGIndexSource.SIGNIFICANT:
+            inds = self.data[ccg_key].inds
+            keys = [ccg_key.parent()]
+            significant = [True]
+        elif indices_source==CCGIndexSource.SPURIOUS:
+            inds = self.spurious[ccg_key].inds
+            keys = [ccg_key.parent()]
+            significant = [False]
+        elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
+            inds = self.connectivity[ccg_key].inds
+            n = self.connectivity[ccg_key].n_chunks
+            keys = [Key(ccg_key.session,ccg_key.epoch,i) for i in range(n)]
+            significant=np.zeros(n,inds.shape[0])
 
-    def time_rescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False):
+        for i,key in enumerate(keys):
+            neurons = self.nd.data[key]
+            ccg = correlations.spike_correlations(
+                        neurons=neurons,
+                        ref_neuron_inds=inds[:,0],
+                        neuron_inds=inds[:,1],
+                        bin_size=self.conf.bin_size,
+                        window_size=self.conf.duration,
+                        use_acceleration=self.conf.use_acceleration,
+                        symmetrize=self.conf.symmetrize_ccg,
+                        paired=True)
+            print("completed rerun")
+            if significance_method is not None: 
+                # TODO W should be number of bins. not actual jitter scale?
+                pvals, pred, qvals = eranconv(ccg,W=self.conf.jscale_bins,wintype="gauss",hollow_frac=None)
+                if key.excitability=='I': pvals = qvals #TODO no corrections
+                print("completed conv")
+                significant[i]=pvals<.05 #TODO need a better routine for this whole chunk
+            else:
+                pvals, pred, qvals = None, None, None
+                # significance = pvals if ccg_key.excitability=='E' else qvals
+            
+            new_ccg = CCG(inds=inds,
+                ids=neurons.ind2id(inds), 
+                ccg=ccg, 
+                ccg_null=pred, 
+                pval=pvals, 
+                conf=self.conf,
+                key=ccg_key,
+                significant=significant[i])
+
+            if indices_source==CCGIndexSource.SIGNIFICANT:
+                self.data[key] = new_ccg
+            elif indices_source==CCGIndexSource.SPURIOUS:
+                self.spurious[key] = new_ccg
+            elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
+                self.data[key] = new_ccg
+
+    def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False,
+                        significance_method=None):
         """
         Run CCG and convolution based significance test for all neurons
 
@@ -1007,6 +1080,7 @@ class CCGDataset(AnalysisDataset):
         ccg_config: Parameters for CCG, contains all configurations
         nd: Neurons dataset, contains all input data
         """
+        # possible to change timescale, etc through here.
         old_bin_size = self._conf.bin_size
         self._conf.bin_size = bin_size
         if duration: self._conf.duration = duration
@@ -1015,18 +1089,30 @@ class CCGDataset(AnalysisDataset):
 
         for key, ccg in self.data.items():
             if ccg is not None:
-                neurons = self.nd.data[key.parent()]
-                self.data[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=ccg.inds,ccg_key=key,run_conv=run_conv)
+                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,
+                                ccg_key=key,run_conv=run_conv)
         print("rescale completed")
 
         if not include_spurious: return
 
         for key, spur in self.spurious.items():
             if spur is not None:
-                neurons = self.nd.data[key.parent()]
-                self.spur[key] = rescale_ccg(neurons=neurons,conf=self.conf,inds=spur.inds,ccg_key=key,run_conv=run_conv)
+                self._reCCG(indices_source=CCGIndexSource.SPURIOUS,
+                                ccg_key=key,method=significance_method)
         print("rescale of spurious CCG completed")
-    
+
+    def reCCG_connectivity(self,jscale=None,run_conv=False):
+        """
+        Rerun CCG with list of pairs that had been significant in any chunk
+        """
+        for key, ccg in self.connectivity.items():
+            if ccg is not None:
+                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,
+                                             ccg_key=key,method=significance_method)
+        self.set_connection_strengths(method=significance_method)
+        self.set_connectivity()
+        print("recomputed CCG")
+
     def save_plots(self, jd = 'JitterDataset', root="~/Documents/NeuroPy/images/ccg_plots",
                    frates_all:dict=None, conn_types:list=None):
         assert os.path.isdir(os.path.expanduser(root))
@@ -1086,7 +1172,11 @@ class CCGDataset(AnalysisDataset):
         for d in self.spurious:
             d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,0]])
 
-    def get_connection_strengths(self, method="eran_conv"):
+    def set_connection_strengths(self, method="eran_conv"):
+        """
+        Set value for each CCG() object of self.data based on given method.
+        Values can be found in self.data[i].conn_strengths.
+        """
         #TODO untested
         for key, ccg in self.data.items():
             if ccg is None: continue # no connection
@@ -1105,7 +1195,11 @@ class CCGDataset(AnalysisDataset):
                 ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
                 return NotImplementedError("Unknown connection strength method")
 
-    def pool_connection_strengths(self, conn_types=None, sessions=None, epochs=None):
+    def set_connectivity(self, conn_types=None, sessions=None, epochs=None):
+        """
+        Create Connectivity objects within this class from connection strengths.
+        Sess class Connecitivity().
+        """
         conn_types = _san(conn_types) or self.conf.conn_types_flat
         sessions = _san(sessions) or self.nd.conf.session_names
         epochs = _san(epochs) or self.nd.conf.epochs
@@ -1121,13 +1215,13 @@ class CCGDataset(AnalysisDataset):
                 if keyy.conn_type in conn_types:
                     ccg=self.data[keyy]
                     if ccg is None: continue # no connections
-                    for ind,val in zip(ccg.inds,ccg.conn_strength):
+                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength,ccg.significance):
                         p = tuple(ind)
                         if p not in pairs:
                             pairs.append(p)
                             exist[p]=np.full(n,False)
                             strength[p]=np.full(n,np.nan)
-                        exist[p][i_chunk]=True
+                        exist[p][i_chunk]=True if sig else False
                         strength[p][i_chunk]=val
             exist_arr = np.zeros((len(pairs),n))
             strength_arr = np.zeros((len(pairs),n))
@@ -1135,8 +1229,10 @@ class CCGDataset(AnalysisDataset):
                 exist_arr[i]=exist[p]
                 strength_arr[i]=strength[p]
             conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
+            neurons = self.nd.data[Key(k.session,k.epoch,0)]
             self.connectivity[conn_key] = Connectivity(key=conn_key, n_chunks=n, ccgs=group,
-                                                       inds=pairs, exist=exist_arr, strength=strength_arr)
+                                                       inds=pairs, exist=exist_arr, strength=strength_arr,
+                                                       ids = neurons.ind2id(pairs))
 
     # TODO move to plotting
     def plot_connection_strengths(self,n_chunks_threshold=None,save=False,
@@ -1146,7 +1242,7 @@ class CCGDataset(AnalysisDataset):
                                             show_legend=False,
                                             skips={}):
         for k1, conn in self.connectivity.items():
-            conn.plot_connection_strengths(n_chunks_threshold=n_chunks_threshold,
+            conn.plot_strength(n_chunks_threshold=n_chunks_threshold,
                                            save=save,
                                            norm_by_n_sess=norm_by_n_sess,
                                            norm_by_total_strength=norm_by_total_strength,
@@ -1660,40 +1756,6 @@ def eranconv(ccg, W=5, wintype="gauss", hollow_frac=None):
     pvals = 1 - poisson.cdf(ccg-1, pred) - poisson.pmf(ccg, pred)*0.5
     qvals = 1 - pvals
     return pvals, pred, qvals
-
-
-def rescale_ccg(ccg_key:Key, neurons:Neurons, conf:CCGConfig, inds:list[int], run_conv=False):
-    ccg = correlations.spike_correlations(
-                neurons=neurons,
-                ref_neuron_inds=inds[:,0],
-                neuron_inds=inds[:,1],
-                bin_size=conf.bin_size,
-                window_size=conf.duration,
-                use_acceleration=conf.use_acceleration,
-                symmetrize=conf.symmetrize_ccg,
-                paired=True
-            )
-    print("completed rerun")
-    if run_conv: 
-        # TODO i think W should be number of bins. not actual jitter scale
-        pvals, pred, qvals = eranconv(ccg,W=conf.jscale_bins,wintype="gauss",hollow_frac=None)
-        # significance = pvals if ccg_key.excitability=='E' else qvals
-        print("completed conv")
-        return CCG(inds=inds,
-                ids=neurons.ind2id(inds), 
-                ccg=ccg, 
-                ccg_null=pred, 
-                pval=None, 
-                conf=conf,
-                key=ccg_key)
-    else:
-        return CCG(inds=inds,
-                ids=neurons.ind2id(inds), 
-                ccg=ccg, 
-                ccg_null=None, 
-                pval=None, 
-                conf=conf,
-                key=ccg_key)
 
 
 def _multiple_correction(pvals,alpha,method='bonferroni'):
