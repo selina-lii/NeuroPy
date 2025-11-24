@@ -3,16 +3,10 @@
 
 import numpy as np
 try:
-    # import os, platform
-    # if platform.system() == "Darwin":
-    #     os.environ["JAX_PLATFORM_NAME"] = "cpu"
-
-    import jax.numpy as jnp
-    import jax.random as jr
+    import cupy as cp
 except ImportError:
-    print("Error importing JAX. No GPU acceleration available.") # Was CuPy
-    jnp = None
-    jr = None
+    print("Error importing CuPy")
+    cp = None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
@@ -26,8 +20,6 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
 
-def RAND_KEY():
-    return jr.PRNGKey(np.random.randint(0,1e10))
 
 def _short_session_name(session):
     """get short printable session name in the format of ANIMAL_DayX"""
@@ -1337,10 +1329,10 @@ class Jitterlet:
 
         if self.conf.use_acceleration:
             jittertrains = (
-                jnp.round(
+                cp.round(
                     (
-                        jnp.array(target_spiketrain)
-                        + 2 * self.conf.jscale *jr.uniform(RAND_KEY(),(self.conf.njitter,target_nspikes))
+                        cp.array(target_spiketrain)
+                        + 2 * self.conf.jscale * cp.random.rand(self.conf.njitter,target_nspikes)
                         - 1 * self.conf.jscale
                     )
                     * sampling_rate
@@ -1360,7 +1352,7 @@ class Jitterlet:
                 / sampling_rate
             )
         self.j_spktrains = list(jittertrains)
-        if self.conf.use_acceleration: jnp.get_default_memory_pool().free_all_blocks()
+        if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
     
     def add_interval_jitter(self):        
         sampling_rate = self.neurons.sampling_rate
@@ -1372,11 +1364,11 @@ class Jitterlet:
         # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
         if self.conf.use_acceleration:
             jittertrains = (
-                jnp.sort(jnp.floor(
-                    (jnp.floor(
-                        jnp.round(jnp.array(self.neurons.spiketrains[b]) * sampling_rate) 
+                cp.sort(cp.floor(
+                    (cp.floor(
+                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
                         / jscale_samples
-                    ) + jr.uniform(RAND_KEY(),(self.conf.njitter,target_nspikes))) * jscale_samples 
+                    ) + cp.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
                 ))
                 / sampling_rate
             ).get()
@@ -1391,7 +1383,7 @@ class Jitterlet:
                 / sampling_rate
             )            
         self.j_spktrains = list(jittertrains)
-        if self.conf.use_acceleration: jnp.get_default_memory_pool().free_all_blocks()
+        if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
 
     def run_ccg_jitter(self):
         """
