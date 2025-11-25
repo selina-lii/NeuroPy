@@ -89,7 +89,6 @@ class Key:
             return False # TODO no type check. allows comparison with other 'key' classes
 
     def matches(self, **kwargs) -> bool:
-        print("here ")
         """Check if this key matches given criteria (for filtering)"""
         for k, v in kwargs.items():
             if isinstance(v, list):
@@ -103,9 +102,8 @@ class Key:
     def parent(self) -> 'Key':
         """Get parent key (one level up in hierarchy)"""
         if self.excitability is not None: # conn_type goes with excitability
-            return Key(self.session, self.epoch, self.chunk)
+            return Key(self.session, self.epoch, chunk=self.chunk)
         if self.chunk is not None:
-            print(self.ref_ind)
             return Key(self.session, self.epoch, self.ref_ind)
         if self.ref_ind is not None:
             return Key(self.session, self.epoch)
@@ -208,8 +206,8 @@ class NeuronsDatasetConfig:
     """
     def __init__(self,
                  name:str = "default",
-                 neuron_types:Union[list[str], str] = ['pyr', 'inter'], 
-                 epochs:Union[list[str], str]="post", 
+                 neuron_types:Union[list[str], str, None] = ['pyr', 'inter'], 
+                 epochs:Union[list[str], str, None]="post", 
                  chunks_per_session:Union[list[int], int]=1, 
                  chunk_stride:int=None,
                  chunk_len:int=None,
@@ -219,7 +217,7 @@ class NeuronsDatasetConfig:
         self.name = name
         self.session_names = []
         self.neuron_types = _san(neuron_types)
-        self.epochs = _san(epochs)
+        self.epochs = _san(epochs) or [None] # each epoch gets their own neurons object
         self.sleep_labels = _san(sleep_labels)
         self.ripple = ripple
         self.chunks_per_session = _san(chunks_per_session)
@@ -339,41 +337,6 @@ class CCGConfig:
         # if self.use_multiple_correction: 
         #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
         #     self.corrected_alpha2=alpha2/(n**2-n)/self.nbins
-
-
-        # example configs
-        msconn_args = {
-            'min_lag':0,
-            'max_lag':1,
-            'min_spkcount':2.5,
-            'spkcount_scope':12,
-            'ignore':IgnoreLevel.NONE,
-            'ref_type':'pyr',
-            'target_type':'pyr',
-            'p':0.05,
-        }
-        excit_args = {
-            'min_lag':1,
-            'max_lag':3,
-            'min_spkcount':2.5,
-            'spkcount_scope':12,
-            'ignore':IgnoreLevel.NONE,
-            'ref_type':'pyr',
-            'target_type':['pyr','inter'],
-            'p':0.05,
-        }
-        inhib_args = {
-            'min_lag':1,
-            'max_lag':3,
-            'min_span':2,
-            'min_spkcount':2.5,
-            'spkcount_scope':12,
-            'ignore':IgnoreLevel.NONE,
-            'ref_type':'inter',
-            'target_type':['pyr','inter'],
-            'p':0.05,
-            'p2':0.1
-        }
 
     def __str__(self):
         s=""
@@ -560,9 +523,14 @@ class NeuronsDataset(AnalysisDataset):
             self.conf.session_names.append(ssn)
 
             for i, e in enumerate(self.conf.epochs):
-                p = s.paradigm.label_slice(e)
-                neus = s.neurons.get_neuron_type(self.conf.neuron_types) \
-                    .time_slice(p.starts[0], p.stops[0])
+                neus = s.neurons
+
+                if self.conf.neuron_types is not None:
+                    neus = neus.get_neuron_type(self.conf.neuron_types)
+                
+                if self.conf.epochs[i] is not None:
+                    p = s.paradigm.label_slice(e)
+                    neus = neus.time_slice(p.starts[0], p.stops[0])
                 
                 if self.conf.sleep_labels is not None:
                     neus = neus.behav_slice(s.brainstates, self.conf.sleep_labels, 
@@ -586,7 +554,7 @@ class NeuronsDataset(AnalysisDataset):
                 if c_len_spk is not None:
                     for i in range(neus.n_neurons):
                         neurons_list = neus.nspike_split(i=i,
-                                                k=c_len_spk)  # Returns list 
+                                                n=c_len_spk)  # Returns list 
                         for c_id, c_neurons in enumerate(neurons_list):
                             key = Key(session=ssn, epoch=e, chunk=c_id, ref_ind=i)
                             self.data[key]=c_neurons
@@ -610,7 +578,22 @@ class NeuronsDataset(AnalysisDataset):
                     key = Key(session=ssn, epoch=e,chunk=0)
                     self.data[key] = neus
                     self.n_chunks[Key(session=ssn, epoch=e,)]=1
-
+    
+    def split(self,session_key,ref_inds,target_inds):
+        key=Key(session_key,chunk=0)
+        neus = self.data[Key(session_key,chunk=0)]
+        ssn=key.session
+        e=key.epoch
+        c_len_spk = self.conf.n_spike_per_bin
+        assert c_len_spk is not None
+        for ref,targets in zip(ref_inds,target_inds):
+            neurons_list = neus.nspike_split(i=ref,neuron_inds=targets,
+                                    n=c_len_spk)  # Returns list 
+            for chunk_id, chunk_neurons in enumerate(neurons_list):
+                new_key = Key(session=ssn, epoch=e, chunk=chunk_id, ref_ind=ref)
+                self.data[new_key]=chunk_neurons
+                self.n_chunks[Key(session=ssn, epoch=e,ref_ind=ref)]=len(neurons_list)
+        self.data[key]=None #TODO
 
 class ACG:
     """Like Neurons, but for auto-correlograms
@@ -820,6 +803,7 @@ class CCG:
                 Warning("_deconv_autocorr: No effect")
                 return
 
+
 class Connectivity:
     def __init__(self, key, n_chunks, ccgs, inds, ids, exist:np.ndarray[bool], strength:np.ndarray[float]):
         self.key=key
@@ -840,11 +824,10 @@ class Connectivity:
 
     def filter(self,min_n_chunk=None,skips=None):
         if skips is not None: 
-            inds = [int(i) for i,(v,e)in enumerate(zip(self.inds,self.exist)) if (v not in skips) and (np.sum(e)>=min_n_chunk)]
+            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.exist)) if (v not in skips) and (np.sum(e)>=min_n_chunk)]
         else:
             inds = np.where(np.sum(self.exist,axis=1)>=min_n_chunk)[0].astype(int)
         return inds
-    
 
     def plot_strength(self,
                       n_chunks_threshold=None,save=False,
@@ -857,7 +840,6 @@ class Connectivity:
         plt.figure()
         inds = self.filter(min_n_chunk=n_chunks_threshold,skips=skips)
         plot_data = self.strength[inds]
-        print(type(self.inds),type(inds[0]))
         pairs = self.inds[inds]
 
         if norm_by_total_strength:
@@ -892,6 +874,7 @@ class CCGIndexSource(Enum):
     SIGNIFICANT=0
     SPURIOUS=1
     SIGNIFICANT_ANY=2
+
 
 class CCGDataset(AnalysisDataset):
     """
@@ -1021,8 +1004,8 @@ class CCGDataset(AnalysisDataset):
         elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
             inds = self.connectivity[ccg_key].inds
             n = self.connectivity[ccg_key].n_chunks
-            keys = [Key(ccg_key.session,ccg_key.epoch,i) for i in range(n)]
-            significant=np.zeros(n,inds.shape[0])
+            keys = [Key(ccg_key.session,ccg_key.epoch,chunk=i) for i in range(n)]
+            significant=np.zeros((n,inds.shape[0]))
 
         for i,key in enumerate(keys):
             neurons = self.nd.data[key]
@@ -1038,13 +1021,12 @@ class CCGDataset(AnalysisDataset):
             print("completed rerun")
             if significance_method is not None: 
                 # TODO W should be number of bins. not actual jitter scale?
-                pvals, pred, qvals = eranconv(ccg,W=self.conf.jscale_bins,wintype="gauss",hollow_frac=None)
+                pvals, pred, qvals = eranconv(ccg,W=self.conf.conv_window*1e3,wintype="gauss",hollow_frac=None)
                 if key.excitability=='I': pvals = qvals #TODO no corrections
                 print("completed conv")
-                significant[i]=pvals<.05 #TODO need a better routine for this whole chunk
+                # significant[i]=pvals<.05 #TODO need a better routine for this whole chunk
             else:
                 pvals, pred, qvals = None, None, None
-                # significance = pvals if ccg_key.excitability=='E' else qvals
             
             new_ccg = CCG(inds=inds,
                 ids=neurons.ind2id(inds), 
@@ -1063,7 +1045,7 @@ class CCGDataset(AnalysisDataset):
                 self.data[key] = new_ccg
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False,
-                        significance_method=None):
+                        method="eran_conv"):
         """
         Run CCG and convolution based significance test for all neurons
 
@@ -1090,18 +1072,18 @@ class CCGDataset(AnalysisDataset):
         for key, spur in self.spurious.items():
             if spur is not None:
                 self._reCCG(indices_source=CCGIndexSource.SPURIOUS,
-                                ccg_key=key,method=significance_method)
+                                ccg_key=key,significance_method=method)
         print("rescale of spurious CCG completed")
 
-    def reCCG_connectivity(self,jscale=None,run_conv=False):
+    def reCCG_connectivity(self,method="eran_conv"):
         """
         Rerun CCG with list of pairs that had been significant in any chunk
         """
         for key, ccg in self.connectivity.items():
             if ccg is not None:
                 self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,
-                                             ccg_key=key,method=significance_method)
-        self.set_connection_strengths(method=significance_method)
+                                             ccg_key=key,significance_method=method)
+        self.set_connection_strengths(method=method)
         self.set_connectivity()
         print("recomputed CCG")
 
@@ -1114,12 +1096,13 @@ class CCGDataset(AnalysisDataset):
         print(f"Saving plots under {root}")
         for key in keys:
             ccg = self.data[key]
+            print(key, key.parent())
             neurons = self.nd[key.parent()]
             frates = frates_all[key.parent()] if frates_all else None
             print(f"ccg {key.session} {key.conn_type}")
             # try:
             if jd is not None:
-                ccg.j_sig = jd.data[key].significance
+                ccg.j_sig = jd.data[key].significant
             ccg.save_plots(
                 neuron_types=neurons.neuron_type[ccg.inds],
                 waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
@@ -1173,6 +1156,8 @@ class CCGDataset(AnalysisDataset):
         for key, ccg in self.data.items():
             if ccg is None: continue # no connection
             if self.conf.normalize==NormalizeBy.REF_FRATE:
+                print("here")
+                print(key.parent())
                 norm_factors = self.nd[key.parent()].firing_rate[ccg.ref_inds][...,np.newaxis]
             elif self.conf.normalize==NormalizeBy.REF_SPKS:
                 norm_factors = self.nd[key.parent()].n_spikes[ccg.ref_inds][...,np.newaxis]
@@ -1207,7 +1192,7 @@ class CCGDataset(AnalysisDataset):
                 if keyy.conn_type in conn_types:
                     ccg=self.data[keyy]
                     if ccg is None: continue # no connections
-                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength,ccg.significance):
+                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength,ccg.significant):
                         p = tuple(ind)
                         if p not in pairs:
                             pairs.append(p)
@@ -1221,7 +1206,7 @@ class CCGDataset(AnalysisDataset):
                 exist_arr[i]=exist[p]
                 strength_arr[i]=strength[p]
             conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
-            neurons = self.nd.data[Key(k.session,k.epoch,0)]
+            neurons = self.nd.data[Key(k.session,k.epoch,chunk=0)]
             self.connectivity[conn_key] = Connectivity(key=conn_key, n_chunks=n, ccgs=group,
                                                        inds=pairs, exist=exist_arr, strength=strength_arr,
                                                        ids = neurons.ind2id(pairs))
@@ -1241,6 +1226,7 @@ class CCGDataset(AnalysisDataset):
                                            z_score=z_score,
                                            show_legend=show_legend,
                                            skips=skips.get(k1))
+            print(skips.get(k1))
 
 
 class DataState(Enum):
@@ -1497,7 +1483,7 @@ class Jitter:
         self.jtgt_inds = []
         self.pos = {} # TODO name
         self.pval = []
-        self.significance = []
+        self.significant = []
         self.threshold = []
         self.JBSI = []
         self.jitterlets = {}

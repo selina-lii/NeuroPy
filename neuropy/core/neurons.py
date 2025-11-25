@@ -312,7 +312,7 @@ class Neurons(DataWriter):
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
 
-    def slice_edges_by_spikecount(self, i, k=1000,):
+    def slice_edges_by_spikecount(self, i, n=1000,):
         """
         Returns bin starts to slice spiketrain so that each bin has k spikes for neuron i
         e.g. t_starts[i] are the starting timepoints of slices where neuron i always has X spikes in each chunk
@@ -320,20 +320,23 @@ class Neurons(DataWriter):
         i: index of the neuron whose spiketrain is used to divide time bins
         """
         spkt = self.spiketrains[i]
-        edges = np.arange(0, spkt.shape[-1], k)
-        edges = np.append(edges, spkt[-1])
-        t_starts = spkt[edges[:-1]]
-        t_ends = spkt[edges[1:]]
-        return t_starts, t_ends
+        N=spkt.shape[0]
+        edges = [(spkt[i],spkt[min(i+n,N-1)]) for i in range(0, N, n)]
+        print(spkt.shape[0]%n)
+        return edges
 
-    def nspike_split(self, i, k=1000, discard_tail=False):
+    def nspike_split(self, i, neuron_inds=None, n=1000, discard_tail=False):
         """
         Returns neuron split in time such that each split has an equal amount of presynaptic spikes = k
-        with neuron[i] as the presynaptic reference.
+        **
+            with neuron[i] as the presynaptic reference.
+        **
         """
-        t_starts, t_ends = self.slice_edges_by_spikecount(i=i,k=k)
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
-        splits = [neurons.time_slice(s,e) for s,e in zip(t_starts, t_ends)]
+        if neuron_inds is not None: neurons = neurons.neuron_slice(neuron_inds)
+        edges = self.slice_edges_by_spikecount(i=i,n=n)
+        print(len(edges),edges)
+        splits = [neurons.time_slice(s,e) for s,e in edges]
         if discard_tail: return splits[:-1] # last chunk likely has shorter time
         return splits
 

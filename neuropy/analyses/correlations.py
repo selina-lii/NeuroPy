@@ -484,7 +484,7 @@ def cp_spike_correlations(
     winsize_bins = 2 * int(0.5 * window_size / bin_size)
 
     # Get unique neuron clusters
-    clusters = _unique_cupy(spike_clusters)
+    clusters = _cp_unique(spike_clusters)
     n_clusters = len(clusters)
 
     spike_clusters_i = _cp_index_of(spike_clusters, clusters)
