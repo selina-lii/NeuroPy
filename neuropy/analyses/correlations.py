@@ -22,6 +22,13 @@ def _san(var):
 def _np_assemble_spike_arrays(neurons):
     """
     Assemble spike arrays for neurons from neurons object using NumPy.
+
+    Returns
+    -------
+    spike_times: 1D array, spike timing in given time units
+    spike_clusters: 1D array, index of neuron where spike came from
+    spike_samples: 1D array, spike timing converted to sample indices
+
     """
     # Get spike times from neurons
     spike_times = np.concatenate(neurons.spiketrains)
@@ -53,7 +60,7 @@ def _cp_assemble_spike_arrays(neurons):
 
     Returns
     -------
-    spike_times: 1D array
+    spike_times: 1D array, spike timing in given time units
     spike_clusters: 1D array, index of neuron where spike came from
     spike_samples: 1D array, spike timing converted to sample indices
 
@@ -257,6 +264,18 @@ def _cp_create_correlograms_array_2groups(n_clusters1,n_clusters2, winsize_bins,
     """Create an empty correlograms array using CuPy."""
     nbins = winsize_bins+1 if symmetrize else winsize_bins//2+1
     return cp.zeros((n_clusters1, n_clusters2, nbins), dtype=cp.int32)
+
+
+def _np_create_correlograms_array_snapshots(n_group, n_clusters1, n_clusters2, winsize_bins, symmetrize):
+    """Create an empty correlograms array using CuPy."""
+    nbins = winsize_bins+1 if symmetrize else winsize_bins//2+1
+    return np.zeros((n_group, n_clusters1, n_clusters2, nbins), dtype=np.int32)
+
+
+def _cp_create_correlograms_array_snapshots(n_group, n_clusters1, n_clusters2, winsize_bins, symmetrize):
+    """Create an empty correlograms array using CuPy."""
+    nbins = winsize_bins+1 if symmetrize else winsize_bins//2+1
+    return cp.zeros((n_group, n_clusters1, n_clusters2, nbins), dtype=cp.int32)
 
 
 def _np_create_correlograms_array_paired(n, winsize_bins, symmetrize):
@@ -1086,7 +1105,143 @@ def spike_correlations(
         return correlograms
 
 
-def np_spike_correlations_ngroups(
+def np_spike_correlations_snapshots(
+        neurons,
+        ref_inds,
+        target_inds,
+        t_starts,
+        t_ends,
+        bin_size=None,
+        window_size=None,
+        symmetrize=True,
+):
+    """
+    Compute N pairwise cross-correlations at once using multiple subsets from one set of spike trains.
+
+    Parameters
+    ----------
+    neurons : core.neurons
+        neurons obj containing spiketrains and related info
+    bin_size : float
+        Size of the bin, in seconds.
+    window_size : float
+        Size of the window, in seconds.
+    symmetrize : boolean (True)
+        Whether the output matrix should be symmetrized or not.
+    paired : 
+        If True this will compute pairwise (ref_inds[k],target_inds[k]) correlations only
+
+    Returns
+    -------
+    correlograms : array
+        A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
+    """
+
+    # each spike has a spike id. each spike id belongs in one or more groups. groups are continuous
+    # so they can be defined by boundaries. filter spikes that belong in the same temporally segmented 
+    # group. this function groups slices the spiketrains by time rather than neuron ids.
+
+    # TODO convert t_starts/t_ends to sampl indices
+    assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
+
+    # SL: get the threshold of which neuron indices are group0 vs group1
+    N0=len(ref_inds)
+    N1=len(target_inds)
+
+    # Convert to array if int
+    target_inds = _san(target_inds)
+    ref_inds = _san(ref_inds)
+    all_inds = np.concatenate([np.array(ref_inds),np.array(target_inds)])
+
+    # TODO! makeshift solution, shouldn't need to relabel neurons. Find out what's wrong-
+    # Reindex neurons. References are 0...N0-1 and targets are N0...N0+N1-1    
+    neurons = neurons.neuron_slice(neuron_inds=all_inds)
+    for i in range(neurons.n_neurons):
+        neurons.neuron_ids[i]=i
+
+    # Get spike times from neurons
+    spike_times, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons)
+
+    # Find `binsize`.
+    bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
+    binsize = int(neurons.sampling_rate * bin_size)  # in samples
+    
+    # Find `winsize_bins`.
+    window_size = np.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
+    winsize_bins = 2 * int(0.5 * window_size / bin_size) # total number of bins
+    
+    # Get unique neuron clusters
+    clusters = _np_unique(spike_clusters)
+    # n_clusters = len(clusters)
+
+    spike_clusters_i = _np_index_of(spike_clusters, clusters)
+
+    shift = 1
+
+    mask = np.ones_like(spike_samples, dtype=np.bool_)
+    correlograms = _np_create_correlograms_array_snapshots(NC, N0, N1, winsize_bins, symmetrize)
+    
+    # 'center' mode has one more bin at the center
+    max_d = winsize_bins//2+1
+    center = winsize_bins//2
+
+    # The loop continues as long as there is at least one spike with
+    # a matching spike.
+    # SL: shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
+    while mask[:-shift].any():
+        # Number of time samples between spike i and spike i+shift.
+        spike_diff = _np_diff_shifted(spike_samples, shift)
+
+        # Binarize the delays between spike i and spike i+shift.
+        # SL: spike_diff_b is which bin the spike_diff falls in 
+        spike_diff_b = (spike_diff+binsize//2) // binsize
+
+        # Spikes with no matching spikes are masked.
+        # SL: If there are no matching spikes now, there wouldn't be any with a larger shift.
+        mask[:-shift][spike_diff_b >= max_d] = False # SL exclude spike pairs that fall outside the ccg window after shifting
+
+        # Cache the masked spike delays.
+        m = mask[:-shift].copy()
+        d = spike_diff_b[m] # SL: get which bins need to be incremented
+
+        # SL: This function only computes intergroup ccgs between
+        #   reference (group0) and target (group1)
+        #   even tho all neurons are pooled in one spiketrain in which
+        #   the first N clusters are group0 and the others are group1
+
+        # SL: group0->group1 forward connections. create an intergroup mask
+        ref=spike_clusters_i[:-shift][m]
+        target=spike_clusters_i[+shift:][m]
+        
+        # Find the indices in the raveled correlograms array that need
+        # to be incremented, taking into account the spike clusters.
+        gm = (ref == target)
+        for s,e in zip(t_starts,t_ends):
+
+            gm = (ref < N0) & (target >= N0)
+        indices = np.ravel_multi_index(
+            (i_ccg, ref[gm], target[gm]-N0, d[gm]+(center if symmetrize else 0)),
+            correlograms.shape,
+        )
+
+        if symmetrize:
+            gm_sym = (ref >= N0) & (target < N0)
+            indices_sym= np.ravel_multi_index(
+                (i_ccg, target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
+                correlograms.shape,
+            )
+            indices = np.concatenate([indices,indices_sym])
+
+        # Increment the matching spikes in the correlograms array.
+        _np_increment(correlograms.ravel(), indices)
+
+        shift += 1
+
+    print("shift", shift)
+    correlograms=correlograms
+    return correlograms
+
+def cp_spike_correlations_snapshots(
         neurons,
         ref_inds,
         target_inds,
@@ -1122,7 +1277,7 @@ def np_spike_correlations_ngroups(
     # Convert to array if int
     target_inds = _san(target_inds)
     ref_inds = _san(ref_inds)
-    all_inds = np.concatenate([np.array(ref_inds),np.array(target_inds)])
+    all_inds = cp.concatenate([cp.array(ref_inds),cp.array(target_inds)])
 
     # SL: get the threshold of which neuron indices are group0 vs group1
     N0=len(ref_inds)
@@ -1135,26 +1290,26 @@ def np_spike_correlations_ngroups(
         neurons.neuron_ids[i]=i
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons)
+    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
 
     # Find `binsize`.
-    bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
+    bin_size = cp.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
     binsize = int(neurons.sampling_rate * bin_size)  # in samples
     
     # Find `winsize_bins`.
-    window_size = np.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
+    window_size = cp.clip(window_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
     winsize_bins = 2 * int(0.5 * window_size / bin_size) # total number of bins
     
     # Get unique neuron clusters
-    clusters = _np_unique(spike_clusters)
+    clusters = _cp_unique(spike_clusters)
     # n_clusters = len(clusters)
 
-    spike_clusters_i = _np_index_of(spike_clusters, clusters)
+    spike_clusters_i = _cp_index_of(spike_clusters, clusters)
 
     shift = 1
 
-    mask = np.ones_like(spike_samples, dtype=np.bool_)
-    correlograms = _np_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize)
+    mask = cp.ones_like(spike_samples, dtype=cp.bool_)
+    correlograms = _cp_create_correlograms_array_snapshots(NC, N0, N1, winsize_bins, symmetrize)
     
     # 'center' mode has one more bin at the center
     max_d = winsize_bins//2+1
@@ -1165,7 +1320,7 @@ def np_spike_correlations_ngroups(
     # SL: shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
     while mask[:-shift].any():
         # Number of time samples between spike i and spike i+shift.
-        spike_diff = _np_diff_shifted(spike_samples, shift)
+        spike_diff = _cp_diff_shifted(spike_samples, shift)
 
         # Binarize the delays between spike i and spike i+shift.
         # SL: spike_diff_b is which bin the spike_diff falls in 
@@ -1191,25 +1346,24 @@ def np_spike_correlations_ngroups(
         # Find the indices in the raveled correlograms array that need
         # to be incremented, taking into account the spike clusters.
         gm = (ref < N0) & (target >= N0)
-        indices = np.ravel_multi_index(
+        indices = cp.ravel_multi_index(
             (ref[gm], target[gm]-N0, d[gm]+(center if symmetrize else 0)),
             correlograms.shape,
         )
 
         if symmetrize:
             gm_sym = (ref >= N0) & (target < N0)
-            indices_sym= np.ravel_multi_index(
+            indices_sym= cp.ravel_multi_index(
                 (target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
                 correlograms.shape,
             )
-            indices = np.concatenate([indices,indices_sym])
+            indices = cp.concatenate([indices,indices_sym])
 
         # Increment the matching spikes in the correlograms array.
-        _np_increment(correlograms.ravel(), indices)
+        _cp_increment(correlograms.ravel(), indices)
 
         shift += 1
 
     print("shift", shift)
     correlograms=correlograms
     return correlograms
-

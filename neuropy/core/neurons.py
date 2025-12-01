@@ -275,24 +275,15 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
 
-    def time_split(self, n_chunks=1):
-        """
-        Evenly divide neuron into N chunks (equal length) by specifying n_chunks
-        """
+    def _edges_time_split(self, n_chunks=1):
         t_start, t_stop = super()._time_slice_params()
 
         chunk_starts = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[:-1]
         chunk_stops = np.histogram_bin_edges([],bins=n_chunks,range=(t_start,t_stop))[1:]
         
-        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
-        return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
-
-    def time_windows(self, stride=None, chunk_len=None, keep_incomplete=False):
-        """
-        Evenly divide neuron into time chunks (equal length, except the last chunk can be short) by specifying length and stride
-
-        stride in seconds, e.g. 5min will be 300
-        """
+        return chunk_starts,chunk_stops
+    
+    def _edges_time_window(self, stride=None, chunk_len=None, keep_incomplete=False):
         t_start, t_stop = super()._time_slice_params()
 
         chunk_starts = np.arange(start=t_start,stop=t_stop-chunk_len+1,step=stride)
@@ -306,13 +297,9 @@ class Neurons(DataWriter):
             chunk_stops=np.append(chunk_stops,min(t_stop,stop))
             print(f"length of last bin is {chunk_stops[-1]-chunk_starts[-1]} while all other bins are {chunk_len}")        
         
-        print(chunk_starts)
-        print(chunk_stops)
-        
-        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
-        return [neurons.time_slice(s,e) for s,e in zip(chunk_starts,chunk_stops)]
+        return chunk_starts,chunk_stops
 
-    def slice_edges_by_spikecount(self, i, n=1000,):
+    def _edges_spikecount(self, i, n=1000, discard_tail=False):
         """
         Returns bin starts to slice spiketrain so that each bin has k spikes for neuron i
         e.g. t_starts[i] are the starting timepoints of slices where neuron i always has X spikes in each chunk
@@ -322,22 +309,39 @@ class Neurons(DataWriter):
         spkt = self.spiketrains[i]
         N=spkt.shape[0]
         edges = [(spkt[i],spkt[min(i+n,N-1)]) for i in range(0, N, n)]
-        print(spkt.shape[0]%n)
-        return edges
-
-    def nspike_split(self, i, neuron_inds=None, n=1000, discard_tail=False):
+        chunk_starts, chunk_stops = edges[:,0], edges[:,1]
+        if discard_tail: 
+            return chunk_starts[:-1], chunk_stops[:-1] 
+        return chunk_starts, chunk_stops
+    
+    def time_split(self, n_chunks=1, zero_spike_times=False):
         """
-        Returns neuron split in time such that each split has an equal amount of presynaptic spikes = k
+        Divide spiketrains into N equal-lengthed time chunks
+        """
+        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
+        return [neurons.time_slice(s,e,zero_spike_times=zero_spike_times) for s,e in self._edges_time_split(n_chunks)]
+
+    def time_windows(self, stride=None, chunk_len=None, keep_incomplete=False, zero_spike_times=False):
+        """
+        Divide spiketrains into time chunks using a sliding window.
+        (equal length, except the last chunk can be short)
+
+        stride is in seconds, e.g. 5min will be 5*60 = 300
+        """
+        neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
+        return [neurons.time_slice(s,e,zero_spike_times=zero_spike_times) for s,e in self._edges_time_window(stride, chunk_len, keep_incomplete)]
+
+    def spikecount_split(self, i, neuron_inds=None, n=1000, discard_tail=False, zero_spike_times=False):
+        """
+        Each split has an equal amount of presynaptic spikes = k
         **
             with neuron[i] as the presynaptic reference.
         **
         """
         neurons=deepcopy(self) # NOTE there's not really a way to create views without deep coping data, since each spiketrain has a different length
         if neuron_inds is not None: neurons = neurons.neuron_slice(neuron_inds)
-        edges = self.slice_edges_by_spikecount(i=i,n=n)
-        print(len(edges),edges)
-        splits = [neurons.time_slice(s,e) for s,e in edges]
-        if discard_tail: return splits[:-1] # last chunk likely has shorter time
+        edges = self._edges_spikecount(i=i,n=n,discard_tail=discard_tail)
+        splits = [neurons.time_slice(s,e,zero_spike_times=zero_spike_times) for s,e in edges]
         return splits
 
     def _clip_intervals(self,intervals,t_start=None,t_stop=None):

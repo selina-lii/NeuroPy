@@ -200,7 +200,7 @@ class NeuronsDatasetConfig:
     tight_time: bool
     if true, try to shrink start and end of epoch to where brainstates are happening 
 
-    chunks_per_session: int
+    n_chunks: int
     Splits session time axis into equal-lengthed blocks if >1
 
     """
@@ -208,10 +208,10 @@ class NeuronsDatasetConfig:
                  name:str = "default",
                  neuron_types:Union[list[str], str, None] = ['pyr', 'inter'], 
                  epochs:Union[list[str], str, None]="post", 
-                 chunks_per_session:Union[list[int], int]=1, 
+                 n_chunks:Union[list[int], int]=1, 
                  chunk_stride:int=None,
                  chunk_len:int=None,
-                 n_spike_per_bin:int=None,
+                 spikecount_per_group:int=None,
                  sleep_labels:Union[list[str], str]=["REM","NREM"], 
                  ripple:Toggle=Toggle.NONE, tight_epoch=False):
         self.name = name
@@ -220,13 +220,13 @@ class NeuronsDatasetConfig:
         self.epochs = _san(epochs) or [None] # each epoch gets their own neurons object
         self.sleep_labels = _san(sleep_labels)
         self.ripple = ripple
-        self.chunks_per_session = _san(chunks_per_session)
+        self.n_chunks = _san(n_chunks)
         self.tight_epoch = tight_epoch
         self.chunk_stride = chunk_stride
         self.chunk_len = chunk_len
-        self.n_spike_per_bin = n_spike_per_bin
+        self.spikecount_per_group = spikecount_per_group
 
-        assert len(self.chunks_per_session)==len(self.epochs)
+        assert len(self.n_chunks)==len(self.epochs)
 
     def __str__(self):
         s=""
@@ -259,7 +259,7 @@ class NeuronsDatasetConfig:
 
     def get_chunks_from_epoch(self,epoch):
         idx = self.epochs.index(epoch)
-        return self.chunks_per_session[idx]
+        return self.n_chunks[idx]
 
 
 class IgnoreLevel(Enum):
@@ -279,6 +279,10 @@ class NormalizeBy(Enum):
     # TGT_FRATE = 3
     # TGT_SPKS = 4 # I don't think we're doing those yet
 
+
+class CCGDataFormat(Enum):
+    FLAT_VIEW = 0
+    FILTERED = 1
 
 class CCGConfig:
     """
@@ -302,6 +306,7 @@ class CCGConfig:
                 use_acceleration = True,
                 symmetrize_ccg = True,
                 normalize:NormalizeBy = NormalizeBy.NONE,
+                data_view = CCGDataFormat.FILTERED
                 ):
         self.name = name
 
@@ -333,6 +338,7 @@ class CCGConfig:
         self.symmetrize_ccg = symmetrize_ccg
 
         self.normalize = normalize
+        self.data_view = data_view
 
         # if self.use_multiple_correction: 
         #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
@@ -423,6 +429,7 @@ class JitterConfig:
         return self.jscale/self.ccg.bin_size
 
 
+#TODO am i using this?
 class KeySlicing:
     data = None
     @property
@@ -480,8 +487,8 @@ class KeySlicing:
 
 class NeuronsDataset(AnalysisDataset):
     """
-    A collection of neurons created for analysis
-    Arguments of the analysis should be provided in an NeuronsDatasetConfig instance
+    A collection of neurons wrapped for analysis
+    Arguments of the analysis should be provided using a NeuronsDatasetConfig object
 
     sessions: subjects.ProcessData
         collection object of sessions
@@ -489,7 +496,7 @@ class NeuronsDataset(AnalysisDataset):
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
         self.conf = conf        
         self.data={}
-        self.n_chunks={} # TODO kinda redundant. but... added for normalizing connection strengths
+        self.edge_timestamps={} # TODO n_chunks is used for normalizing connection strengths
 
         self.prep(sessions)
 
@@ -525,17 +532,19 @@ class NeuronsDataset(AnalysisDataset):
             for i, e in enumerate(self.conf.epochs):
                 neus = s.neurons
 
+                # Filter neurons
+                # -type
                 if self.conf.neuron_types is not None:
                     neus = neus.get_neuron_type(self.conf.neuron_types)
-                
+                # -paradigm label
                 if self.conf.epochs[i] is not None:
                     p = s.paradigm.label_slice(e)
                     neus = neus.time_slice(p.starts[0], p.stops[0])
-                
+                # -sleep states
                 if self.conf.sleep_labels is not None:
                     neus = neus.behav_slice(s.brainstates, self.conf.sleep_labels, 
                                             tighten=self.conf.tight_epoch)
-                
+                # -ripple states
                 if self.conf.ripple==Toggle.SELECT:
                     neus = neus.behav_slice(s.ripple,
                                             tighten=self.conf.tight_epoch,
@@ -545,55 +554,43 @@ class NeuronsDataset(AnalysisDataset):
                     neus = neus.behav_slice(non_ripple,
                                             tighten=self.conf.tight_epoch,
                                             min_dur=0) # NOTE not selecting ripple duration for now
-                # Select mdoe of segmenting epoch, if any
-                n_chunks = self.conf.chunks_per_session
-                c_stride = self.conf.chunk_stride
-                c_len = self.conf.chunk_len
-                c_len_spk = self.conf.n_spike_per_bin
 
-                if c_len_spk is not None:
-                    for i in range(neus.n_neurons):
-                        neurons_list = neus.nspike_split(i=i,
-                                                n=c_len_spk)  # Returns list 
-                        for c_id, c_neurons in enumerate(neurons_list):
-                            key = Key(session=ssn, epoch=e, chunk=c_id, ref_ind=i)
-                            self.data[key]=c_neurons
-                        self.n_chunks[Key(session=ssn, epoch=e,ref_ind=i)]=len(neurons_list)
-                elif c_stride is not None and c_len is not None:
-                    neurons_list = neus.time_windows(stride=c_stride,
-                                                chunk_len=c_len)  # Returns list 
-                    # Store each chunk separately
-                    for c_id, c_neurons in enumerate(neurons_list):
-                        key = Key(session=ssn, epoch=e, chunk=c_id)
-                        self.data[key] = c_neurons
-                    self.n_chunks[Key(session=ssn, epoch=e,)]=len(neurons_list)
-                elif n_chunks is not None and n_chunks[i] > 1:
-                    neurons_list = neus.time_split(n_chunks=n_chunks)  # Returns list 
-                    # Store each chunk separately
-                    for c_id, c_neurons in enumerate(neurons_list):
-                        key = Key(session=ssn, epoch=e, chunk=c_id)
-                        self.data[key] = c_neurons
-                    self.n_chunks[Key(session=ssn, epoch=e,)]=n_chunks
+                # Store filtered neurons
+                key = Key(session=ssn, epoch=e)
+                self.data[key] = neus
+                N = neus.n_neurons
+
+                # Define how to segment each neurons group for comparative analysis
+                # see neurons.py: 
+                #    _edges_time_split  time_split
+                #   _edges_time_window  time_windows
+                #   _edges_spikecount   spikecount_split
+
+                if self.conf.spikecount_per_group is not None:
+                    for i in range(N):
+                        k = Key(session=ssn, epoch=e, ref_ind=i)
+                        edges = neus._edges_by_spikecount(i=i,
+                                                          n=self.conf.spikecount_per_group,
+                                                          discard_tail=False)
+                        self.edge_timestamps[k]=len(edges)
+                elif self.conf.chunk_stride is not None and self.conf.chunk_len is not None:
+                    self.edge_timestamps[key] = neus._edges_time_window(stride=self.conf.chunk_stride, 
+                                                                        chunk_len=self.conf.chunk_len) 
+                elif self.conf.n_chunks is not None and self.conf.n_chunks[i] > 1:
+                    self.edge_timestamps[key] = neus._edges_time_split(n_chunks=self.conf.n_chunks)
                 else:
-                    key = Key(session=ssn, epoch=e,chunk=0)
-                    self.data[key] = neus
-                    self.n_chunks[Key(session=ssn, epoch=e,)]=1
+                    self.edge_timestamps[key] = None
     
-    def split(self,session_key,ref_inds,target_inds):
-        key=Key(session_key,chunk=0)
-        neus = self.data[Key(session_key,chunk=0)]
-        ssn=key.session
-        e=key.epoch
-        c_len_spk = self.conf.n_spike_per_bin
+    def split(self,session_key,epoch_key,ref_inds,target_inds):
+        neus = self.data[Key(session_key,epoch_key)]
+        c_len_spk = self.conf.spikecount_per_group
         assert c_len_spk is not None
-        for ref,targets in zip(ref_inds,target_inds):
-            neurons_list = neus.nspike_split(i=ref,neuron_inds=targets,
-                                    n=c_len_spk)  # Returns list 
-            for chunk_id, chunk_neurons in enumerate(neurons_list):
-                new_key = Key(session=ssn, epoch=e, chunk=chunk_id, ref_ind=ref)
-                self.data[new_key]=chunk_neurons
-                self.n_chunks[Key(session=ssn, epoch=e,ref_ind=ref)]=len(neurons_list)
-        self.data[key]=None #TODO
+        for ref, targets in zip(ref_inds,target_inds):
+            edges = neus._edges_spikecount(i=ref,neuron_inds=targets,
+                                    n=c_len_spk)  # Returns list
+            k = Key(session=session_key, epoch=epoch_key,ref_ind=ref)
+            self.edge_timestamps[k]=edges
+
 
 class ACG:
     """Like Neurons, but for auto-correlograms
@@ -610,8 +607,17 @@ class ACG:
 class CCG:
     """Like Neurons, but for CCGs
     * Static dataclass, not mean for reuse
-    * Shouldn't really be called on its own. Wrap in a CCGDataset!"""
-    def __init__(self, key, ccg, ids, inds, ccg_null=None, pval=None, j_sig=None, conn_strength=None,
+    * Shouldn't really be called on its own. Wrap in CCGDataset!"""
+    # TODO TODO
+    # there should be two versions of CCG, but they should share some common methods, 
+    #           using sparse and dense matrix representations.
+    # filtered: ccg shape = ngroups,nccg,nbins     ids shape = nccg,2
+    # flat:     ccg shape = (ngroups),nneu,nneu,nbins   ids shape = nneu
+    # since chunks will be abolished, ngroups dimension should always exist, even when redundant
+    # chunks is a dimension such that all items in the list can have the same operations applied on them
+    #   as chunks are purely for comparison analysis
+    def __init__(self, key, ccg, ids, inds, 
+                 ccg_null=None, pval=None, j_sig=None, conn_strength=None,
                  conf:CCGConfig=None,significant=True):
         self.key=key
         self.ids=ids
@@ -654,7 +660,7 @@ class CCG:
 
     @property
     def total(self):
-        return self.ccg.shape[0]
+        return self.ccg.shape[-2]
 
     def _set_cs_eranconv(self, norm_factor:np.ndarray=None):
         """
@@ -742,7 +748,7 @@ class CCG:
                             j_sig=self.j_sig[s][i] if self.j_sig else None,
                             show=False,save=True)
 
-    def deconv_autocorr(self, acgs, nspks, target=True, ref=True):
+    def deconv_autocorr(self, acgs:ACG, nspks, target=True, ref=True):
         """
         Remove auto-correlograms (ACG) from CCG
         target/ref is set to true if corresponding ACG is to be removed
@@ -876,6 +882,8 @@ class CCGIndexSource(Enum):
     SIGNIFICANT_ANY=2
 
 
+# TODO two storage views? one w excitability in mind, the other view is all CCGs.
+# flat view is memory intensive. 
 class CCGDataset(AnalysisDataset):
     """
     Data and operations on CCGs from an experiment
@@ -889,6 +897,18 @@ class CCGDataset(AnalysisDataset):
         self.spurious={} # rest of pairwise CCG that failed the significance checks
         self.auto={} # autocorrelograms 
         self.connectivity={}
+
+    def get_CCG_with_baseline(self, method="eran_conv"):
+        """
+        main function of the class
+        """
+        if method=="eran_conv":
+            self._ccg_eranconv()
+        elif method=="jitter":
+            NotImplementedError("CCG jitter must be run in the Jitter object, " \
+            "since it generates a ton of extra data. Nothing is run...")
+        else:
+            ValueError("Unknown method")
 
     @property
     def conf(self):
@@ -956,14 +976,6 @@ class CCGDataset(AnalysisDataset):
         except Exception as e:
             print(f"Load failed: {e}")
 
-    def get_CCG_with_baseline(self,method="eran_conv"):
-        if method=="eran_conv":
-            self._ccg_eranconv()
-        elif method=="jitter":
-            NotImplementedError("CCG & Jitter must be run in the Jitter object, due to generating a ton of extra data. Nothing is run...")
-        else:
-            ValueError("Unknown method")
-
     def _ccg_eranconv(self):
         """
         Run CCG and convolution based significance test for all neurons
@@ -991,58 +1003,55 @@ class CCGDataset(AnalysisDataset):
             print(_s(key.session,neurons)+printstr)
 
     def _reCCG(self,ccg_key:Key,
+               conf:CCGConfig,
                indices_source=CCGIndexSource.SIGNIFICANT,
-               significance_method=None):
-        if indices_source==CCGIndexSource.SIGNIFICANT:
-            inds = self.data[ccg_key].inds
-            keys = [ccg_key.parent()]
-            significant = [True]
-        elif indices_source==CCGIndexSource.SPURIOUS:
-            inds = self.spurious[ccg_key].inds
-            keys = [ccg_key.parent()]
-            significant = [False]
-        elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
-            inds = self.connectivity[ccg_key].inds
-            n = self.connectivity[ccg_key].n_chunks
-            keys = [Key(ccg_key.session,ccg_key.epoch,chunk=i) for i in range(n)]
-            significant=np.zeros((n,inds.shape[0]))
+               significance_method=None,
+               ):
+        """
+        Rerun CCG given list of indices
 
-        for i,key in enumerate(keys):
-            neurons = self.nd.data[key]
-            ccg = correlations.spike_correlations(
-                        neurons=neurons,
-                        ref_neuron_inds=inds[:,0],
-                        neuron_inds=inds[:,1],
-                        bin_size=self.conf.bin_size,
-                        window_size=self.conf.duration,
-                        use_acceleration=self.conf.use_acceleration,
-                        symmetrize=self.conf.symmetrize_ccg,
-                        paired=True)
-            print("completed rerun")
-            if significance_method is not None: 
-                # TODO W should be number of bins. not actual jitter scale?
-                pvals, pred, qvals = eranconv(ccg,W=self.conf.conv_window*1e3,wintype="gauss",hollow_frac=None)
-                if key.excitability=='I': pvals = qvals #TODO no corrections
-                print("completed conv")
-                # significant[i]=pvals<.05 #TODO need a better routine for this whole chunk
-            else:
-                pvals, pred, qvals = None, None, None
-            
-            new_ccg = CCG(inds=inds,
-                ids=neurons.ind2id(inds), 
-                ccg=ccg, 
-                ccg_null=pred, 
-                pval=pvals, 
-                conf=self.conf,
-                key=ccg_key,
-                significant=significant[i])
+        Call one of the wrappers instead
+        """
+        new_dataset = CCGDataset(self.nd,conf=conf)
+        for key, ccg in self.connectivity.items():
+            if ccg is not None:
+                inds = self.connectivity[ccg_key].inds
+                n = self.connectivity[ccg_key].n_chunks
+                keys = [Key(ccg_key.session,ccg_key.epoch,chunk=i) for i in range(n)] # TODO this won't be needed since we're restructuring chunks
+                significant=np.zeros((n,inds.shape[0]))
 
-            if indices_source==CCGIndexSource.SIGNIFICANT:
-                self.data[key] = new_ccg
-            elif indices_source==CCGIndexSource.SPURIOUS:
-                self.spurious[key] = new_ccg
-            elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
-                self.data[key] = new_ccg
+            for i,key in enumerate(keys):
+                neurons = self.nd.data[key]
+                ccg = correlations.spike_correlations(
+                            neurons=neurons,
+                            ref_neuron_inds=inds[:,0],
+                            neuron_inds=inds[:,1],
+                            bin_size=self.conf.bin_size,
+                            window_size=self.conf.duration,
+                            use_acceleration=self.conf.use_acceleration,
+                            symmetrize=self.conf.symmetrize_ccg,
+                            paired=True)
+                print("completed rerun")
+                # TODO break down routines and reuse functions
+                if significance_method is not None: 
+                    # TODO W should be number of bins. not actual jitter scale?
+                    pvals, pred, qvals = eranconv(ccg,W=self.conf.conv_window*1e3,wintype="gauss",hollow_frac=None)
+                    if key.excitability=='I': pvals = qvals #TODO no corrections
+                    print("completed conv")
+                    # significant[i]=pvals<.05 #TODO need a better routine for this whole chunk
+                else:
+                    pvals, pred, qvals = None, None, None
+                new_ccg = CCG(inds=inds,
+                    ids=neurons.ind2id(inds), 
+                    ccg=ccg, 
+                    ccg_null=pred, 
+                    pval=pvals, 
+                    conf=conf,
+                    key=ccg_key,
+                    significant=significant[i])
+
+                new_dataset.data[key] = new_ccg
+        return new_dataset
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False,
                         method="eran_conv"):
@@ -1079,10 +1088,6 @@ class CCGDataset(AnalysisDataset):
         """
         Rerun CCG with list of pairs that had been significant in any chunk
         """
-        for key, ccg in self.connectivity.items():
-            if ccg is not None:
-                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,
-                                             ccg_key=key,significance_method=method)
         self.set_connection_strengths(method=method)
         self.set_connectivity()
         print("recomputed CCG")
@@ -1747,9 +1752,11 @@ def _multiple_correction(pvals,alpha,method='bonferroni'):
     return sig,p_corr
 
 
+# TODO TODO split this into two functions, one that can be reused for reCCG, the other is this fixed routine
 def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     """
-    Helper of CCGDataset
+    Main function for CCG computatinon
+    Call from CCGDataset
 
     chunked_neurons: list[Neurons] or Neurons, sliced from the same session.
     """
@@ -1781,6 +1788,11 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
     neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
     pairs_I = np.argwhere(neighbor.any(-1) & ~autocorr_locations)
     
+    # Condition 1: Spike count of certain bins must pass a threshold
+    pairs_spkcount = np.argwhere((ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
+    pairs_E = _intersect2d(pairs_E, pairs_spkcount, n)
+    pairs_I = _intersect2d(pairs_I, pairs_spkcount, n)
+
     def _count_significant_pairs(pairs,neurons,conn_types,ignore:IgnoreLevel=IgnoreLevel.SAME_CHANNEL):
         """
         Create a tally of significant neuronal connectoins by type
@@ -1815,13 +1827,6 @@ def eranconv_group(key:Key, neurons:Neurons, conf:CCGConfig):
                                 np.isin(pairs[:,1],np.where(neurons.neuron_type==ct[1])))[0]
             sig_pairs[ct]=pairs[inds] if inds.shape[0] else None
         return sig_pairs
-
-    # Celltype specific crieria for significance
-    # Condition 1: Spikecounts of bins within a certain time range are pass threshold
-    pairs_spkcount = np.argwhere((ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
-    pairs_E = _intersect2d(pairs_E, pairs_spkcount, n)
-    pairs_I = _intersect2d(pairs_I, pairs_spkcount, n)
-
     pairs_E_filtered = _count_significant_pairs(pairs_E,neurons,conf.conn_types_E,ignore=conf.ignore)
     pairs_I_filtered = _count_significant_pairs(pairs_I,neurons,conf.conn_types_I,ignore=conf.ignore)
 
@@ -2003,7 +2008,7 @@ class GroupwiseDiff:
 
 # will fall under WindowSweep
 def routine_mean_firing_rates(nd:NeuronsDataset):
-    n_chunks=nd.conf.chunks_per_session
+    n_chunks=nd.conf.n_chunks
     epochs=nd.conf.epochs
     total_n_chunks = np.sum(n_chunks)
     neuron_types = nd.conf.neuron_types
