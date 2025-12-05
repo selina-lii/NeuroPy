@@ -84,6 +84,62 @@ def _cp_assemble_spike_arrays(neurons):
     return spike_times, spike_clusters, spike_samples
 
 
+def _np_assemble_segment_ids_array(neurons,t_starts,t_ends):
+    # t_starts, t_ends: specified time periods
+
+    # create segments. 
+    # the segments are another form of representation of t_starts and t_ends. 
+    # as there might be overlaps between time periods, a segment can map to multiple time periods,
+    #  hence the lookup table to map them back to time period ids.
+    # segment ids are used to label spike identity for rolling computation of multiple CCGs.
+    segments = np.unique(np.concatenate[t_starts,t_ends]) 
+    # maps segment ids back to t_starts/t_ends ids
+    lookup_table = [
+        np.where((t_starts <= s) & (t_ends > s))[0]
+        for s in segments[:-1]
+    ]
+
+    # Example:
+    # suppose our time chunks of interest are 0~3, 1~5, and 2~3.
+    # t_starts=[0, 1, 2], t_ends=[3, 5, 3]
+    # segments = [0,1,2,3,5]
+    # lookup_table = [[1],[1,2],[1,2,3],[2]]
+
+    spike_segment_ids = np.concatenate([
+        np.searchsorted(segments, spiketrain) for spiketrain in neurons.spiketrains
+    ])
+    
+    return spike_segment_ids, lookup_table
+
+
+def _cp_assemble_segment_ids_array(neurons,t_starts,t_ends):
+    # t_starts, t_ends: specified time periods
+
+    # create segments. 
+    # the segments are another form of representation of t_starts and t_ends. 
+    # as there might be overlaps between time periods, a segment can map to multiple time periods,
+    #  hence the lookup table to map them back to time period ids.
+    # segment ids are used to label spike identity for rolling computation of multiple CCGs.
+    segments = cp.unique(cp.concatenate[t_starts,t_ends]) 
+    # maps segment ids back to t_starts/t_ends ids
+    lookup_table = [
+        cp.where((t_starts <= s) & (t_ends > s))[0]
+        for s in segments[:-1]
+    ]
+
+    # Example:
+    # suppose our time chunks of interest are 0~3, 1~5, and 2~3.
+    # t_starts=[0, 1, 2], t_ends=[3, 5, 3]
+    # segments = [0,1,2,3,5]
+    # lookup_table = [[1],[1,2],[1,2,3],[2]]
+
+    spike_segment_ids = cp.concatenate([
+        cp.searchsorted(segments, spiketrain) for spiketrain in neurons.spiketrains
+    ])
+    
+    return spike_segment_ids, lookup_table
+
+
 # Create Arrays
 def _np_as_array(arr, dtype=None):
     """
@@ -212,6 +268,7 @@ def _cp_unique(x):
     x = x[x >= 0]
     bc = cp.bincount(x)
     return cp.nonzero(bc)[0]
+
 
 def _np_increment(arr, indices):
     """Increment some indices in a 1D vector of non-negative integers.
@@ -1076,7 +1133,8 @@ def spike_correlations(
         window_size=None,
         symmetrize=True,
         use_acceleration=False,
-        paired=False
+        paired=False,
+        chunk_edges=None
 ):
     """
     Switch between spike correlation cases.
@@ -1085,15 +1143,26 @@ def spike_correlations(
         If True this will compute pairwise (ref_inds[k],target_inds[k]) correlations only
 
     """
-    if ref_neuron_inds is not None:
+    if chunk_edges is not None:
+        if use_acceleration:
+            correlograms = cp_spike_correlations_snapshots(neurons, ref_inds=ref_neuron_inds,
+            target_inds = neuron_inds, t_starts=chunk_edges[:,0], t_ends=chunk_edges[:,1],
+            bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
+        else:
+            correlograms = np_spike_correlations_snapshots(neurons, ref_inds=ref_neuron_inds, 
+            target_inds = neuron_inds, t_starts=chunk_edges[:,0], t_ends=chunk_edges[:,1],
+            bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
+    elif ref_neuron_inds is not None:
         if paired:
             if use_acceleration:
-                correlograms = cp_spike_correlations_paired(neurons, ref_inds=ref_neuron_inds, target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
+                correlograms = cp_spike_correlations_paired(neurons, ref_inds=ref_neuron_inds, 
+                target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
             else:
                 pass# TODO write np version
         else:
             if use_acceleration:
-                correlograms = cp_spike_correlations_2groups(neurons, ref_inds=ref_neuron_inds, target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
+                correlograms = cp_spike_correlations_2groups(neurons, ref_inds=ref_neuron_inds,
+                target_inds = neuron_inds, bin_size=bin_size, window_size=window_size, symmetrize=symmetrize)
             else:
                 pass# TODO write np version
         return correlograms
@@ -1161,6 +1230,7 @@ def np_spike_correlations_snapshots(
 
     # Get spike times from neurons
     spike_times, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons)
+    spike_segment_ids, segments_lookup_table = _np_assemble_segment_ids_array(neurons,t_starts,t_ends)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -1212,23 +1282,28 @@ def np_spike_correlations_snapshots(
         # SL: group0->group1 forward connections. create an intergroup mask
         ref=spike_clusters_i[:-shift][m]
         target=spike_clusters_i[+shift:][m]
+
+        ref_=spike_segment_ids[:-shift][m]
+        target_=spike_segment_ids[+shift:][m]
         
         # Find the indices in the raveled correlograms array that need
         # to be incremented, taking into account the spike clusters.
-        gm = (ref == target)
-        for s,e in zip(t_starts,t_ends):
-
-            gm = (ref < N0) & (target >= N0)
-        indices = np.ravel_multi_index(
+        gm = (ref_ == target_) & (ref < N0) & (target >= N0)
+        indices = np.concatenate(
+            [np.ravel_multi_index(
             (i_ccg, ref[gm], target[gm]-N0, d[gm]+(center if symmetrize else 0)),
             correlograms.shape,
+            ) for i_ccg in segments_lookup_table[gm]]
         )
 
         if symmetrize:
-            gm_sym = (ref >= N0) & (target < N0)
-            indices_sym= np.ravel_multi_index(
-                (i_ccg, target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
-                correlograms.shape,
+            gm_sym = (ref_ == target_) & (ref >= N0) & (target < N0)
+            
+            indices_sym = np.concatenate(
+                [np.ravel_multi_index(
+                    (i_ccg, target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
+                    correlograms.shape,
+                ) for i_ccg in segments_lookup_table[gm]]
             )
             indices = np.concatenate([indices,indices_sym])
 
@@ -1240,6 +1315,7 @@ def np_spike_correlations_snapshots(
     print("shift", shift)
     correlograms=correlograms
     return correlograms
+
 
 def cp_spike_correlations_snapshots(
         neurons,
@@ -1291,6 +1367,7 @@ def cp_spike_correlations_snapshots(
 
     # Get spike times from neurons
     spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
+    spike_segment_ids, segments_lookup_table = _np_assemble_segment_ids_array(neurons,t_starts,t_ends)
 
     # Find `binsize`.
     bin_size = cp.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -1343,19 +1420,27 @@ def cp_spike_correlations_snapshots(
         ref=spike_clusters_i[:-shift][m]
         target=spike_clusters_i[+shift:][m]
 
+        ref_=spike_segment_ids[:-shift][m]
+        target_=spike_segment_ids[+shift:][m]
+
         # Find the indices in the raveled correlograms array that need
         # to be incremented, taking into account the spike clusters.
-        gm = (ref < N0) & (target >= N0)
-        indices = cp.ravel_multi_index(
-            (ref[gm], target[gm]-N0, d[gm]+(center if symmetrize else 0)),
+        gm = (ref_ == target_) & (ref < N0) & (target >= N0)
+        indices = np.concatenate(
+            [cp.ravel_multi_index(
+            (i_ccg, ref[gm], target[gm]-N0, d[gm]+(center if symmetrize else 0)),
             correlograms.shape,
+            ) for i_ccg in segments_lookup_table[gm]]
         )
 
         if symmetrize:
-            gm_sym = (ref >= N0) & (target < N0)
-            indices_sym= cp.ravel_multi_index(
-                (target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
-                correlograms.shape,
+            gm_sym = (ref_ == target_) & (ref >= N0) & (target < N0)
+            
+            indices_sym = np.concatenate(
+                [cp.ravel_multi_index(
+                    (i_ccg, target[gm_sym], ref[gm_sym]-N0, center-d[gm_sym]),
+                    correlograms.shape,
+                ) for i_ccg in segments_lookup_table[gm]]
             )
             indices = cp.concatenate([indices,indices_sym])
 
