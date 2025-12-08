@@ -1,6 +1,7 @@
 ﻿"""Calculate and test millisecond-scale connectivity between neurons a la Diba et al. (2014) and English/McKenzie
  et al. (2017)"""
 
+from neuropy.io import NeuroscopeIO
 import numpy as np
 # try:
 #     import cupy as cp
@@ -20,6 +21,8 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
 
+# TODO
+CHANNELS_PER_SHANK=16
 
 def _short_session_name(session):
     """get short printable session name in the format of ANIMAL_DayX"""
@@ -171,6 +174,22 @@ class AnalysisDataset:
         for k in self.data.keys():
             print(k)
 
+    @property
+    def conf(self):
+        return self._conf
+
+    @conf.setter
+    def conf(self,conf):
+        ans = input("Clear all datafields with the new config? [y/n]").lower()
+        if ans=='y':
+            self.data={}
+            self.spurious={}
+            self.auto={}
+            self.connectivity={}
+            print(f'{self.__class__.__name__}: all data fields are cleared')
+        self._conf = conf
+        print(f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary.")
+
 
 class Toggle(Enum):
     """
@@ -201,7 +220,8 @@ class NeuronsDatasetConfig:
                  chunk_len:int=None,
                  spikecount_per_group:int=None,
                  sleep_labels:Union[list[str], str]=["REM","NREM"], 
-                 ripple:Toggle=Toggle.NONE, tight_epoch=False):
+                 ripple:Toggle=Toggle.NONE, tight_epoch=False,
+                 recinfo:NeuroscopeIO=None):
         self.name = name
         self.session_names = []
         self.neuron_types = _san(neuron_types)
@@ -213,7 +233,8 @@ class NeuronsDatasetConfig:
         self.chunk_stride = chunk_stride
         self.chunk_len = chunk_len
         self.spikecount_per_group = spikecount_per_group
-
+        self.ch_per_shank = 16 
+        self.recinfo = recinfo
         assert len(self.n_chunks)==len(self.epochs)
 
     def __str__(self):
@@ -476,7 +497,7 @@ class NeuronsDataset(AnalysisDataset):
         collection object of sessions
     """
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
-        self.conf = conf        
+        self._conf = conf        
         self.data={}
         self.edge_timestamps={} # TODO n_chunks is used for normalizing connection strengths
 
@@ -707,7 +728,7 @@ class CCG:
             pval=pval, ccg_null=ccg_null, j_sig=j_sig,
         )
 
-    def save_plots(self, neuron_types, waveforms, firing_rate, frates_all, root):
+    def save_plots(self, neuron_types, shank_ids, waveforms, frates_cut, frates_all, root, discarded_channels=None,ch_per_shank=None):
         assert self.ccg is not None
         plotdir = self.plotdir(root)
         if not os.path.exists(plotdir):
@@ -722,9 +743,12 @@ class CCG:
             plot_ccg_figure(ids=self.ids[s][i],
                             inds=inds,
                             neuron_types=neuron_types[s][i] if neuron_types is not None else None,
-                            frate_cut=firing_rate[s][i] if firing_rate is not None else None,
+                            frates_cut=frates_cut[s][i] if frates_cut is not None else None,
                             frates_all=frates_all[s][i] if frates_all is not None else None,
                             waveforms=waveforms[s][i] if waveforms is not None else None,
+                            shank_ids=shank_ids[s][i] if shank_ids is not None else None,
+                            discarded_channels=discarded_channels,
+                            ch_per_shank=ch_per_shank,
                             ccg=np.array(self.ccg)[s][i], 
                             plotdir=plotdir, 
                             window_size=self.conf.duration*1e3,
@@ -901,23 +925,7 @@ class CCGDataset(AnalysisDataset):
             "since it generates a ton of extra data. Nothing is run...")
         else:
             ValueError("Unknown method")
-
-    @property
-    def conf(self):
-        return self._conf
-
-    @conf.setter
-    def conf(self,conf):
-        # ans = input("Changing configuration will remove existing CCG data. Proceed? [y/n]").lower()
-        # if ans=='n' or ans=='no':
-        #     print("Aborted")
-        #     return
-        self._conf = conf
-        # self.data={}
-        # self.spurious={}
-        # self.auto={}
-        # self.connectivity={}
-    
+        
     def filter_excitability(self, E):
         return self.filter(excitability=E)
 
@@ -1107,9 +1115,9 @@ class CCGDataset(AnalysisDataset):
             if chunk_edges is not None:
                 t_start= chunk_edges[0][key.chunk]
                 t_end=chunk_edges[1][key.chunk]
-                firing_rate = None if neurons.firing_rate is None else neurons.time_slice(t_start,t_end).firing_rate[ccg.inds]
+                frates_cut = None if neurons.firing_rate is None else neurons.time_slice(t_start,t_end).firing_rate
             else:
-                firing_rate = None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds]
+                frates_cut = None if neurons.firing_rate is None else neurons.firing_rate
             # frates = frates_all[key.subkey('session','epoch')] if frates_all else None
             print(f"ccg {key.session} {key.conn_type}")
             # try:
@@ -1118,8 +1126,11 @@ class CCGDataset(AnalysisDataset):
             ccg.save_plots(
                 neuron_types=neurons.neuron_type[ccg.inds],
                 waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
+                shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[ccg.inds],
                 frates_all=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
-                firing_rate=firing_rate,
+                frates_cut=frates_cut[ccg.inds],
+                discarded_channels=self.nd.conf.recinfo.skipped_channels,
+                ch_per_shank=self.nd.conf.ch_per_shank,
                 root=root,
             )
                 # firing_rate=None if frates is None else frates[ccg.inds],
@@ -1142,8 +1153,11 @@ class CCGDataset(AnalysisDataset):
                 ccg.save_plots(
                     neuron_types=neurons.neuron_type[ccg.inds],
                     waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
-                    firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
+                    shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[ccg.inds],
+                    frates_cut=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
                     frates_all=None if frates is None else frates[ccg.inds],
+                    discarded_channels=self.nd.conf.recinfo.discarded_channels,
+                    ch_per_shank=self.nd.conf.ch_per_shank,
                     root=root)
             except Exception as e:
                 print(f"{key.session}: No {key.excitability} spurious connections {e}")
@@ -1663,7 +1677,7 @@ class Jitter:
         print(f"loaded jitter data {self.key}")
    
 
-class JitterDataset:
+class JitterDataset(AnalysisDataset):
     def __init__(self, nd: Neurons, cd: CCGDataset, conf:JitterConfig):
         """Note that jitter dataset stores single session/epoch data because jitter computation is memory consuming"""
         self._conf = conf
@@ -1671,19 +1685,6 @@ class JitterDataset:
         self.nd = nd
         self.cd = cd
         self.data = {} # data key is target index
-
-    @property
-    def conf(self):
-        return self._conf
-
-    @conf.setter
-    def conf(self,conf):
-        # ans = input("Changing configuration will remove existing jitters. Proceed? [y/n]").lower()
-        # if ans=='n' or ans=='no':
-        #     print("Aborted")
-        #     return
-        self._conf = conf
-        # self.data = []
 
     @property
     def filepath(self):
@@ -2228,6 +2229,7 @@ class EranConv:
 import seaborn as sns
 import matplotlib.pyplot as plt
 import os
+import neuropy.plotting.probe as probe
 
 
 def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, 
@@ -2249,48 +2251,82 @@ def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size,
     ax.set_title(f"CCG, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
     ax.legend()
     sns.despine(ax=ax)
+    sns.despine(ax=ax2)
     return ax, ax2 #TODO read return vars?
 
-
 def plot_waveform_panel(ax, waveform, neuron_type, neuron_id, 
-                        frate_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None, discard_channels=None):
+                        frate_all=None, frates_cut=None, n_shanks=None, ch_per_shank=None, discarded_channels=None):
     """Single waveform panel into provided axis"""
     n_shanks = n_shanks or 12
-    ch_per_shank = ch_per_shank or 16 # TODO put hardcoded values elsewhere?
+    ch_per_shank = ch_per_shank or CHANNELS_PER_SHANK # TODO put hardcoded values elsewhere?
     max_ch = waveform.shape[0]
     ax.imshow(waveform.astype(float))
     ax.set_title(f"{neuron_type}{neuron_id}")
     xlabel = ""
     if frate_all is not None:
         xlabel += f"{frate_all:.2f}Hz all "
-    elif frate_cut is not None:
-        xlabel += f"{frate_cut:.2f}Hz cut "
+    elif frates_cut is not None:
+        xlabel += f"{frates_cut:.2f}Hz cut "
     ax.set_xlabel(xlabel)
     
     edges = (np.array(range(n_shanks))+1)*ch_per_shank+1
-    if discard_channels is not None:
-        shanks = discard_channels // ch_per_shank
+    if discarded_channels is not None:
+        shanks = discarded_channels // ch_per_shank
         edges = edges - np.cumsum(np.histogram(shanks,np.arange(n_shanks))[0])
         
     for k in edges:
         ax.axhline(k, c='w', alpha=0.5, linestyle='dashed')
+    
     return ax
 
 
-def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
+def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms, 
                     window_size, bin_size, pval=None, ccg_null=None, j_sig=None, 
-                    frates_all=None, frate_cut=None, n_shanks=None, ch_per_shank=None,
-                    show=True, save=False, plotdir=None):
+                    shank_ids=None,
+                    frates_all=None, frates_cut=None, n_shanks=None, ch_per_shank=None,
+                    discarded_channels=None,
+                    show=True, save=False, plotdir=None,
+                    waveform_plot_type="channel"):
     """Full figure: CCG + 2 waveforms"""
-    fig, axs = plt.subplots(1, 3, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 1, 1]})
+    if waveform_plot_type=='channel':
+        fig, axs = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={'width_ratios': [2, 1]})
+    else:
+        fig, axs = plt.subplots(1, 3, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 1, 1]})
+
+    labels = ['ref', 'target']
 
     plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval, ccg_null, j_sig)
-    labels = ['ref', 'target']
-    for i in range(2):
-        axs[1+i] = plot_waveform_panel(axs[1+i], waveforms[i], neuron_types[i], ids[i],
-                            frates_all[i] if frates_all is not None else None,
-                            frate_cut[i] if frate_cut is not None else None,
-                            n_shanks=n_shanks,ch_per_shank=ch_per_shank)
+    if waveform_plot_type=='channel' and shank_ids is not None:
+        def get_filled_waveforms(shank_id,wf):
+            channel_ids = ch_per_shank*shank_id+np.arange(ch_per_shank)
+            mask = ~np.isin(channel_ids, discarded_channels)
+            start = ch_per_shank*shank_id-np.sum(discarded_channels<16*shank_id)
+            length = np.sum(mask,axis=0)
+            clean = np.full((ch_per_shank,wf.shape[-1]),np.nan)
+            clean[mask]=wf[start:start+length]
+            return clean
+
+        ref_waveform = get_filled_waveforms(shank_ids[0],waveforms[0])
+        tgt_waveform = get_filled_waveforms(shank_ids[1],waveforms[1])
+
+        xlabel = ""
+        if frates_all is not None:
+            xlabel += f"ref {frates_all[0]:.2f}Hz | tgt {frates_all[1]:.2f} all \n"
+        if frates_cut is not None:
+            xlabel += f"ref {frates_cut[0]:.2f}Hz | tgt {frates_all[1]:.2f} cut "
+        axs[1] = probe.plot_waveform_on_channel(ref_waveform, shank_ids[0], 
+                                                tgt_waveform, shank_ids[1], 
+                                                footnote=xlabel, amplitude_limit=True,
+                                                ax=axs[1],
+                                                color='green' if shank_ids[0]!=shank_ids[1] else 'orange')
+        sns.despine(ax=axs[1])
+    else:
+        for i in range(2):
+            axs[1+i] = plot_waveform_panel(axs[1+i], waveforms[i], neuron_types[i], ids[i],
+                                frates_all[i] if frates_all is not None else None,
+                                frates_cut[i] if frates_cut is not None else None,
+                                n_shanks=n_shanks,ch_per_shank=ch_per_shank,
+                                discarded_channels=discarded_channels)
 
     fig.tight_layout()
     if save and plotdir:

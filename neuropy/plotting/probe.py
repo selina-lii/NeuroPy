@@ -52,13 +52,9 @@ def plot_probe(
     return ax
 
 
-def plot_on_probe(probe: ProbeGroup, probe_id: int, ):
-    """
-    
-    """
-    pass
-
-def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange"):
+def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_shank=None,
+                             color="orange",amplitude_limit=False,
+                             footnote="",ax=None):
     # units are um (micron)
     # For Cambridge Neurotech F-8. Specs are from their brochure
     # and adjusted based on plotting effects.
@@ -70,6 +66,7 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
     eletrode_size_x = 11 - 5
     eletrode_size_y = 15
     tip_length = 50
+    waveform_amp_limit=interchannel_y*3
 
     # Function description
     # draw a vertical_eletrode_span * shank_width box, but remove the lower left corner by covering with a white triange, 
@@ -89,12 +86,13 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
 
     # given waveform shaped (n_channels_per_side * 2, 2, window), put 2 lines side by side by the center of corresponding channel.
     # window will be about 50-100 pixels. the first line is black and closer to the center of the plot.
-    # the second line is next to that in a given ref_color 
+    # the second line is next to that in a given color 
     # the result is that these waveforms flank the illutration of the channel.
     # add channel number at the left edge of the whole plot from 1...n
     # on top of the channel numbers to the left of the gray-fill shank add text "ch #"
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 6))
 
     # Draw shank (gray)
     shank = patches.Rectangle(
@@ -161,6 +159,10 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
 
         # Scale waveform for display
         wf1 = ref_waveform[ch] * y_scale
+        if amplitude_limit:
+            amp=wf1.max()-wf1.min()
+            if amp>waveform_amp_limit: wf1=wf1/amp*waveform_amp_limit
+
         # Left or right of shank
         if ch < n_channels_per_side:
             x_center = -x_offset-shank_width
@@ -171,12 +173,15 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
         if target_waveform is not None:
             # Scale waveform for display
             wf2 = target_waveform[ch] * y_scale
+            if amplitude_limit:
+                amp=wf2.max()-wf2.min()
+                if amp>waveform_amp_limit: wf2=wf2/amp*waveform_amp_limit
             # Left or right of shank
             if ch < n_channels_per_side:
                 x_center_ref = x_center-window/x_scale-2
             else:
                 x_center_ref = x_center+window/x_scale+2
-            ax.plot(x_center_ref + np.zeros_like(wf2)+np.arange(window)/x_scale, y_center + wf2, color=ref_color, lw=1.2)
+            ax.plot(x_center_ref + np.zeros_like(wf2)+np.arange(window)/x_scale, y_center + wf2, color=color, lw=1.2)
 
     wavewidth = window/x_scale*2
 
@@ -184,7 +189,11 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
     for ch in range(n_channels_per_side*2):
         y_center = tip_length + (n_channels_per_side*2 - ch-2) * interchannel_y + eletrode_size_y / 2
         ax.text(-shank_width-wavewidth-15, y_center, str(ch + 1), ha="center", va="center", fontsize=14)
-    ax.text(-shank_width-wavewidth-15, vertical_eletrode_span-14, "ch #", ha="center", va="center", fontsize=14)
+    ax.text(-shank_width-wavewidth-15, vertical_eletrode_span-10, f"shank#\nch#", ha="center", va="center", fontsize=10)
+    ax.text(0, vertical_eletrode_span-5, f"{str(f'{ref_shank:02d}'):{wavewidth/4}s}ref", ha="center", va="center", fontsize=12)
+    if target_shank is not None: 
+        ax.text(0, vertical_eletrode_span-5, f"{str(f'{target_shank:02d}'):{wavewidth/2}s}tgt", ha="center", va="center", fontsize=12)
+    ax.text(-shank_width-wavewidth-15,-interchannel_y,footnote,fontsize=12)
 
     # Set limits and aspect
     ax.set_xlim(-shank_width-wavewidth, shank_width+wavewidth)
@@ -192,6 +201,5 @@ def plot_waveform_on_channel(ref_waveform,target_waveform=None,ref_color="orange
     ax.set_aspect("equal")
     ax.axis("off")
 
-    # plt.show()
+    return ax
 
-    return fig

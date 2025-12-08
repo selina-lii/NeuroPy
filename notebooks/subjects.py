@@ -670,8 +670,8 @@ def data_table(sessions: list):
 # minimally processed
 class Group:
     tag = None
-    basedir = Path("/Users/selinl/Documents/sessions") # laptop
-    # basedir = Path("/home/selinali/Documents/ms_synchrony/sessions") # Tower
+    # basedir = Path("/Users/selinl/Documents/sessions") # laptop
+    basedir = Path("/home/selinali/Documents/ms_synchrony/sessions") # Tower
     # basedir = Path("/data/Clustering/sessions/")
 
     def _process(self, rel_path, use_relaligned_pos=False):
