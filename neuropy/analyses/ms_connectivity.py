@@ -3,11 +3,11 @@
 
 from neuropy.io import NeuroscopeIO
 import numpy as np
-# try:
-#     import cupy as cp
-# except ImportError:
-#     print("Error importing CuPy")
-#     cp = None
+try:
+    import cupy as cp
+except ImportError:
+    print("Error importing CuPy")
+    cp = None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
