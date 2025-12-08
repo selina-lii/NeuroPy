@@ -2,11 +2,11 @@
  et al. (2017)"""
 
 import numpy as np
-try:
-    import cupy as cp
-except ImportError:
-    print("Error importing CuPy")
-    cp = None
+# try:
+#     import cupy as cp
+# except ImportError:
+#     print("Error importing CuPy")
+#     cp = None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
@@ -41,6 +41,7 @@ class Key:
     session: Optional[str] = None
     epoch: Optional[str] = None
     ref_ind: Optional[int] = None
+    target_ind: Optional[int] = None
     chunk: Optional[int] = None
     excitability: Optional[str] = None
     conn_type: Optional[tuple[str,str]] = None
@@ -59,6 +60,7 @@ class Key:
         if self.session: parts.append(f"{self.session}")
         if self.epoch: parts.append(f"{self.epoch}")
         if self.ref_ind is not None: parts.append(f"ref{self.ref_ind}")
+        if self.target_ind is not None: parts.append(f"_tgt{self.target_ind}")
         if self.chunk is not None: parts.append(f"c{self.chunk}")
         if self.excitability: parts.append(f"{self.excitability}")
         if self.conn_type: parts.append(f"{self.conn_type[0]}-{self.conn_type[1]}")
@@ -86,7 +88,7 @@ class Key:
         if self.excitability is not None: # conn_type goes with excitability
             return Key(self.session, self.epoch, chunk=self.chunk)
         if self.chunk is not None:
-            return Key(self.session, self.epoch, self.ref_ind)
+            return Key(self.session, self.epoch, self.ref_ind, self.target_ind)
         if self.ref_ind is not None:
             return Key(self.session, self.epoch)
         if self.epoch is not None:
@@ -96,6 +98,9 @@ class Key:
     def subkey(self, *dimensions) -> 'Key':
         return Key(**{dim: getattr(self, dim, None) for dim in dimensions})
  
+    def remove(self,*dimensions) -> 'Key':
+        return Key(**{f: getattr(self, f) for f in self.__dataclass_fields__ if f not in dimensions})
+
 
 class AnalysisDataset:
     """
@@ -130,7 +135,7 @@ class AnalysisDataset:
         """Get all keys matching criteria"""
         return [k for k in self.data.keys() if k.matches(**criteria)]
     
-    def group_by(self, *dimensions) -> Dict[Key, Dict[Key, Any]]:
+    def group_by(self, *dimensions, source='data') -> Dict[Key, Dict[Key, Any]]:
         """
         Group data by specified dimensions.
         
@@ -138,8 +143,9 @@ class AnalysisDataset:
             dataset.group_by('session', 'epoch')
             # Returns: {('s1', 'pre'): {key: data, ...}, ('s1', 'post'): {...}}
         """
+        items = getattr(self, source)
         groups = defaultdict(dict)
-        for key, value in self.data.items():
+        for key, value in items.items():
             # group_key = tuple(getattr(key, dim, None) for dim in dimensions)
             groups[key.subkey(*dimensions)][key] = value
         return dict(groups)
@@ -262,11 +268,6 @@ class NormalizeBy(Enum):
     # TGT_SPKS = 4 # I don't think we're doing those yet
 
 
-class CCGDataFormat(Enum):
-    FLAT_VIEW = 0
-    FILTERED = 1
-
-
 class CCGConfig:
     """
     All the details of CCG computation need to be predefined, kinda like a batch run
@@ -289,7 +290,6 @@ class CCGConfig:
                 use_acceleration = True,
                 symmetrize_ccg = True,
                 normalize:NormalizeBy = NormalizeBy.NONE,
-                data_view = CCGDataFormat.FILTERED
                 ):
         self.name = name
 
@@ -321,7 +321,6 @@ class CCGConfig:
         self.symmetrize_ccg = symmetrize_ccg
 
         self.normalize = normalize
-        self.data_view = data_view
 
         # if self.use_multiple_correction: 
         #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
@@ -550,10 +549,10 @@ class NeuronsDataset(AnalysisDataset):
                 if self.conf.spikecount_per_group is not None:
                     for i in range(N):
                         k = Key(session=ssn, epoch=e, ref_ind=i)
-                        edges = neus._edges_by_spikecount(i=i,
+                        edges = neus._edges_spikecount(i=i,
                                                           n=self.conf.spikecount_per_group,
                                                           discard_tail=False)
-                        self.edge_timestamps[k]=len(edges)
+                        self.edge_timestamps[k]=edges
                 elif self.conf.chunk_stride is not None and self.conf.chunk_len is not None:
                     self.edge_timestamps[key] = neus._edges_time_window(stride=self.conf.chunk_stride, 
                                                                         chunk_len=self.conf.chunk_len) 
@@ -600,12 +599,10 @@ class CCG:
         self.conn_strength = conn_strength # 
         self._conf=conf
         n=self.inds.shape[0]
-        if type(significant)==bool and significant == True:
-            self.significant=np.ones(n) # by default, all ccgs in this variable are significant
-        elif type(significant)==bool and significant == False:
-            self.significant=np.zeros(n)
+        if type(significant)==bool:
+            self.significant=np.full((n,),significant) # by default, all ccgs in this variable are significant
         else:
-            assert significant.shape==(n,)
+            # assert significant.shape==(n,)#TODO
             self.significant=significant
 
     def __str__(self):
@@ -619,11 +616,15 @@ class CCG:
     
     @property
     def ref_inds(self):
-        return self.inds[:,0]
+        return self.inds[:,-2]
     
     @property
     def target_inds(self):
-        return self.inds[:,1]
+        return self.inds[:,-1]
+    
+    @property
+    def ref_ind(self):
+        return self.inds[-2]
     
     @property
     def conf(self):
@@ -643,11 +644,25 @@ class CCG:
         Can be negative
         """
         auc = self.ccg-self.ccg_null # area under curve
-        cs = np.sum(auc[:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=1) # inds,nbins
-        if norm_factor is not None: cs /= norm_factor # e.g. presynaptic element firing rate
-        self.conn_strength = cs
+        cs = np.sum(auc[:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=1) # (inds,)
+        if norm_factor is not None: cs = (cs.astype(float) / norm_factor.T).ravel() # e.g. presynaptic element firing rate
+        self.conn_strength = cs # divided by presynaptic firing rate
 
-    def _set_cs_tail(self, acgs:ACG, nspks:list, norm_factor:np.ndarray=False):
+    def _set_cs_eranconv_compound(self, norm_factor:float=None):
+        """
+        Connection strength:
+        
+            Area under CCG curve minus baseline, within temporal ROI
+            The ROI is by default the same as the interval tested for peak/trough signficance
+
+        Can be negative
+        """
+        auc = self.ccg-self.ccg_null # area under curve
+        cs = np.sum(auc[:,:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=(1,2)) # (inds,)
+        if norm_factor is not None: cs = cs.astype(float) / norm_factor # e.g. presynaptic element firing rate
+        self.conn_strength = cs # divided by presynaptic firing rate
+
+    def _set_cs_tail(self, acgs:ACG, nspks:list, norm_factor:np.ndarray=False): #TODO untested
         """
         Connection strength:
 
@@ -698,7 +713,7 @@ class CCG:
         if not os.path.exists(plotdir):
             os.makedirs(plotdir,exist_ok=True)
 
-        s=np.argsort(self.inds[:,1]) #[np.random.random_integers(0,inds.shape[0]-1,5)]
+        s=np.argsort(self.inds[:,-1]) #[np.random.random_integers(0,inds.shape[0]-1,5)]
         for i,inds in enumerate(self.inds[s]):
             print(i,inds)
             #TODO self doesn't have all the indices so the they're overflowing
@@ -817,7 +832,11 @@ class Connectivity:
         plt.figure()
         inds = self.filter(min_n_chunk=n_chunks_threshold,skips=skips)
         plot_data = self.strength[inds]
+        significant=self.exist[inds]
         pairs = self.inds[inds]
+        if pairs.shape[0]==0: 
+            print(f"{self.key}: No pairs fit the criteria min_n_chunk={n_chunks_threshold}, nothing is plotted")
+            return
 
         if norm_by_total_strength:
             plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
@@ -827,8 +846,10 @@ class Connectivity:
             plot_data=(plot_data - np.nanmin(plot_data,axis=1,keepdims=True)) / np.nanmean(plot_data,axis=1,keepdims=True)
         colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
         legend_keys = []
-        for i, (pair, v, c) in enumerate(zip(pairs,plot_data,colors)):
+        for i, (pair, v, c, sig) in enumerate(zip(pairs,plot_data,colors,significant)):
             plt.plot(v,c=c,alpha=0.3)  # normalized
+            x_sig = np.where(sig)[0]
+            plt.scatter(x_sig, v[x_sig], s=8, c=c,label="_nolegend_")
             if show_legend: legend_keys.append(f"{i}:{pair}")
         plt.title(f"{self.key}")
         plt.xlabel("epoch id")
@@ -887,15 +908,15 @@ class CCGDataset(AnalysisDataset):
 
     @conf.setter
     def conf(self,conf):
-        ans = input("Changing configuration will remove existing CCG data. Proceed? [y/n]").lower()
-        if ans=='n' or ans=='no':
-            print("Aborted")
-            return
+        # ans = input("Changing configuration will remove existing CCG data. Proceed? [y/n]").lower()
+        # if ans=='n' or ans=='no':
+        #     print("Aborted")
+        #     return
         self._conf = conf
-        self.data={}
-        self.spurious={}
-        self.auto={}
-        self.connectivity={}
+        # self.data={}
+        # self.spurious={}
+        # self.auto={}
+        # self.connectivity={}
     
     def filter_excitability(self, E):
         return self.filter(excitability=E)
@@ -969,38 +990,52 @@ class CCGDataset(AnalysisDataset):
         conv = EranConv()
         for key, neurons in self.nd.data.items():
             ccgs, spurs, autos, printstr = conv.eranconv_1st_pass(key=key, 
-                                                                  neurons=neurons, 
-                                                                  chunk_edges=self.nd.edge_timestamps[key], 
-                                                                  conf=self.conf)
+                                        neurons=neurons, 
+                                        chunk_edges=self.nd.edge_timestamps[key], 
+                                        conf=self.conf)
             self.append_ccg(key, ccgs)
             self.append_spurious(key, spurs)
             self.append_auto(key, autos)
             print(_s(key.session,neurons)+printstr)
 
-    def _reCCG(self,ccg_key:Key,
-               conf:CCGConfig,
-               significance_method=None, #TODO
+    def _reCCG(self,key:Key,
+               indices_source=CCGIndexSource.SIGNIFICANT,
+               inds=None,
                ):
         """
         Rerun CCG given list of indices
 
         Call one of the wrappers instead
         """
-        new_dataset = CCGDataset(self.nd,conf=conf)
-        for key, ccg in self.connectivity.items().group_by(['session','epoch']): #TODO fix grouping
-            if ccg is not None:
-                inds = self.connectivity[ccg_key].inds
-            conv = EranConv()
-            new_dataset.data[key] = conv.eranconv_2nd_pass(key=key, 
-                                  neurons=self.nd.data[key], # TODO 2nd pass doesn't concern multiple conn types, but we can make such an indices array
-                                  ref_inds=inds[:,0], 
-                                  target_inds=inds[:,1], 
-                                  chunk_edges=self.nd.edge_timestamps[key], 
-                                  conf=self.conf)
-        return new_dataset
+        chunk_edges=None
+        
+        # groups=self.group_by('session','epoch',source='connectivity')
+        if inds is not None:
+            k = Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,chunk=key.chunk)
+            chunk_edges = self.nd.edge_timestamps[k]
 
-    def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False,run_conv=False,
-                        method="eran_conv"):
+        elif indices_source==CCGIndexSource.SIGNIFICANT:
+            inds = self.data[key].inds
+
+        elif indices_source==CCGIndexSource.SPURIOUS:
+            inds = self.spurious[key].inds
+
+        elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
+            inds = self.connectivity[key].inds
+
+        elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
+            inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T                  
+
+        conv = EranConv()
+        data_key = key.subkey('session','epoch')
+        ccgs = conv.eranconv_2nd_pass(key=key, 
+                            neurons=self.nd.data[data_key], # session, epoch, conn_type
+                            pair_inds=inds,
+                            chunk_edges=chunk_edges or self.nd.edge_timestamps[data_key], 
+                            conf=self.conf)
+        return ccgs
+
+    def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False):
         """
         Run CCG and convolution based significance test for all neurons
 
@@ -1009,7 +1044,7 @@ class CCGDataset(AnalysisDataset):
         ccg_config: Parameters for CCG, contains all configurations
         nd: Neurons dataset, contains all input data
         """
-        # possible to change timescale, etc through here.
+        # change timescale in my configurations.
         old_bin_size = self._conf.bin_size
         self._conf.bin_size = bin_size
         if duration: self._conf.duration = duration
@@ -1018,28 +1053,48 @@ class CCGDataset(AnalysisDataset):
 
         for key, ccg in self.data.items():
             if ccg is not None:
-                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,
-                                ccg_key=key,run_conv=run_conv)
+                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,ccg_key=key)
         print("rescale completed")
 
-        if not include_spurious: return
-
-        for key, spur in self.spurious.items():
-            if spur is not None:
-                self._reCCG(indices_source=CCGIndexSource.SPURIOUS,
-                                ccg_key=key,significance_method=method)
+        if include_spurious: 
+            for key, spur in self.spurious.items():
+                if spur is not None:
+                    self._reCCG(indices_source=CCGIndexSource.SPURIOUS,ccg_key=key)
         print("rescale of spurious CCG completed")
 
-    def reCCG_connectivity(self,method="eran_conv"):
+    def reCCG_connectivity(self):
         """
         Rerun CCG with list of pairs that had been significant in any chunk
         """
-        self.set_connection_strengths(method=method)
-        self.set_connectivity()
-        print("recomputed CCG")
+        for key, ccg in self.connectivity.items():
+            if ccg is not None:
+                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,key=key)
+                for k,ccg in new_ccgs.items():
+                     # inherit original significant markers
+                    ccg.significant = self.connectivity[key].exist[:,k.chunk]
+                    self.data[k] = ccg
+        print("recomputed CCG for pairs that had been significant in any chunk")
+    
+    def reCCG_connectivity_pairwise(self,conn_type=('pyr','pyr')):
+        """
+        TODO group by reference
+        """
+        group = self.group_by('conn_type',source='connectivity')[Key(conn_type=conn_type)]
+        self.data={}
+        for key, ccg in group.items():
+            if ccg is not None:
+                for i,pair in enumerate(ccg.inds):
+                    print(f"reCCG: {i}/{ccg.inds.shape[0]}")
+                    k = Key(session=key.session,epoch=key.epoch,ref_ind=pair[0],target_ind=pair[1],
+                            chunk=key.chunk,excitability=key.excitability,conn_type=key.conn_type)
+                    new_ccgs = self._reCCG(key=k,
+                                           inds=pair)
+                    for k,new_ccg in new_ccgs.items():
+                        self.data[k] = new_ccg
+        print("recomputed CCG using spike count chunks")
 
     def save_plots(self, jd = 'JitterDataset', root="~/Documents/NeuroPy/images/ccg_plots",
-                   frates_all:dict=None, conn_types:list=None):
+                   conn_types:list=None):
         assert os.path.isdir(os.path.expanduser(root))
         if isinstance(jd,str): jd = None # TODO ugly. to avoid circular imports
         keys = self.keys_matching(conn_type=conn_types) if conn_types else self.data.keys()
@@ -1047,9 +1102,15 @@ class CCGDataset(AnalysisDataset):
         print(f"Saving plots under {root}")
         for key in keys:
             ccg = self.data[key]
-            print(key, key.parent())
-            neurons = self.nd[key.parent()]
-            frates = frates_all[key.parent()] if frates_all else None
+            neurons = self.nd[key.subkey('session','epoch')]
+            chunk_edges = self.nd.edge_timestamps[key.subkey('session','epoch')]
+            if chunk_edges is not None:
+                t_start= chunk_edges[0][key.chunk]
+                t_end=chunk_edges[1][key.chunk]
+                firing_rate = None if neurons.firing_rate is None else neurons.time_slice(t_start,t_end).firing_rate[ccg.inds]
+            else:
+                firing_rate = None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds]
+            # frates = frates_all[key.subkey('session','epoch')] if frates_all else None
             print(f"ccg {key.session} {key.conn_type}")
             # try:
             if jd is not None:
@@ -1057,10 +1118,11 @@ class CCGDataset(AnalysisDataset):
             ccg.save_plots(
                 neuron_types=neurons.neuron_type[ccg.inds],
                 waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
-                firing_rate=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
-                frates_all=None if frates is None else frates[ccg.inds],
+                frates_all=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
+                firing_rate=firing_rate,
                 root=root,
             )
+                # firing_rate=None if frates is None else frates[ccg.inds],
             # except Exception as e:
             #     print(f"No {key.conn_type} connections: {e}")
             #     continue
@@ -1094,9 +1156,9 @@ class CCGDataset(AnalysisDataset):
         """
         # TODO modifies data TODO untested TODO normalize to reference firing rate
         for d in self.data:
-            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,0]])
+            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,-2]])
         for d in self.spurious:
-            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,0]])
+            d.normalize(self.nd.data[d.key.parent()].n_spikes[d.inds[:,-2]])
 
     def set_connection_strengths(self, method="eran_conv"):
         """
@@ -1105,13 +1167,12 @@ class CCGDataset(AnalysisDataset):
         """
         #TODO untested
         for key, ccg in self.data.items():
+            k=Key(key.session,key.epoch)
             if ccg is None: continue # no connection
-            if self.conf.normalize==NormalizeBy.REF_FRATE:
-                print("here")
-                print(key.parent())
-                norm_factors = self.nd[key.parent()].firing_rate[ccg.ref_inds][...,np.newaxis]
-            elif self.conf.normalize==NormalizeBy.REF_SPKS:
-                norm_factors = self.nd[key.parent()].n_spikes[ccg.ref_inds][...,np.newaxis]
+            if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
+                norm_factors = self.nd[k].firing_rate[ccg.ref_inds][...,np.newaxis]
+            elif self.conf.normalize.name==NormalizeBy.REF_SPKS.name:
+                norm_factors = self.nd[k].n_spikes[ccg.ref_inds][...,np.newaxis]
             else:
                 norm_factors = None
 
@@ -1122,6 +1183,22 @@ class CCGDataset(AnalysisDataset):
                 acg = self.auto[key.parent()]
                 ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
                 return NotImplementedError("Unknown connection strength method")
+
+    def set_connection_strengths_compound(self, method="eran_conv"):
+        """
+        Set value for each CCG() object of self.data based on given method.
+        Values can be found in self.data[i].conn_strengths.
+        """
+        for key, ccg in self.data.items():
+            k=Key(key.session,key.epoch)
+            if ccg is None: continue # no connection
+            if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
+                norm_factor = self.nd[k].firing_rate[ccg.ref_ind]
+            elif self.conf.normaliz.name==NormalizeBy.REF_SPKS.name:
+                norm_factor = self.nd[k].n_spikes[ccg.ref_ind]
+            else:
+                norm_factor = None
+            ccg._set_cs_eranconv_compound(norm_factor)
 
     def set_connectivity(self, conn_types=None, sessions=None, epochs=None):
         """
@@ -1137,7 +1214,7 @@ class CCGDataset(AnalysisDataset):
             exist = {}
             strength = {}
             pairs = []
-            n = int(self.nd.n_chunks[k.parent()])
+            n = 1 if self.nd.edge_timestamps[k.parent()] is None else len(self.nd.edge_timestamps[k.parent()][0])
             for keyy, _ in grouped[k].items():
                 i_chunk = keyy.chunk
                 if keyy.conn_type in conn_types:
@@ -1149,7 +1226,7 @@ class CCGDataset(AnalysisDataset):
                             pairs.append(p)
                             exist[p]=np.full(n,False)
                             strength[p]=np.full(n,np.nan)
-                        exist[p][i_chunk]=True if sig else False
+                        exist[p][i_chunk]=sig
                         strength[p][i_chunk]=val
             exist_arr = np.zeros((len(pairs),n))
             strength_arr = np.zeros((len(pairs),n))
@@ -1157,10 +1234,23 @@ class CCGDataset(AnalysisDataset):
                 exist_arr[i]=exist[p]
                 strength_arr[i]=strength[p]
             conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
-            neurons = self.nd.data[Key(k.session,k.epoch,chunk=0)]
+            neurons = self.nd.data[Key(k.session,k.epoch)]
             self.connectivity[conn_key] = Connectivity(key=conn_key, n_chunks=n, ccgs=group,
                                                        inds=pairs, exist=exist_arr, strength=strength_arr,
                                                        ids = neurons.ind2id(pairs))
+
+    # def set_connectivity_compound(self):
+    #     """
+    #     Create Connectivity objects within this class from connection strengths.
+    #     Sess class Connecitivity().
+    #     """
+    #     for k, ccg in self.data.items():
+    #         chunk_key = Key(session=k.session, epoch=k.epoch, ref_ind=k.ref_ind)
+    #         n = len(self.nd.edge_timestamps[chunk_key][0])
+    #         neurons = self.nd.data[Key(k.session,k.epoch)]
+    #         self.connectivity[k] = Connectivity(key=k, n_chunks=n, ccgs=ccg,
+    #                                                    inds=ccg.inds, exist=ccg.significant, strength=ccg.conn_strength,
+    #                                                    ids = neurons.ind2id(ccg.inds))
 
     # TODO move to plotting
     def plot_connection_strengths(self,n_chunks_threshold=None,save=False,
@@ -1177,7 +1267,81 @@ class CCGDataset(AnalysisDataset):
                                            z_score=z_score,
                                            show_legend=show_legend,
                                            skips=skips.get(k1))
-            print(skips.get(k1))
+            print(k1,skips.get(k1))
+
+    def plot_connection_strengths_compound(self,n_chunks_threshold=None,save=False,
+                                            norm_by_n_sess=False,
+                                            norm_by_total_strength=False,
+                                            z_score=False,
+                                            show_legend=False,
+                                            skips={},
+                                            legend_group_size=25):
+            self.plot_strength_compound(n_chunks_threshold=n_chunks_threshold,
+                                           save=save,
+                                           norm_by_n_sess=norm_by_n_sess,
+                                           norm_by_total_strength=norm_by_total_strength,
+                                           z_score=z_score,
+                                           show_legend=show_legend,
+                                           legend_group_size=legend_group_size
+                                           )
+
+    def plot_strength_compound(self,
+                      n_chunks_threshold=None,save=False,
+                        norm_by_n_sess=False,
+                        norm_by_total_strength=False,
+                        z_score=False,
+                        show_legend=False,
+                        legend_group_size=25,
+                        ):
+        inds=[]
+        strength=[]
+        x_coords=[]
+        sig=[]
+        for k, ccg in self.data.items():
+            edges = self.nd.edge_timestamps[k.subkey('session','epoch','ref_ind')]
+            xcoord = np.array([(ts+te)/7200 for ts,te in zip(edges[0],edges[1])])
+            inds.append(ccg.inds)
+            strength.append(ccg.conn_strength)
+            sig.append(ccg.significant)
+            x_coords.append(xcoord)
+        inds=np.array(inds)
+        x_ticks = list(np.arange(13))
+
+        # n_chunks_threshold=n_chunks_threshold if n_chunks_threshold is not None else self.n_chunks
+        plt.figure()
+        # inds = self.filter(min_n_chunk=n_chunks_threshold,skips=skips)
+        plot_data = strength
+        pairs = inds
+        if pairs.shape[0]==0: 
+            print(f": No pairs fit the criteria min_n_chunk={n_chunks_threshold}, nothing is plotted")
+            return
+
+        if norm_by_total_strength:
+            plot_data=[x/np.nansum(x) for x in plot_data]
+        if norm_by_n_sess:
+            plot_data=[x*np.count_nonzero(si)/len(x) for x,si in zip(plot_data,sig)]
+        if z_score:
+            plot_data=[(x - np.nanmin(x)) / np.nanmean(x) for x in plot_data]
+        colors = plt.cm.hsv(np.linspace(0, 1, len(plot_data)))
+        legend_keys = []
+        for i, (pair, x,y, c,si) in enumerate(zip(pairs,x_coords,plot_data,colors,sig)):
+            plt.plot(x,y,c=c,alpha=0.3)
+            si=np.array(si)
+            if si.any():plt.scatter(x[si], y[si], s=8,c=c,label="_nolegend_")
+            if show_legend: legend_keys.append(f"{i}:{pair}({len(x)})")
+        plt.title(f"{k.subkey('session','epoch','excitability','conn_type')}")
+        plt.xlabel("time (hours)")
+        plt.xticks(x_ticks,x_ticks)
+        plt.ylabel("normalized connection strength")
+        if show_legend: 
+            # spacing
+            ncol = 1+int(i//legend_group_size)
+            i_per_col=i//ncol
+            offset = -.3-1*(i_per_col/legend_group_size)
+            plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
+        plt.show()
+        #TODO save
+
 
 
 class DataState(Enum):
@@ -1368,10 +1532,10 @@ class Jitterlet:
 
         """
         if EI=='E':
-            pval = np.argsort(np.argsort(-self.j_ccg,axis=1,kind="stable"),axis=1)[:,0]/self.conf.njitter
+            pval = np.argsort(np.argsort(-self.j_ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.conf.njitter
             thresholds = np.percentile(self.j_ccg[:,1:], 100*(1-self.conf.alpha), axis=1)
         else:
-            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,0]/self.njitter
+            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.njitter
             thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
 
         self.j_sig = pval<=self.conf.alpha
@@ -1452,7 +1616,7 @@ class Jitter:
     def get_jitter_inputs(self):
         """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
         grouped by target indices"""
-        keys, inv = np.unique(self.ccg.inds[:,1], return_inverse=True)
+        keys, inv = np.unique(self.ccg.inds[:,-1], return_inverse=True)
         self.jref_inds = [self.ccg.inds[inv==i,0].tolist() for i in range(len(keys))]
         self.jtgt_inds = keys
         self.pos = {k: np.where(inv == i)[0] for i, k in enumerate(keys)}
@@ -1514,12 +1678,12 @@ class JitterDataset:
 
     @conf.setter
     def conf(self,conf):
-        ans = input("Changing configuration will remove existing jitters. Proceed? [y/n]").lower()
-        if ans=='n' or ans=='no':
-            print("Aborted")
-            return
+        # ans = input("Changing configuration will remove existing jitters. Proceed? [y/n]").lower()
+        # if ans=='n' or ans=='no':
+        #     print("Aborted")
+        #     return
         self._conf = conf
-        self.data = []
+        # self.data = []
 
     @property
     def filepath(self):
@@ -1619,12 +1783,8 @@ class EranConv:
     """
     A device for running EranConv and other significance tests    
     """
-    Emask_basic=[]
-    Imask_basic=[]
-    Emask=[]
-    Imask=[]
-    mask_basic=[]
-    mask=[]
+    mask_basic={}
+    mask={}
 
     pvals=[]
     qvals=[]
@@ -1637,7 +1797,7 @@ class EranConv:
     conf=None
 
     @staticmethod
-    def _eranconv(ccg, W=5, wintype="gauss", hollow_frac=None):
+    def _conv(ccg, W=5, wintype="gauss", hollow_frac=None):
         """
         Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
         Referencing MATLAB script EranConv.m written by the authors
@@ -1708,56 +1868,62 @@ class EranConv:
         qvals = 1 - pvals
         return pvals, pred, qvals
 
-    @staticmethod
-    def intersect2d(coords1,coords2,n):
+    def intersect(self, coords1, coords2):
         # Intersection of coordinate lists
-        coords1 = coords1[:,0]*n+coords1[:,1]
-        coords2 = coords2[:,0]*n+coords2[:,1]
-        coords=np.intersect1d(coords1,coords2)
-        coords=np.array([[x//n,x%n] for x in coords])
+        ravel_dims = (self.n,self.n) if coords1.shape[-1]==2 else (self.n_chunks,self.n,self.n) #TODO
+        coords1_flat = np.ravel_multi_index(coords1.T, ravel_dims)
+        coords2_flat = np.ravel_multi_index(coords2.T, ravel_dims)
+        coords_flat = np.intersect1d(coords1_flat, coords2_flat)
+        coords = np.array(np.unravel_index(coords_flat, ravel_dims)).T
         return coords
 
-    @staticmethod
-    def _setdiff2d(coords1,coords2,n):
+    def setdiff(self, coords1,coords2):
         # Set difference of coordinate lists
-        coords1 = coords1[:,0]*n+coords1[:,1]
-        coords2 = coords2[:,0]*n+coords2[:,1]
-        coords=np.setdiff1d(coords1,coords2)
-        coords=np.array([[x//n,x%n] for x in coords])
+        ravel_dims = (self.n,self.n) if coords1.shape[-1]==2 else (self.n_chunks,self.n,self.n)
+        flat1 = np.ravel_multi_index(coords1.T, ravel_dims)
+        flat2 = np.ravel_multi_index(coords2.T, ravel_dims)
+        flat  = np.setdiff1d(flat1, flat2)
+        coords = np.array(np.unravel_index(flat, ravel_dims)).T
         return coords
 
     @staticmethod
     def get_autocorr_locations(shape):
-        autocorr_locations = np.eye(shape[-3], dtype=bool)
+        """
+        Genearte a mask of autocorrelation locations shaped (ngroups, nneurons, nneurons)
+        """
         n_auto = min(shape[-3], shape[-2])
         auto_mask = np.eye(n_auto, dtype=bool)
         auto_mask = np.pad(auto_mask, ((0,shape[-3]-n_auto),(0,shape[-2]-n_auto)))
-        autocorr_locations = (..., auto_mask, slice(None))
+        autocorr_locations = np.broadcast_to(auto_mask, shape[:-1])
         return autocorr_locations
     
     @staticmethod
     def multiple_correction(pvals,alpha,method='bonferroni'):
         # NOTE should bump this to utils or something
         # methods: 'fdr_bh', 'bonferroni'
-        p_flat = pvals.ravel()
-        sig, p_corr, _, _ = multipletests(p_flat, alpha=alpha, method=method)
-        sig = sig.reshape(pvals.shape)
-        p_corr = p_corr.reshape(pvals.shape)   
-        # sig = (pvals[...,C+start:C+end+1] < corrected_alpha)
+        sig = np.empty_like(pvals, dtype=bool)
+        p_corr = np.empty_like(pvals, dtype=float)
+
+        for idx in np.ndindex(pvals.shape[:-3]):
+            subarray = pvals[idx]  # shape = last 3 dims
+            flat = subarray.ravel()
+            s, pc, _, _ = multipletests(flat, alpha=alpha, method=method)
+            sig[idx] = s.reshape(subarray.shape)
+            p_corr[idx] = pc.reshape(subarray.shape)
         return sig,p_corr
     
-    def significance_mask(self,sig,excitability):
+    def significance_mask(self,excitability):
         conf = self.conf
-        autocorr_locations = EranConv.get_autocorr_locations(sig.shape)
+        autocorr_locations = EranConv.get_autocorr_locations(self.pvals.shape)
         if excitability=='E':
             sig, self.pval_corrected = EranConv.multiple_correction(self.pvals, conf.alpha)
-            mask = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1) & ~autocorr_locations)
+            sig_mask = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1) & ~autocorr_locations)
         elif excitability=='I':
             sig1, self.qval_corrected = EranConv.multiple_correction(self.qvals, conf.alpha)
             sig2, self.qval_corrected2 = EranConv.multiple_correction(self.qvals, conf.alpha2)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
-            mask = np.argwhere(neighbor.any(-1) & ~autocorr_locations)
-        return mask            
+            sig_mask = np.argwhere(neighbor.any(-1) & ~autocorr_locations)
+        return sig_mask
 
     def _cell_type_mask(self,pair_inds,neurons,conn_types):
         sig_pairs = {}
@@ -1767,22 +1933,22 @@ class EranConv:
 
         # Condition 3: Ref/Target are specific cell types
         for ct in conn_types:
-            inds=np.where(np.isin(pair_inds[:,0],np.where(neurons.neuron_type==ct[0])) & 
-                                np.isin(pair_inds[:,1],np.where(neurons.neuron_type==ct[1])))[0]
-            sig_pairs[ct]=inds if inds.shape[0] else None
+            inds=np.where(np.isin(pair_inds[:,-2],np.where(neurons.neuron_type==ct[0])) & 
+                                np.isin(pair_inds[:,-1],np.where(neurons.neuron_type==ct[1])))[0]
+            sig_pairs[ct]=pair_inds[inds] if inds.shape[0] else None
         return sig_pairs
     
     def _probe_loc_mask(self,pair_inds,neurons):
         # Condition 2: Ref/Target are not too close by
         ignore = self.conf.ignore
-        x,y = pair_inds[:,0],pair_inds[:,1]
-        if ignore==IgnoreLevel.SAME_CHANNEL:
+        x,y = pair_inds[:,-2],pair_inds[:,-1]
+        if ignore.name==IgnoreLevel.SAME_CHANNEL.name:
             assert neurons.peak_channels is not None
             inds=np.where(neurons.peak_channels[x]!=neurons.peak_channels[y])[0]
-        elif ignore==IgnoreLevel.SAME_SHANK:
+        elif ignore.name==IgnoreLevel.SAME_SHANK.name:
             assert neurons.shank_ids is not None
             inds=np.where(neurons.shank_ids[x]!=neurons.shank_ids[y])[0]
-        return inds
+        return pair_inds[inds]
     
     @staticmethod
     def count_significant_pairs():
@@ -1798,54 +1964,6 @@ class EranConv:
         """
         pass
 
-    def process_output_eranconv(self,neurons):
-        
-        ccgs_by_type,spurs_by_type = {},{} # 1 neuron group -> many connection types
-
-        # Update return values
-        for EI, filtered_pairs, all_pairs in zip(['E','I'],
-                                                [self.Emask,self.Imask],
-                                                [self.Emask_basic,self.Imask_basic]):
-            significance = self.pvals if EI=='E' else self.qvals # TODO TODO not storing corrected p-vals. make it an option!
-
-            spurious_pairs = all_pairs
-            for conn_type, pairs in filtered_pairs.items():
-                key = Key(session=key.session,
-                        epoch=key.epoch,
-                        chunk=key.chunk,
-                        conn_type=conn_type,
-                        excitability=EI)
-                if pairs is None or len(pairs)==0:
-                    ccgs_by_type[key] = None
-                else:
-                    spurious_pairs = EranConv._setdiff2d(spurious_pairs,pairs,n)
-                    x,y = pairs[:,0],pairs[:,1]
-                    ccgs_by_type[key] = CCG(inds=pairs, 
-                                        ids=neurons.ind2id(pairs), 
-                                        ccg=self.ccg[x,y], 
-                                        ccg_null=self.pred[x,y], 
-                                        pval=significance[x,y], 
-                                        conf=self.conf,
-                                        key=key)
-
-            key = Key(session=key.session,
-                    epoch=key.epoch,
-                    chunk=key.chunk,excitability=EI)
-            pairs = np.asarray(spurious_pairs)
-            if pairs is None or len(pairs)==0:
-                spurs_by_type[key] = None
-            else:
-                x,y = pairs[:,0],pairs[:,1]
-                spurs_by_type[key] = CCG(inds=pairs, 
-                                ids=neurons.ind2id(pairs), 
-                                ccg=self.ccg[x,y], 
-                                ccg_null=self.pred[x,y], 
-                                pval=significance[x,y], 
-                                conf=self.conf,
-                                key=key)
-        ### end of chunks loop ###
-        return ccgs_by_type, spurs_by_type
-
     # Update print string 
     def _printstr_sig(self, pairs_dict, EI, s=""):
         # if any type of connection under consideration has a non-zero count, print a summary
@@ -1857,12 +1975,62 @@ class EranConv:
             s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
         return s, nonempty
 
+    def _regroup_basic(self,pairs):
+        groups = defaultdict(lambda: defaultdict(list))
+        for i in range(self.n_chunks): 
+            for EI in ['E','I']:
+                groups[i][EI]=[]
+
+        for EI in ['E','I']:
+            for row in pairs[EI]:
+                if len(row)>2:
+                    groups[row[0]][EI].append(row[1:])
+                else:
+                    groups[0][EI].append(row)
+
+        for i in range(self.n_chunks): 
+            for EI in ['E','I']:
+                groups[i][EI]=np.array(groups[i][EI])
+        return groups
+
+    def __regroup_mask(self,pairs):
+        groups = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        for i in range(self.n_chunks): 
+            for EI in ['E','I']:
+                for conn_type in self.conf.conn_types[EI]:
+                    groups[i][EI][conn_type]=[]
+
+        for EI in ['E','I']:
+            for conn_type, pair_vals in pairs[EI].items():
+                if pair_vals is None: continue
+                for row in pair_vals:
+                    if len(row)>2:
+                        groups[row[0]][EI][conn_type].append(row[1:])
+                    else:
+                        groups[0][EI][conn_type].append(row)
+
+        for i in range(self.n_chunks): 
+            for EI in ['E','I']:
+                for conn_type in self.conf.conn_types[EI]:
+                    groups[i][EI][conn_type]=np.array(groups[i][EI][conn_type]) 
+        return groups
+    
+    def _group_by_chunk(self):
+        self.mask = self.__regroup_mask(self.mask)
+        self.mask_basic = self._regroup_basic(self.mask_basic)
+
     def eranconv_1st_pass(self, key:Key, neurons:Neurons, chunk_edges:np.ndarray, conf:CCGConfig):
         """
         Main function for CCG computatinon
         Call from CCGDataset
         """
+        print("running eranconv (1st pass)")
         self.conf = conf
+        self.n=neurons.n_neurons
+        if chunk_edges is not None:
+            self.n_chunks = len(chunk_edges[0])
+        else: 
+            self.n_chunks = 1
 
         self.ccg = correlations.spike_correlations(
                 neurons=neurons,
@@ -1873,68 +2041,187 @@ class EranConv:
                 symmetrize=conf.symmetrize_ccg,
                 chunk_edges=chunk_edges,
             )
+
         spkcount_mask = np.argwhere((self.ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
-        
-        self.pvals, self.pred,self.qvals = EranConv._eranconv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+
+        self.pvals, self.pred,self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
         # Universal criteria of significance
         # These indices pairs are kept as a baseline; anything not fitting downstream criteria is put under 'spurious'
-        autocorr_locations = EranConv.get_autocorr_locations(self.pvals.shape)
 
         # Multiple corrections
-        self.Emask_basic = EranConv.intersect2d(self.significance_mask('E'), spkcount_mask, neurons.n_neurons)
-        self.Emask = EranConv._probe_loc_mask(self.Emask_basic,neurons,conf.conn_types_E,ignore=conf.ignore)
-        self.Emask = EranConv._cell_type_mask(self.Emask,neurons,conf.conn_types_E,ignore=conf.ignore)
+        self.mask={'E':{},'I':{}}
+        self.mask_basic={'E':{},'I':{}}
 
-        self.Imask_basic = EranConv.intersect2d(self.significance_mask('I'), spkcount_mask, neurons.n_neurons)
-        self.Imask = EranConv._probe_loc_mask(self.Imask_basic,neurons,conf.conn_types_E,ignore=conf.ignore)
-        self.Imask = EranConv._cell_type_mask(self.Imask,neurons,conf.conn_types_E,ignore=conf.ignore)
+        self.mask_basic['E'] = self.intersect(self.significance_mask('E'), spkcount_mask)
+        self.mask['E'] = self._probe_loc_mask(self.mask_basic['E'],neurons)
+        self.mask['E'] = self._cell_type_mask(self.mask['E'],neurons,conf.conn_types_E)
 
-        E_str, hasE = self._printstr_sig(self.Emask, 'E')
-        I_str, hasI = self._printstr_sig(self.Imask, 'I')
+        self.mask_basic['I'] = self.intersect(self.significance_mask('I'), spkcount_mask)
+        self.mask['I'] = self._probe_loc_mask(self.mask_basic['I'],neurons)
+        self.mask['I'] = self._cell_type_mask(self.mask['I'],neurons,conf.conn_types_I)
 
-        overview_str = f"SLEEP{key.chunk}: E/I pairs {self.sigE.shape[0]:03d} / {self.sigI.shape[0]:03d} | "
-        overview_str=overview_str+E_str+I_str+"\n" if (hasE or hasI) else overview_str+"no connections\n"
+        ccgs_by_type, spurs_by_type, acgs = self.process_output(key, neurons)
 
-        ccgs_by_type, spurs_by_type = self.process_output_eranconv(neurons)
-        acgs = self.ccg[autocorr_locations]
+        overview_str=""
+        for i in range(self.n_chunks):
+            E_str, hasE = self._printstr_sig(self.mask[i]['E'], 'E')
+            I_str, hasI = self._printstr_sig(self.mask[i]['I'], 'I')
+            overview_str += f"SLEEP{i}: E/I pairs {self.mask_basic[i]['E'].shape[0]:03d} / {self.mask_basic[i]['I'].shape[0]:03d} | "
+            overview_str=overview_str+E_str+I_str+"\n" if (hasE or hasI) else overview_str+"no connections\n"
+        print("eranconv (1st pass) done")
 
         return ccgs_by_type, spurs_by_type, acgs, overview_str
 
-    def eranconv_2nd_pass(self, key:Key, neurons:Neurons, ref_inds:list, target_inds:list, chunk_edges:np.ndarray, conf:CCGConfig):
-        # ref and target indices should be organized by conn type
-        pairs = np.concatenate([ref_inds,target_inds],axis=1)
-        self.conf = conf
-        ccg = {}
+    def process_output(self, key, neurons):
+        """
+        Post processor organizing eranconv outputs into mergeable formats for CCGDataset
+        """
+        
+        self._group_by_chunk()
+        if len(self.ccg.shape)==3: 
+            self.ccg=self.ccg[np.newaxis,...]
+            self.pred=self.pred[np.newaxis,...]
+            self.pval_corrected=self.pval_corrected[np.newaxis,...]
+            self.qval_corrected=self.qval_corrected[np.newaxis,...]
+
+        ccgs_by_type,spurs_by_type,acgs = {},{},{} # 1 neuron group -> many connection types
+
+        # Update return values
+        for chunk_id in range(self.n_chunks):
+            for EI in ['E','I']:
+                filtered_pairs=self.mask[chunk_id][EI]
+                all_pairs=self.mask_basic[chunk_id][EI]
+                p = self.pval_corrected if EI=='E' else self.qval_corrected # TODO TODO not storing corrected p-vals. make it an option!
+
+                spurious_pairs = all_pairs
+                for conn_type, pairs in filtered_pairs.items():
+                    key = Key(session=key.session,
+                            epoch=key.epoch,
+                            chunk=chunk_id,
+                            conn_type=conn_type,
+                            excitability=EI)
+                    if pairs is None or len(pairs)==0:
+                        ccgs_by_type[key] = None
+                    else:
+                        spurious_pairs = self.setdiff(spurious_pairs,pairs)
+                        x,y = pairs[:,-2],pairs[:,-1]
+                        ccgs_by_type[key] = CCG(inds=pairs, 
+                                            ids=neurons.ind2id(pairs), 
+                                            ccg=self.ccg[chunk_id,x,y], 
+                                            ccg_null=self.pred[chunk_id,x,y], 
+                                            pval=p[chunk_id,x,y], 
+                                            conf=self.conf,
+                                            key=key)
+
+                key = Key(session=key.session,
+                        epoch=key.epoch,
+                        chunk=chunk_id,
+                        excitability=EI)
+                pairs = np.asarray(spurious_pairs)
+                if pairs is None or len(pairs)==0:
+                    spurs_by_type[key] = None
+                else:
+                    x,y = pairs[...,0],pairs[...,1]
+                    spurs_by_type[key] = CCG(inds=pairs, 
+                                    ids=neurons.ind2id(pairs), 
+                                    ccg=self.ccg[chunk_id,x,y], 
+                                    ccg_null=self.pred[chunk_id,x,y], 
+                                    pval=p[chunk_id,x,y], 
+                                    conf=self.conf,
+                                    key=key)
+        
+        autocorr_locations = EranConv.get_autocorr_locations(self.ccg.shape)            
+        if self.n_chunks:
+            for chunk_id in range(self.n_chunks):
+                key = Key(session=key.session,
+                        epoch=key.epoch,
+                        chunk=chunk_id)
+                acgs[key] = ACG(key=key,
+                            acg=self.ccg[chunk_id,autocorr_locations[0]],
+                            inds=np.arange(neurons.n_neurons),
+                            ids=neurons.ind2id(np.arange(neurons.n_neurons)),
+                            conf=self.conf)
+        else:
+            key = Key(session=key.session,
+                        epoch=key.epoch,
+                        chunk_id=0)
+            acgs[key] = ACG(key=key,
+                        acg=self.ccg[chunk_id,autocorr_locations[0]],
+                        inds=np.arange(neurons.n_neurons),
+                        ids=neurons.ind2id(np.arange(neurons.n_neurons)),
+                        conf=self.conf)
+
+        return ccgs_by_type, spurs_by_type, acgs
     
-        for EI,conn_types in zip(['E','I'],conf.conn_types):
-            k=Key(session=key.session,epoch=key.epoch,conn_type=ct,excitability=EI)
-            smallkey = Key(conn_type=ct,excitability=EI)
-            for ct in conn_types:
-                self.ccg = correlations.spike_correlations(
-                        neurons=neurons,
-                        neuron_inds=ref_inds[smallkey], # all
-                        target_inds=target_inds[smallkey],
-                        bin_size=conf.bin_size,
-                        window_size=conf.duration,
-                        use_acceleration=conf.use_acceleration,
-                        symmetrize=conf.symmetrize_ccg,
-                        chunk_edges=chunk_edges,
-                        paired=True #TODO
-                    )
-                spkcount_mask = np.argwhere((self.ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
-                self.pvals, self.pred, _ = EranConv._eranconv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
-                self.mask_basic = EranConv.intersect2d(self.significance_mask(EI), spkcount_mask, neurons.n_neurons)
-                self.mask = EranConv._probe_loc_mask(self.mask_basic,neurons,conf.conn_types_E,ignore=conf.ignore)
-                ccg[k]=CCG(inds=pairs, 
-                        ids=neurons.ind2id(pairs), 
-                        ccg=self.ccg, 
-                        ccg_null=self.pred, 
-                        pval=self.pval_corrected, 
-                        sig=self.mask,
+    def eranconv_2nd_pass(self, key:Key, neurons:Neurons, pair_inds:list, chunk_edges:np.ndarray, conf:CCGConfig):
+        # ref and target indices should be organized by conn type
+        print(f"running eranconv (2nd pass): {key}")
+
+        self.conf = conf
+        self.n=neurons.n_neurons
+        if chunk_edges is not None:
+            self.n_chunks = len(chunk_edges[0])
+        else: 
+            self.n_chunks = 1
+
+        self.conf = conf
+        ccgs = {}
+        if key.ref_ind is None:
+            self.ccg = correlations.spike_correlations(
+                    neurons=neurons,
+                    neuron_inds=np.arange(neurons.n_neurons),
+                    bin_size=conf.bin_size,
+                    window_size=conf.duration,
+                    use_acceleration=conf.use_acceleration,
+                    symmetrize=conf.symmetrize_ccg,
+                    chunk_edges=chunk_edges,
+                )
+            slicer = (..., pair_inds[:, -2], pair_inds[:, -1], slice(None))
+            self.ccg=self.ccg[slicer]
+
+            self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+            self.significance_mask(key.excitability)
+            for i in range(self.n_chunks):
+                k=Key(session=key.session,epoch=key.epoch,chunk=i,excitability=key.excitability,conn_type=key.conn_type)
+                ccgs[k]=CCG(inds=pair_inds, 
+                        ids=neurons.ind2id(pair_inds), 
+                        ccg=self.ccg[i], 
+                        ccg_null=self.pred[i], 
+                        pval=self.pval_corrected[i] if key.excitability=='E' else self.qval_corrected[i], 
                         conf=self.conf,
                         key=k)
-        return ccg
+        else:
+            self.ccg = correlations.spike_correlations(
+                    neurons=neurons,
+                    neuron_inds=pair_inds,
+                    bin_size=conf.bin_size,
+                    window_size=conf.duration,
+                    use_acceleration=conf.use_acceleration,
+                    symmetrize=conf.symmetrize_ccg,
+                    chunk_edges=chunk_edges,
+                )[:,0,1:2] #TODO
+            self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+
+            spkcount_mask = np.argwhere((self.ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
+            self.mask = self.intersect(self.significance_mask(key.excitability), spkcount_mask)
+            if self.mask.any(): self.mask = self._probe_loc_mask(self.mask,neurons)
+            sig = np.full((self.ccg.shape[-3],self.ccg.shape[-2]),False) 
+            if self.mask.any(): sig[self.mask[:,0],self.mask[:,1]] = True
+
+            k=Key(session=key.session,epoch=key.epoch,chunk=None,ref_ind=key.ref_ind,target_ind=key.target_ind,
+                  excitability=key.excitability,conn_type=key.conn_type)
+            ccgs[k]=CCG(inds=pair_inds, 
+                    ids=neurons.ind2id(pair_inds), 
+                    ccg=self.ccg, 
+                    ccg_null=self.pred, 
+                    pval=self.pval_corrected if key.excitability=='E' else self.qval_corrected, 
+                    conf=self.conf,
+                    significant=sig.squeeze(),
+                    key=k) # merged ccg
+
+        print("done")
+        return ccgs
     
 
 # NOTE move to plotting in the future!
@@ -2029,25 +2316,6 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, ccg_null=Non
     plt.close(fig)
     return fig
 
-
-class GroupwiseDiff:
-    """
-    Wrapper over a CCG, a neuron dataset, etc to split each item of the object into several windows of arbitrary step size
-    and compare statistics on them. 
-
-    Probably specific to the CCG project only, TBD how large the scope is
-    """
-    data:NeuronsDataset
-
-    def mean(self):
-        return self.data.mean()
-    def sd(self):
-        return self.data.std()
-    def iqr(self):
-        return np.percentile(self.data, 75)-np.percentile(self.data, 25)
-    def p_ttest(self):
-        return ttest_ind(self.data[k],self.data[j],equal_var=True).pvalue 
-    
 
 # will fall under WindowSweep
 def routine_mean_firing_rates(nd:NeuronsDataset):

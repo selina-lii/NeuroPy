@@ -286,6 +286,10 @@ class Neurons(DataWriter):
     def _edges_time_window(self, stride=None, chunk_len=None, keep_incomplete=False):
         t_start, t_stop = super()._time_slice_params()
 
+        if chunk_len>=t_stop-t_start:
+            print(f"chunk length overflowed, using maximum recording time {t_stop-t_start}") 
+            return [t_start],[t_stop]
+
         chunk_starts = np.arange(start=t_start,stop=t_stop-chunk_len+1,step=stride)
         chunk_stops = chunk_starts+chunk_len
 
@@ -308,7 +312,7 @@ class Neurons(DataWriter):
         """
         spkt = self.spiketrains[i]
         N=spkt.shape[0]
-        edges = [(spkt[i],spkt[min(i+n,N-1)]) for i in range(0, N, n)]
+        edges = np.array([[spkt[i],spkt[min(i+n,N-1)]] for i in range(0, N, n)])
         chunk_starts, chunk_stops = edges[:,0], edges[:,1]
         if discard_tail: 
             return chunk_starts[:-1], chunk_stops[:-1] 

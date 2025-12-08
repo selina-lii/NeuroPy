@@ -5,10 +5,10 @@ import numpy as np
 import seaborn as sns
 from neuropy.utils.ccg import correlograms
 from neuropy.analyses import correlations
-try:
-    import cupy as cp
-except ImportError:
-    cp = None
+# try:
+#     import cupy as cp
+# except ImportError:
+#     cp = None
 
 
 def plot_raster(
