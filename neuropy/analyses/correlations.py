@@ -18,6 +18,12 @@ def _san(var):
     if not (isinstance(var, list) or isinstance(var, np.ndarray)): var = [var]
     return var
 
+def __cp_clean():
+    """Call at the end of each cupy procedure to free resources"""
+    cp.cuda.Stream.null.synchronize() # ensure gpu ops are complete
+    cp._default_memory_pool.free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()
+
 # Assemble Spike Arrayss
 def _np_assemble_spike_arrays(neurons):
     """
@@ -115,29 +121,17 @@ def _np_assemble_segment_ids_array(neurons,t_starts,t_ends):
 def _cp_assemble_segment_ids_array(neurons,t_starts,t_ends):
     # t_starts, t_ends: specified time periods
 
-    # create segments. 
-    # the segments are another form of representation of t_starts and t_ends. 
-    # as there might be overlaps between time periods, a segment can map to multiple time periods,
-    #  hence the lookup table to map them back to time period ids.
-    # segment ids are used to label spike identity for rolling computation of multiple CCGs.
-    segments = cp.unique(cp.concatenate([t_starts,t_ends])) 
-    # maps segment ids back to t_starts/t_ends ids
-    lookup_table = [
-        cp.where((t_starts <= s) & (t_ends > s))[0]
-        for s in segments[:-1]
-    ]
+    edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
+    t_starts,t_ends=cp.array(t_starts),cp.array(t_ends)
+    spike_segment_ids=cp.full((len(t_starts),int(edges[-1])),False)
+    for i in range(len(neurons.spiketrains)):
+        st = cp.array(neurons.spiketrains[i])[:,None]
+        x = (st < t_ends) & (st >= t_starts)
+        spike_segment_ids[:,edges[i]:edges[i+1]]=x.T 
+    print(cp.sum(spike_segment_ids,axis=1))
+    return spike_segment_ids
 
-    # Example:
-    # suppose our time chunks of interest are 0~3, 1~5, and 2~3.
-    # t_starts=[0, 1, 2], t_ends=[3, 5, 3]
-    # segments = [0,1,2,3,5]
-    # lookup_table = [[1],[1,2],[1,2,3],[2]]
-
-    spike_segment_ids = cp.concatenate([
-        cp.searchsorted(segments, cp.array(spiketrain))-1 for spiketrain in neurons.spiketrains
-    ])
-    
-    return spike_segment_ids, lookup_table
+# spike orders are wrong somehow?
 
 
 # Create Arrays
@@ -585,6 +579,8 @@ def cp_spike_correlations(
 
     mask = cp.ones_like(spike_samples, dtype=cp.bool_)
     correlograms = _cp_create_correlograms_array(n_clusters, winsize_bins)
+    print(spike_samples)
+    print(spike_clusters_i)
 
     # The loop continues as long as there is at least one spike with
     # a matching spike.
@@ -617,6 +613,7 @@ def cp_spike_correlations(
 
         # Increment the matching spikes in the correlograms array.
         _cp_increment(correlograms.ravel(), indices)
+        # print(indices.shape[0])
 
         shift += 1
 
@@ -630,7 +627,9 @@ def cp_spike_correlations(
     out = np.zeros((n_neurons, n_neurons, correlograms.shape[-1]), dtype=correlograms.dtype)
     out[np.ix_(idxs, idxs)] = correlograms
 
-    cp.get_default_memory_pool().free_all_blocks()
+    print("shift:", shift)
+
+    __cp_clean()
     return out
 
 
@@ -883,7 +882,7 @@ def cp_spike_correlations_2groups(
 
     print("shift", shift)
     correlograms=correlograms.get()
-    cp.get_default_memory_pool().free_all_blocks()
+    __cp_clean()
     return correlograms
 
 
@@ -1131,7 +1130,7 @@ def cp_spike_correlations_paired(
 
     print("shift", shift)
     correlograms=correlograms.get()
-    cp.get_default_memory_pool().free_all_blocks()
+    __cp_clean()
     return correlograms
 
 
@@ -1295,7 +1294,7 @@ def cp_spike_correlations_snapshots(
 
     # Get spike times from neurons
     spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
-    spike_segment_ids, segments_lookup_table = _cp_assemble_segment_ids_array(neurons,cp.asarray(t_starts),cp.asarray(t_ends))
+    spike_segment_ids = _cp_assemble_segment_ids_array(neurons,cp.asarray(t_starts),cp.asarray(t_ends))
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -1311,66 +1310,68 @@ def cp_spike_correlations_snapshots(
 
     spike_clusters_i = _cp_index_of(spike_clusters, clusters)
 
-    # Shift between the two copies of the spike trains.
-    shift = 1
-
     # each side has half+1 bins
     max_d = winsize_bins//2+1
-
-    # At a given shift, the mask precises which spikes have matching spikes
-    # within the correlogram time window.
-    mask = cp.ones_like(spike_samples, dtype=cp.bool_)
     correlograms = _cp_create_correlograms_array(n_clusters, winsize_bins,n_groups=len(t_starts))
-    
-    # The loop continues as long as there is at least one spike with
-    # a matching spike.
-    # SL: shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
-    while mask[:-shift].any():
-        # Number of time samples between spike i and spike i+shift.
-        spike_diff = _cp_diff_shifted(spike_samples, shift)
 
-        # Binarize the delays between spike i and spike i+shift.
-        # SL: spike_diff_b is which bin the spike_diff falls in 
-        spike_diff_b = (spike_diff+binsize//2) // binsize
+    for i_ccg in range(len(t_starts)):
+        print("here",i_ccg)
+        # Shift between the two copies of the spike trains.
+        shift = 1
 
-        # Spikes with no matching spikes are masked.
-        # SL: If there are no matching spikes now, there wouldn't be any with a larger shift.
-        mask[:-shift][spike_diff_b >= max_d] = False # SL exclude spike pairs that fall outside the ccg window after shifting
+        # At a given shift, the mask precises which spikes have matching spikes
+        # within the correlogram time window.
+        mi = spike_segment_ids[i_ccg] # spikes in this segment
+        seg_spike_samples = spike_samples[mi]
+        seg_clusters_i = spike_clusters_i[mi]
+        print(seg_spike_samples)
+        print(seg_clusters_i)
+        mask = cp.ones_like(seg_spike_samples, dtype=cp.bool_)
 
-        # Cache the masked spike delays.
-        m = mask[:-shift].copy()
+        # The loop continues as long as there is at least one spike with
+        # a matching spike.
+        # SL: shift walks over spike indices, not time lags. shift+=1 discards the last spike from the train.
+        while mask[:-shift].any():
+            # Number of time samples between spike i and spike i+shift.
+            spike_diff = _cp_diff_shifted(seg_spike_samples, shift)
 
-        # Update the masks given the clusters to update.
-        d = spike_diff_b[m] # SL: get which bins need to be incremented
+            # Binarize the delays between spike i and spike i+shift.
+            # SL: spike_diff_b is which bin the spike_diff falls in 
+            spike_diff_b = (spike_diff+binsize//2) // binsize
 
-        ref_=spike_segment_ids[:-shift][m]
-        target_=spike_segment_ids[+shift:][m]
+            # Spikes with no matching spikes are masked.
+            # SL: If there are no matching spikes now, there wouldn't be any with a larger shift.
+            mask[:-shift][spike_diff_b >= max_d] = False # SL exclude spike pairs that fall outside the ccg window after shifting
 
-        # Find the indices in the raveled correlograms array that need
-        # to be incremented, taking into account the spike clusters.
-        for ii,chunks in enumerate(segments_lookup_table):
-            m_segment = (ref_ == ii) & (target_ == ii) # time chunk mask
-            dm = d[m_segment]
-            for i_ccg in chunks:
-                indices = cp.ravel_multi_index(
-                        (
-                            cp.full(dm.shape,i_ccg), 
-                            spike_clusters_i[:-shift][m][m_segment], 
-                            spike_clusters_i[+shift:][m][m_segment],
-                            dm
-                        ),
-                        correlograms.shape,
-                        )
-                # Increment the matching spikes in the correlograms array.
-                _cp_increment(correlograms.ravel(), indices)
-        shift += 1
+            # Cache the masked spike delays.
+            m = mask[:-shift].copy()
+
+            # Update the masks given the clusters to update.
+            d = spike_diff_b[m] # SL: get which bins need to be incremented
+
+            # Find the indices in the raveled correlograms array that need
+            # to be incremented, taking into account the spike clusters.
+
+            # same segment
+            indices = cp.ravel_multi_index(
+                    (
+                        cp.full_like(d,i_ccg), 
+                        seg_clusters_i[:-shift][m], 
+                        seg_clusters_i[+shift:][m],
+                        d
+                    ),
+                    correlograms.shape,
+                    )
+            # Increment the matching spikes in the correlograms array.
+            _cp_increment(correlograms.ravel(), indices)
+            # print(indices.shape[0])
+            shift += 1
+        print("shift", shift)
 
     if symmetrize:
         correlograms = _cp_symmetrize_correlograms(correlograms).get()
     else:
         correlograms = correlograms.get()
-
-    print("shift", shift)
 
     # Fill in neurons with zero spikes
     n_neurons=neurons.n_neurons
@@ -1378,7 +1379,8 @@ def cp_spike_correlations_snapshots(
     out = np.zeros((len(t_starts), n_neurons, n_neurons, correlograms.shape[-1]), dtype=correlograms.dtype)
     for i,c in enumerate(correlograms):
         out[i][np.ix_(idxs,idxs)]=c
-
+    
+    __cp_clean()
     return out
 
 
