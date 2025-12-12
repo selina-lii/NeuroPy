@@ -60,7 +60,7 @@ def _np_assemble_spike_arrays(neurons):
     return spike_times, spike_clusters, spike_samples
 
 
-def _cp_assemble_spike_arrays(neurons):
+def _cp_assemble_spike_arrays(neurons, segments=None):
     """
     Assemble spike arrays for neurons from neurons object using CuPy.
 
@@ -87,51 +87,18 @@ def _cp_assemble_spike_arrays(neurons):
     spike_clusters = spike_clusters[sort_ind]
     spike_samples = (spike_times * neurons.sampling_rate).astype(cp.int32)
 
+    if segments is not None:
+        edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
+        t_starts,t_ends=cp.array(segments[0]),cp.array(segments[1])
+        spike_segment_ids=cp.full((len(t_starts),int(edges[-1])),False)
+        for i in range(len(neurons.spiketrains)):
+            st = cp.array(neurons.spiketrains[i])[:,None]
+            x = (st < t_ends) & (st >= t_starts)
+            spike_segment_ids[:,edges[i]:edges[i+1]]=x.T
+        spike_segment_ids = np.take_along_axis(spike_segment_ids, sort_ind[None,:], axis=1)
+        return spike_times, spike_clusters, spike_samples, spike_segment_ids
+
     return spike_times, spike_clusters, spike_samples
-
-
-def _np_assemble_segment_ids_array(neurons,t_starts,t_ends):
-    # t_starts, t_ends: specified time periods
-
-    # create segments. 
-    # the segments are another form of representation of t_starts and t_ends. 
-    # as there might be overlaps between time periods, a segment can map to multiple time periods,
-    #  hence the lookup table to map them back to time period ids.
-    # segment ids are used to label spike identity for rolling computation of multiple CCGs.
-    segments = np.unique(np.concatenate([t_starts,t_ends])) 
-    # maps segment ids back to t_starts/t_ends ids
-    lookup_table = [
-        np.where((t_starts <= s) & (t_ends > s))[0]
-        for s in segments[:-1]
-    ]
-
-    # Example:
-    # suppose our time chunks of interest are 0~3, 1~5, and 2~3.
-    # t_starts=[0, 1, 2], t_ends=[3, 5, 3]
-    # segments = [0,1,2,3,5]
-    # lookup_table = [[1],[1,2],[1,2,3],[2]]
-
-    spike_segment_ids = np.concatenate([
-        np.searchsorted(segments, spiketrain)-1 for spiketrain in neurons.spiketrains
-    ])
-    
-    return spike_segment_ids, lookup_table
-
-
-def _cp_assemble_segment_ids_array(neurons,t_starts,t_ends):
-    # t_starts, t_ends: specified time periods
-
-    edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
-    t_starts,t_ends=cp.array(t_starts),cp.array(t_ends)
-    spike_segment_ids=cp.full((len(t_starts),int(edges[-1])),False)
-    for i in range(len(neurons.spiketrains)):
-        st = cp.array(neurons.spiketrains[i])[:,None]
-        x = (st < t_ends) & (st >= t_starts)
-        spike_segment_ids[:,edges[i]:edges[i+1]]=x.T 
-    print(cp.sum(spike_segment_ids,axis=1))
-    return spike_segment_ids
-
-# spike orders are wrong somehow?
 
 
 # Create Arrays
@@ -1293,8 +1260,7 @@ def cp_spike_correlations_snapshots(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
-    spike_segment_ids = _cp_assemble_segment_ids_array(neurons,cp.asarray(t_starts),cp.asarray(t_ends))
+    spike_times, spike_clusters, spike_samples, spike_segment_ids = _cp_assemble_spike_arrays(neurons,segments=[t_starts,t_ends])
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
