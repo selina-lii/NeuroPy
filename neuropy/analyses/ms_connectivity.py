@@ -913,6 +913,7 @@ class CCGDataset(AnalysisDataset):
         self.spurious={} # rest of pairwise CCG that failed the significance checks
         self.auto={} # autocorrelograms 
         self.connectivity={}
+        self.key_level="chunk" # 'chunk' or 'epoch'
 
     def get_CCG_with_baseline(self, method="eran_conv"):
         """
@@ -943,16 +944,53 @@ class CCGDataset(AnalysisDataset):
 
     def append_auto(self, base_key: Key, spurs: Dict[Key, CCG]):
         self.auto.update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in spurs.items()})
-    
-    def merge_CCGs(self, cd_list: list):
+
+    def merge_CCG(self, key:Key, ccg_list: list[CCG]):
         # TODO
-        new_dataset = CCGDataset(conf=self.conf)
-        for cd in cd_list:
-            (cd.ccgs.items())# split into key list and values list
-            new_dataset.append_ccg(base_key, cd.ccgs.items())
-            new_dataset.append_spurious(base_key, cd.spurious)
-            new_dataset.append_spurious(base_key, cd.auto) # do not append if none
-        return new_dataset
+        # [dev] ccg list items must share a common key that indexes the neurons dataset
+        n_bins = ccg_list[0].shape[-1]
+        n_chunks = len(ccg_list)
+
+        inds = np.unique(np.concatenate([c.inds for c in ccg_list],axis=0),axis=0)
+        ids = self.nd[key].ind2id(inds)
+        n_uniqinds=inds.shape[0]
+        sort_inds = [np.where(inds,c.inds) for c in ccg_list]
+        ccg=np.full((n_uniqinds,n_chunks,n_bins),np.nan) # what if ccg list has none items..
+        pval=np.full_like(ccg,np.nan)
+        j_sig=np.full_like(ccg,np.nan)
+        conn_strength=np.full((n_uniqinds,n_chunks),np.nan)
+        significant=np.full_like(conn_strength,np.nan)
+        # i need to define how jsig and significant are different, or give them different names
+
+        for i,c in enumerate(ccg_list):
+            if c.ccg is not None: ccg[sort_inds[i],i,:]=c.ccg
+            if c.pval is not None: pval[sort_inds[i],i,:]=c.pval
+            if c.j_sig is not None: j_sig[sort_inds[i],i,:]=c.j_sig
+            if c.conn_strength is not None: conn_strength[sort_inds[i],i]=c.conn_strength
+            if c.significant is not None: significant[sort_inds[i],i]=c.significant
+        
+        # check if there's any non-nan values
+        pass
+        
+        merged_CCG = CCG(key=key,
+                         ccg=ccg,
+                         ids=ids,
+                         inds=inds,
+                         pval=pval,
+                         j_sig=j_sig,
+                         conn_strength=conn_strength,
+                         conf=ccg_list[0].conf,
+                         significant=significant)
+
+        return merged_CCG
+
+    def merge_all_CCGs(self):
+        # TODO
+        new_dataset = CCGDataset(nd=self.nd,conf=self.conf)
+        for ccg_list in self.data.items().group_by('session','epoch'):
+            ccg_list = [v for k,v in ccg_list.items()]
+            k=list(ccg_list.keys())[0]
+            new_dataset.data[k] = self.merge_CCG(k,ccg_list)
 
     @property
     def filepath(self):
@@ -1242,12 +1280,13 @@ class CCGDataset(AnalysisDataset):
                             strength[p]=np.full(n,np.nan)
                         exist[p][i_chunk]=sig
                         strength[p][i_chunk]=val
+            conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
+            if len(pairs)==0: self.connectivity[conn_key]=None
             exist_arr = np.zeros((len(pairs),n))
             strength_arr = np.zeros((len(pairs),n))
             for i,p in enumerate(pairs):
                 exist_arr[i]=exist[p]
                 strength_arr[i]=strength[p]
-            conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
             neurons = self.nd.data[Key(k.session,k.epoch)]
             self.connectivity[conn_key] = Connectivity(key=conn_key, n_chunks=n, ccgs=group,
                                                        inds=pairs, exist=exist_arr, strength=strength_arr,
