@@ -17,9 +17,10 @@ from scipy import ndimage
 from typing import Union, Optional, Dict, Any, Tuple
 import h5py
 from statsmodels.stats.multitest import multipletests
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections import defaultdict
 from enum import Enum
+from copy import deepcopy
 
 # TODO
 CHANNELS_PER_SHANK=16
@@ -103,6 +104,14 @@ class Key:
  
     def remove(self,*dimensions) -> 'Key':
         return Key(**{f: getattr(self, f) for f in self.__dataclass_fields__ if f not in dimensions})
+
+    def add(self,dimension,value) -> 'Key':
+        new_key = replace(self, **{dimension: value})
+        return new_key
+    
+    def change(self,dimension,value) -> 'Key':
+        new_key = replace(self, **{dimension: value})
+        return new_key
 
 
 class AnalysisDataset:
@@ -838,25 +847,29 @@ class Connectivity:
         return s
         
 
-    def filter(self,min_n_chunk=None,skips=None):
+    def filter(self,min_n_chunk,skips):
         if skips is not None: 
-            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.exist)) if (v not in skips) and (np.sum(e)>=min_n_chunk)]
+            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.exist)) if 
+                    not ((v[0] in skips[:,0]) & (v[1] in skips[:,1])) 
+                    and (np.sum(e)>=min_n_chunk)]
         else:
             inds = np.where(np.sum(self.exist,axis=1)>=min_n_chunk)[0].astype(int)
         return inds
 
     def plot_strength(self,
-                      n_chunks_threshold=None,save=False,
-                        norm_by_n_sess=False,
-                        norm_by_total_strength=False,
-                        z_score=False,
-                        show_legend=False,
-                        skips=None):
-        n_chunks_threshold=n_chunks_threshold if n_chunks_threshold is not None else self.n_chunks
+                    n_chunks_threshold=None,save=False,
+                    norm_by_n_sess=False,
+                    norm_by_total_strength=False,
+                    zero_first_timepoint=False,
+                    show_legend=False,
+                    skips=None):
+        # show all pairs by default
+        n_chunks_threshold=n_chunks_threshold if n_chunks_threshold is not None else 0
         plt.figure()
         inds = self.filter(min_n_chunk=n_chunks_threshold,skips=skips)
         plot_data = self.strength[inds]
         significant=self.exist[inds]
+        n_significant=np.sum(significant,axis=1,keepdims=True)
         pairs = self.inds[inds]
         if pairs.shape[0]==0: 
             print(f"{self.key}: No pairs fit the criteria min_n_chunk={n_chunks_threshold}, nothing is plotted")
@@ -864,10 +877,12 @@ class Connectivity:
 
         if norm_by_total_strength:
             plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
-        if norm_by_n_sess:
-            plot_data=plot_data*np.count_nonzero(~np.isnan(plot_data),axis=1,keepdims=True)/self.n_chunks
-        if z_score:
-            plot_data=(plot_data - np.nanmin(plot_data,axis=1,keepdims=True)) / np.nanmean(plot_data,axis=1,keepdims=True)
+        if norm_by_n_sess: # normalize by the inverse of number of sessions where this pair appeared
+            plot_data=plot_data*n_significant/self.n_chunks
+        if zero_first_timepoint:
+            # dmax = np.nanmax(plot_data,axis=1,keepdims=True)
+            # dmin = np.nanmin(plot_data,axis=1,keepdims=True)
+            plot_data= (plot_data-plot_data[:,0:1])
         colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
         legend_keys = []
         for i, (pair, v, c, sig) in enumerate(zip(pairs,plot_data,colors,significant)):
@@ -935,7 +950,7 @@ class CCGDataset(AnalysisDataset):
 
     def filter_target(self, target):
         return {k: v for k, v in self.data.items() if k.conn_type and k.conn_type[1] == target}
-    
+
     def append_ccg(self, base_key: Key, ccgs: Dict[Key, CCG]):
         self.data.update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in ccgs.items()})
 
@@ -1056,15 +1071,12 @@ class CCGDataset(AnalysisDataset):
         chunk_edges=None
         
         # groups=self.group_by('session','epoch',source='connectivity')
-        if inds is not None:
+        if key.ref_ind is not None:
             k = Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,chunk=key.chunk)
             chunk_edges = self.nd.edge_timestamps[k]
 
         elif indices_source==CCGIndexSource.SIGNIFICANT:
             inds = self.data[key].inds
-
-        elif indices_source==CCGIndexSource.SPURIOUS:
-            inds = self.spurious[key].inds
 
         elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
             inds = self.connectivity[key].inds
@@ -1079,6 +1091,7 @@ class CCGDataset(AnalysisDataset):
                             pair_inds=inds,
                             chunk_edges=chunk_edges or self.nd.edge_timestamps[data_key], 
                             conf=self.conf)
+        print("_reCCG",ccgs)
         return ccgs
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None,include_spurious=False):
@@ -1099,13 +1112,13 @@ class CCGDataset(AnalysisDataset):
 
         for key, ccg in self.data.items():
             if ccg is not None:
-                self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,ccg_key=key)
+                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,key=key)
         print("rescale completed")
 
         if include_spurious: 
             for key, spur in self.spurious.items():
                 if spur is not None:
-                    self._reCCG(indices_source=CCGIndexSource.SPURIOUS,ccg_key=key)
+                    new_ccgs = self._reCCG(indices_source=CCGIndexSource.SPURIOUS,key=key)
         print("rescale of spurious CCG completed")
 
     def reCCG_connectivity(self):
@@ -1120,7 +1133,7 @@ class CCGDataset(AnalysisDataset):
                     ccg.significant = self.connectivity[key].exist[:,k.chunk]
                     self.data[k] = ccg
         print("recomputed CCG for pairs that had been significant in any chunk")
-    
+
     def reCCG_connectivity_pairwise(self,conn_type=('pyr','pyr')):
         """
         TODO group by reference
@@ -1246,7 +1259,7 @@ class CCGDataset(AnalysisDataset):
             if ccg is None: continue # no connection
             if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
                 norm_factor = self.nd[k].firing_rate[ccg.ref_ind]
-            elif self.conf.normaliz.name==NormalizeBy.REF_SPKS.name:
+            elif self.conf.normalize.name==NormalizeBy.REF_SPKS.name:
                 norm_factor = self.nd[k].n_spikes[ccg.ref_ind]
             else:
                 norm_factor = None
@@ -1266,7 +1279,9 @@ class CCGDataset(AnalysisDataset):
             exist = {}
             strength = {}
             pairs = []
-            n = 1 if self.nd.edge_timestamps[k.parent()] is None else len(self.nd.edge_timestamps[k.parent()][0])
+            n = 1 if self.nd.edge_timestamps[k.parent()] is None else len(self.nd.edge_timestamps
+            [k.parent()][0])
+            print(n)
             for keyy, _ in grouped[k].items():
                 i_chunk = keyy.chunk
                 if keyy.conn_type in conn_types:
@@ -1281,7 +1296,10 @@ class CCGDataset(AnalysisDataset):
                         exist[p][i_chunk]=sig
                         strength[p][i_chunk]=val
             conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
-            if len(pairs)==0: self.connectivity[conn_key]=None
+            if len(pairs)==0: 
+                print(pairs,conn_key)
+                self.connectivity[conn_key]=None
+                return
             exist_arr = np.zeros((len(pairs),n))
             strength_arr = np.zeros((len(pairs),n))
             for i,p in enumerate(pairs):
@@ -1309,7 +1327,7 @@ class CCGDataset(AnalysisDataset):
     def plot_connection_strengths(self,n_chunks_threshold=None,save=False,
                                             norm_by_n_sess=False,
                                             norm_by_total_strength=False,
-                                            z_score=False,
+                                            zero_first_timepoint=False,
                                             show_legend=False,
                                             skips={}):
         for k1, conn in self.connectivity.items():
@@ -1317,7 +1335,7 @@ class CCGDataset(AnalysisDataset):
                                            save=save,
                                            norm_by_n_sess=norm_by_n_sess,
                                            norm_by_total_strength=norm_by_total_strength,
-                                           z_score=z_score,
+                                           zero_first_timepoint=zero_first_timepoint,
                                            show_legend=show_legend,
                                            skips=skips.get(k1))
             print(k1,skips.get(k1))
@@ -1325,7 +1343,7 @@ class CCGDataset(AnalysisDataset):
     def plot_connection_strengths_compound(self,n_chunks_threshold=None,save=False,
                                             norm_by_n_sess=False,
                                             norm_by_total_strength=False,
-                                            z_score=False,
+                                            zero_first_timepoint=False,
                                             show_legend=False,
                                             skips={},
                                             legend_group_size=25):
@@ -1333,7 +1351,7 @@ class CCGDataset(AnalysisDataset):
                                            save=save,
                                            norm_by_n_sess=norm_by_n_sess,
                                            norm_by_total_strength=norm_by_total_strength,
-                                           z_score=z_score,
+                                           zero_first_timepoint=zero_first_timepoint,
                                            show_legend=show_legend,
                                            legend_group_size=legend_group_size
                                            )
@@ -1342,7 +1360,7 @@ class CCGDataset(AnalysisDataset):
                       n_chunks_threshold=None,save=False,
                         norm_by_n_sess=False,
                         norm_by_total_strength=False,
-                        z_score=False,
+                        zero_first_timepoint=False,
                         show_legend=False,
                         legend_group_size=25,
                         ):
@@ -1373,7 +1391,7 @@ class CCGDataset(AnalysisDataset):
             plot_data=[x/np.nansum(x) for x in plot_data]
         if norm_by_n_sess:
             plot_data=[x*np.count_nonzero(si)/len(x) for x,si in zip(plot_data,sig)]
-        if z_score:
+        if zero_first_timepoint:
             plot_data=[(x - np.nanmin(x)) / np.nanmean(x) for x in plot_data]
         colors = plt.cm.hsv(np.linspace(0, 1, len(plot_data)))
         legend_keys = []
@@ -2059,7 +2077,8 @@ class EranConv:
         self.mask = self.__regroup_mask(self.mask)
         self.mask_basic = self._regroup_basic(self.mask_basic)
 
-    def eranconv_1st_pass(self, key:Key, neurons:Neurons, chunk_edges:np.ndarray, conf:CCGConfig):
+    def eranconv_1st_pass(self, key:Key, neurons:Neurons, chunk_edges:np.ndarray, conf:CCGConfig,
+                          inds=None):
         """
         Main function for CCG computatinon
         Call from CCGDataset
@@ -2221,15 +2240,26 @@ class EranConv:
             self.ccg=self.ccg[slicer]
 
             self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
-            self.significance_mask(key.excitability)
+
+            conf = self.conf
+            if key.excitability=='E':
+                sig, self.pval_corrected = EranConv.multiple_correction(self.pvals, conf.alpha)
+                sig_mask = (sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1)
+            elif key.excitability=='I':
+                sig1, self.qval_corrected = EranConv.multiple_correction(self.qvals, conf.alpha)
+                sig2, self.qval_corrected2 = EranConv.multiple_correction(self.qvals, conf.alpha2)
+                neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
+                sig_mask = neighbor.any(-1)
+
             for i in range(self.n_chunks):
-                k=Key(session=key.session,epoch=key.epoch,chunk=i,excitability=key.excitability,conn_type=key.conn_type)
+                k=key.change('chunk',i)
                 ccgs[k]=CCG(inds=pair_inds, 
                         ids=neurons.ind2id(pair_inds), 
                         ccg=self.ccg[i], 
                         ccg_null=self.pred[i], 
                         pval=self.pval_corrected[i] if key.excitability=='E' else self.qval_corrected[i], 
                         conf=self.conf,
+                        significant=sig_mask[i],
                         key=k)
         else:
             self.ccg = correlations.spike_correlations(
