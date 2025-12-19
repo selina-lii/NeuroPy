@@ -134,6 +134,12 @@ class AnalysisDataset:
         """Safe retrieval with default"""
         return self.data.get(key, default)
     
+    def example(self,field=None) -> Any:
+        """Get an example from data"""
+        if field:
+            return self.__dict__[field].get(next(iter(self.__dict__[field].keys())),None)
+        return self.data.get(next(iter(self.data.keys())),None)
+
     def filter(self, **criteria) -> Dict[Key, Any]:
         """
         Filter data by any combination of key attributes.
@@ -513,15 +519,13 @@ class NeuronsDataset(AnalysisDataset):
 
         self.prep(sessions)
 
-    def __str__(self): #TODO untested
-        s = str(self.conf) + "\ndata:\n"
-        by_session = self.group_by('session')
-        for k1, session_data in sorted(by_session.items()):
-            s += f"  Session {k1.session}:\n"
-            by_epoch = session_data.group_by('epoch')
-            for k2, epoch_data in sorted(by_epoch.items()):
-                s += f"    Epoch {k2.epoch}: {len(epoch_data)} entries\n"
-        return s
+    def __str__(self): 
+        s=''
+        cnt=0
+        for k,v in self.data.items():
+            s+=f"{k}\t{str(v)}"
+            cnt+=1
+        return f"NeuronsDataset #sessions = {cnt}\n{s}"
 
     def get_neurons(self, session: str = None, epoch: str = None):
         """
@@ -637,12 +641,14 @@ class CCG:
             self.significant=significant
 
     def __str__(self):
-        s = self.conf.__str__()
+        s=''
         for key, val in self.__dict__.items():
             if isinstance(val,np.ndarray) or isinstance(val,list):
-                s+=f"{key}: {val[0]}...\n"
-            else:
-                s+=f"{key}: {val}\n"
+                sval="\n".join(str(val[0:2]).splitlines()[:3])
+                s+=f"{key}\tshape={np.array(val).shape}\n\tval={sval}...\n"
+            elif key!='_conf':
+                sval="\n".join(str(val).splitlines()[:3])
+                s+=f"{key}: {sval}\n"
         return s
     
     @property
@@ -752,7 +758,8 @@ class CCG:
 
         if self.key.segment is None: # TODO is len(self.ccg.shape)==3 a better condition? 
             for i,(inds,ids) in enumerate(zip(self.inds[s],self.ids[s])):
-                frames = []
+                figs = []
+                ymin,ymax=[],[]
                 print(i,inds)
                 idx=np.array([idx_dict[inds[0]],idx_dict[inds[1]]])
                 for i_seg in range(n_seg):
@@ -774,9 +781,15 @@ class CCG:
                                     j_sig=self.j_sig[i_seg][s][i] if self.j_sig else None,
                                     show=False,save=False,
                                     segment_id=i_seg)
-                    fig.canvas.draw()
-                    image = np.array(fig.canvas.renderer.buffer_rgba())
-                    frames.append(image)
+                    _ymin, _ymax =fig.axes[0].get_ylim()
+                    ymin.append(_ymin);ymax.append(_ymax)
+                    figs.append(fig)
+                ymin=min(ymin);ymax=max(ymax)
+                frames=[]
+                for fig in figs:
+                    fig.axes[0].set_ylim(ymin, ymax)
+                    fig.canvas.draw_idle()
+                    frames.append(np.array(fig.canvas.renderer.buffer_rgba()))
                     plt.close(fig)
                 imageio.mimsave(
                     f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.gif",
@@ -804,7 +817,6 @@ class CCG:
                                 ccg_null=self.ccg_null[s][i] if self.ccg_null is not None else None,
                                 j_sig=self.j_sig[s][i] if self.j_sig else None,
                                 show=False,save=True)
-            
         print("done saving plots")
 
     def deconv_autocorr(self, acgs:ACG, nspks, target=True, ref=True):
@@ -886,7 +898,21 @@ class Connectivity:
             s += f"{str(inds):<15}\tIn segments {str(np.where(self.exist[i])[0]):<20}\tstrengths: {self.strength[i]}\n"
         return s
         
-
+    def __str__(self):
+        s='Connectivity\n'
+        for key, val in self.__dict__.items():
+            if isinstance(val,np.ndarray) or isinstance(val,list):
+                s+=f"{key}\tshape={np.array(val).shape}"
+                sval="\n".join(str(val[0:2]).splitlines()[:3])
+                s+=f"\tval={sval}...\n"
+            elif isinstance(val,dict):
+                k,v = next(iter(val.items()))
+                s+=f"{key} dict keys={k}...\n"
+                item_str = str(v)
+                for line in item_str.splitlines()[:3]:
+                    s+=f"\t\t{line}\n"
+        return s
+    
     def filter(self,min_n_segment,skips):
         if skips is not None: 
             inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.exist)) if 
@@ -897,12 +923,13 @@ class Connectivity:
         return inds
 
     def plot_strength(self,
-                    n_segments_threshold=None,save=False,
+                    n_segments_threshold=None,
                     norm_by_n_sess=False,
                     norm_by_total_strength=False,
                     zero_first_timepoint=False,
                     show_legend=False,
-                    skips=None):
+                    skips=None,
+                    save=False,root=None):
         # show all pairs by default
         n_segments_threshold=n_segments_threshold if n_segments_threshold is not None else 0
         plt.figure()
@@ -914,34 +941,47 @@ class Connectivity:
         if pairs.shape[0]==0: 
             print(f"{self.key}: No pairs fit the criteria min_n_segment={n_segments_threshold}, nothing is plotted")
             return
+        
+        ylabel = "connection strength"
 
         if norm_by_total_strength:
             plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
+            ylabel=ylabel+" \nnormalized by total strength"
         if norm_by_n_sess: # normalize by the inverse of number of sessions where this pair appeared
             plot_data=plot_data*n_significant/self.n_segments
+            ylabel=ylabel+" \n(normalized by number of sessions)"
         if zero_first_timepoint:
             # dmax = np.nanmax(plot_data,axis=1,keepdims=True)
             # dmin = np.nanmin(plot_data,axis=1,keepdims=True)
             plot_data= (plot_data-plot_data[:,0:1])
+            ylabel=ylabel+" \naligning the first timepoint"
         colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
         legend_keys = []
+        
+        max_pairs=np.max(plot_data,axis=1).argsort()[-5:][::-1]
+        min_pairs=np.min(plot_data,axis=1).argsort()[:5]
+        print("max",pairs[max_pairs],"min",pairs[min_pairs])
         for i, (pair, v, c, sig) in enumerate(zip(pairs,plot_data,colors,significant)):
             plt.plot(v,c=c,alpha=0.3)  # normalized
             x_sig = np.where(sig)[0]
             plt.scatter(x_sig, v[x_sig], s=8, c=c,label="_nolegend_")
             if show_legend: legend_keys.append(f"{i}:{pair}")
         plt.title(f"{self.key}")
-        plt.xlabel("epoch id")
+        plt.xlabel("time segment")
         plt.xticks(np.arange(self.n_segments),np.arange(self.n_segments))
-        plt.ylabel("normalized connection strength")
+        plt.ylabel(ylabel)
         if show_legend: 
             # spacing
             ncol = 1+int(i//25)
             i_per_col=i//ncol
             offset = -.3-.5*(i_per_col/25)
             plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
-        plt.show()
-        #TODO save
+        
+        if save:
+            assert os.path.isdir(os.path.expanduser(root))
+            plt.savefig(f"{os.path.expanduser(root)}/{self.key}.png", bbox_inches='tight')
+        else:
+            plt.show()
 
     def plot_network(self):
         pass
@@ -1129,7 +1169,6 @@ class CCGDataset(AnalysisDataset):
                             pair_inds=inds,
                             seg_edges=seg_edges or self.nd.edge_timestamps[key.nd()], 
                             conf=self.conf)
-        print("_reCCG",ccgs)
         return ccgs
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None):
@@ -1161,13 +1200,15 @@ class CCGDataset(AnalysisDataset):
         """
         Rerun CCG with list of pairs that had been significant in any segment
         """
+        new_data = {}
         for key, ccg in self.connectivity.items():
             if ccg is not None:
                 new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,key=key)
                 for k,ccg in new_ccgs.items():
                      # TODO inherit original significant markers
-                    ccg.significant = self.connectivity[key].exist[:,k.segment]
-                    self.data[k] = ccg
+                    ccg.significant = self.connectivity[k].exist.T
+                    new_data[k] = ccg
+        self.data=new_data
         print("recomputed CCG for pairs that had been significant in any segment")
 
     def reCCG_connectivity_pairwise(self,conn_type=('pyr','pyr')):
@@ -1347,16 +1388,18 @@ class CCGDataset(AnalysisDataset):
     #                                                    ids = neurons.ind2id(ccg.inds))
 
     # TODO move to plotting
-    def plot_connection_strengths(self,n_segments_threshold=None,save=False,
+    def plot_connection_strengths(self,n_segments_threshold=None,
                                             norm_by_n_sess=False,
                                             norm_by_total_strength=False,
                                             zero_first_timepoint=False,
                                             show_legend=False,
-                                            skips={}):
+                                            skips={},
+                                            save=False,root='~/Documents/NeuroPy/images/conn_strengths'):
         for k1, conn in self.connectivity.items():
             print(k1,skips.get(k1))
             conn.plot_strength(n_segments_threshold=n_segments_threshold,
                                            save=save,
+                                           root=root,
                                            norm_by_n_sess=norm_by_n_sess,
                                            norm_by_total_strength=norm_by_total_strength,
                                            zero_first_timepoint=zero_first_timepoint,
@@ -1435,7 +1478,6 @@ class CCGDataset(AnalysisDataset):
             plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
         plt.show()
         #TODO save
-
 
 
 class DataState(Enum):
@@ -2154,7 +2196,6 @@ class EranConv:
                                 excitability=EI)
                         if prs is None or len(prs)==0: ccgs_by_type[new_key] = None
                         else:
-                            print(type(prs),conn_type)
                             x,y = prs[:,-2],prs[:,-1]
                             ccgs_by_type[new_key] = CCG(key=new_key,conf=self.conf, 
                                                 inds=prs, ids=neurons.ind2id(prs), 
