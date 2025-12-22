@@ -43,6 +43,12 @@ def _san(var,as_np=False):
     return var
 
 
+def example(var:dict):
+    """Get an example from a dictionary"""
+    k,v = next(iter(var.items()))
+    return v
+
+
 @dataclass(frozen=True)
 class Key:
     session: Optional[str] = None
@@ -122,22 +128,23 @@ class AnalysisDataset:
     def __init__(self):
         self.data: Dict[Key, Any] = {}
     
-    def __setitem__(self, key: Key, value: Any):
-        """Store data with a key"""
-        self.data[key] = value
+    # def __setitem__(self, key: Key, value: Any):
+    #     """Store data with a key"""
+    #     self.data[key] = value
     
-    def __getitem__(self, key: Key) -> Any:
-        """Retrieve data by key"""
-        return self.data[key]
+    # def __getitem__(self, key: Key) -> Any:
+    #     """Retrieve data by key"""
+    #     return self.data[key]
     
-    def get(self, key: Key, default=None) -> Any:
-        """Safe retrieval with default"""
-        return self.data.get(key, default)
+    # def get(self, key: Key, default=None) -> Any:
+    #     """Safe retrieval with default"""
+    #     return self.data.get(key, default)
     
     def example(self,field=None) -> Any:
-        """Get an example from data"""
+        """Get an example from data or another field"""
         if field:
-            return self.__dict__[field].get(next(iter(self.__dict__[field].keys())),None)
+                item = next(iter(self.__dict__[field].keys()))
+                return self.__dict__[field].get(item,None)
         return self.data.get(next(iter(self.data.keys())),None)
 
     def filter(self, **criteria) -> Dict[Key, Any]:
@@ -527,16 +534,16 @@ class NeuronsDataset(AnalysisDataset):
             cnt+=1
         return f"NeuronsDataset #sessions = {cnt}\n{s}"
 
-    def get_neurons(self, session: str = None, epoch: str = None):
-        """
-        Convenience method to get neurons with optional filtering.
-        Returns single Neurons object or dict of matching entries.
-        """
-        results = self.filter(session=session, epoch=epoch, analysis_type='neurons')
+    # def get_neurons(self, session: str = None, epoch: str = None):
+    #     """
+    #     Convenience method to get neurons with optional filtering.
+    #     Returns single Neurons object or dict of matching entries.
+    #     """
+    #     results = self.filter(session=session, epoch=epoch, analysis_type='neurons')
         
-        if len(results) == 1:
-            return list(results.values())[0]
-        return results
+    #     if len(results) == 1:
+    #         return list(results.values())[0]
+    #     return results
     
     def prep(self, sessions):
         sessions = _san(sessions)
@@ -943,7 +950,8 @@ class Connectivity:
             return
         
         ylabel = "connection strength"
-
+        if skips is not None:
+            ylabel+="\nremoving outliers"
         if norm_by_total_strength:
             plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
             ylabel=ylabel+" \nnormalized by total strength"
@@ -1020,7 +1028,7 @@ class CCGDataset(AnalysisDataset):
             "since it generates a ton of extra data. Nothing is run...")
         else:
             ValueError("Unknown method")
-        
+    
     def filter_excitability(self, E):
         return self.filter(excitability=E)
 
@@ -2441,7 +2449,7 @@ def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
         if frates_all is not None:
             xlabel += f"ref {frates_all[0]:.2f}Hz | tgt {frates_all[1]:.2f} all \n"
         if frates_cut is not None:
-            xlabel += f"ref {frates_cut[0]:.2f}Hz | tgt {frates_all[1]:.2f} cut "
+            xlabel += f"ref {frates_cut[0]:.2f}Hz | tgt {frates_cut[1]:.2f} cut "
         axs[1] = probe.plot_waveform_on_channel(ref_waveform, shank_ids[0], 
                                                 tgt_waveform, shank_ids[1], 
                                                 footnote=xlabel, amplitude_limit=True,
