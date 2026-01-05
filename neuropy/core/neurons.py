@@ -362,13 +362,14 @@ class Neurons(DataWriter):
         # print("after",intervals[0],intervals[-1])
         return intervals
 
-    def time_multislices(self, intervals:list[list], t_start=None, t_stop=None, zero_spike_times=False,
+    def time_multislices(self, t_starts,t_stops, t_start=None, t_stop=None, zero_spike_times=False,
                          tighten=False):
         """
         Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
         TODO slow (if num intervals are large)
         """
         t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        intervals = list(zip(t_starts,t_stops))
         def _merge_intervals(intervals):
             intervals = np.array(sorted(intervals))
             merged = []
@@ -489,8 +490,8 @@ class Neurons(DataWriter):
             if discard: 
                 labels = list(set(b_times.get_unique_labels()) - set(labels))
             bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
-        intervals = list(zip(bstates.starts,bstates.stops))
-        state_neurons=self.time_multislices(intervals,tighten=tighten)
+        
+        state_neurons=self.time_multislices(t_start=bstates.starts,t_stops=bstates.stops,tighten=tighten)
         return state_neurons
 
     def burst_slice(self,k:int=1,threshold=1e-4):

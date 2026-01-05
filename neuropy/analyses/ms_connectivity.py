@@ -12,7 +12,7 @@ except ImportError:
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows
-from scipy.stats import poisson, ttest_ind, ttest_1samp
+from scipy.stats import poisson, ttest_ind, ttest_1samp, describe
 from scipy import ndimage
 from typing import Union, Optional, Dict, Any, Tuple
 import h5py
@@ -457,62 +457,6 @@ class JitterConfig:
         return self.jscale/self.ccg.bin_size
 
 
-#TODO am i using this?
-class KeySlicing:
-    data = None
-    @property
-    def _key_list(self):
-        assert isinstance(self.data, dict)
-        return list(self.data.keys())
-
-    def session_keys(self, session):
-        keys = self._key_list
-        if len(keys)==0:
-            return []
-        if isinstance(keys[0],str):
-            return [k for k in keys if k == session]
-        else:
-            return [k for k in keys if k[0] == session]
-
-    def epoch_keys(self, epoch):
-        keys = self._key_list
-        if len(keys)==0:
-            return []
-        assert len(keys[0])>=2
-        return [k for k in keys if k[1] == epoch]
-        
-    def segment_keys(self, segment_id, epoch:Optional[Union[str,list[str]]]=None):
-        keys = self._key_list
-        if len(keys)==0:
-            return []
-        assert len(keys[0])>=3
-        if epoch:
-            epochs = _san(epoch)
-            keys = [k for k in keys if k[1] in epochs] # all sessions should have that segment
-            for e in epochs:
-                # check if the epoch has this many segments
-                assert epoch in self.conf.epochs
-                assert self.conf.get_segments_from_epoch(epoch)>segment_id
-        return keys
-
-    def excitability_keys(self, excitability):
-        keys = self._key_list
-        if len(keys)==0:
-            return []
-        assert len(keys[0])>=2
-        return [k for k in keys if k[-2] == excitability]
-        
-    def conn_type_keys(self, conn_type, excitability=None):
-        keys = self._key_list
-        if len(keys)==0:
-            return []
-        assert len(keys[0])>=2
-        keys = [k for k in keys if k[-1] == conn_type]  
-        if excitability:
-            keys = [k for k in keys if k[-2] == excitability]  
-        return keys
-
-
 class NeuronsDataset(AnalysisDataset):
     """
     A collection of neurons wrapped for analysis
@@ -524,7 +468,7 @@ class NeuronsDataset(AnalysisDataset):
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
         self._conf = conf        
         self.data={}
-        self.edge_timestamps={} # TODO n_segments is used for normalizing connection strengths
+        self.edge_timestamps=defaultdict(lambda: defaultdict(list))
 
         self.prep(sessions)
 
@@ -535,75 +479,150 @@ class NeuronsDataset(AnalysisDataset):
             s+=f"{k}\t{str(v)}"
             cnt+=1
         return f"NeuronsDataset #sessions = {cnt}\n{s}"
-
-    # def get_neurons(self, session: str = None, epoch: str = None):
-    #     """
-    #     Convenience method to get neurons with optional filtering.
-    #     Returns single Neurons object or dict of matching entries.
-    #     """
-    #     results = self.filter(session=session, epoch=epoch, analysis_type='neurons')
-        
-    #     if len(results) == 1:
-    #         return list(results.values())[0]
-    #     return results
+    
+    @property
+    def conf(self):
+        return self._conf
     
     def prep(self, sessions):
         sessions = _san(sessions)
         for s in sessions:
             ssn = _short_session_name(s)
             self.conf.session_names.append(ssn)
+            
+            neus = s.neurons
+
+            # Filter neurons
+            # -type
+            if self.conf.neuron_types is not None:
+                neus = neus.get_neuron_type(self.conf.neuron_types)
+            # -paradigm label
+            if self.conf.epochs is not None:
+                neus = neus.behav_slice(s.paradigm, self.conf.epochs)
+            # -sleep states
+            if self.conf.sleep_labels is not None:
+                neus = neus.behav_slice(s.brainstates, self.conf.sleep_labels, 
+                                        tighten=self.conf.tight_epoch)
+            # -ripple states
+            if self.conf.ripple==Toggle.SELECT:
+                neus = neus.behav_slice(s.ripple,
+                                        tighten=self.conf.tight_epoch,
+                                        min_dur=0) # NOTE not selecting ripple duration for now
+            elif self.conf.ripple==Toggle.REMOVE:
+                non_ripple = s.ripple.time_invert_selection(t_start=s.paradigm.starts[0],
+                                                            t_stop=s.paradigm.stops[0])
+                neus = neus.behav_slice(non_ripple,
+                                        tighten=self.conf.tight_epoch,
+                                        min_dur=0) # NOTE not selecting ripple duration for now
+
+            # Store filtered neurons
+            key = Key(session=ssn, epoch=e)
+            self.data[key] = neus
+            N = neus.n_neurons
+
+            # Define segment edges of each neurons group
+            # see neurons.py: 
+            #    _edges_time_split  time_split
+            #   _edges_time_window  time_windows
+            #   _edges_spikecount   spikecount_split
 
             for i, e in enumerate(self.conf.epochs):
-                neus = s.neurons
-
-                # Filter neurons
-                # -type
-                if self.conf.neuron_types is not None:
-                    neus = neus.get_neuron_type(self.conf.neuron_types)
-                # -paradigm label
-                if self.conf.epochs[i] is not None:
-                    p = s.paradigm.label_slice(e)
-                    neus = neus.time_slice(p.starts[0], p.stops[0])
-                # -sleep states
-                if self.conf.sleep_labels is not None:
-                    neus = neus.behav_slice(s.brainstates, self.conf.sleep_labels, 
-                                            tighten=self.conf.tight_epoch)
-                # -ripple states
-                if self.conf.ripple==Toggle.SELECT:
-                    neus = neus.behav_slice(s.ripple,
-                                            tighten=self.conf.tight_epoch,
-                                            min_dur=0) # NOTE not selecting ripple duration for now
-                elif self.conf.ripple==Toggle.REMOVE:
-                    non_ripple = s.ripple.time_invert_selection(t_start=p.starts[0],t_stop=p.stops[0])
-                    neus = neus.behav_slice(non_ripple,
-                                            tighten=self.conf.tight_epoch,
-                                            min_dur=0) # NOTE not selecting ripple duration for now
-
-                # Store filtered neurons
-                key = Key(session=ssn, epoch=e)
-                self.data[key] = neus
-                N = neus.n_neurons
-
-                # Define how to segment each neurons group for comparative analysis
-                # see neurons.py: 
-                #    _edges_time_split  time_split
-                #   _edges_time_window  time_windows
-                #   _edges_spikecount   spikecount_split
-
                 if self.conf.spikecount_per_group is not None:
                     for i in range(N):
-                        k = Key(session=ssn, epoch=e, ref_ind=i)
+                        k = Key(session=ssn, ref_ind=i)
                         edges = neus._edges_spikecount(i=i,
                                                           n=self.conf.spikecount_per_group,
                                                           discard_tail=False)
-                        self.edge_timestamps[k]=edges
+                        self.edge_timestamps[k][e]=edges
                 elif self.conf.seg_stride is not None and self.conf.seg_len is not None:
-                    self.edge_timestamps[key] = neus._edges_time_window(stride=self.conf.seg_stride, 
-                                                                        seg_len=self.conf.seg_len) 
+                    self.edge_timestamps[key][e] = neus._edges_time_window(stride=self.conf.seg_stride, 
+                                            seg_len=self.conf.seg_len) 
                 elif self.conf.n_segments is not None and self.conf.n_segments[i] > 1:
-                    self.edge_timestamps[key] = neus._edges_time_split(n_segments=self.conf.n_segments)
+                    self.edge_timestamps[key][e] = neus._edges_time_split(n_segments=self.conf.n_segments)
                 else:
-                    self.edge_timestamps[key] = None
+                    self.edge_timestamps[key][e] = None
+            
+
+    def frate_stats(self):
+        @dataclass
+        class FrateStat:
+            def __init__(self,n_neurons,neu_type):
+                self.n_neurons=n_neurons
+                self.neu_type=neu_type
+                self.keys=[]
+                self.frates=[]
+                self.effective_time=[]
+                self.n_neurons=[]
+                self.neu_type=[]
+                self.i=[]
+            
+            def append(self,key,frates,effective_time,n_neurons,i):
+                self.keys.append(key)
+                self.frates.append(frates)
+                self.effective_time.append(effective_time)
+                self.n_neurons.append(n_neurons)
+                self.i.append(i)
+
+            @property
+            def iqr(self):
+                return np.percentile(self.frates, 75)-np.percentile(self.frates, 25)
+            
+            @property
+            def describe(self):
+                return [describe(self.frates)]
+            
+            def __str__(self):
+                overview_str=""
+                overview_str+=f"{self.i}. {self.neu_type}\t"
+                overview_str+=f"n={int(self.n_neurons)}\t"
+                overview_str+=f"mean firing rates (Hz)|effective time (h)\n"
+                for ts,mfrs in zip(self.effective_time,self.mean_firing_rates):
+                    for t,mfr in zip(ts,mfrs):
+                        overview_str+=f"{mfr:.02f}|{t:.02f}  "
+                overview_str+="\n"
+                if self.n_neurons<2:
+                    overview_str+="Too few neurons in this category\n"
+                return overview_str
+
+        print("Mean firing rates P VALUES")
+        stats = {}
+        for k,v in self.data.items():
+            for epoch in self.conf.epochs:
+                overview_str = f"======={k.session}-{epoch}=======\n"
+                edges=self.edge_timestamps[k]
+                for i,neu_type in enumerate(self.conf.neuron_types):
+                    neus = v.get_neuron_type(neu_type)
+                    for s,e in zip(edges[0],edges[1]):
+                        _neus = neus.time_slice(s,e)
+                        if _neus.n_neurons>0:
+                            stats[k] = FrateStat(
+                                i=i,
+                                neu_type=neu_type,
+                                frates=_neus.firing_rate,
+                                effective_time = _neus.effective_time_hours,
+                                n_neurons=_neus.n_neurons,
+                                )
+                        else:
+                            stats[k] = FrateStat(n_neurons=0)
+                    labels += [f"{epoch.capitalize()}{i+1}" for i in range(len(edges[0]))]
+        if neus.n_neurons>5:
+        return stats
+
+
+                decimal_places=int(2+-np.floor(np.log10(alpha)))
+                frates = [xx for x in frates for xx in x]
+                flag = False
+                for j in range(total_n_segments):
+                    for k in range(j):
+                        p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
+                        if p<alpha:
+                            flag = True
+                            overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
+                        # Standard t-test,  check if mean firing rate changes per cell type
+                if not flag: overview_str+="No significant difference between segments\n"            
+
+
+
 
 
 class ACG:
@@ -2486,88 +2505,3 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, ccg_null=Non
         plt.show()
     plt.close(fig)
     return fig
-
-
-# will fall under WindowSweep
-def routine_mean_firing_rates(nd:NeuronsDataset):
-    n_segments=nd.conf.n_segments
-    epochs=nd.conf.epochs
-    total_n_segments = np.sum(n_segments)
-    neuron_types = nd.conf.neuron_types
-    ntypes = len(neuron_types)
-    alpha = 0.05
-
-    print("Mean firing rates P VALUES")
-    for key,sess_neurons in nd.data.items():
-        
-        overview_str=f"======={key.session}=======\n"
-        for epoch, n_segment in zip(epochs, n_segments):
-            labels+=[f"{epoch.capitalize()}{i+1}" for i in range(n_segment)]
-
-        for itype in range(ntypes):
-            ################ UPDATE RETURN VALUES #################       
-            nneurons = 0
-            mean_firing_rates,\
-            sd_firing_rates,\
-            iqr,\
-            frates,\
-            effective_time = [],[],[],[],[]
-            ############# END OF UPDATE RETURN VALUES ##############
-
-            ### start of epochs loop ###
-            for ie, epoch, n_segment in enumerate(zip(epochs, n_segments)):
-                ################ UPDATE RETURN VALUES #################       
-                mean_firing_rates.append([])
-                sd_firing_rates.append([])
-                iqr.append([])
-                frates.append([])
-                effective_time.append([])
-                ############# END OF UPDATE RETURN VALUES ##############
-
-                ### start of segments loop ###
-                for ic in range(n_segment):
-                    neus = sess_neurons[epoch][ic]
-                    neus = neus.get_neuron_type(neuron_types[itype])
-                    nneurons=neus.n_neurons
-                    frate = neus.firing_rate if nneurons>0 else 0
-                    frates[ie].append(frate)
-                    mean_firing_rates[ie].append(np.mean(frate))
-                    sd_firing_rates[ie].append(np.std(frate))
-                    effective_time[ie].append(neus.effective_time_hours) # time in hours
-                    if neus.n_neurons>5:
-                        iqr[ie].append(np.percentile(frate, 75)-np.percentile(frate, 25))
-                ### end of segments loop ###
-
-            ################ UPDATE PRINT STRING #################
-            overview_str+=f"{itype+1}. {neuron_types[itype]}\t"
-            overview_str+=f"n={int(nneurons)}\t"
-            overview_str+=f"mean firing rates (Hz)|effective time (h)\n"
-            for ts,mfrs in zip(effective_time,mean_firing_rates):
-                for t,mfr in zip(ts,mfrs):
-                    overview_str+=f"{mfr:.02f}|{t:.02f}  "
-            overview_str+="\n"
-            if nneurons<2:
-                overview_str+="Too few neurons in this category\n"
-            else:
-                decimal_places=int(2+-np.floor(np.log10(alpha)))
-                frates = [xx for x in frates for xx in x]
-                flag = False
-                for j in range(total_n_segments):
-                    for k in range(j):
-                        p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
-                        if p<alpha:
-                            flag = True
-                            overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
-                        # Standard t-test,  check if mean firing rate changes over sleep per cell type
-                if not flag: overview_str+="No significant difference between segments\n"
-            ############# END OF UPDATE PRINT STRING ##############
-            ### end of celltype loop ###
-            
-        print(overview_str)
-        ### end of sessions loop ###
-    return effective_time, mean_firing_rates, sd_firing_rates, iqr, frates
-    ### end of function ###
- 
-# routine_connection_strength
-
-
