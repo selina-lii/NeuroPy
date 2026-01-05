@@ -12,7 +12,7 @@ except ImportError:
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows
-from scipy.stats import poisson, ttest_ind
+from scipy.stats import poisson, ttest_ind, ttest_1samp
 from scipy import ndimage
 from typing import Union, Optional, Dict, Any, Tuple
 import h5py
@@ -308,8 +308,10 @@ class NormalizeBy(Enum):
     NONE = 0
     REF_FRATE = 1
     REF_SPKS = 2
-    # TGT_FRATE = 3
-    # TGT_SPKS = 4 # I don't think we're doing those yet
+    TARGET_FRATE = 3
+    TARGET_SPKS = 4 
+    BOTH_FRATE = 5
+    BOTH_SPKS = 6
 
 
 class CCGConfig:
@@ -630,7 +632,8 @@ class CCG:
     #   as segments are purely for comparison analysis
     def __init__(self, key, ccg, ids, inds, 
                  ccg_null=None, pval=None, j_sig=None, conn_strength=None,
-                 conf:CCGConfig=None,significant=True):
+                 conf:CCGConfig=None,significant=True,
+                 seg_edges=None):
         self.key=key
         self.ids=ids
         self.inds=inds
@@ -640,12 +643,23 @@ class CCG:
         self.j_sig=j_sig
         self.conn_strength = conn_strength # 
         self._conf=conf
+        self.seg_edges=seg_edges
+        self.frates=None
         n=self.inds.shape[0]
         if type(significant)==bool:
             self.significant=np.full((n,),significant) # by default, all ccgs in this variable are significant
         else:
             # assert significant.shape==(n,)#TODO
             self.significant=significant
+
+    def set_firing_rates(self, neurons:Neurons):
+        # Obtain the firing rates during the time period used to compute this CCG
+        if (self.seg_edges is not None) and (neurons.firing_rate is not None):
+            n_seg, n_pairs = self.ccg.shape[0], self.inds.shape[0]
+            frates_cut = np.zeros((n_seg,n_pairs,2))
+            for i,(t_start, t_end) in enumerate(zip(self.seg_edges[0], self.seg_edges[1])):
+                frates_cut[i] = neurons.time_slice(t_start,t_end).firing_rate[self.inds] #TODO other cases
+        self.frates = frates_cut
 
     def __str__(self):
         s=''
@@ -671,6 +685,10 @@ class CCG:
         return self.inds[-2]
     
     @property
+    def unique_inds(self):
+        return np.unique(self.inds)
+    
+    @property
     def conf(self):
         return self._conf
 
@@ -691,7 +709,7 @@ class CCG:
         cs = np.sum(auc[...,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=-1) # (inds,)
         if norm_factor is not None: 
             shape=cs.shape
-            cs = cs.astype(float).reshape(shape) / norm_factor.T # e.g. presynaptic element firing rate
+            cs = cs.astype(float).reshape(shape) / norm_factor # e.g. presynaptic element firing rate
         self.conn_strength = cs.squeeze() # divided by presynaptic firing rate
 
     def _set_cs_eranconv_compound(self, norm_factor:float=None):
@@ -753,7 +771,7 @@ class CCG:
             pval=pval, ccg_null=ccg_null, j_sig=j_sig,
         )
 
-    def save_plots(self, neuron_types, shank_ids, waveforms, frates_cut, frates_all, root, discarded_channels=None,ch_per_shank=None):
+    def save_plots(self, neuron_types, shank_ids, waveforms, frates_all, root, discarded_channels=None,ch_per_shank=None):
         assert self.ccg is not None
         plotdir = self.plotdir(root)
         if not os.path.exists(plotdir):
@@ -773,7 +791,7 @@ class CCG:
                     fig = plot_ccg_figure(ids=ids,
                                     inds=inds,
                                     neuron_types=neuron_types[idx] if neuron_types is not None else None,
-                                    frates_cut=frates_cut[i_seg][idx] if frates_cut is not None else None,
+                                    frates_cut=self.frates[i_seg][s][i] if self.frates is not None else None,
                                     frates_all=frates_all[idx] if frates_all is not None else None,
                                     waveforms=waveforms[idx] if waveforms is not None else None,
                                     shank_ids=shank_ids[idx] if shank_ids is not None else None,
@@ -887,6 +905,17 @@ class CCG:
                 Warning("_deconv_autocorr: No effect")
                 return
 
+    def normalize_by_ref_rate(self):
+        shape=self.ccg.shape
+        frates=self.frates[...,-2][...,np.newaxis] 
+        self.ccg = self.ccg.astype(float).reshape(shape) / frates
+        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates
+
+    def normalize_by_target_rate(self):
+        shape=self.ccg.shape
+        frates=self.frates[...,-1][...,np.newaxis] 
+        self.ccg = self.ccg.astype(float).reshape(shape) / frates
+        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates
 
 class Connectivity:
     def __init__(self, key, n_segments, ccgs, inds, ids, exist:np.ndarray[bool], strength:np.ndarray[float]):
@@ -936,7 +965,9 @@ class Connectivity:
                     zero_first_timepoint=False,
                     show_legend=False,
                     skips=None,
-                    save=False,root=None):
+                    save=False,
+                    root=None,
+                    debug=False):
         # show all pairs by default
         n_segments_threshold=n_segments_threshold if n_segments_threshold is not None else 0
         plt.figure()
@@ -966,9 +997,10 @@ class Connectivity:
         colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
         legend_keys = []
         
-        max_pairs=np.max(plot_data,axis=1).argsort()[-5:][::-1]
-        min_pairs=np.min(plot_data,axis=1).argsort()[:5]
-        print("max",pairs[max_pairs],"min",pairs[min_pairs])
+        if debug:
+            max_pairs=np.max(plot_data,axis=1).argsort()[-3:][::-1]
+            min_pairs=np.min(plot_data,axis=1).argsort()[:3]
+            print("max",pairs[max_pairs],"min",pairs[min_pairs])
         for i, (pair, v, c, sig) in enumerate(zip(pairs,plot_data,colors,significant)):
             plt.plot(v,c=c,alpha=0.3)  # normalized
             x_sig = np.where(sig)[0]
@@ -990,6 +1022,10 @@ class Connectivity:
             plt.savefig(f"{os.path.expanduser(root)}/{self.key}.png", bbox_inches='tight')
         else:
             plt.show()
+
+        mean, pvals = ttest_1samp(plot_data,0,axis=0)
+        print("pvals",pvals[1:],'threshold',0.05/len(pvals[1:]),"\n")
+        print("mean values",mean[1:],"\n")
 
     def plot_network(self):
         pass
@@ -1137,10 +1173,15 @@ class CCGDataset(AnalysisDataset):
 
         conv = EranConv()
         for key, neurons in self.nd.data.items():
+            seg_edges = self.nd.edge_timestamps[key]
+            if seg_edges is None: 
+                seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
+
             ccgs, spurs, autos, printstr = conv.eranconv_split(key=key, 
                                         neurons=neurons, 
-                                        seg_edges=self.nd.edge_timestamps[key], 
+                                        seg_edges=seg_edges, 
                                         conf=self.conf)
+            
             self.append_ccg(key, ccgs)
             self.append_spurious(key, spurs)
             self.append_auto(key, autos)
@@ -1246,71 +1287,33 @@ class CCGDataset(AnalysisDataset):
         print(f"Saving plots under {root}")
         for key in keys:
             ccg = self.data[key]
-            neurons = self.nd[key.nd()]
-            seg_edges = self.nd.edge_timestamps[key.nd()]
-            
-            unique_inds = np.unique(ccg.inds)
+            neurons = self.nd.data[key.nd()]
+            inds = ccg.unique_inds
 
-            # create frates_cut
-            frates_cut = None
-            if (seg_edges is not None) and (neurons.firing_rate is not None):
-                if key.segment is not None:
-                    t_start, t_end = seg_edges[0][key.segment], seg_edges[1][key.segment]
-                    frates_cut = neurons.time_slice(t_start,t_end).firing_rate[ccg.inds]
-                else:
-                    frates_cut=np.zeros((len(seg_edges[0]),unique_inds.shape[0]))
-                    for i,(t_start,t_end) in enumerate(zip(seg_edges[0],seg_edges[1])):
-                        frates_cut[i] = neurons.time_slice(t_start,t_end).firing_rate[unique_inds]
             print(f"ccg {key.session} {key.conn_type}")
             # try:
             if jd is not None:
                 ccg.j_sig = jd.data[key].significant
             ccg.save_plots(
-                neuron_types=neurons.neuron_type[unique_inds],
-                waveforms=None if neurons.waveforms is None else neurons.waveforms[unique_inds],
-                shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[unique_inds],
-                frates_all=None if neurons.firing_rate is None else neurons.firing_rate[unique_inds],
-                frates_cut=None if neurons.firing_rate is None else frates_cut,
+                neuron_types=neurons.neuron_type[inds],
+                waveforms=None if neurons.waveforms is None else neurons.waveforms[inds],
+                shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[inds],
+                frates_all=None if neurons.firing_rate is None else neurons.firing_rate[inds],
                 discarded_channels=self.nd.conf.recinfo.skipped_channels,
                 ch_per_shank=self.nd.conf.ch_per_shank,
                 root=root,
             )
         print("done")
 
-    def save_plots_spurious(self, root="~/Documents/NeuroPy/images/ccg_plots", frates_all=None, EI:list=None):
-        assert os.path.isdir(root)
-        keys = self.keys_matching(excitability=EI) if EI else self.spurious.keys()
-        print(f"Saving plots under {root}")
-        for key in keys:
-            ccg = self.spurious[key]
-            neurons = self.nd[key.nd()] # REMOVE key parent
-            if EI is not None and key.excitability not in EI: continue
-            print(f"spurious {key.session} {key.conn_type}") # REMOVE key parent
-            frates = frates_all[key.nd()] if frates_all else None
-            try:
-                ccg.save_plots(
-                    neuron_types=neurons.neuron_type[ccg.inds],
-                    waveforms=None if neurons.waveforms is None else neurons.waveforms[ccg.inds],
-                    shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[ccg.inds],
-                    frates_cut=None if neurons.firing_rate is None else neurons.firing_rate[ccg.inds],
-                    frates_all=None if frates is None else frates[ccg.inds],
-                    discarded_channels=self.nd.conf.recinfo.discarded_channels,
-                    ch_per_shank=self.nd.conf.ch_per_shank,
-                    root=root)
-            except Exception as e:
-                print(f"{key.session}: No {key.excitability} spurious connections {e}")
-                continue
-        print("done")
-
-    def normalize_by_ref(self):
-        """
-        Normalize CCGs by reference firing rate (or the number of reference spikes?)
-        """
-        # TODO modifies data TODO untested TODO normalize to reference firing rate
-        for d in self.data:
-            d.normalize(self.nd.data[d.key.nd()].n_spikes[d.inds[:,-2]])
-        for d in self.spurious:
-            d.normalize(self.nd.data[d.key.nd()].n_spikes[d.inds[:,-2]])
+    def normalize(self):
+        for _, ccg in self.data.items():
+            if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
+                ccg.normalize_by_ref_rate()
+            elif self.conf.normalize.name == NormalizeBy.TARGET_FRATE.name:
+                ccg.normalize_by_target_rate()
+            elif self.conf.normalize.name == NormalizeBy.BOTH_FRATE.name:
+                ccg.normalize_by_ref_rate()
+                ccg.normalize_by_target_rate()
 
     def set_connection_strengths(self, method="eran_conv"):
         """
@@ -1321,19 +1324,12 @@ class CCGDataset(AnalysisDataset):
         for key, ccg in self.data.items():
             k=key.nd()
             if ccg is None: continue # no connection
-            if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
-                norm_factors = self.nd[k].firing_rate[ccg.ref_inds][...,np.newaxis]
-            elif self.conf.normalize.name==NormalizeBy.REF_SPKS.name:
-                norm_factors = self.nd[k].n_spikes[ccg.ref_inds][...,np.newaxis]
-            else:
-                norm_factors = None
-
             if method=="eran_conv":
-                ccg._set_cs_eranconv(norm_factors)
+                ccg._set_cs_eranconv()
             elif method=="tail":
                 spikecount = self.nd[k].n_spikes
                 acg = self.auto[k]
-                ccg._set_cs_tail(acg,spikecount,norm_factors=norm_factors)
+                ccg._set_cs_tail(acg,spikecount)
                 return NotImplementedError("Unknown connection strength method")
 
     def set_connectivity(self, conn_types=None, sessions=None, epochs=None):
@@ -1356,7 +1352,7 @@ class CCGDataset(AnalysisDataset):
                 if keyy.conn_type in conn_types:
                     ccg=self.data[keyy]
                     if ccg is None: continue # no connections
-                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength.T,ccg.significant.T):
+                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength.T,ccg.significant.T):#TODO how to not use transpose?
                         p = tuple(ind)
                         if p not in pairs:
                             pairs.append(p)
@@ -1402,7 +1398,9 @@ class CCGDataset(AnalysisDataset):
                                             zero_first_timepoint=False,
                                             show_legend=False,
                                             skips={},
-                                            save=False,root='~/Documents/NeuroPy/images/conn_strengths'):
+                                            save=False,
+                                            root='~/Documents/NeuroPy/images/conn_strengths',
+                                            debug=False):
         for k1, conn in self.connectivity.items():
             print(k1,skips.get(k1))
             conn.plot_strength(n_segments_threshold=n_segments_threshold,
@@ -1412,7 +1410,8 @@ class CCGDataset(AnalysisDataset):
                                            norm_by_total_strength=norm_by_total_strength,
                                            zero_first_timepoint=zero_first_timepoint,
                                            show_legend=show_legend,
-                                           skips=skips.get(k1))
+                                           skips=skips.get(k1),
+                                           debug=debug)
 
     def plot_connection_strengths_compound(self,n_segments_threshold=None,save=False,
                                             norm_by_n_sess=False,
@@ -2122,9 +2121,6 @@ class EranConv:
         print("running eranconv (1st pass)")
         self.conf = conf
         self.n = neurons.n_neurons
-        # self.n_segments = 1 if seg_edges is None else len(seg_edges[0])
-        if seg_edges is None: 
-            seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
         self.n_segments = len(seg_edges[0])
 
         self.ccg = correlations.spike_correlations(
@@ -2291,7 +2287,9 @@ class EranConv:
                 pval=self.pval_corrected if key.excitability=='E' else self.qval_corrected, 
                 conf=self.conf,
                 significant=sig_mask,
-                key=k)
+                key=k,
+                seg_edges=seg_edges)
+        ccgs[k].set_firing_rates(neurons)
 
         # for i in range(self.n_segments):
         #     k=key.change(segment=i)

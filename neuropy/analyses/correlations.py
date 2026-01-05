@@ -948,7 +948,7 @@ def np_spike_correlations_snapshots(
             # Increment the matching spikes in the correlograms array.
             _np_increment(correlogram.ravel(), indices)
             shift += 1
-        print("ccg #", i_ccg, "shift", shift)
+        # print("ccg #", i_ccg, "shift", shift)
         correlograms[i_ccg]=correlogram
 
     if symmetrize:
@@ -1070,7 +1070,7 @@ def cp_spike_correlations_snapshots(
             # Increment the matching spikes in the correlograms array.
             _cp_increment(correlogram.ravel(), indices)
             shift += 1
-        print("ccg #", i_ccg, "shift", shift)
+        # print("ccg #", i_ccg, "shift", shift)
         correlograms[i_ccg]=correlogram
 
     if symmetrize:
