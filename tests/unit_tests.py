@@ -37,10 +37,10 @@ def test_spike_correlation_snapshots(sess:ProcessData):
     # new implementation, compute all time segments together
     c_newchunk=msconn.NeuronsDatasetConfig(seg_stride=60*60*0.5, seg_len=60*60*5, epochs=['post'], sleep_labels=None,recinfo=sess.recinfo)
     nd_n=msconn.NeuronsDataset(sess,c_newchunk)
-    edges = nd_n.edge_timestamps[list(nd_n.edge_timestamps.keys())[0]]
+    edges = nd_n.edge_times[list(nd_n.edge_times.keys())[0]]
     print("segment edges", edges)
     ccg_n=msconn.CCGDataset(nd_n,conf)
-    ccg_n.get_CCG_with_baseline() # "there was something wrong in switching to jax but i can reference np version
+    ccg_n.get_ccg() 
 
     # old implemention, slice time to make a new neurons object
     c_oldchunk=msconn.NeuronsDatasetConfig(epochs=['post'], sleep_labels=None,recinfo=sess.recinfo)
@@ -49,7 +49,7 @@ def test_spike_correlation_snapshots(sess:ProcessData):
         n.data[list(n.data.keys())[0]]=n.data[list(n.data.keys())[0]].time_slice(t_start=edges[0][i],t_stop=edges[1][i])
     ccg_o=[msconn.CCGDataset(n,conf) for n in nd_o]
     for c in ccg_o:
-        c.get_CCG_with_baseline()
+        c.get_ccg()
         c.set_connection_strengths(method="eran_conv")
         c.set_connectivity()
         neu=c.nd.data[list(c.nd.data.keys())[0]]

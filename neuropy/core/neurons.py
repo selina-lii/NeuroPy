@@ -145,13 +145,6 @@ class Neurons(DataWriter):
             metadata=self.metadata
         )
 
-    def t_tighten(self):
-        # shrink t_start/t_stop to tight boundaries
-        assert np.isin('intervals',list(self.metadata.keys())), "missing epochs data"
-        actual_start, actual_end = self.metadata['intervals'][0,0], self.metadata['intervals'][-1,-1]
-        self.t_start = max(self.t_start,actual_start)
-        self.t_stop = min(actual_end,self.t_stop)
-
     def add_metadata(self,data:dict):
         if self.metadata is None:
             self.metadata=data
@@ -253,12 +246,15 @@ class Neurons(DataWriter):
         neurons = deepcopy(self)
         if zero_spike_times:
             spiketrains = [t[(t >= t_start) & (t <= t_stop)] - t_start for t in neurons.spiketrains]
-            if np.isin('intervals',list(neurons.metadata.keys())):
-                neurons.metadata['intervals']=neurons.metadata['intervals']-t_start
             t_stop = t_stop - t_start
             t_start = 0
         else:
             spiketrains = [t[(t >= t_start) & (t <= t_stop)] for t in neurons.spiketrains]
+
+        if np.isin('intervals',list(neurons.metadata.keys())):
+            iv = neurons.metadata["intervals"]
+            iv = iv[(iv[:,1]>=t_start)&(iv[:,0]<=t_stop)]
+            neurons.metadata["intervals"] = iv - (t_start if zero_spike_times else 0)
 
         return Neurons(
             spiketrains=spiketrains,
@@ -275,20 +271,44 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
 
-    def _edges_time_split(self, n_segments=1):
+    def zero_spike_times(self):
         t_start, t_stop = super()._time_slice_params()
+        neurons = deepcopy(self)
+        spiketrains = [t - t_start for t in neurons.spiketrains]
+        if np.isin('intervals',list(neurons.metadata.keys())):
+            neurons.metadata['intervals']=neurons.metadata['intervals']-t_start
+        t_stop = t_stop - t_start
+        t_start = 0
+
+        return Neurons(
+            spiketrains=spiketrains,
+            t_stop=t_stop,
+            t_start=t_start,
+            sampling_rate=neurons.sampling_rate,
+            neuron_ids=neurons.neuron_ids,
+            neuron_type=neurons.neuron_type,
+            waveforms=neurons.waveforms,
+            waveforms_amplitude=neurons.waveforms_amplitude,
+            peak_channels=neurons.peak_channels,
+            shank_ids=neurons.shank_ids,
+            clu_q=neurons.clu_q,
+            metadata=neurons.metadata,
+        )
+    
+    def _edges_time_split(self, n_segments=1, t_start=None,t_stop=None):
+        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
 
         seg_starts = np.histogram_bin_edges([],bins=n_segments,range=(t_start,t_stop))[:-1]
         seg_stops = np.histogram_bin_edges([],bins=n_segments,range=(t_start,t_stop))[1:]
         
         return seg_starts,seg_stops
     
-    def _edges_time_window(self, stride=None, seg_len=None, keep_incomplete=False):
-        t_start, t_stop = super()._time_slice_params()
+    def _edges_time_window(self, stride=None, seg_len=None, keep_incomplete=False, t_start=None,t_stop=None):
+        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
 
         if seg_len>=t_stop-t_start:
             print(f"segment length overflowed, using maximum recording time {t_stop-t_start}") 
-            return [t_start],[t_stop]
+            return np.array([t_start]),np.array([t_stop])
 
         seg_starts = np.arange(start=t_start,stop=t_stop-seg_len+1,step=stride)
         seg_stops = seg_starts+seg_len
@@ -301,7 +321,7 @@ class Neurons(DataWriter):
             seg_stops=np.append(seg_stops,min(t_stop,stop))
             print(f"length of last bin is {seg_stops[-1]-seg_starts[-1]} while all other bins are {seg_len}")        
         
-        return seg_starts,seg_stops
+        return seg_starts, seg_stops
 
     def _edges_spikecount(self, i, n=1000, discard_tail=False):
         """
@@ -362,13 +382,12 @@ class Neurons(DataWriter):
         # print("after",intervals[0],intervals[-1])
         return intervals
 
-    def time_multislices(self, t_starts,t_stops, t_start=None, t_stop=None, zero_spike_times=False,
-                         tighten=False):
+    def time_multislices(self, t_starts, t_stops):
         """
         Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
+        and tighten t_start, t_end by the intervals.
         TODO slow (if num intervals are large)
         """
-        t_start, t_stop = super()._time_slice_params(t_start, t_stop)
         intervals = list(zip(t_starts,t_stops))
         def _merge_intervals(intervals):
             intervals = np.array(sorted(intervals))
@@ -383,6 +402,11 @@ class Neurons(DataWriter):
         # remove out of range intervals
         intervals=_merge_intervals(intervals)
 
+        t_start, t_stop = super()._time_slice_params(
+            max(t_starts[0],self.t_start),
+            min(self.t_stop,t_stops[-1])
+        )
+
         # this is faster. 
         # alternatively, use inds = np.any((spks >= intervals[:,0]) & (spks <= intervals[:,1]), axis=1)
         def _mask(spks, intervals):
@@ -394,18 +418,12 @@ class Neurons(DataWriter):
             return np.concatenate(keep)
         
         neurons = deepcopy(self)
-        if zero_spike_times:
-            spiketrains = [_mask(spks,intervals)-t_start for spks in neurons.spiketrains]
-            t_stop = t_stop - t_start
-            t_start = 0
-        else:
-            spiketrains = [_mask(spks,intervals) for spks in neurons.spiketrains]
+        spiketrains = [_mask(spks,intervals) for spks in neurons.spiketrains]
 
         neurons.spiketrains=np.asarray(spiketrains,dtype='object')
         neurons.t_stop=t_stop
         neurons.t_start=t_start
         neurons.metadata={'intervals':intervals}
-        if tighten: neurons.t_tighten()
         return neurons
     
     def neuron_slice(self, neuron_inds=None, neuron_ids=None):
@@ -464,10 +482,11 @@ class Neurons(DataWriter):
             metadata=neurons.metadata
         )
 
-    def behav_slice(self, b_times:Epoch, 
+    def behav_slice(self, behav_times:Epoch, 
                     labels: Union[list[str], str]=None,
                     discard = False,
-                    tighten=False, min_dur=120):
+                    min_dur=0,
+                    ):
         """
         Return neurons with only spikes during specified behavioral or brain states
         (for example, sleep/wake)
@@ -479,20 +498,19 @@ class Neurons(DataWriter):
         label: name of the brainstates
             Usually from ["QW","AW","REM","NREM"].
         min_dur: minimum duration threshold in seconds
-        tighten: 
+        return_t: if true, return original timestamps of slice t_start and t_end
         """
-        if labels is None:
-            if min_dur==0 or min_dur is None:
-                bstates=b_times # If no conditions are specified, this function just cuts neurons by intervals in b_times 
-            else:
-                bstates = b_times.duration_slice(min_dur=min_dur)
+        if not behav_times.has_labels: # no labels
+            if discard: behav_times = behav_times.invert_time()
+            # If no labels are provided, this function just cuts neurons by intervals in b_times 
         else:
-            if discard: 
-                labels = list(set(b_times.get_unique_labels()) - set(labels))
-            bstates = b_times.label_slice(labels).duration_slice(min_dur=min_dur)
+            if discard: labels = list(set(behav_times.get_unique_labels()) - set(labels))
+            behav_times = behav_times.label_slice(labels)
         
-        state_neurons=self.time_multislices(t_start=bstates.starts,t_stops=bstates.stops,tighten=tighten)
-        return state_neurons
+        behav_times = behav_times.duration_slice(min_dur=min_dur)
+
+        return self.time_multislices(t_starts=behav_times.starts,
+                                    t_stops=behav_times.stops,)
 
     def burst_slice(self,k:int=1,threshold=1e-4):
         """

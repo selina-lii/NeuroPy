@@ -3,11 +3,11 @@
 
 from neuropy.io import NeuroscopeIO
 import numpy as np
-try:
-    import cupy as cp
-except ImportError:
-    print("Error importing CuPy")
-    cp = None
+# try:
+#     import cupy as cp
+# except ImportError:
+#     print("Error importing CuPy")
+#     cp = None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
@@ -118,7 +118,7 @@ class Key:
         return replace(self, **kwargs)
 
     def nd(self) -> 'Key':
-        return self.get('session','epoch')
+        return self.get('session')
 
 
 class AnalysisDataset:
@@ -214,14 +214,14 @@ class AnalysisDataset:
         print(f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary.")
 
 
-class Toggle(Enum):
-    """
-    Set operation on a variable during filtering of neural data
-    """
-    NONE = 0
-    SELECT = 1
-    REMOVE = 2
+class EpochSelect:
+    def __init__(self,labels:Union[list[str], str, None]=None,min_dur=0,discard=False):
+        self.labels=_san(labels)
+        self.min_dur=min_dur
+        self.discard=discard
 
+    def __str__(self):
+        return self.__class__ + ': ' + '\n'.join([f"{key}={val}" for key, val in self.__dict__.items()])
 
 class NeuronsDatasetConfig:
     """
@@ -236,29 +236,39 @@ class NeuronsDatasetConfig:
     """
     def __init__(self,
                  name:str = "default",
-                 neuron_types:Union[list[str], str, None] = ['pyr', 'inter'], 
-                 epochs:Union[list[str], str, None]="post", 
-                 n_segments:Union[list[int], int]=1, 
+                 neuron_types:Union[list[str], str, None]=['pyr','inter'], 
+                 epochs:Union[list[str], str, None]=['maze','post'], 
+                 sleep:Union[EpochSelect, None]=None, 
+                 ripple:Union[EpochSelect, None]=None, 
+                 n_segments:Union[list[int], int]=None, 
                  seg_stride:int=None,
                  seg_len:int=None,
-                 spikecount_per_group:int=None,
-                 sleep_labels:Union[list[str], str]=["REM","NREM"], 
-                 ripple:Toggle=Toggle.NONE, tight_epoch=False,
+                 seg_spikecount:int=None,
+                 zero_spike_times=False,
                  recinfo:NeuroscopeIO=None):
         self.name = name
         self.session_names = []
         self.neuron_types = _san(neuron_types)
-        self.epochs = _san(epochs) or [None] # each epoch gets their own neurons object
-        self.sleep_labels = _san(sleep_labels)
+        self.sleep = sleep
         self.ripple = ripple
         self.n_segments = _san(n_segments)
-        self.tight_epoch = tight_epoch
         self.seg_stride = seg_stride
         self.seg_len = seg_len
-        self.spikecount_per_group = spikecount_per_group
-        self.ch_per_shank = 16 
+        self.seg_spikecount = seg_spikecount
+        self.zero_spike_times = zero_spike_times
         self.recinfo = recinfo
-        assert len(self.n_segments)==len(self.epochs)
+
+        self.ch_per_shank = 16 
+
+        self.epochs = _san(epochs)
+        if epochs is not None and n_segments is not None:
+            assert len(self.n_segments)==len(self.epochs)
+
+        # self.sleep = EpochSelect(labels=['REM','NREM'],
+        #                           min_dur=120,
+        #                           discard=False,)
+        # self.ripple = EpochSelect(min_dur=0,
+        #                           discard=True,)
 
     def __str__(self):
         s=""
@@ -468,8 +478,9 @@ class NeuronsDataset(AnalysisDataset):
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
         self._conf = conf        
         self.data={}
-        self.edge_timestamps=defaultdict(lambda: defaultdict(list))
-
+        self.edge_times=defaultdict(lambda: defaultdict(list))
+        self.effective_time_hours=defaultdict(lambda: defaultdict(list))
+        self.total_time_hours=defaultdict(lambda: defaultdict(list))
         self.prep(sessions)
 
     def __str__(self): 
@@ -485,63 +496,95 @@ class NeuronsDataset(AnalysisDataset):
         return self._conf
     
     def prep(self, sessions):
+        c = self.conf
         sessions = _san(sessions)
         for s in sessions:
-            ssn = _short_session_name(s)
-            self.conf.session_names.append(ssn)
-            
-            neus = s.neurons
+            name = _short_session_name(s)
+            key = Key(session=name)
+            self.conf.session_names.append(name)
+            neurons = s.neurons
 
             # Filter neurons
             # -type
             if self.conf.neuron_types is not None:
-                neus = neus.get_neuron_type(self.conf.neuron_types)
+                neurons = neurons.get_neuron_type(c.neuron_types)
             # -paradigm label
             if self.conf.epochs is not None:
-                neus = neus.behav_slice(s.paradigm, self.conf.epochs)
+                neurons = neurons.behav_slice(behav_times=s.paradigm, 
+                                        labels=c.epochs)
             # -sleep states
-            if self.conf.sleep_labels is not None:
-                neus = neus.behav_slice(s.brainstates, self.conf.sleep_labels, 
-                                        tighten=self.conf.tight_epoch)
+            if self.conf.sleep is not None:
+                neurons = neurons.behav_slice(behav_times=s.brainstates, 
+                                        labels=c.sleep.labels, 
+                                        discard=c.sleep.discard,
+                                        min_dur=c.sleep.min_dur)
             # -ripple states
-            if self.conf.ripple==Toggle.SELECT:
-                neus = neus.behav_slice(s.ripple,
-                                        tighten=self.conf.tight_epoch,
-                                        min_dur=0) # NOTE not selecting ripple duration for now
-            elif self.conf.ripple==Toggle.REMOVE:
-                non_ripple = s.ripple.time_invert_selection(t_start=s.paradigm.starts[0],
-                                                            t_stop=s.paradigm.stops[0])
-                neus = neus.behav_slice(non_ripple,
-                                        tighten=self.conf.tight_epoch,
-                                        min_dur=0) # NOTE not selecting ripple duration for now
+            if self.conf.ripple is not None:
+                neurons = neurons.behav_slice(behav_times=s.ripple, 
+                                        labels=None, 
+                                        discard=c.ripple.discard,
+                                        min_dur=c.ripple.min_dur)
+
+            """
+            Get the start and end of each segment. A segment is the smallest time period in the 
+            dataset where analysis will be performed (e.g. data used to calculate one CCG). There 
+            can be many overlapping segments within a dataset depending on configuration.
+            
+            Define segment edges of each neurons group
+            see neurons.py: 
+                _edges_time_split   time_split
+                _edges_time_window  time_windows
+                _edges_spikecount   spikecount_split
+            """
+
+            for i, e in enumerate(c.epochs):
+                k = key.add(epoch=e)
+                t_start,t_stop = s.paradigm.timing_by_label(e)
+                    
+                if c.seg_spikecount is not None:
+                    neus = neurons.time_slice(t_start,t_stop)
+                    for i in range(neus.n_neurons):
+                        k = key.add(epoch=e, ref_ind=i)
+                        edges = neus._edges_spikecount(i=i,
+                                                    n=c.seg_spikecount,
+                                                    discard_tail=False)
+                        self.edge_times[k]=edges 
+                elif c.seg_stride is not None and c.seg_len is not None:
+                    self.edge_times[k] = neurons._edges_time_window(stride=c.seg_stride, 
+                                                                seg_len=c.seg_len,
+                                                                t_start=t_start,
+                                                                t_stop=t_stop) 
+                elif c.n_segments is not None and c.n_segments[i] > 1:
+                    self.edge_times[k] = neurons._edges_time_split(n_segments=c.n_segments,
+                                                                t_start=t_start,
+                                                                t_stop=t_stop)
+                else:
+                    self.edge_times[k] = None
+                
+                # Calculate total/actual time length of each segment
+                #TODO does not work for spikecount edges yet
+                intervals = neurons.metadata['intervals']
+                seg_edges=self.edge_times[k]
+                effective_time_hours,total_time_hours = [],[]
+                for t_start, t_stop in zip(seg_edges[0],seg_edges[1]):
+                    iv = intervals[(intervals[:,1]>=t_start)&(intervals[:,0]<=t_stop)]
+                    tth = (t_stop-t_start)/3600
+                    total_time_hours.append(tth)
+                    effective_time_hours.append(min(tth,np.sum(iv[:,1]-iv[:,0])/3600))
+                self.effective_time_hours[k]=np.array(effective_time_hours)
+                self.total_time_hours[k]=np.array(total_time_hours)
+
+            if c.zero_spike_times:
+                t_start = neurons.t_start
+                neurons = neurons.zero_spike_times()
+                for k,v in self.edge_times.items():
+                    self.edge_times[k]=(v[0]-t_start,v[1]-t_start)
 
             # Store filtered neurons
-            key = Key(session=ssn, epoch=e)
-            self.data[key] = neus
-            N = neus.n_neurons
+            self.data[key] = neurons
 
-            # Define segment edges of each neurons group
-            # see neurons.py: 
-            #    _edges_time_split  time_split
-            #   _edges_time_window  time_windows
-            #   _edges_spikecount   spikecount_split
 
-            for i, e in enumerate(self.conf.epochs):
-                if self.conf.spikecount_per_group is not None:
-                    for i in range(N):
-                        k = Key(session=ssn, ref_ind=i)
-                        edges = neus._edges_spikecount(i=i,
-                                                          n=self.conf.spikecount_per_group,
-                                                          discard_tail=False)
-                        self.edge_timestamps[k][e]=edges
-                elif self.conf.seg_stride is not None and self.conf.seg_len is not None:
-                    self.edge_timestamps[key][e] = neus._edges_time_window(stride=self.conf.seg_stride, 
-                                            seg_len=self.conf.seg_len) 
-                elif self.conf.n_segments is not None and self.conf.n_segments[i] > 1:
-                    self.edge_timestamps[key][e] = neus._edges_time_split(n_segments=self.conf.n_segments)
-                else:
-                    self.edge_timestamps[key][e] = None
-            
+
 
     def frate_stats(self):
         @dataclass
@@ -586,12 +629,12 @@ class NeuronsDataset(AnalysisDataset):
 
         print("Mean firing rates P VALUES")
         stats = {}
-        for k,v in self.data.items():
+        for k,edges in self.edge_times.items():
             for epoch in self.conf.epochs:
                 overview_str = f"======={k.session}-{epoch}=======\n"
-                edges=self.edge_timestamps[k]
+                neurons=self.data[k.nd()]
                 for i,neu_type in enumerate(self.conf.neuron_types):
-                    neus = v.get_neuron_type(neu_type)
+                    neus = neurons.get_neuron_type(neu_type)
                     for s,e in zip(edges[0],edges[1]):
                         _neus = neus.time_slice(s,e)
                         if _neus.n_neurons>0:
@@ -606,20 +649,21 @@ class NeuronsDataset(AnalysisDataset):
                             stats[k] = FrateStat(n_neurons=0)
                     labels += [f"{epoch.capitalize()}{i+1}" for i in range(len(edges[0]))]
         if neus.n_neurons>5:
+            pass
         return stats
 
 
-                decimal_places=int(2+-np.floor(np.log10(alpha)))
-                frates = [xx for x in frates for xx in x]
-                flag = False
-                for j in range(total_n_segments):
-                    for k in range(j):
-                        p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
-                        if p<alpha:
-                            flag = True
-                            overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
-                        # Standard t-test,  check if mean firing rate changes per cell type
-                if not flag: overview_str+="No significant difference between segments\n"            
+                # decimal_places=int(2+-np.floor(np.log10(alpha)))
+                # frates = [xx for x in frates for xx in x]
+                # flag = False
+                # for j in range(total_n_segments):
+                #     for k in range(j):
+                #         p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
+                #         if p<alpha:
+                #             flag = True
+                #             overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
+                #         # Standard t-test,  check if mean firing rate changes per cell type
+                # if not flag: overview_str+="No significant difference between segments\n"            
 
 
 
@@ -675,10 +719,10 @@ class CCG:
         # Obtain the firing rates during the time period used to compute this CCG
         if (self.seg_edges is not None) and (neurons.firing_rate is not None):
             n_seg, n_pairs = self.ccg.shape[0], self.inds.shape[0]
-            frates_cut = np.zeros((n_seg,n_pairs,2))
+            self.frates = np.zeros((n_seg,n_pairs,2))
             for i,(t_start, t_end) in enumerate(zip(self.seg_edges[0], self.seg_edges[1])):
-                frates_cut[i] = neurons.time_slice(t_start,t_end).firing_rate[self.inds] #TODO other cases
-        self.frates = frates_cut
+                neu=neurons.time_slice(t_start,t_end)
+                self.frates[i] = neu.firing_rate[self.inds] #TODO other cases
 
     def __str__(self):
         s=''
@@ -800,7 +844,7 @@ class CCG:
         s=np.argsort(self.inds[:,-2]) #[np.random.random_integers(0,inds.shape[0]-1,5)]
         n_seg=self.ccg.shape[0]
 
-        if self.key.segment is None: # TODO is len(self.ccg.shape)==3 a better condition? 
+        if len(self.ccg.shape)==3:
             for i,(inds,ids) in enumerate(zip(self.inds[s],self.ids[s])):
                 figs = []
                 ymin,ymax=[],[]
@@ -847,7 +891,7 @@ class CCG:
                 plot_ccg_figure(ids=ids,
                                 inds=inds,
                                 neuron_types=neuron_types[idx] if neuron_types is not None else None,
-                                frates_cut=frates_cut[idx] if frates_cut is not None else None,
+                                frates_cut=self.frates[idx] if self.frates is not None else None,
                                 frates_all=frates_all[idx] if frates_all is not None else None,
                                 waveforms=waveforms[idx] if waveforms is not None else None,
                                 shank_ids=shank_ids[idx] if shank_ids is not None else None,
@@ -1072,7 +1116,7 @@ class CCGDataset(AnalysisDataset):
         self.auto={} # autocorrelograms 
         self.connectivity={}
 
-    def get_CCG_with_baseline(self, method="eran_conv"):
+    def get_ccg(self, method="eran_conv"):
         """
         main function of the class
         """
@@ -1181,18 +1225,19 @@ class CCGDataset(AnalysisDataset):
         nd: Neurons dataset, contains all input data
         """
         print("EranConv significant pairs")
-        def _s(sess_name, neurons): # print helper
-            neurons=_san(neurons)
-            s = f"======={sess_name}=======\n"
-            s+=f"Segment(s) are {neurons[0].total_time_hours:.2f}h each and contain {[f'{_.effective_time_hours:.2f}' for _ in neurons]} hours of actual sleep "
+        def _s(key, neurons, total_time_hours, effective_time_hours): # print helper
+            s = f"======={key.session}-{key.epoch}=======\n"
+            s+=f"Segment(s) are {total_time_hours[0]:.2f}h each "
+            if self.nd.conf.sleep is not None:
+                s+=f"and contain {[f'{_:.2f}' for _ in effective_time_hours]} hours of actual sleep "
             for _ in self.nd.conf.neuron_types:
-                s+=f"{_}={neurons[0].get_neuron_type(_).n_neurons} "
+                s+=f"{_}={neurons.get_neuron_type(_).n_neurons} "
             s+="\n"
             return s
 
         conv = EranConv()
-        for key, neurons in self.nd.data.items():
-            seg_edges = self.nd.edge_timestamps[key]
+        for key, seg_edges in self.nd.edge_times.items():
+            neurons = self.nd.data[key.nd()]
             if seg_edges is None: 
                 seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
 
@@ -1204,7 +1249,10 @@ class CCGDataset(AnalysisDataset):
             self.append_ccg(key, ccgs)
             self.append_spurious(key, spurs)
             self.append_auto(key, autos)
-            print(_s(key.session,neurons)+printstr)
+
+            tt=self.nd.total_time_hours[key]
+            et=self.nd.effective_time_hours[key]
+            print(_s(key,neurons,tt,et)+printstr)
 
     def _reCCG(self,key:Key,
                indices_source=CCGIndexSource.SIGNIFICANT,
@@ -1220,7 +1268,7 @@ class CCGDataset(AnalysisDataset):
         # groups=self.group_by('session','epoch',source='connectivity')
         if key.ref_ind is not None:
             # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
-            seg_edges = self.nd.edge_timestamps[key.remove('segment')]
+            seg_edges = self.nd.edge_times[key.remove('segment')]
 
         elif indices_source==CCGIndexSource.SIGNIFICANT:
             inds = self.data[key].inds
@@ -1235,7 +1283,7 @@ class CCGDataset(AnalysisDataset):
         ccgs = conv.eranconv_merge(key=key, 
                             neurons=self.nd.data[key.nd()], # session, epoch, conn_type
                             pair_inds=inds,
-                            seg_edges=seg_edges or self.nd.edge_timestamps[key.nd()], 
+                            seg_edges=seg_edges or self.nd.edge_times[key.get('session','epoch')], 
                             conf=self.conf)
         return ccgs
 
@@ -1365,7 +1413,8 @@ class CCGDataset(AnalysisDataset):
             exist = {}
             strength = {}
             pairs = []
-            n_seg = 1 if self.nd.edge_timestamps[k.nd()] is None else len(self.nd.edge_timestamps[k.nd()][0])
+            k2 = k.get('session','epoch')
+            n_seg = 1 if self.nd.edge_times[k2] is None else len(self.nd.edge_times[k2][0])
             for keyy, _ in grouped[k].items():
                 i_seg = keyy.segment or 0
                 if keyy.conn_type in conn_types:
@@ -1404,7 +1453,7 @@ class CCGDataset(AnalysisDataset):
     #     """
     #     for k, ccg in self.data.items():
     #         segment_key = Key(session=k.session, epoch=k.epoch, ref_ind=k.ref_ind)
-    #         n = len(self.nd.edge_timestamps[segment_key][0])
+    #         n = len(self.nd.edge_times[segment_key][0])
     #         neurons = self.nd.data[Key(k.session,k.epoch)]
     #         self.connectivity[k] = Connectivity(key=k, n_segments=n, ccgs=ccg,
     #                                                    inds=ccg.inds, exist=ccg.significant, strength=ccg.conn_strength,
@@ -1461,7 +1510,7 @@ class CCGDataset(AnalysisDataset):
         x_coords=[]
         sig=[]
         for k, ccg in self.data.items():
-            edges = self.nd.edge_timestamps[k.get('session','epoch','ref_ind')]
+            edges = self.nd.edge_times[k.get('session','epoch','ref_ind')]
             xcoord = np.array([(ts+te)/7200 for ts,te in zip(edges[0],edges[1])])
             inds.append(ccg.inds)
             strength.append(ccg.conn_strength)
@@ -1512,352 +1561,352 @@ class DataState(Enum):
     #TODO hopefully get rid of this
 
 
-class Jitterlet:
-    def __init__(self, key:Key, neurons:Neurons, noj_inds:Union[int,list[int]], j_ind:int, conf:JitterConfig):
-        """
-        A set of neuronal pairs defined for efficient computation. 
+# class Jitterlet:
+#     def __init__(self, key:Key, neurons:Neurons, noj_inds:Union[int,list[int]], j_ind:int, conf:JitterConfig):
+#         """
+#         A set of neuronal pairs defined for efficient computation. 
 
-        Pairs are required to have:
+#         Pairs are required to have:
 
-        1. The same target neuron
-            (we jitter the target neuron spiketrain)
+#         1. The same target neuron
+#             (we jitter the target neuron spiketrain)
 
-        2. The same reference neuronal type 
-            Multiple references are okay.
-            this is to ensure significance criteria are uniform 
-            i.e. we test for either excitation or inhibition.
+#         2. The same reference neuronal type 
+#             Multiple references are okay.
+#             this is to ensure significance criteria are uniform 
+#             i.e. we test for either excitation or inhibition.
         
-        You should never have to create instances of this class because it will be 
-        taken care of by Jitter().
-        """
-        self.key = key
-        self.noj_inds = _san(noj_inds)
-        self.j_ind = j_ind
-        self.neurons = neurons
-        self.j_spktrains = []
-        self.j_ccg = []
-        self.conf = conf
-        self.__datastate = DataState.DEFAULT
-        assert len(set(neurons.neuron_type[self.noj_inds]))==1
+#         You should never have to create instances of this class because it will be 
+#         taken care of by Jitter().
+#         """
+#         self.key = key
+#         self.noj_inds = _san(noj_inds)
+#         self.j_ind = j_ind
+#         self.neurons = neurons
+#         self.j_spktrains = []
+#         self.j_ccg = []
+#         self.conf = conf
+#         self.__datastate = DataState.DEFAULT
+#         assert len(set(neurons.neuron_type[self.noj_inds]))==1
     
-    @property
-    def datastate(self):
-        return self.__datastate
-    @datastate.setter
-    def datastate(self,v:DataState):
-        if self.__datastate==DataState.READONLY: return
-        self.__datastate=v
+#     @property
+#     def datastate(self):
+#         return self.__datastate
+#     @datastate.setter
+#     def datastate(self,v:DataState):
+#         if self.__datastate==DataState.READONLY: return
+#         self.__datastate=v
         
-    @property
-    def inds(self):
-        return np.concatenate([self.noj_inds, self.j_ind])
-    @property
-    def ref_inds(self):
-        return self.noj_inds
-    @property
-    def target_ind(self):
-        return self.j_ind
+#     @property
+#     def inds(self):
+#         return np.concatenate([self.noj_inds, self.j_ind])
+#     @property
+#     def ref_inds(self):
+#         return self.noj_inds
+#     @property
+#     def target_ind(self):
+#         return self.j_ind
 
-    @property
-    def n_ref(self):
-        return len(self.noj_inds)
+#     @property
+#     def n_ref(self):
+#         return len(self.noj_inds)
     
-    @property
-    def target_type(self):
-        return self.neurons.neuron_type[self.j_ind][0]
+#     @property
+#     def target_type(self):
+#         return self.neurons.neuron_type[self.j_ind][0]
     
-    @property
-    def target_id(self):
-        return self.neurons.neuron_ids[self.j_ind]
+#     @property
+#     def target_id(self):
+#         return self.neurons.neuron_ids[self.j_ind]
 
-    @property
-    def ref_type(self):
-        return self.neurons.neuron_type[self.noj_inds[0]][0]
+#     @property
+#     def ref_type(self):
+#         return self.neurons.neuron_type[self.noj_inds[0]][0]
 
-    def add_jitter(self):
-        if self.conf.jitter_type == JitterType.INTERVAL:
-            self.add_interval_jitter()
-        else: # JitterType.SPIKE_TIMING
-            self.add_jitter_spike_timing()
+#     def add_jitter(self):
+#         if self.conf.jitter_type == JitterType.INTERVAL:
+#             self.add_interval_jitter()
+#         else: # JitterType.SPIKE_TIMING
+#             self.add_jitter_spike_timing()
 
-    def add_jitter_spike_timing(self):
-        """
-        Spike timing jitter.
-        Randomly shift each spike in target spike train
-        """
-        b = self.j_ind
-        target_nspikes = self.neurons.n_spikes[b]
-        target_spiketrain = self.neurons.spiketrains[b]
-        sampling_rate = self.neurons.sampling_rate
+#     def add_jitter_spike_timing(self):
+#         """
+#         Spike timing jitter.
+#         Randomly shift each spike in target spike train
+#         """
+#         b = self.j_ind
+#         target_nspikes = self.neurons.n_spikes[b]
+#         target_spiketrain = self.neurons.spiketrains[b]
+#         sampling_rate = self.neurons.sampling_rate
 
-        if self.conf.use_acceleration:
-            jittertrains = (
-                cp.round(
-                    (
-                        cp.array(target_spiketrain)
-                        + 2 * self.conf.jscale * cp.random.rand(self.conf.njitter,target_nspikes)
-                        - 1 * self.conf.jscale
-                    )
-                    * sampling_rate
-                )
-                / sampling_rate
-            ).get()
-        else:
-            jittertrains = (
-                np.round(
-                    (
-                        target_spiketrain
-                        + 2 * self.conf.jscale * np.random.rand(self.conf.njitter,target_nspikes)
-                        - 1 * self.conf.jscale
-                    )
-                    * sampling_rate
-                )
-                / sampling_rate
-            )
-        self.j_spktrains = list(jittertrains)
-        if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
+#         if self.conf.use_acceleration:
+#             jittertrains = (
+#                 cp.round(
+#                     (
+#                         cp.array(target_spiketrain)
+#                         + 2 * self.conf.jscale * cp.random.rand(self.conf.njitter,target_nspikes)
+#                         - 1 * self.conf.jscale
+#                     )
+#                     * sampling_rate
+#                 )
+#                 / sampling_rate
+#             ).get()
+#         else:
+#             jittertrains = (
+#                 np.round(
+#                     (
+#                         target_spiketrain
+#                         + 2 * self.conf.jscale * np.random.rand(self.conf.njitter,target_nspikes)
+#                         - 1 * self.conf.jscale
+#                     )
+#                     * sampling_rate
+#                 )
+#                 / sampling_rate
+#             )
+#         self.j_spktrains = list(jittertrains)
+#         if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
     
-    def add_interval_jitter(self):        
-        sampling_rate = self.neurons.sampling_rate
-        b = self.j_ind
-        target_nspikes = self.neurons.n_spikes[b]
-        jscale_samples = int(self.conf.jscale * sampling_rate)
-        # example: jscale_ms = 5ms, sampling rate = 30KHz, jscale in samples = 150
+#     def add_interval_jitter(self):        
+#         sampling_rate = self.neurons.sampling_rate
+#         b = self.j_ind
+#         target_nspikes = self.neurons.n_spikes[b]
+#         jscale_samples = int(self.conf.jscale * sampling_rate)
+#         # example: jscale_ms = 5ms, sampling rate = 30KHz, jscale in samples = 150
         
-        # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
-        if self.conf.use_acceleration:
-            jittertrains = (
-                cp.sort(cp.floor(
-                    (cp.floor(
-                        cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
-                        / jscale_samples
-                    ) + cp.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
-                ))
-                / sampling_rate
-            ).get()
-        else:
-            jittertrains = (
-                np.sort(np.floor(
-                    (np.floor(
-                        np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
-                        / jscale_samples
-                    ) + np.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
-                ))
-                / sampling_rate
-            )            
-        self.j_spktrains = list(jittertrains)
-        if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
+#         # from https://github.com/aamarasingham/bjitter/blob/master/Figure2.m
+#         if self.conf.use_acceleration:
+#             jittertrains = (
+#                 cp.sort(cp.floor(
+#                     (cp.floor(
+#                         cp.round(cp.array(self.neurons.spiketrains[b]) * sampling_rate) 
+#                         / jscale_samples
+#                     ) + cp.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
+#                 ))
+#                 / sampling_rate
+#             ).get()
+#         else:
+#             jittertrains = (
+#                 np.sort(np.floor(
+#                     (np.floor(
+#                         np.round(np.array(self.neurons.spiketrains[b]) * sampling_rate) 
+#                         / jscale_samples
+#                     ) + np.random.rand(self.conf.njitter,target_nspikes)) * jscale_samples 
+#                 ))
+#                 / sampling_rate
+#             )            
+#         self.j_spktrains = list(jittertrains)
+#         if self.conf.use_acceleration: cp.get_default_memory_pool().free_all_blocks()
 
-    def run_ccg_jitter(self):
-        """
-        CCGs are shaped (N0,1,nbins)
-        """
-        print("debug",self.noj_inds,self.j_ind)
+#     def run_ccg_jitter(self):
+#         """
+#         CCGs are shaped (N0,1,nbins)
+#         """
+#         print("debug",self.noj_inds,self.j_ind)
 
-        neurons = self.neurons.neuron_slice(neuron_inds=self.noj_inds)
-        j = Neurons(spiketrains=self.j_spktrains,
-            t_start=self.neurons.t_start,
-            t_stop=self.neurons.t_stop,
-            neuron_ids=[self.target_id]*self.conf.njitter,
-            neuron_type=[self.target_type]*self.conf.njitter
-            ) # TODO not copying over other fields
-        neurons.merge(j)
+#         neurons = self.neurons.neuron_slice(neuron_inds=self.noj_inds)
+#         j = Neurons(spiketrains=self.j_spktrains,
+#             t_start=self.neurons.t_start,
+#             t_stop=self.neurons.t_stop,
+#             neuron_ids=[self.target_id]*self.conf.njitter,
+#             neuron_type=[self.target_type]*self.conf.njitter
+#             ) # TODO not copying over other fields
+#         neurons.merge(j)
         
-        self.j_ccg=correlations.spike_correlations(
-                neurons=neurons,
-                ref_neuron_inds=np.arange(self.n_ref),
-                neuron_inds=self.n_ref+np.arange(self.conf.njitter),
-                bin_size=self.conf.ccg.bin_size,
-                window_size=self.conf.ccg.duration,
-                use_acceleration=self.conf.ccg.use_acceleration,
-                symmetrize=self.conf.ccg.symmetrize_ccg,
-            )
-        # Debugging - 'debug' should be all zeros (two methods are identical)
-        # orig = correlations.spike_correlations(
-        #         neurons=neurons,
-        #         neuron_inds=np.arange(neurons.n_neurons),
-        #         bin_size=bin_size,
-        #         window_size=duration,
-        #         use_acceleration=use_acceleration,
-        #         symmetrize=True,
-        #     )
-        # debug = orig[0,len(noj_inds):]-ccg_all[0]
-        # print(debug)
+#         self.j_ccg=correlations.spike_correlations(
+#                 neurons=neurons,
+#                 ref_neuron_inds=np.arange(self.n_ref),
+#                 neuron_inds=self.n_ref+np.arange(self.conf.njitter),
+#                 bin_size=self.conf.ccg.bin_size,
+#                 window_size=self.conf.ccg.duration,
+#                 use_acceleration=self.conf.ccg.use_acceleration,
+#                 symmetrize=self.conf.ccg.symmetrize_ccg,
+#             )
+#         # Debugging - 'debug' should be all zeros (two methods are identical)
+#         # orig = correlations.spike_correlations(
+#         #         neurons=neurons,
+#         #         neuron_inds=np.arange(neurons.n_neurons),
+#         #         bin_size=bin_size,
+#         #         window_size=duration,
+#         #         use_acceleration=use_acceleration,
+#         #         symmetrize=True,
+#         #     )
+#         # debug = orig[0,len(noj_inds):]-ccg_all[0]
+#         # print(debug)
 
-    def jitter_significance(self, EI):
-        """
-                EI: if 'E', use p-vals for peaks, else use q-vals for troughs
-        # TODO
-        # ccg_all: (N0, njitter+1, Nbins)
-        # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
-        # thresholds = (N0, Nbins)
+#     def jitter_significance(self, EI):
+#         """
+#                 EI: if 'E', use p-vals for peaks, else use q-vals for troughs
+#         # TODO
+#         # ccg_all: (N0, njitter+1, Nbins)
+#         # pval = (N0, Nbins) where real data is ranked among fake data. conservative when there are ties
+#         # thresholds = (N0, Nbins)
 
-        """
-        if EI=='E':
-            pval = np.argsort(np.argsort(-self.j_ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.conf.njitter
-            thresholds = np.percentile(self.j_ccg[:,1:], 100*(1-self.conf.alpha), axis=1)
-        else:
-            pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.njitter
-            thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
+#         """
+#         if EI=='E':
+#             pval = np.argsort(np.argsort(-self.j_ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.conf.njitter
+#             thresholds = np.percentile(self.j_ccg[:,1:], 100*(1-self.conf.alpha), axis=1)
+#         else:
+#             pval = np.argsort(np.argsort(self.ccg,axis=1,kind="stable"),axis=1)[:,-2]/self.njitter
+#             thresholds = np.percentile(self.ccg[:,1:], 100*(self.alpha), axis=1)
 
-        self.j_sig = pval<=self.conf.alpha
-        self.thresholds=thresholds
+#         self.j_sig = pval<=self.conf.alpha
+#         self.thresholds=thresholds
 
-    def jbsi(self,real_ccg):
-        """
-        Jitter-based synchrony index  Agmon (2012)
-        """
-        assert self.j_ccg is not None
+#     def jbsi(self,real_ccg):
+#         """
+#         Jitter-based synchrony index  Agmon (2012)
+#         """
+#         assert self.j_ccg is not None
 
-        j_ccg_avg = np.mean(self.j_ccg,axis=1) # (N0, Nbins) averaged over Njitter columns
-        n1 = np.minimum(self.neurons.firing_rate[self.j_ind],
-                            self.neurons.firing_rate[self.noj_inds])[..., None] # (N0,1) or (1,1)
+#         j_ccg_avg = np.mean(self.j_ccg,axis=1) # (N0, Nbins) averaged over Njitter columns
+#         n1 = np.minimum(self.neurons.firing_rate[self.j_ind],
+#                             self.neurons.firing_rate[self.noj_inds])[..., None] # (N0,1) or (1,1)
 
-        ts = self.conf.ccg.bin_size
-        tj = self.conf.jscale
+#         ts = self.conf.ccg.bin_size
+#         tj = self.conf.jscale
 
-        b = tj/(tj-ts) if tj/ts>2 else 2
-        JBSI =  b/n1*(real_ccg - j_ccg_avg) # (N0, Nbins) or (1, Nbins)
-        return JBSI
+#         b = tj/(tj-ts) if tj/ts>2 else 2
+#         JBSI =  b/n1*(real_ccg - j_ccg_avg) # (N0, Nbins) or (1, Nbins)
+#         return JBSI
     
-    def spktrain_path(self): # TODO
-        get_path_from_key(self.key)
-        pass
+#     def spktrain_path(self): # TODO
+#         get_path_from_key(self.key)
+#         pass
 
-    def ccg_path(self):
-        get_path_from_key(self.key)
-        pass
+#     def ccg_path(self):
+#         get_path_from_key(self.key)
+#         pass
 
-    def save(self):
-        with h5py.File(self.spktrain_path, "a") as f:
-            f.create_dataset(self.j_ind, data=self.j_spktrains)
-            print(f"saved jitter spiketrains {self.key}:{self.j_ind}")
-        with h5py.File(self.ccg_path, "a") as f:
-            f.create_dataset(self.j_ind, data=self.j_ccg)
-            print(f"saved jitter ccgs {self.key}:{self.j_ind}")
+#     def save(self):
+#         with h5py.File(self.spktrain_path, "a") as f:
+#             f.create_dataset(self.j_ind, data=self.j_spktrains)
+#             print(f"saved jitter spiketrains {self.key}:{self.j_ind}")
+#         with h5py.File(self.ccg_path, "a") as f:
+#             f.create_dataset(self.j_ind, data=self.j_ccg)
+#             print(f"saved jitter ccgs {self.key}:{self.j_ind}")
 
-    def load(self):
-        # loaded data 
-        with h5py.File(self.spktrain_path, "r") as f:
-            self.j_spktrains = f[self.j_ind][:]
-            print(f"loaded jitter spiketrains {self.key}:{self.j_ind}")
-        with h5py.File(self.ccg_path, "r") as f:
-            self.ccg_path = f[self.j_ind][:]
-            print(f"loaded jitter ccgs {self.key}:{self.j_ind}")
-        self.neurons = None
-        self.conf = None
-        self.datastate=DataState.READONLY # data was loaded not computed. cannot recompute bc neurons/conf will not be saved
+#     def load(self):
+#         # loaded data 
+#         with h5py.File(self.spktrain_path, "r") as f:
+#             self.j_spktrains = f[self.j_ind][:]
+#             print(f"loaded jitter spiketrains {self.key}:{self.j_ind}")
+#         with h5py.File(self.ccg_path, "r") as f:
+#             self.ccg_path = f[self.j_ind][:]
+#             print(f"loaded jitter ccgs {self.key}:{self.j_ind}")
+#         self.neurons = None
+#         self.conf = None
+#         self.datastate=DataState.READONLY # data was loaded not computed. cannot recompute bc neurons/conf will not be saved
 
 
-class Jitter:
-    def __init__(self, key:Key, neurons: Neurons, conf:JitterConfig, ccg:CCG, root:str=None):
-        """Single session/epoch jitters
-        Note: Jitter computation is time and memory consuming!"""
-        self.key = key
-        self.conf = conf
+# class Jitter:
+#     def __init__(self, key:Key, neurons: Neurons, conf:JitterConfig, ccg:CCG, root:str=None):
+#         """Single session/epoch jitters
+#         Note: Jitter computation is time and memory consuming!"""
+#         self.key = key
+#         self.conf = conf
 
-        self.jref_inds = []
-        self.jtgt_inds = []
-        self.pos = {} # TODO name
-        self.pval = []
-        self.significant = []
-        self.threshold = []
-        self.JBSI = []
-        self.jitterlets = {}
+#         self.jref_inds = []
+#         self.jtgt_inds = []
+#         self.pos = {} # TODO name
+#         self.pval = []
+#         self.significant = []
+#         self.threshold = []
+#         self.JBSI = []
+#         self.jitterlets = {}
 
-        self.neurons = neurons
-        self.ccg = ccg
+#         self.neurons = neurons
+#         self.ccg = ccg
 
-        self.root = root or f"~/Documents/jitter_out"
-        self.get_jitter_inputs()
+#         self.root = root or f"~/Documents/jitter_out"
+#         self.get_jitter_inputs()
     
-    @property
-    def n_inds(self):
-        return len(self.ccg.inds)
+#     @property
+#     def n_inds(self):
+#         return len(self.ccg.inds)
 
-    def get_jitter_inputs(self):
-        """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
-        grouped by target indices"""
-        keys, inv = np.unique(self.ccg.inds[:,-1], return_inverse=True)
-        self.jref_inds = [self.ccg.inds[inv==i,0].tolist() for i in range(len(keys))]
-        self.jtgt_inds = keys
-        self.pos = {k: np.where(inv == i)[0] for i, k in enumerate(keys)}
+#     def get_jitter_inputs(self):
+#         """Reshape coordinates of (ref,target) pairs into most efficient format for jittering
+#         grouped by target indices"""
+#         keys, inv = np.unique(self.ccg.inds[:,-1], return_inverse=True)
+#         self.jref_inds = [self.ccg.inds[inv==i,0].tolist() for i in range(len(keys))]
+#         self.jtgt_inds = keys
+#         self.pos = {k: np.where(inv == i)[0] for i, k in enumerate(keys)}
     
-    def get(self,ref,tgt,field='jitters'):
-        # TODO untested
-        return getattr(self.data[tgt], field)[np.where(self.data[tgt].noj_inds==ref)[0]]
+#     def get(self,ref,tgt,field='jitters'):
+#         # TODO untested
+#         return getattr(self.data[tgt], field)[np.where(self.data[tgt].noj_inds==ref)[0]]
 
-    def run(self,save_progress=False):
-        self.JBSI = np.zeros((self.n_inds,self.ccg.conf.nbins))
-        for refs, tgt in zip(self.jref_inds,self.jtgt_inds):
-            self.jitterlets[tgt] = Jitterlet(key=self.key,
-                                        neurons=self.neurons,
-                                       noj_inds=refs,
-                                       j_ind=tgt,
-                                       conf=self.conf)
-        for tgt,j in self.jitterlets.items():
-            j.add_jitter()
-            j.run_ccg_jitter()
-            self.JBSI[self.pos[tgt]] = j.jbsi(self.ccg.ccg[self.pos[tgt]]) # TODO indexing
-        if save_progress:
-            self.save()
+#     def run(self,save_progress=False):
+#         self.JBSI = np.zeros((self.n_inds,self.ccg.conf.nbins))
+#         for refs, tgt in zip(self.jref_inds,self.jtgt_inds):
+#             self.jitterlets[tgt] = Jitterlet(key=self.key,
+#                                         neurons=self.neurons,
+#                                        noj_inds=refs,
+#                                        j_ind=tgt,
+#                                        conf=self.conf)
+#         for tgt,j in self.jitterlets.items():
+#             j.add_jitter()
+#             j.run_ccg_jitter()
+#             self.JBSI[self.pos[tgt]] = j.jbsi(self.ccg.ccg[self.pos[tgt]]) # TODO indexing
+#         if save_progress:
+#             self.save()
 
-    @property
-    def filepath(self):
-        return f'{self.root}/jitter-{str(self.key)}.h5'
+#     @property
+#     def filepath(self):
+#         return f'{self.root}/jitter-{str(self.key)}.h5'
 
-    def save(self,intermediates=False):
-        if intermediates:
-            for k,v in self.jitterlets.items():
-                v.save()
-        with h5py.File(self.filepath, "a") as f:
-                f.create_dataset((self.session_name,field), data=getattr(self, field, None))
-        print(f"saved {self.key}")
+#     def save(self,intermediates=False):
+#         if intermediates:
+#             for k,v in self.jitterlets.items():
+#                 v.save()
+#         with h5py.File(self.filepath, "a") as f:
+#                 f.create_dataset((self.session_name,field), data=getattr(self, field, None))
+#         print(f"saved {self.key}")
 
-    def load(self,intermediates=False):
-        if intermediates:
-            for k,v in self.jitterlets.items():
-                v.load()
-        with h5py.File(self.filepath, "r") as f:
-            for field in ['key','pval','JBSI','conf']:
-                d = f[(self.session_name,field)][:]
-                setattr(self, field, d)
-        print(f"loaded jitter data {self.key}")
+#     def load(self,intermediates=False):
+#         if intermediates:
+#             for k,v in self.jitterlets.items():
+#                 v.load()
+#         with h5py.File(self.filepath, "r") as f:
+#             for field in ['key','pval','JBSI','conf']:
+#                 d = f[(self.session_name,field)][:]
+#                 setattr(self, field, d)
+#         print(f"loaded jitter data {self.key}")
    
 
-class JitterDataset(AnalysisDataset):
-    def __init__(self, nd: Neurons, cd: CCGDataset, conf:JitterConfig):
-        """Note that jitter dataset stores single session/epoch data because jitter computation is memory consuming"""
-        self._conf = conf
-        self.conf.ccg=cd.conf
-        self.nd = nd
-        self.cd = cd
-        self.data = {} # data key is target index
+# class JitterDataset(AnalysisDataset):
+#     def __init__(self, nd: Neurons, cd: CCGDataset, conf:JitterConfig):
+#         """Note that jitter dataset stores single session/epoch data because jitter computation is memory consuming"""
+#         self._conf = conf
+#         self.conf.ccg=cd.conf
+#         self.nd = nd
+#         self.cd = cd
+#         self.data = {} # data key is target index
 
-    @property
-    def filepath(self):
-        return f'~/Documents/jitter_out/'
+#     @property
+#     def filepath(self):
+#         return f'~/Documents/jitter_out/'
 
-    def save(self):
-        for k,v in self.data.items():
-            v.save(root=self.filepath)
+#     def save(self):
+#         for k,v in self.data.items():
+#             v.save(root=self.filepath)
 
-    def load(self):
-        for k,v in self.data.items():
-            v.load(root=self.filepath)
+#     def load(self):
+#         for k,v in self.data.items():
+#             v.load(root=self.filepath)
 
-    def run_jitter(self,save_progress=True):
-        for key, ccg in self.cd.data.items():
-            if ccg is None: 
-                self.data[key] = None
-            else:
-                neurons = self.nd.data[key.nd()]
-                self.data[key]=Jitter(key=key,
-                                    neurons=neurons,
-                                    conf=self.conf,
-                                    ccg=ccg)
-        for _,j in self.data.items():
-            if j is not None: j.run(save_progress=save_progress)
+#     def run_jitter(self,save_progress=True):
+#         for key, ccg in self.cd.data.items():
+#             if ccg is None: 
+#                 self.data[key] = None
+#             else:
+#                 neurons = self.nd.data[key.nd()]
+#                 self.data[key]=Jitter(key=key,
+#                                     neurons=neurons,
+#                                     conf=self.conf,
+#                                     ccg=ccg)
+#         for _,j in self.data.items():
+#             if j is not None: j.run(save_progress=save_progress)
 
 
 def routine_eranconv_connection_info(info, nd:NeuronsDataset, cd:CCGDataset, epoch_id=0):
@@ -2159,9 +2208,15 @@ class EranConv:
 
         for EI in ['E','I']:
             self.rough_mask[EI] = self.intersect(self.significance_mask(EI), self.spkcount_mask())
-            if self.rough_mask[EI].any(): self.rough_mask[EI] = self._autocorr_mask(self.rough_mask[EI])
-            if self.rough_mask[EI].any(): self.mask[EI] = self._probe_loc_mask(self.rough_mask[EI],neurons)
-            if self.mask[EI].any(): self.mask[EI] = self._cell_type_mask(self.mask[EI],neurons,conf.conn_types[EI])
+            val = self.rough_mask.get(EI)
+            if isinstance(val, np.ndarray) and val.any():
+                self.rough_mask[EI] = self._autocorr_mask(self.rough_mask[EI])
+            val = self.rough_mask.get(EI)
+            if isinstance(val, np.ndarray) and val.any():
+                self.mask[EI] = self._probe_loc_mask(self.rough_mask[EI],neurons)
+            val = self.mask.get(EI)
+            if isinstance(val, np.ndarray) and val.any():
+                self.mask[EI] = self._cell_type_mask(self.mask[EI],neurons,conf.conn_types[EI])
 
         def process_output(key:Key, neurons:Neurons):
             """
@@ -2229,13 +2284,14 @@ class EranConv:
                     new_key = key.add(segment=seg if self.n_segments>1 else None,
                                       excitability=EI)
 
-                    if pairs is None or len(pairs)==0: spurs_by_type[new_key] = None
-                    else:
+                    if isinstance(spairs, np.ndarray) and spairs.any():
                         x,y = spairs[:,-2],spairs[:,-1] # x,y = pairs[...,0],pairs[...,1]
                         spurs_by_type[new_key] = CCG(key=new_key,conf=self.conf, 
                                             inds=spairs, ids=neurons.ind2id(spairs), 
                                             ccg=self.ccg[seg,x,y], ccg_null=self.pred[seg,x,y], pval=p[seg,x,y], 
                                             )
+                    else:
+                        spurs_by_type[new_key] = None
 
             autocorr_locations = EranConv.get_autocorr_locations(self.ccg.shape)            
             new_key = key

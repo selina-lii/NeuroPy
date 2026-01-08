@@ -54,7 +54,6 @@ class Epoch(DataWriter):
 
         return self.from_boolean_array(np.bitwise_and(bool1, bool2), times)
 
-
     def replace_start_with_t_start_eeg(self):
         if hasattr(self, 'data'):
             self.data['start'] = self.data['t_start_eeg']
@@ -248,7 +247,7 @@ class Epoch(DataWriter):
 
         return Epoch(epoch_df, metadata=self.metadata)
 
-    def time_invert_selection(self, t_start=None, t_stop=None,):
+    def invert_time(self, t_start=None, t_stop=None,):
         """Return complmentary intervals"""
         starts = self.starts
         stops = self.stops
@@ -288,13 +287,10 @@ class Epoch(DataWriter):
         epoch
             epochs with durations between min_dur and max_dur
         """
-        durations = self.durations
-        if min_dur is None:
-            min_dur = np.min(durations)
-        if max_dur is None:
-            max_dur = np.max(durations)
-
-        return self[(durations >= min_dur) & (durations <= max_dur)]
+        min_dur = min_dur or 0
+        max_dur = max_dur or np.inf
+        if (min_dur==0) and (max_dur==np.inf): return self
+        return self[(self.durations >= min_dur) & (self.durations <= max_dur)]
 
     def label_slice(self, labels: typing.Union[list[str], str]):
         """Returns Epoch for input labels
@@ -825,6 +821,10 @@ class Epoch(DataWriter):
     def epochs(self):
         return self._epochs
 
+    def timing_by_label(self,label):
+        loc = self.epochs.query("label == @label")[["start", "stop"]]
+        starts, stops = (c.squeeze() for _, c in loc.items())
+        return starts,stops
 
 def add_epoch_buffer(epoch_df: pd.DataFrame, buffer_sec: float or int or tuple or list):
     """Extend each epoch by buffer_sec before/after start/stop of each epoch"""
