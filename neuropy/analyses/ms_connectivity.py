@@ -48,7 +48,6 @@ def example(var:dict):
     k,v = next(iter(var.items()))
     return v
 
-
 @dataclass(frozen=True)
 class Key:
     session: Optional[str] = None
@@ -237,7 +236,7 @@ class NeuronsDatasetConfig:
     def __init__(self,
                  name:str = "default",
                  neuron_types:Union[list[str], str, None]=['pyr','inter'], 
-                 epochs:Union[list[str], str, None]=['maze','post'], 
+                 epochs:Union[list[str], str, None]=['pre','maze','post','re-maze'], 
                  sleep:Union[EpochSelect, None]=None, 
                  ripple:Union[EpochSelect, None]=None, 
                  n_segments:Union[list[int], int]=None, 
@@ -260,7 +259,7 @@ class NeuronsDatasetConfig:
 
         self.ch_per_shank = 16 
 
-        self.epochs = _san(epochs)
+        self.epochs = epochs
         if epochs is not None and n_segments is not None:
             assert len(self.n_segments)==len(self.epochs)
 
@@ -503,6 +502,7 @@ class NeuronsDataset(AnalysisDataset):
             key = Key(session=name)
             self.conf.session_names.append(name)
             neurons = s.neurons
+            neurons.metadata['intervals']=np.array([[neurons.t_start,neurons.t_stop]])
 
             # Filter neurons
             # -type
@@ -536,11 +536,12 @@ class NeuronsDataset(AnalysisDataset):
                 _edges_time_window  time_windows
                 _edges_spikecount   spikecount_split
             """
-
-            for i, e in enumerate(c.epochs):
+            
+            for i, e in enumerate(_san(c.epochs) or [None]):
                 k = key.add(epoch=e)
-                t_start,t_stop = s.paradigm.timing_by_label(e)
-                    
+                t = s.paradigm.timing_by_label(e) if e else (neurons.t_start, neurons.t_stop)
+                t_start, t_stop = t
+                
                 if c.seg_spikecount is not None:
                     neus = neurons.time_slice(t_start,t_stop)
                     for i in range(neus.n_neurons):
@@ -559,13 +560,13 @@ class NeuronsDataset(AnalysisDataset):
                                                                 t_start=t_start,
                                                                 t_stop=t_stop)
                 else:
-                    self.edge_times[k] = None
+                    self.edge_times[k] = [np.array([t_start]),np.array([t_stop])]
                 
                 # Calculate total/actual time length of each segment
                 #TODO does not work for spikecount edges yet
                 intervals = neurons.metadata['intervals']
                 seg_edges=self.edge_times[k]
-                effective_time_hours,total_time_hours = [],[]
+                effective_time_hours, total_time_hours = [],[]
                 for t_start, t_stop in zip(seg_edges[0],seg_edges[1]):
                     iv = intervals[(intervals[:,1]>=t_start)&(intervals[:,0]<=t_stop)]
                     tth = (t_stop-t_start)/3600
@@ -1266,7 +1267,10 @@ class CCGDataset(AnalysisDataset):
         seg_edges=None
         
         # groups=self.group_by('session','epoch',source='connectivity')
-        if key.ref_ind is not None:
+        if inds is not None:
+            pass
+
+        elif key.ref_ind is not None:
             # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
             seg_edges = self.nd.edge_times[key.remove('segment')]
 
@@ -1277,7 +1281,7 @@ class CCGDataset(AnalysisDataset):
             inds = self.connectivity[key].inds
 
         elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
-            inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T                  
+            inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
 
         conv = EranConv()
         ccgs = conv.eranconv_merge(key=key, 
@@ -1304,25 +1308,31 @@ class CCGDataset(AnalysisDataset):
         print(f"recalculated CCG from binsize={old_bin_size} to binsize={bin_size}")
 
         for key, ccg in self.data.items():
-            if ccg is not None:
-                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,key=key)
-                for k,ccg in new_ccgs.items():
-                        # inherit original significant markers
-                    ccg.significant = self.connectivity[key].exist
-                    self.data[k] = ccg
+            new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,key=key)
+            for k,ccg in new_ccgs.items():
+                    # inherit original significant markers
+                ccg.significant = self.connectivity[key].exist
+                self.data[k] = ccg
         print("rescale completed")
 
-    def reCCG_connectivity(self):
+    def reCCG_connectivity(self,inds_by_type=None):
         """
         Rerun CCG with list of pairs that had been significant in any segment
         """
         new_data = {}
-        for key, ccg in self.connectivity.items():
-            if ccg is not None:
-                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,key=key)
+        external_inds = None
+        for key, old_ccg in self.connectivity.items():
+            if old_ccg is not None:
+                if inds_by_type is not None: external_inds = inds_by_type[key.conn_type]
+                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,inds=external_inds,key=key)
                 for k,ccg in new_ccgs.items():
                      # TODO inherit original significant markers
-                    ccg.significant = self.connectivity[k].exist.T
+                    if external_inds is not None:
+                        ccg.significant=np.zeros((old_ccg.n_segments,external_inds.shape[0]))
+                        columns = np.where((external_inds[:, None] == old_ccg.inds).all(-1).any(1))[0]
+                        ccg.significant[:,columns] = self.connectivity[k].exist.T
+                    else:
+                        ccg.significant = self.connectivity[k].exist.T
                     new_data[k] = ccg
         self.data=new_data
         print("recomputed CCG for pairs that had been significant in any segment")
@@ -2066,21 +2076,39 @@ class EranConv:
         qvals = 1 - pvals
         return pvals, pred, qvals
 
-    def intersect(self, coords1, coords2):
+
+    def intersect(coords1, coords2, n, n_groups=1):
         # Intersection of coordinate lists
-        ravel_dims = (self.n,self.n) if coords1.shape[-1]==2 else (self.n_segments,self.n,self.n) #TODO
+        if coords1 is None or coords2 is None: return np.array([])
+        ravel_dims = (n,n) if coords1.shape[-1]==2 else (n_groups,n,n) #TODO
         coords1_flat = np.ravel_multi_index(coords1.T, ravel_dims)
         coords2_flat = np.ravel_multi_index(coords2.T, ravel_dims)
         coords_flat = np.intersect1d(coords1_flat, coords2_flat)
         coords = np.array(np.unravel_index(coords_flat, ravel_dims)).T
         return coords
 
-    def setdiff(self, coords1,coords2):
+    @staticmethod
+    def setdiff(coords1,coords2, n, n_groups=1):#n2=None
         # Set difference of coordinate lists
-        ravel_dims = (self.n,self.n) if coords1.shape[-1]==2 else (self.n_segments,self.n,self.n)
+        if coords1 is None or coords2 is None: 
+            return coords1 if coords1 is not None else np.array([])
+        ravel_dims = (n,n) if coords1.shape[-1]==2 else (n_groups,n,n)
         flat1 = np.ravel_multi_index(coords1.T, ravel_dims)
         flat2 = np.ravel_multi_index(coords2.T, ravel_dims)
         flat  = np.setdiff1d(flat1, flat2)
+        coords = np.array(np.unravel_index(flat, ravel_dims)).T
+        return coords
+
+
+    @staticmethod
+    def union(coords1, coords2, n, n_groups=1):#n2=None
+        # Set difference of coordinate lists
+        if coords1 is None: return coords2 if coords2 is not None else np.array([])
+        elif coords2 is None: return coords1 if coords1 is not None else np.array([])
+        ravel_dims = (n,n) if coords1.shape[-1]==2 else (n_groups,n,n)
+        flat1 = np.ravel_multi_index(coords1.T, ravel_dims)
+        flat2 = np.ravel_multi_index(coords2.T, ravel_dims)
+        flat  = np.union1d(flat1, flat2)
         coords = np.array(np.unravel_index(flat, ravel_dims)).T
         return coords
 
@@ -2096,7 +2124,7 @@ class EranConv:
         return autocorr_locations
     
     @staticmethod
-    def multiple_correction(pvals,alpha,method='bonferroni'):
+    def multiple_correction(pvals,alpha,method='bonferroni'): # correct for number of bins
         # NOTE should bump this to utils or something
         # methods: 'fdr_bh', 'bonferroni'
         sig = np.empty_like(pvals, dtype=bool)
@@ -2207,7 +2235,7 @@ class EranConv:
         self.rough_mask={'E':{},'I':{}}
 
         for EI in ['E','I']:
-            self.rough_mask[EI] = self.intersect(self.significance_mask(EI), self.spkcount_mask())
+            self.rough_mask[EI] = EranConv.intersect(self.significance_mask(EI), self.spkcount_mask(),self.n,self.n_segments)
             val = self.rough_mask.get(EI)
             if isinstance(val, np.ndarray) and val.any():
                 self.rough_mask[EI] = self._autocorr_mask(self.rough_mask[EI])
@@ -2279,7 +2307,7 @@ class EranConv:
                                                 inds=prs, ids=neurons.ind2id(prs), 
                                                 ccg=self.ccg[seg,x,y], ccg_null=self.pred[seg,x,y], pval=p[seg,x,y], 
                                                 )
-                            spairs = self.setdiff(spairs,prs) # remove these pairs from spurious
+                            spairs = EranConv.setdiff(spairs,prs,self.n,self.n_segments) # remove these pairs from spurious
 
                     new_key = key.add(segment=seg if self.n_segments>1 else None,
                                       excitability=EI)
@@ -2403,7 +2431,7 @@ class EranConv:
             )[:,0,1:2] #TODO
         self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
-        self.rough_mask = self.intersect(self.significance_mask(key.excitability), self.spkcount_mask())
+        self.rough_mask = EranConv.intersect(self.significance_mask(key.excitability), self.spkcount_mask(),self.n,self.n_segments)
         if self.rough_mask.any(): self.rough_mask = self._probe_loc_mask(self.mask,neurons)
         
         significant = np.full((self.ccg.shape[-3],self.ccg.shape[-2]),False) 
