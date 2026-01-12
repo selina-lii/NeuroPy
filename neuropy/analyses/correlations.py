@@ -1,9 +1,9 @@
 import numpy as np
-# try:
-#     import cupy as cp
-# except ImportError:
-#     print("Error importing CuPy")
-#     cp = None
+try:
+    import cupy as cp
+except ImportError:
+    print("Error importing CuPy")
+    cp = None
 
 # Define acceptable dtypes
 _ACCEPTED_ARRAY_DTYPES = (

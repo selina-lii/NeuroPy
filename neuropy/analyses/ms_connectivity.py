@@ -3,11 +3,11 @@
 
 from neuropy.io import NeuroscopeIO
 import numpy as np
-# try:
-#     import cupy as cp
-# except ImportError:
-#     print("Error importing CuPy")
-#     cp = None
+try:
+    import cupy as cp
+except ImportError:
+    print("Error importing CuPy")
+    cp = None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.core.neurons import Neurons
@@ -221,6 +221,7 @@ class EpochSelect:
 
     def __str__(self):
         return self.__class__ + ': ' + '\n'.join([f"{key}={val}" for key, val in self.__dict__.items()])
+
 
 class NeuronsDatasetConfig:
     """
@@ -667,9 +668,6 @@ class NeuronsDataset(AnalysisDataset):
                 # if not flag: overview_str+="No significant difference between segments\n"            
 
 
-
-
-
 class ACG:
     """Like Neurons, but for auto-correlograms
     Static dataclass, not mean for reuse"""
@@ -981,6 +979,7 @@ class CCG:
         self.ccg = self.ccg.astype(float).reshape(shape) / frates
         self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates
 
+
 class Connectivity:
     def __init__(self, key, n_segments, ccgs, inds, ids, exist:np.ndarray[bool], strength:np.ndarray[float]):
         self.key=key
@@ -1147,52 +1146,52 @@ class CCGDataset(AnalysisDataset):
     def append_auto(self, base_key: Key, spurs: Dict[Key, CCG]):
         self.auto.update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in spurs.items()})
 
-    def merge_CCG(self, key:Key, ccg_list: list[CCG]):
+    def merge_CCGs(self, merge_levels):
         # TODO
-        # [dev] ccg list items must share a common key that indexes the neurons dataset
-        n_bins = ccg_list[0].shape[-1]
-        n_segments = len(ccg_list)
+        groups=self.group_by(*merge_levels)
+        self.data={}
+        for merge_key, ccg_list in groups.items():
+            # [dev] ccg list items must share a common key that indexes the neurons dataset
+            n_bins = ccg_list[0].shape[-1]
+            n_segments = len(ccg_list)
+            keys = np.array([ccg.key for ccg in ccg_list])
 
-        inds = np.unique(np.concatenate([c.inds for c in ccg_list],axis=0),axis=0)
-        ids = self.nd[key].ind2id(inds)
-        n_uniqinds=inds.shape[0]
-        sort_inds = [np.where(inds,c.inds) for c in ccg_list]
-        ccg=np.full((n_uniqinds,n_segments,n_bins),np.nan) # what if ccg list has none items..
-        pval=np.full_like(ccg,np.nan)
-        j_sig=np.full_like(ccg,np.nan)
-        conn_strength=np.full((n_uniqinds,n_segments),np.nan)
-        significant=np.full_like(conn_strength,np.nan)
-        # i need to define how jsig and significant are different, or give them different names
+            inds = np.unique(np.concatenate([c.inds for c in ccg_list],axis=0),axis=0)
+            ids = self.nd[merge_key.nd()].ind2id(inds)
+            n_uniqinds=inds.shape[0]
+            sort_inds = [np.where(inds,c.inds) for c in ccg_list]
+            ccg=np.full((n_uniqinds,n_segments,n_bins),np.nan) # what if ccg list has none items..
+            pval=np.full_like(ccg,np.nan)
+            j_sig=np.full_like(ccg,np.nan)
+            conn_strength=np.full((n_uniqinds,n_segments),np.nan)
+            significant=np.full_like(conn_strength,np.nan)
+            # i need to define how jsig and significant are different, or give them different names
 
-        for i,c in enumerate(ccg_list):
-            if c.ccg is not None: ccg[sort_inds[i],i,:]=c.ccg
-            if c.pval is not None: pval[sort_inds[i],i,:]=c.pval
-            if c.j_sig is not None: j_sig[sort_inds[i],i,:]=c.j_sig
-            if c.conn_strength is not None: conn_strength[sort_inds[i],i]=c.conn_strength
-            if c.significant is not None: significant[sort_inds[i],i]=c.significant
-        
-        # check if there's any non-nan values
+            for i,c in enumerate(ccg_list):
+                if c.ccg is not None: ccg[sort_inds[i],i,:]=c.ccg
+                if c.pval is not None: pval[sort_inds[i],i,:]=c.pval
+                if c.j_sig is not None: j_sig[sort_inds[i],i,:]=c.j_sig
+                if c.conn_strength is not None: conn_strength[sort_inds[i],i]=c.conn_strength
+                if c.significant is not None: significant[sort_inds[i],i]=c.significant
+            
+            # check if there's any non-nan values
+            pass
+            
+            ccg = CCG(key=merge_key,
+                ccg=ccg,
+                ids=ids,
+                inds=inds,
+                pval=pval,
+                j_sig=j_sig,
+                conn_strength=conn_strength,
+                conf=ccg_list[0].conf,
+                significant=significant)
+            ccg.keys = keys
+            self.data[merge_key]=ccg
+
+
+    def split_CCG(self):
         pass
-        
-        merged_CCG = CCG(key=key,
-                         ccg=ccg,
-                         ids=ids,
-                         inds=inds,
-                         pval=pval,
-                         j_sig=j_sig,
-                         conn_strength=conn_strength,
-                         conf=ccg_list[0].conf,
-                         significant=significant)
-
-        return merged_CCG
-
-    def merge_all_CCGs(self):
-        # TODO
-        new_dataset = CCGDataset(nd=self.nd,conf=self.conf)
-        for ccg_list in self.data.items().group_by('session','epoch'):
-            ccg_list = [v for k,v in ccg_list.items()]
-            k=list(ccg_list.keys())[0]
-            new_dataset.data[k] = self.merge_CCG(k,ccg_list)
 
     @property
     def filepath(self):
@@ -1315,29 +1314,55 @@ class CCGDataset(AnalysisDataset):
                 self.data[k] = ccg
         print("rescale completed")
 
-    def reCCG_connectivity(self,inds_by_type=None):
+    def reCCG_pair_inds_1conntype(self,conn_type=('pyr','pyr'),external_inds=None,_new_data=None,_group=None):
         """
-        Rerun CCG with list of pairs that had been significant in any segment
+        modifies _new_data
         """
-        new_data = {}
-        external_inds = None
-        for key, old_ccg in self.connectivity.items():
+        SET_SELF_DATA=_new_data is None
+        if _group is None:
+            _group = self.group_by('conn_type',source='connectivity')[Key(conn_type=conn_type)]
+        if _new_data is None:
+            _new_data={}
+            
+        for key, old_ccg in _group.items():
             if old_ccg is not None:
-                if inds_by_type is not None: external_inds = inds_by_type[key.conn_type]
-                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,inds=external_inds,key=key)
+                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,
+                                       inds=external_inds,
+                                       key=key)
                 for k,ccg in new_ccgs.items():
                      # TODO inherit original significant markers
                     if external_inds is not None:
                         ccg.significant=np.zeros((old_ccg.n_segments,external_inds.shape[0]))
-                        columns = np.where((external_inds[:, None] == old_ccg.inds).all(-1).any(1))[0]
-                        ccg.significant[:,columns] = self.connectivity[k].exist.T
+                        m = (external_inds[:,None] == old_ccg.inds).all(-1)
+                        i_ext, i_old = np.where(m)
+                        ccg.significant[:,i_ext] = self.connectivity[k].exist[i_old].T
                     else:
                         ccg.significant = self.connectivity[k].exist.T
-                    new_data[k] = ccg
-        self.data=new_data
+                    _new_data[k] = ccg
+
+        if SET_SELF_DATA: 
+            for k, v in _new_data.items():
+                self.data[k]=v
+
+    def reCCG_pair_inds(self,external_inds_by_type:dict[np.ndarray]=None):
+        """
+        Rerun CCG with a list of pair indices
+        The significance of the pairs are set by whether they were significant before the rerun
+
+        overwrites self.data
+        """
+        new_data = {}
+        groups = self.group_by('conn_type',source='connectivity')
+        for k, group in groups.items():
+            inds = external_inds_by_type.get(k.conn_type) if external_inds_by_type is not None else None
+            self.reCCG_pair_inds_1conntype(conn_type=k.conn_type, 
+                                              external_inds=inds,
+                                              _new_data=new_data,
+                                              _group=group)
+        self.data = new_data
         print("recomputed CCG for pairs that had been significant in any segment")
 
-    def reCCG_connectivity_pairwise(self,conn_type=('pyr','pyr')):
+    def reCCG_pair_inds_pairwise(self,conn_type=('pyr','pyr')):
         """
         TODO group by reference
         """
