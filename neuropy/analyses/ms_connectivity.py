@@ -698,7 +698,7 @@ class CCG:
                  seg_edges=None):
         self.key=key
         self.ids=ids
-        self.inds=inds
+        self.inds=_san(inds,as_np=True)
         self.ccg=ccg
         self.ccg_null=ccg_null # 'baseline', or jittered, chance level CCG
         self.pval=pval
@@ -713,6 +713,7 @@ class CCG:
         else:
             # assert significant.shape==(n,)#TODO
             self.significant=significant
+#def __init__(self, exist:np.ndarray[bool], strength:np.ndarray[float]):
 
     def set_firing_rates(self, neurons:Neurons):
         # Obtain the firing rates during the time period used to compute this CCG
@@ -723,12 +724,25 @@ class CCG:
                 neu=neurons.time_slice(t_start,t_end)
                 self.frates[i] = neu.firing_rate[self.inds] #TODO other cases
 
+    def __repr__(self):
+        s = str(self.key) + "\n"
+        for i,inds in enumerate(self.inds):
+            s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\tstrengths: {self.conn_strength[i]}\n"
+        return s
+        
     def __str__(self):
-        s=''
+        s='CCG connectivity\n'
         for key, val in self.__dict__.items():
             if isinstance(val,np.ndarray) or isinstance(val,list):
+                s+=f"{key}\tshape={np.array(val).shape}"
                 sval="\n".join(str(val[0:2]).splitlines()[:3])
-                s+=f"{key}\tshape={np.array(val).shape}\n\tval={sval}...\n"
+                s+=f"\tval={sval}...\n"
+            elif isinstance(val,dict):
+                k,v = next(iter(val.items()))
+                s+=f"{key} dict keys={k}...\n"
+                item_str = str(v)
+                for line in item_str.splitlines()[:3]:
+                    s+=f"\t\t{line}\n"
             elif key!='_conf':
                 sval="\n".join(str(val).splitlines()[:3])
                 s+=f"{key}: {sval}\n"
@@ -758,6 +772,15 @@ class CCG:
     def total(self):
         return self.ccg.shape[-2]
 
+    @property
+    def conn_strength_change(self):
+        r=self.conn_strength
+        return (np.polyfit(range(r.shape[0]), r, 1)[0] if len(r.shape)>1 else np.full(r.shape,np.nan))
+
+    @property
+    def n_segments(self):
+        return self.ccg.shape[0]
+    
     def _set_cs_eranconv(self, norm_factor:np.ndarray=None):
         """
         Connection strength:
@@ -977,48 +1000,15 @@ class CCG:
         shape=self.ccg.shape
         frates=self.frates[...,-1][...,np.newaxis] 
         self.ccg = self.ccg.astype(float).reshape(shape) / frates
-        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates
-
-
-class Connectivity:
-    def __init__(self, key, n_segments, ccgs, inds, ids, exist:np.ndarray[bool], strength:np.ndarray[float]):
-        self.key=key
-        self.inds=_san(inds,as_np=True)
-        self.ccgs=ccgs
-        self.exist=exist # has to be a separate field, cannot be inferred from strength because a strength might not be significant
-        self.strength = strength # 
-        self.coordinates = None #TODO physical neuron coordinates
-        self.n_segments = n_segments
-        self.ids = ids
-        
-    def __repr__(self):
-        s = str(self.key) + "\n"
-        for i,inds in enumerate(self.inds):
-            s += f"{str(inds):<15}\tIn segments {str(np.where(self.exist[i])[0]):<20}\tstrengths: {self.strength[i]}\n"
-        return s
-        
-    def __str__(self):
-        s='Connectivity\n'
-        for key, val in self.__dict__.items():
-            if isinstance(val,np.ndarray) or isinstance(val,list):
-                s+=f"{key}\tshape={np.array(val).shape}"
-                sval="\n".join(str(val[0:2]).splitlines()[:3])
-                s+=f"\tval={sval}...\n"
-            elif isinstance(val,dict):
-                k,v = next(iter(val.items()))
-                s+=f"{key} dict keys={k}...\n"
-                item_str = str(v)
-                for line in item_str.splitlines()[:3]:
-                    s+=f"\t\t{line}\n"
-        return s
+        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates        
     
     def filter(self,min_n_segment,skips):
         if skips is not None: 
-            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.exist)) if 
+            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.significant)) if 
                     not ((v[0] in skips[:,0]) & (v[1] in skips[:,1])) 
                     and (np.sum(e)>=min_n_segment)]
         else:
-            inds = np.where(np.sum(self.exist,axis=1)>=min_n_segment)[0].astype(int)
+            inds = np.where(np.sum(self.significant,axis=1)>=min_n_segment)[0].astype(int)
         return inds
 
     def plot_strength(self,
@@ -1035,8 +1025,8 @@ class Connectivity:
         n_segments_threshold=n_segments_threshold if n_segments_threshold is not None else 0
         plt.figure()
         inds = self.filter(min_n_segment=n_segments_threshold,skips=skips)
-        plot_data = self.strength[inds]
-        significant=self.exist[inds]
+        plot_data = self.conn_strength[inds]
+        significant=self.significant[inds]
         n_significant=np.sum(significant,axis=1,keepdims=True)
         pairs = self.inds[inds]
         if pairs.shape[0]==0: 
@@ -1149,25 +1139,28 @@ class CCGDataset(AnalysisDataset):
     def merge_CCGs(self, merge_levels):
         # TODO
         groups=self.group_by(*merge_levels)
-        self.data={}
-        for merge_key, ccg_list in groups.items():
+        # self.data={}
+        for merge_key, grouped_ccgs in groups.items():
             # [dev] ccg list items must share a common key that indexes the neurons dataset
-            n_bins = ccg_list[0].shape[-1]
-            n_segments = len(ccg_list)
-            keys = np.array([ccg.key for ccg in ccg_list])
+            n_bins = example(grouped_ccgs).ccg.shape[-1]
+            n_items = len(grouped_ccgs)
+            keys = list(grouped_ccgs.keys())
 
-            inds = np.unique(np.concatenate([c.inds for c in ccg_list],axis=0),axis=0)
-            ids = self.nd[merge_key.nd()].ind2id(inds)
+            inds = np.unique(np.concatenate([c.inds for _,c in grouped_ccgs.items()],axis=0),axis=0)
+            ids = self.nd.data[merge_key.nd()].ind2id(inds)
             n_uniqinds=inds.shape[0]
-            sort_inds = [np.where(inds,c.inds) for c in ccg_list]
-            ccg=np.full((n_uniqinds,n_segments,n_bins),np.nan) # what if ccg list has none items..
+            # TODO 
+            # PICK UP HERE!!!!! i was debugging merge_CCGs, combining CCGs of different epochs into one
+            # sort_inds should be by row; make row matching a helper function
+            sort_inds = [np.where(np.isin(c.inds, inds))[0]  for _,c in grouped_ccgs.items()]
+            ccg=np.full((n_uniqinds,n_items,n_bins),np.nan) # what if ccg list has none items..
             pval=np.full_like(ccg,np.nan)
             j_sig=np.full_like(ccg,np.nan)
-            conn_strength=np.full((n_uniqinds,n_segments),np.nan)
+            conn_strength=np.full((n_uniqinds,n_items),np.nan)
             significant=np.full_like(conn_strength,np.nan)
             # i need to define how jsig and significant are different, or give them different names
 
-            for i,c in enumerate(ccg_list):
+            for i,(_,c) in enumerate(grouped_ccgs.items()):
                 if c.ccg is not None: ccg[sort_inds[i],i,:]=c.ccg
                 if c.pval is not None: pval[sort_inds[i],i,:]=c.pval
                 if c.j_sig is not None: j_sig[sort_inds[i],i,:]=c.j_sig
@@ -1184,7 +1177,7 @@ class CCGDataset(AnalysisDataset):
                 pval=pval,
                 j_sig=j_sig,
                 conn_strength=conn_strength,
-                conf=ccg_list[0].conf,
+                conf=grouped_ccgs[0].conf,
                 significant=significant)
             ccg.keys = keys
             self.data[merge_key]=ccg
@@ -1434,53 +1427,6 @@ class CCGDataset(AnalysisDataset):
                 ccg._set_cs_tail(acg,spikecount)
                 return NotImplementedError("Unknown connection strength method")
 
-    def set_connectivity(self, conn_types=None, sessions=None, epochs=None):
-        """
-        Create Connectivity objects within this class from connection strengths.
-        Sess class Connecitivity().
-        """
-        conn_types = _san(conn_types) or self.conf.conn_types_flat
-        sessions = _san(sessions) or self.nd.conf.session_names
-        epochs = _san(epochs) or self.nd.conf.epochs
-
-        grouped = self.group_by('conn_type','session','epoch','excitability')
-        for k, group in grouped.items():
-            exist = {}
-            strength = {}
-            pairs = []
-            k2 = k.get('session','epoch')
-            n_seg = 1 if self.nd.edge_times[k2] is None else len(self.nd.edge_times[k2][0])
-            for keyy, _ in grouped[k].items():
-                i_seg = keyy.segment or 0
-                if keyy.conn_type in conn_types:
-                    ccg=self.data[keyy]
-                    if ccg is None: continue # no connections
-                    for ind,val,sig in zip(ccg.inds,ccg.conn_strength.T,ccg.significant.T):#TODO how to not use transpose?
-                        p = tuple(ind)
-                        if p not in pairs:
-                            pairs.append(p)
-                            exist[p]=np.full(n_seg,False)
-                            strength[p]=np.full(n_seg,np.nan)
-                        if isinstance(sig,np.ndarray):
-                            exist[p]=sig
-                            strength[p]=val
-                        else:
-                            exist[p][i_seg]=sig
-                            strength[p][i_seg]=val
-            conn_key = Key(k.session,k.epoch,conn_type=k.conn_type,excitability=k.excitability)
-            if len(pairs)==0: 
-                self.connectivity[conn_key]=None
-                return
-            exist_arr = np.zeros((len(pairs),n_seg))
-            strength_arr = np.zeros((len(pairs),n_seg))
-            for i,p in enumerate(pairs):
-                exist_arr[i]=exist[p]
-                strength_arr[i]=strength[p]
-            neurons = self.nd.data[k.nd()]
-            self.connectivity[conn_key] = Connectivity(key=conn_key, n_segments=n_seg, ccgs=group,
-                                                       inds=pairs, exist=exist_arr, strength=strength_arr,
-                                                       ids = neurons.ind2id(pairs))
-
     # def set_connectivity_compound(self):
     #     """
     #     Create Connectivity objects within this class from connection strengths.
@@ -1504,16 +1450,16 @@ class CCGDataset(AnalysisDataset):
                                             save=False,
                                             root='~/Documents/NeuroPy/images/conn_strengths',
                                             debug=False):
-        for k1, conn in self.connectivity.items():
-            print(k1,skips.get(k1))
-            conn.plot_strength(n_segments_threshold=n_segments_threshold,
+        for k, ccg in self.data.items():
+            print(k,skips.get(k))
+            ccg.plot_strength(n_segments_threshold=n_segments_threshold,
                                            save=save,
                                            root=root,
                                            norm_by_n_sess=norm_by_n_sess,
                                            norm_by_total_strength=norm_by_total_strength,
                                            zero_first_timepoint=zero_first_timepoint,
                                            show_legend=show_legend,
-                                           skips=skips.get(k1),
+                                           skips=skips.get(k),
                                            debug=debug)
 
     def plot_connection_strengths_compound(self,n_segments_threshold=None,save=False,
