@@ -4,6 +4,7 @@ import os
 import neuropy.plotting.probe as probe
 import numpy as np
 
+
 def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, 
                    pval=None, ccg_null=None, j_sig=None,segment_id=None):
     """Single CCG plot into provided axis"""
@@ -16,11 +17,9 @@ def plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size,
     ax2 = ax.twinx()
     ylim=ax.get_ylim()[1]*0.8
     if pval is not None:
-        pval_scale = pval/pval.max() * ylim
-        ax2.plot(bins, pval_scale, label='p',alpha=0.3, color='gray')
+        ax2.plot(bins, pval/pval.max() * ylim, label='p',alpha=0.3, color='gray')
     if j_sig is not None:
-        j_sig_scale = j_sig/j_sig.max() * ylim
-        ax2.plot(bins, j_sig_scale, label='jitter significance')
+        ax2.plot(bins, j_sig/j_sig.max() * ylim, label='j-significance')
     # Set ticks to pval values on a correct scale
     ticks_scaled = np.linspace(0, ylim, len(ax.get_yticks()))  # positions in scaled axis
     ticks_original = np.round(ticks_scaled /ylim*pval.max(), 2) #TODO sometimes p val looks weird, is it a problem w p val calculation?
@@ -85,6 +84,7 @@ def plot_ccg_figure(ccg, ids, inds, neuron_types, waveforms,
                                 frates_cut[i] if frates_cut is not None else None,
                                 n_shanks=n_shanks,ch_per_shank=ch_per_shank,
                                 discarded_channels=discarded_channels)
+        sns.despine(ax=axs[1])
 
     fig.tight_layout()
     if save and plotdir:
@@ -110,6 +110,147 @@ def plot_ccg_only(ccg, ids, inds, window_size, bin_size, pval=None, ccg_null=Non
         plt.show()
     plt.close(fig)
     return fig
+
+
+def plot_waveform_panel(ax, waveform, neuron_type, neuron_id, 
+                        frate_all=None, frates_cut=None, n_shanks=None, ch_per_shank=None, discarded_channels=None):
+    """Single waveform panel into provided axis"""
+    n_shanks = n_shanks or 12
+    ch_per_shank = ch_per_shank or CHANNELS_PER_SHANK # TODO put hardcoded values elsewhere?
+    max_ch = waveform.shape[0]
+    ax.imshow(waveform.astype(float))
+    ax.set_title(f"{neuron_type}{neuron_id}")
+    xlabel = ""
+    if frate_all is not None:
+        xlabel += f"{frate_all:.2f}Hz all "
+    elif frates_cut is not None:
+        xlabel += f"{frates_cut:.2f}Hz cut "
+    ax.set_xlabel(xlabel)
+    
+    edges = (np.array(range(n_shanks))+1)*ch_per_shank+1
+    if discarded_channels is not None:
+        shanks = discarded_channels // ch_per_shank
+        edges = edges - np.cumsum(np.histogram(shanks,np.arange(n_shanks))[0])
+        
+    for k in edges:
+        ax.axhline(k, c='w', alpha=0.5, linestyle='dashed')
+    
+    return ax
+
+
+
+def plot_strength(self,
+                n_segments_threshold=None,
+                norm_by_n_sess=False,
+                norm_by_total_strength=False,
+                zero_first_timepoint=False,
+                show_legend=False,
+                skips=None,
+                save=False,
+                root=None,
+                debug=False):
+    # show all pairs by default
+    n_segments_threshold=n_segments_threshold if n_segments_threshold is not None else 0
+    plt.figure()
+    inds = self.filter(min_n_segment=n_segments_threshold,skips=skips)
+    plot_data = self.conn_strength[inds]
+    significant=self.significant[inds]
+    n_significant=np.sum(significant,axis=1,keepdims=True)
+    pairs = self.inds[inds]
+    if pairs.shape[0]==0: 
+        print(f"{self.key}: No pairs fit the criteria min_n_segment={n_segments_threshold}, nothing is plotted")
+        return
+    
+    ylabel = "connection strength"
+    if skips is not None:
+        ylabel+="\nremoving outliers"
+    if norm_by_total_strength:
+        plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
+        ylabel=ylabel+" \nnormalized by total strength"
+    if norm_by_n_sess: # normalize by the inverse of number of sessions where this pair appeared
+        plot_data=plot_data*n_significant/self.n_segments
+        ylabel=ylabel+" \n(normalized by number of sessions)"
+    if zero_first_timepoint:
+        # dmax = np.nanmax(plot_data,axis=1,keepdims=True)
+        # dmin = np.nanmin(plot_data,axis=1,keepdims=True)
+        plot_data= (plot_data-plot_data[:,0:1])
+        ylabel=ylabel+" \naligning the first timepoint"
+    colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
+    legend_keys = []
+    
+    if debug:
+        max_pairs=np.max(plot_data,axis=1).argsort()[-3:][::-1]
+        min_pairs=np.min(plot_data,axis=1).argsort()[:3]
+        print("max",pairs[max_pairs],"min",pairs[min_pairs])
+    for i, (pair, v, c, sig) in enumerate(zip(pairs,plot_data,colors,significant)):
+        plt.plot(v,c=c,alpha=0.3)  # normalized
+        x_sig = np.where(sig)[0]
+        plt.scatter(x_sig, v[x_sig], s=8, c=c,label="_nolegend_")
+        if show_legend: legend_keys.append(f"{i}:{pair}")
+    plt.title(f"{self.key}")
+    plt.xlabel("time segment")
+    plt.xticks(np.arange(self.n_segments),np.arange(self.n_segments))
+    plt.ylabel(ylabel)
+    if show_legend: 
+        # spacing
+        ncol = 1+int(i//25)
+        i_per_col=i//ncol
+        offset = -.3-.5*(i_per_col/25)
+        plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
+    
+    if save:
+        assert os.path.isdir(os.path.expanduser(root))
+        plt.savefig(f"{os.path.expanduser(root)}/{self.key}.png", bbox_inches='tight')
+    else:
+        plt.show()
+
+    mean, pvals = ttest_1samp(plot_data,0,axis=0)
+    print("pvals",pvals[1:],'threshold',0.05/len(pvals[1:]),"\n")
+    print("mean values",mean[1:],"\n")
+
+def plot_network(self):
+    pass
+
+
+# TODO move to plotting
+def plot_connection_strengths(self,n_segments_threshold=None,
+                                        norm_by_n_sess=False,
+                                        norm_by_total_strength=False,
+                                        zero_first_timepoint=False,
+                                        show_legend=False,
+                                        skips={},
+                                        save=False,
+                                        root='~/Documents/NeuroPy/images/conn_strengths',
+                                        debug=False):
+    for k, ccg in self.data.items():
+        print(k,skips.get(k))
+        ccg.plot_strength(n_segments_threshold=n_segments_threshold,
+                                        save=save,
+                                        root=root,
+                                        norm_by_n_sess=norm_by_n_sess,
+                                        norm_by_total_strength=norm_by_total_strength,
+                                        zero_first_timepoint=zero_first_timepoint,
+                                        show_legend=show_legend,
+                                        skips=skips.get(k),
+                                        debug=debug)
+
+def plot_connection_strengths_compound(self,n_segments_threshold=None,save=False,
+                                        norm_by_n_sess=False,
+                                        norm_by_total_strength=False,
+                                        zero_first_timepoint=False,
+                                        show_legend=False,
+                                        skips={},
+                                        legend_group_size=25):
+        self.plot_strength_compound(n_segments_threshold=n_segments_threshold,
+                                        save=save,
+                                        norm_by_n_sess=norm_by_n_sess,
+                                        norm_by_total_strength=norm_by_total_strength,
+                                        zero_first_timepoint=zero_first_timepoint,
+                                        show_legend=show_legend,
+                                        legend_group_size=legend_group_size
+                                        )
+
+
 
 
 def plot_connection_strength(key,n_segments_total,
@@ -177,3 +318,61 @@ def plot_connection_strength(key,n_segments_total,
             plt.savefig(f"{os.path.expanduser(root)}/{key}.png", bbox_inches='tight')
         else:
             plt.show()
+
+
+def plot_strength_compound(self,
+                    n_segments_threshold=None,save=False,
+                    norm_by_n_sess=False,
+                    norm_by_total_strength=False,
+                    zero_first_timepoint=False,
+                    show_legend=False,
+                    legend_group_size=25,
+                    ):
+    inds=[]
+    strength=[]
+    x_coords=[]
+    sig=[]
+    for k, ccg in self.data.items():
+        edges = self.nd.edge_times[k.get('session','epoch','ref_ind')]
+        xcoord = np.array([(ts+te)/7200 for ts,te in zip(edges[0],edges[1])])
+        inds.append(ccg.inds)
+        strength.append(ccg.conn_strength)
+        sig.append(ccg.significant)
+        x_coords.append(xcoord)
+    inds=np.array(inds)
+    x_ticks = list(np.arange(13))
+
+    # n_segments_threshold=n_segments_threshold if n_segments_threshold is not None else self.n_segments
+    plt.figure()
+    # inds = self.filter(min_n_segment=n_segments_threshold,skips=skips)
+    plot_data = strength
+    pairs = inds
+    if pairs.shape[0]==0: 
+        print(f": No pairs fit the criteria min_n_segment={n_segments_threshold}, nothing is plotted")
+        return
+
+    if norm_by_total_strength:
+        plot_data=[x/np.nansum(x) for x in plot_data]
+    if norm_by_n_sess:
+        plot_data=[x*np.count_nonzero(si)/len(x) for x,si in zip(plot_data,sig)]
+    if zero_first_timepoint:
+        plot_data=[(x - np.nanmin(x)) / np.nanmean(x) for x in plot_data]
+    colors = plt.cm.hsv(np.linspace(0, 1, len(plot_data)))
+    legend_keys = []
+    for i, (pair, x,y, c,si) in enumerate(zip(pairs,x_coords,plot_data,colors,sig)):
+        plt.plot(x,y,c=c,alpha=0.3)
+        si=np.array(si)
+        if si.any():plt.scatter(x[si], y[si], s=8,c=c,label="_nolegend_")
+        if show_legend: legend_keys.append(f"{i}:{pair}({len(x)})")
+    plt.title(f"{k.get('session','epoch','excitability','conn_type')}")
+    plt.xlabel("time (hours)")
+    plt.xticks(x_ticks,x_ticks)
+    plt.ylabel("normalized connection strength")
+    if show_legend: 
+        # spacing
+        ncol = 1+int(i//legend_group_size)
+        i_per_col=i//ncol
+        offset = -.3-1*(i_per_col/legend_group_size)
+        plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
+    plt.show()
+    #TODO save
