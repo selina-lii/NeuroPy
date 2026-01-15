@@ -846,7 +846,7 @@ def cp_spike_correlations_2groups(
 def np_spike_correlations_snapshots(
         neurons,
         neuron_inds,
-        seg_edges,
+        edge_times,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -872,7 +872,7 @@ def np_spike_correlations_snapshots(
     """
 
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = len(seg_edges[0])
+    n_segments = len(edge_times[0])
 
     # Convert to array if int
     neuron_inds = _san(neuron_inds)
@@ -880,7 +880,7 @@ def np_spike_correlations_snapshots(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples, spike_segment_ids = _np_assemble_spike_arrays(neurons,segments=seg_edges)
+    spike_times, spike_clusters, spike_samples, spike_segment_ids = _np_assemble_spike_arrays(neurons,segments=edge_times)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -967,7 +967,7 @@ def np_spike_correlations_snapshots(
 def cp_spike_correlations_snapshots(
         neurons,
         neuron_inds,
-        seg_edges,
+        edge_times,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -985,7 +985,7 @@ def cp_spike_correlations_snapshots(
         Size of the window (width of entire CCG), in seconds.
     symmetrize : boolean (True)
         Whether the output matrix should be symmetrized or not.
-    seg_edges: list[np.ndarray]
+    edge_times: list[np.ndarray]
         Two element list, first item is an array of t_starts and 
         the second item is an array of t_ends.
     Returns
@@ -995,14 +995,14 @@ def cp_spike_correlations_snapshots(
     """
 
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = len(seg_edges[0])
+    n_segments = len(edge_times[0])
     # Convert to array if int
     neuron_inds = _san(neuron_inds)
 
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples, spike_segment_ids = _cp_assemble_spike_arrays(neurons,segments=seg_edges)
+    spike_times, spike_clusters, spike_samples, spike_segment_ids = _cp_assemble_spike_arrays(neurons,segments=edge_times)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -1096,21 +1096,21 @@ def spike_correlations(
         window_size=None,
         symmetrize=True,
         use_acceleration=False,
-        seg_edges=None,
+        edge_times=None,
         ref_neuron_inds=None,
 ):
     """
     Switch between spike correlation cases.
     """
     print("running spike correlations")
-    if seg_edges is not None:
+    if edge_times is not None:
 
         spike_correlations_snapshots = cp_spike_correlations_snapshots \
         if use_acceleration else np_spike_correlations_snapshots
         
         correlograms = spike_correlations_snapshots(
             neurons, neuron_inds=neuron_inds, 
-            seg_edges=seg_edges,
+            edge_times=edge_times,
             bin_size=bin_size, window_size=window_size,symmetrize=symmetrize
             )
     elif ref_neuron_inds is not None:

@@ -1,9 +1,10 @@
 import numpy as np
-def _san(var,as_np=False):
+
+def _san(var,as_np=False,wrap_none=False):
     """
     Sanitize array
     """
-    if var is None: return var
+    if var is None: return [None] if wrap_none else None
     if not isinstance(var, list): var = [var]
     if as_np: var = np.array(var)
     return var

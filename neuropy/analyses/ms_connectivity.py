@@ -24,7 +24,7 @@ from enum import Enum
 from copy import deepcopy
 import imageio
 import neuropy.plotting.ccg as plot_ccg
-
+import pandas as pd
 
 
 # TODO
@@ -322,6 +322,7 @@ class CCGConfig(Config):
     @property
     def conn_types_flat(self):
         return self.conn_types_E+self.conn_types_I
+    
     @property
     def conv_window_bins(self):
         return self.conv_window/self.bin_size
@@ -433,7 +434,7 @@ class NeuronsDataset(AnalysisDataset):
                 _edges_spikecount   spikecount_split
             """
             
-            for i, e in enumerate(_san(c.epochs) or [None]):
+            for i, e in enumerate(_san(c.epochs,wrap_none=True)):
                 k = key.add(epoch=e)
                 t = s.paradigm.timing_by_label(e) if e else (neurons.t_start, neurons.t_stop)
                 t_start, t_stop = t
@@ -617,7 +618,7 @@ class CCG:
         self.ccg_null=ccg_null # 'baseline' chance level CCG
         self.pval=pval
         self.conn_strength = conn_strength # 
-        self._conf=conf
+        self.conf=conf
         self.edge_times=edge_times
         self.frates=None
         n=self.inds.shape[0]
@@ -1072,12 +1073,12 @@ class CCGDataset(AnalysisDataset):
             inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
 
         conv = EranConv()
-        ccgs = conv.eranconv_merge(key=key, 
+        ccg_dict = conv.eranconv_merge(key=key, 
                             neurons=self.nd.data[key.nd()], # session, epoch, conn_type
                             pair_inds=inds,
                             edge_times=edge_times or self.nd.edge_times[key.get('session','epoch')], 
                             conf=self.conf)
-        return ccgs
+        return ccg_dict
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None):
         """
@@ -1096,8 +1097,8 @@ class CCGDataset(AnalysisDataset):
         print(f"recalculated CCG from binsize={old_bin_size} to binsize={bin_size}")
 
         for key, ccg in self.data.items():
-            new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,key=key)
-            for k,ccg in new_ccgs.items():
+            ccg_dict = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT,key=key)
+            for k,ccg in ccg_dict.items():
                     # inherit original significant markers
                 ccg.significant = self.data[key].exist
                 self.data[k] = ccg
@@ -1228,13 +1229,12 @@ class EranConv:
     rough_mask={} # used for eranconv_split
     mask={}
 
-    pvals=[]
-    qvals=[]
-    pval_corrected=[]
-    qval_corrected=[]
-    qval_corrected2=[]
-    ccg=[]
-    acg=[]
+    _pvals=[]
+    _qvals=[]
+    _pval_corrected=[]
+    _qval_corrected=[]
+    _qval_corrected2=[]
+    _ccg=[]
     pred=[]
     conf=None
 
@@ -1338,17 +1338,17 @@ class EranConv:
     
     def spkcount_mask(self):
         conf=self.conf
-        pair_inds = np.argwhere((self.ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
+        pair_inds = np.argwhere((self._ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
         return pair_inds
     
     def significance_mask(self,excitability):
         conf = self.conf
         if excitability=='E':
-            sig, self.pval_corrected = EranConv.multiple_correction(self.pvals, conf.alpha)
+            sig, self._pval_corrected = EranConv.multiple_correction(self._pvals, conf.alpha)
             pair_inds = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1))
         elif excitability=='I':
-            sig1, self.qval_corrected = EranConv.multiple_correction(self.qvals, conf.alpha)
-            sig2, self.qval_corrected2 = EranConv.multiple_correction(self.qvals, conf.alpha2)
+            sig1, self._qval_corrected = EranConv.multiple_correction(self._qvals, conf.alpha)
+            sig2, self._qval_corrected2 = EranConv.multiple_correction(self._qvals, conf.alpha2)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
             pair_inds = np.argwhere(neighbor.any(-1))
         return pair_inds
@@ -1382,20 +1382,6 @@ class EranConv:
             inds=np.where(neurons.shank_ids[x]!=neurons.shank_ids[y])[0]
         return pair_inds[inds]
     
-    @staticmethod
-    def count_significant_pairs():
-        """
-        Create a tally of significant neuronal connectoins by type
-        Currently, the type is defined as 
-            reference-target/[E,I]
-        where reference is presynaptic, and target is postsynaptic neuronal type, 
-        and E/I indicates the connection being excitatory or inhibitory
-
-        SL: If this helper function seems messy it's probably because 
-        it pertains to our specific definition of significant pairs (see Diba 2014, Pairwise connections.)
-        """
-        pass
-
     # Update print string 
     def _printstr_sig(self, pairs_dict, EI, s=""):
         # if any type of connection under consideration has a non-zero count, print a summary
@@ -1414,10 +1400,9 @@ class EranConv:
         """
         print("running eranconv (1st pass)")
         self.conf = conf
-        self.n = neurons.n_neurons
         self.n_segments = len(edge_times['start'])
 
-        self.ccg = correlations.spike_correlations(
+        self._ccg = correlations.spike_correlations(
                 neurons=neurons,
                 neuron_inds=np.arange(neurons.n_neurons), # all
                 bin_size=conf.bin_size,
@@ -1427,7 +1412,7 @@ class EranConv:
                 edge_times=edge_times,
             )
 
-        self.pvals, self.pred,self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+        self._pvals, self._pred,self._qvals = EranConv._conv(self._ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
         self.mask={'E':{},'I':{}}
         self.rough_mask={'E':{},'I':{}}
@@ -1481,18 +1466,18 @@ class EranConv:
 
             ccgs_by_type,spurs_by_type,acgs = {},{},{} # 1 neuron group -> many connection types
 
-            if len(self.ccg.shape)==3: 
-                self.ccg=self.ccg[np.newaxis,...]
-                self.pred=self.pred[np.newaxis,...]
-                self.pval_corrected=self.pval_corrected[np.newaxis,...]
-                self.qval_corrected=self.qval_corrected[np.newaxis,...]
+            if len(self._ccg.shape)==3: 
+                self._ccg=self._ccg[np.newaxis,...]
+                self._pred=self._pred[np.newaxis,...]
+                self._pval_corrected=self._pval_corrected[np.newaxis,...]
+                self._qval_corrected=self._qval_corrected[np.newaxis,...]
 
             # Update return values
             for seg in range(self.n_segments):
                 for EI in ['E','I']:
                     pairs=self.mask[seg][EI]
                     spairs = self.rough_mask[seg][EI] # initialize spurious pairs
-                    p = self.pval_corrected if EI=='E' else self.qval_corrected # TODO TODO not storing corrected p-vals. make it an option!
+                    p = self._pval_corrected if EI=='E' else self._qval_corrected # TODO TODO not storing corrected p-vals. make it an option!
 
                     for conn_type, prs in pairs.items():
                         new_key = key.add(segment=seg if self.n_segments>1 else None,
@@ -1503,8 +1488,8 @@ class EranConv:
                             x,y = prs[:,-2],prs[:,-1]
                             ccgs_by_type[new_key] = CCG(key=new_key,conf=self.conf, 
                                                 inds=prs, 
-                                                ccg=self.ccg[seg,x,y], 
-                                                ccg_null=self.pred[seg,x,y], 
+                                                ccg=self._ccg[seg,x,y], 
+                                                ccg_null=self._pred[seg,x,y], 
                                                 pval=p[seg,x,y], 
                                                 edge_times=edge_times
                                                 )
@@ -1517,15 +1502,15 @@ class EranConv:
                         x,y = spairs[:,-2],spairs[:,-1] # x,y = pairs[...,0],pairs[...,1]
                         spurs_by_type[new_key] = CCG(key=new_key,conf=self.conf, 
                                             inds=spairs, ids=neurons.ind2id(spairs), 
-                                            ccg=self.ccg[seg,x,y], ccg_null=self.pred[seg,x,y], pval=p[seg,x,y], 
+                                            ccg=self._ccg[seg,x,y], ccg_null=self._pred[seg,x,y], pval=p[seg,x,y], 
                                             )
                     else:
                         spurs_by_type[new_key] = None
 
-            autocorr_locations = EranConv.get_autocorr_locations(self.ccg.shape)            
+            autocorr_locations = EranConv.get_autocorr_locations(self._ccg.shape)            
             new_key = key
             acgs[new_key] = ACG(key=new_key,
-                        acg=self.ccg[:,autocorr_locations[0]],
+                        acg=self._ccg[:,autocorr_locations[0]],
                         inds=np.arange(neurons.n_neurons),
                         ids=neurons.ind2id(np.arange(neurons.n_neurons)),
                         conf=self.conf)
@@ -1548,14 +1533,11 @@ class EranConv:
         print(f"running eranconv (2nd pass): {key}")
 
         self.conf = conf
-        self.n=neurons.n_neurons
-        if edge_times is None: 
-            edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
         self.n_segments = len(edge_times[0])
 
-        ccgs = {}
+        ccg_dict = {}
         neuron_inds = np.unique(pair_inds)
-        self.ccg = correlations.spike_correlations(
+        self._ccg = correlations.spike_correlations(
                 neurons=neurons,
                 neuron_inds=neuron_inds,
                 bin_size=conf.bin_size,
@@ -1569,89 +1551,33 @@ class EranConv:
                 [idx[a] for a in pair_inds[:, -2]],
                 [idx[b] for b in pair_inds[:, -1]],
                 slice(None))
-        self.ccg=self.ccg[slicer]
+        self._ccg=self._ccg[slicer]
 
-        self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+        self._pvals, self._pred, self._qvals = EranConv._conv(self._ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
-        conf = self.conf
         if key.excitability=='E':
-            sig, self.pval_corrected = EranConv.multiple_correction(self.pvals, conf.alpha)
+            sig, self._pval_corrected = EranConv.multiple_correction(self._pvals, conf.alpha)
             sig_mask = (sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1)
         elif key.excitability=='I':
-            sig1, self.qval_corrected = EranConv.multiple_correction(self.qvals, conf.alpha)
-            sig2, self.qval_corrected2 = EranConv.multiple_correction(self.qvals, conf.alpha2)
+            sig1, self._qval_corrected = EranConv.multiple_correction(self._qvals, conf.alpha)
+            sig2, self._qval_corrected2 = EranConv.multiple_correction(self._qvals, conf.alpha2)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
             sig_mask = neighbor.any(-1)
 
         k=key.remove('segment')
-        ccgs[k]=CCG(inds=pair_inds, 
+        ccg_dict[k]=CCG(inds=pair_inds, 
                 ids=neurons.ind2id(pair_inds), 
-                ccg=self.ccg, 
-                ccg_null=self.pred, 
-                pval=self.pval_corrected if key.excitability=='E' else self.qval_corrected, 
+                ccg=self._ccg, 
+                ccg_null=self._pred, 
+                pval=self._pval_corrected if key.excitability=='E' else self._qval_corrected, 
                 conf=self.conf,
                 significant=sig_mask,
                 key=k,
                 edge_times=edge_times)
-        ccgs[k].set_firing_rates(neurons)
-
-        # for i in range(self.n_segments):
-        #     k=key.change(segment=i)
-        #     ccgs[k]=CCG(inds=pair_inds, 
-        #             ids=neurons.ind2id(pair_inds), 
-        #             ccg=self.ccg[i], 
-        #             ccg_null=self.pred[i], 
-        #             pval=self.pval_corrected[i] if key.excitability=='E' else self.qval_corrected[i], 
-        #             conf=self.conf,
-        #             significant=sig_mask[i],
-        #             key=k)
-        print("done")
-        return ccgs
-
-    def eranconv_ref(self, key:list[Key], neurons:Neurons, pair_inds:dict[list], edge_times:np.ndarray, conf:CCGConfig):
-        # TODO
-        print(f"running eranconv (2nd pass): {key}")
-
-        self.conf = conf
-        self.n=neurons.n_neurons
-        if edge_times is None: 
-            edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
-        self.n_segments = len(edge_times[0])
-
-        ccgs = {}
-
-        self.ccg = correlations.spike_correlations(
-                neurons=neurons,
-                ref_neuron_inds=pair_inds[0],
-                neuron_inds=pair_inds[1:],
-                bin_size=conf.bin_size,
-                window_size=conf.duration,
-                use_acceleration=conf.use_acceleration,
-                symmetrize=conf.symmetrize_ccg,
-                edge_times=edge_times,
-            )[:,0,1:2] #TODO
-        self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
-
-        self.rough_mask = intersect(self.significance_mask(key.excitability), self.spkcount_mask())
-        if self.rough_mask.any(): self.rough_mask = self._probe_loc_mask(self.mask,neurons)
-        
-        significant = np.full((self.ccg.shape[-3],self.ccg.shape[-2]),False) 
-        if self.rough_mask.any(): significant[self.rough_mask[:,0],self.rough_mask[:,1]] = True
-        significant=significant.squeeze()
-
-        # REMOVE Key(session=key.session,epoch=key.epoch,segment=None,ref_ind=key.ref_ind,target_ind=key.target_ind,
-        #       excitability=key.excitability,conn_type=key.conn_type)
-        ccgs[k]=CCG(inds=pair_inds, 
-                ids=neurons.ind2id(pair_inds), 
-                ccg=self.ccg, 
-                ccg_null=self.pred, 
-                pval=self.pval_corrected if key.excitability=='E' else self.qval_corrected, 
-                conf=self.conf,
-                significant=significant,
-                key=key.remove('segment')) # merged ccg
+        ccg_dict[k].set_firing_rates(neurons)
 
         print("done")
-        return ccgs
+        return ccg_dict
 
 
 def routine_eranconv_connection_info(info, nd:NeuronsDataset, cd:CCGDataset, epoch_id=0):
