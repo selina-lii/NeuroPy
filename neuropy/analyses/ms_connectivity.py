@@ -29,6 +29,7 @@ import neuropy.plotting.ccg as plot_ccg
 
 # TODO
 CHANNELS_PER_SHANK=16
+SAVE_ROOT="~/Documents/Neuropy/outputs"
 
 class IgnoreLevel(Enum):
     """Config for CCG and other analysis
@@ -48,6 +49,7 @@ class NormalizeBy(Enum):
     TARGET_SPKS = 4 
     BOTH_FRATE = 5
     BOTH_SPKS = 6
+
 
 def _short_session_name(session):
     """
@@ -334,7 +336,7 @@ class CCGConfig(Config):
 
     @property
     def filepath(self):
-        return f"~/Documents/jitter_out/{self.name}.ccg.meta.h5"
+        return f"{SAVE_ROOT}/{self.name}.ccg.meta.h5"
     
     def save(self):
         with h5py.File(self.filepath, "w") as f:
@@ -362,13 +364,15 @@ class NeuronsDataset(AnalysisDataset):
 
     sessions: subjects.ProcessData
         collection object of sessions
+
+    data: dict[neurpy.Neurons]
+
+    edge_times: dict[pd.DataFrame(
+                            start, stop, total_time_hours, effective_time_hours, label)]
+        data and edge_times has the same key list.
     """
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
         self._conf = conf        
-        self.data={}
-        self.edge_times=defaultdict(lambda: defaultdict(list))
-        self.effective_time_hours=defaultdict(lambda: defaultdict(list))
-        self.total_time_hours=defaultdict(lambda: defaultdict(list))
         self.prep(sessions)
 
     def __str__(self): 
@@ -378,13 +382,16 @@ class NeuronsDataset(AnalysisDataset):
             s+=f"{k}\t{str(v)}"
             cnt+=1
         return f"NeuronsDataset #sessions = {cnt}\n{s}"
-    
-    @property
-    def conf(self):
-        return self._conf
-    
+        
     def prep(self, sessions):
+        """
+        Filter neurons by behavioral epochs and type 
+        Set segment edge timing data
+        """
+        self.data={}
+        self.edge_times=defaultdict(pd.DataFrame)
         c = self.conf
+
         sessions = _san(sessions)
         for s in sessions:
             name = _short_session_name(s)
@@ -394,28 +401,28 @@ class NeuronsDataset(AnalysisDataset):
             neurons.metadata['intervals']=np.array([[neurons.t_start,neurons.t_stop]])
 
             # Filter neurons
-            # -type
-            if self.conf.neuron_types is not None:
+            if c.neuron_types is not None:
                 neurons = neurons.get_neuron_type(c.neuron_types)
-            # -paradigm label
-            if self.conf.epochs is not None:
+
+            if c.epochs is not None:
                 neurons = neurons.behav_slice(behav_times=s.paradigm, 
                                         labels=c.epochs)
-            # -sleep states
-            if self.conf.sleep is not None:
+                
+            if c.sleep is not None:
                 neurons = neurons.behav_slice(behav_times=s.brainstates, 
                                         labels=c.sleep.labels, 
                                         discard=c.sleep.discard,
                                         min_dur=c.sleep.min_dur)
-            # -ripple states
-            if self.conf.ripple is not None:
+                
+            if c.ripple is not None:
                 neurons = neurons.behav_slice(behav_times=s.ripple, 
                                         labels=None, 
                                         discard=c.ripple.discard,
                                         min_dur=c.ripple.min_dur)
 
             """
-            Get the start and end of each segment. A segment is the smallest time period in the 
+            Get the start and end of each segment. The edge timing are processed by epoch
+            A segment is the smallest time period in the 
             dataset where analysis will be performed (e.g. data used to calculate one CCG). There 
             can be many overlapping segments within a dataset depending on configuration.
             
@@ -432,6 +439,7 @@ class NeuronsDataset(AnalysisDataset):
                 t_start, t_stop = t
                 
                 if c.seg_spikecount is not None:
+                    # TODO spikecount segmentation code is not maintained
                     neus = neurons.time_slice(t_start,t_stop)
                     for i in range(neus.n_neurons):
                         k = key.add(epoch=e, ref_ind=i)
@@ -450,31 +458,36 @@ class NeuronsDataset(AnalysisDataset):
                                                                 t_stop=t_stop)
                 else:
                     self.edge_times[k] = [np.array([t_start]),np.array([t_stop])]
-                
-                # Calculate total/actual time length of each segment
+
+
+                """
+                Calculate total/actual time lengths of each segment
+                """
+                et = self.edge_times[k]
+                edges = pd.DataFrame({"start": et[0],
+                                    "stop":  et[1],
+                                    "total_time_hours": (et[1]-et[0])/3600,
+                                    "label":[e + str(i) for i in range(10)],
+                                    })
                 #TODO does not work for spikecount edges yet
-                intervals = neurons.metadata['intervals']
-                seg_edges=self.edge_times[k]
-                effective_time_hours, total_time_hours = [],[]
-                for t_start, t_stop in zip(seg_edges[0],seg_edges[1]):
-                    iv = intervals[(intervals[:,1]>=t_start)&(intervals[:,0]<=t_stop)]
-                    tth = (t_stop-t_start)/3600
-                    total_time_hours.append(tth)
-                    effective_time_hours.append(min(tth,np.sum(iv[:,1]-iv[:,0])/3600))
-                self.effective_time_hours[k]=np.array(effective_time_hours)
-                self.total_time_hours[k]=np.array(total_time_hours)
+                ivs = neurons.metadata['intervals']
+                eths = []
+                for row in edges.itertuples(index=False):
+                    start, stop, tth = row.start, row.stop, row.total_time_hours
+                    start_ivs, stop_ivs = ivs[:,0], ivs[:,1]
+                    iv = ivs[(start_ivs>=start) & (stop_ivs<=stop)]
+                    start_iv, stop_iv = iv[:,0], iv[:,1]
+                    eths.append( 
+                        np.min(np.sum(stop_iv-start_iv)/3600, tth)
+                        )
+                edges['effective_time_hours']=np.array(eths)
 
             if c.zero_spike_times:
-                t_start = neurons.t_start
                 neurons = neurons.zero_spike_times()
-                for k,v in self.edge_times.items():
-                    self.edge_times[k]=(v[0]-t_start,v[1]-t_start)
+                for _, v in self.edge_times.items(): v[['start','stop']] -= neurons.t_start
 
             # Store filtered neurons
             self.data[key] = neurons
-
-
-
 
     def frate_stats(self):
         @dataclass
@@ -557,9 +570,8 @@ class NeuronsDataset(AnalysisDataset):
 
 
 class ACG:
-    """Like Neurons, but for auto-correlograms
-    Static dataclass, not mean for reuse"""
-    def __init__(self, key, acg, ids, inds,
+    """Like Neurons, but for auto-correlograms"""
+    def __init__(self, key, acg, inds,
                  conf:CCGConfig=None):
         self.key=key
         self.inds=inds
@@ -579,6 +591,15 @@ class CCG:
 
     """
     # TODO
+    # TODO 1 CCGs are np.float16
+    # TODO 2 CCG of a session is saved locally in hdf5
+    # TODO 3 class CCGraw() stores the whole CCG array and its p values, with metadata of CCGConfig, 
+    #  contains slicing functions
+    # TODO 4 CCG() has two modes: _optimize_memory or no optimization
+    # optimized CCG stores its own CCG values while unoptimized indexes a CCGraw object, avoiding recomputation at higher memory costs
+    # load CCGraw as needed.
+    # wrt to p-values: jitter needs to be run as sparsely as possible while eran_conv can be done for the whole dataset easily.
+    # should optim CCG use sparse matrices with certain rows filled? 
     # there should be two versions of CCG, but they should share some common methods, 
     #           using sparse and dense matrix representations.
     # filtered: ccg shape = ngroups,nccg,nbins     ids shape = nccg,2
@@ -589,7 +610,7 @@ class CCG:
     def __init__(self, key, ccg, inds, 
                  ccg_null=None, pval=None, conn_strength=None,
                  conf:CCGConfig=None,significant=True,
-                 seg_edges=None):
+                 edge_times=None):
         self.key=key
         self.inds=_san(inds,as_np=True)
         self.ccg=ccg
@@ -597,7 +618,7 @@ class CCG:
         self.pval=pval
         self.conn_strength = conn_strength # 
         self._conf=conf
-        self.seg_edges=seg_edges
+        self.edge_times=edge_times
         self.frates=None
         n=self.inds.shape[0]
         if type(significant)==bool:
@@ -609,10 +630,10 @@ class CCG:
 
     def set_firing_rates(self, neurons:Neurons):
         # Obtain the firing rates during the time period used to compute this CCG
-        if (self.seg_edges is not None) and (neurons.firing_rate is not None):
+        if (self.edge_times is not None) and (neurons.firing_rate is not None):
             n_seg, n_pairs = self.ccg.shape[0], self.inds.shape[0]
             self.frates = np.zeros((n_seg,n_pairs,2))
-            for i,(t_start, t_end) in enumerate(zip(self.seg_edges[0], self.seg_edges[1])):
+            for i,(t_start, t_end) in enumerate(zip(self.edge_times[0], self.edge_times[1])):
                 neu=neurons.time_slice(t_start,t_end)
                 self.frates[i] = neu.firing_rate[self.inds] #TODO other cases
 
@@ -656,10 +677,6 @@ class CCG:
     def unique_inds(self):
         return np.unique(self.inds)
     
-    @property
-    def conf(self):
-        return self._conf
-
     @property
     def total(self):
         return self.ccg.shape[-2]
@@ -917,7 +934,7 @@ class CCGDataset(AnalysisDataset):
 
     def merge_CCGs(self, merge_levels):
         # TODO
-        groups=self.group_by(*merge_levels)
+        groups=self.groupby(*merge_levels)
         # self.data={}
         for merge_key, grouped_ccgs in groups.items():
             # [dev] ccg list items must share a common key that indexes the neurons dataset
@@ -1007,14 +1024,14 @@ class CCGDataset(AnalysisDataset):
             return s
 
         conv = EranConv()
-        for key, seg_edges in self.nd.edge_times.items():
+        for key, edge_times in self.nd.edge_times.items():
             neurons = self.nd.data[key.nd()]
-            if seg_edges is None: 
-                seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
+            if edge_times is None: 
+                edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
 
             ccgs, spurs, autos, printstr = conv.eranconv_split(key=key, 
                                         neurons=neurons, 
-                                        seg_edges=seg_edges, 
+                                        edge_times=edge_times, 
                                         conf=self.conf)
             
             self._attr_append(key, ccgs, 'data')
@@ -1034,15 +1051,15 @@ class CCGDataset(AnalysisDataset):
 
         Call one of the wrappers instead
         """
-        seg_edges=None
+        edge_times=None
         
-        # groups=self.group_by('session','epoch',source='connectivity')
+        # groups=self.groupby('session','epoch',source='connectivity')
         if inds is not None:
             pass
 
         elif key.ref_ind is not None:
             # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
-            seg_edges = self.nd.edge_times[key.remove('segment')]
+            edge_times = self.nd.edge_times[key.remove('segment')]
 
         elif indices_source==CCGIndexSource.SIGNIFICANT:
             inds = self.data[key].inds
@@ -1058,7 +1075,7 @@ class CCGDataset(AnalysisDataset):
         ccgs = conv.eranconv_merge(key=key, 
                             neurons=self.nd.data[key.nd()], # session, epoch, conn_type
                             pair_inds=inds,
-                            seg_edges=seg_edges or self.nd.edge_times[key.get('session','epoch')], 
+                            edge_times=edge_times or self.nd.edge_times[key.get('session','epoch')], 
                             conf=self.conf)
         return ccgs
 
@@ -1092,7 +1109,7 @@ class CCGDataset(AnalysisDataset):
         """
         SET_SELF_DATA=_new_data is None
         if _group is None:
-            _group = self.group_by('conn_type',source='connectivity')[Key(conn_type=conn_type)]
+            _group = self.groupby('conn_type',source='connectivity')[Key(conn_type=conn_type)]
         if _new_data is None:
             _new_data={}
             
@@ -1124,7 +1141,7 @@ class CCGDataset(AnalysisDataset):
         overwrites self.data
         """
         new_data = {}
-        groups = self.group_by('conn_type',source='connectivity')
+        groups = self.groupby('conn_type',source='connectivity')
         for k, group in groups.items():
             inds = external_inds_by_type.get(k.conn_type) if external_inds_by_type is not None else None
             self.reCCG_pair_inds_1conntype(conn_type=k.conn_type, 
@@ -1138,7 +1155,7 @@ class CCGDataset(AnalysisDataset):
         """
         TODO group by reference
         """
-        group = self.group_by('conn_type',source='connectivity')[Key(conn_type=conn_type)]
+        group = self.groupby('conn_type',source='connectivity')[Key(conn_type=conn_type)]
         self.data={}
         for key, ccg in group.items():
             if ccg is not None:
@@ -1390,7 +1407,7 @@ class EranConv:
             s=f"no {'excitatory' if EI=='E' else 'inhbitory'} connections  "
         return s, nonempty
 
-    def eranconv_split(self, key:Key, neurons:Neurons, seg_edges:np.ndarray, conf:CCGConfig,):
+    def eranconv_split(self, key:Key, neurons:Neurons, edge_times:pd.DataFrame, conf:CCGConfig,):
         """
         Main function for CCG computatinon
         Call from CCGDataset
@@ -1398,7 +1415,7 @@ class EranConv:
         print("running eranconv (1st pass)")
         self.conf = conf
         self.n = neurons.n_neurons
-        self.n_segments = len(seg_edges[0])
+        self.n_segments = len(edge_times['start'])
 
         self.ccg = correlations.spike_correlations(
                 neurons=neurons,
@@ -1407,7 +1424,7 @@ class EranConv:
                 window_size=conf.duration,
                 use_acceleration=conf.use_acceleration,
                 symmetrize=conf.symmetrize_ccg,
-                seg_edges=seg_edges,
+                edge_times=edge_times,
             )
 
         self.pvals, self.pred,self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
@@ -1485,8 +1502,11 @@ class EranConv:
                         else:
                             x,y = prs[:,-2],prs[:,-1]
                             ccgs_by_type[new_key] = CCG(key=new_key,conf=self.conf, 
-                                                inds=prs, ids=neurons.ind2id(prs), 
-                                                ccg=self.ccg[seg,x,y], ccg_null=self.pred[seg,x,y], pval=p[seg,x,y], 
+                                                inds=prs, 
+                                                ccg=self.ccg[seg,x,y], 
+                                                ccg_null=self.pred[seg,x,y], 
+                                                pval=p[seg,x,y], 
+                                                edge_times=edge_times
                                                 )
                             spairs = setdiff(spairs,prs) # remove these pairs from spurious
 
@@ -1523,15 +1543,15 @@ class EranConv:
 
         return ccgs_by_type, spurs_by_type, acgs, overview_str
 
-    def eranconv_merge(self, key:list[Key], neurons:Neurons, pair_inds:dict[list], seg_edges:np.ndarray, conf:CCGConfig):
+    def eranconv_merge(self, key:list[Key], neurons:Neurons, pair_inds:dict[list], edge_times:np.ndarray, conf:CCGConfig):
         # ref and target indices should be organized by conn type
         print(f"running eranconv (2nd pass): {key}")
 
         self.conf = conf
         self.n=neurons.n_neurons
-        if seg_edges is None: 
-            seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
-        self.n_segments = len(seg_edges[0])
+        if edge_times is None: 
+            edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
+        self.n_segments = len(edge_times[0])
 
         ccgs = {}
         neuron_inds = np.unique(pair_inds)
@@ -1542,7 +1562,7 @@ class EranConv:
                 window_size=conf.duration,
                 use_acceleration=conf.use_acceleration,
                 symmetrize=conf.symmetrize_ccg,
-                seg_edges=seg_edges,
+                edge_times=edge_times,
             )
         idx = {n: i for i, n in enumerate(neuron_inds)}
         slicer = (...,
@@ -1572,7 +1592,7 @@ class EranConv:
                 conf=self.conf,
                 significant=sig_mask,
                 key=k,
-                seg_edges=seg_edges)
+                edge_times=edge_times)
         ccgs[k].set_firing_rates(neurons)
 
         # for i in range(self.n_segments):
@@ -1588,15 +1608,15 @@ class EranConv:
         print("done")
         return ccgs
 
-    def eranconv_ref(self, key:list[Key], neurons:Neurons, pair_inds:dict[list], seg_edges:np.ndarray, conf:CCGConfig):
+    def eranconv_ref(self, key:list[Key], neurons:Neurons, pair_inds:dict[list], edge_times:np.ndarray, conf:CCGConfig):
         # TODO
         print(f"running eranconv (2nd pass): {key}")
 
         self.conf = conf
         self.n=neurons.n_neurons
-        if seg_edges is None: 
-            seg_edges = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
-        self.n_segments = len(seg_edges[0])
+        if edge_times is None: 
+            edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
+        self.n_segments = len(edge_times[0])
 
         ccgs = {}
 
@@ -1608,7 +1628,7 @@ class EranConv:
                 window_size=conf.duration,
                 use_acceleration=conf.use_acceleration,
                 symmetrize=conf.symmetrize_ccg,
-                seg_edges=seg_edges,
+                edge_times=edge_times,
             )[:,0,1:2] #TODO
         self.pvals, self.pred, self.qvals = EranConv._conv(self.ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 

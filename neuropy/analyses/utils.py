@@ -69,12 +69,12 @@ class AnalysisDataset:
         """Get all keys matching criteria"""
         return [k for k in self.data.keys() if k.matches(**criteria)]
     
-    def group_by(self, *dimensions, source='data') -> Dict[Key, Dict[Key, Any]]:
+    def groupby(self, *dimensions, source='data') -> Dict[Key, Dict[Key, Any]]:
         """
         Group data by specified dimensions.
         
         Example:
-            dataset.group_by('session', 'epoch')
+            dataset.groupby('session', 'epoch')
             # Returns: {('s1', 'pre'): {key: data, ...}, ('s1', 'post'): {...}}
         """
         items = getattr(self, source)
