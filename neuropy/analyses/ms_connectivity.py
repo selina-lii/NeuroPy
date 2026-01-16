@@ -420,7 +420,7 @@ class NeuronsDataset(AnalysisDataset):
                                         labels=None, 
                                         discard=c.ripple.discard,
                                         min_dur=c.ripple.min_dur)
-
+            
             """
             Get the start and end of each segment. The edge timing are processed by epoch
             A segment is the smallest time period in the 
@@ -434,6 +434,8 @@ class NeuronsDataset(AnalysisDataset):
                 _edges_spikecount   spikecount_split
             """
             
+            dfs=[]
+            ivs = neurons.metadata['intervals']
             for i, e in enumerate(_san(c.epochs,wrap_none=True)):
                 k = key.add(epoch=e)
                 t = s.paradigm.timing_by_label(e) if e else (neurons.t_start, neurons.t_stop)
@@ -444,44 +446,51 @@ class NeuronsDataset(AnalysisDataset):
                     neus = neurons.time_slice(t_start,t_stop)
                     for i in range(neus.n_neurons):
                         k = key.add(epoch=e, ref_ind=i)
-                        edges = neus._edges_spikecount(i=i,
+                        starts, stops = neus._edges_spikecount(i=i,
                                                     n=c.seg_spikecount,
                                                     discard_tail=False)
-                        self.edge_times[k]=edges 
                 elif c.seg_stride is not None and c.seg_len is not None:
-                    self.edge_times[k] = neurons._edges_time_window(stride=c.seg_stride, 
+                    starts, stops = neurons._edges_time_window(stride=c.seg_stride, 
                                                                 seg_len=c.seg_len,
                                                                 t_start=t_start,
                                                                 t_stop=t_stop) 
                 elif c.n_segments is not None and c.n_segments[i] > 1:
-                    self.edge_times[k] = neurons._edges_time_split(n_segments=c.n_segments,
+                    starts, stops = neurons._edges_time_split(n_segments=c.n_segments,
                                                                 t_start=t_start,
                                                                 t_stop=t_stop)
                 else:
-                    self.edge_times[k] = [np.array([t_start]),np.array([t_stop])]
+                    starts, stops = np.array([t_start]),np.array([t_stop])
 
 
                 """
                 Calculate total/actual time lengths of each segment
                 """
-                et = self.edge_times[k]
-                edges = pd.DataFrame({"start": et[0],
-                                    "stop":  et[1],
-                                    "total_time_hours": (et[1]-et[0])/3600,
-                                    "label":[e + str(i) for i in range(10)],
+                edges = pd.DataFrame({"start": starts,
+                                    "stop":  stops,
+                                    "total_time_hours": (stops-starts)/3600,
+                                    "key": [k.add(segment=i) for i in range(len(starts))],
+                                    "epoch": [e for i in range(len(starts))],
                                     })
                 #TODO does not work for spikecount edges yet
-                ivs = neurons.metadata['intervals']
+                
                 eths = []
                 for row in edges.itertuples(index=False):
                     start, stop, tth = row.start, row.stop, row.total_time_hours
-                    start_ivs, stop_ivs = ivs[:,0], ivs[:,1]
-                    iv = ivs[(start_ivs>=start) & (stop_ivs<=stop)]
-                    start_iv, stop_iv = iv[:,0], iv[:,1]
-                    eths.append( 
-                        np.min(np.sum(stop_iv-start_iv)/3600, tth)
-                        )
+
+                    # find intervals that overlap the edge
+                    overlap_mask = (ivs[:,1] > start) & (ivs[:,0] < stop)
+                    overlapping_ivs = ivs[overlap_mask]
+
+                    # clip intervals to edge boundaries
+                    clipped_start = np.clip(overlapping_ivs[:,0], start, stop)
+                    clipped_stop  = np.clip(overlapping_ivs[:,1], start, stop)
+
+                    # compute effective time in hours
+                    effective_hours = np.sum(clipped_stop - clipped_start) / 3600
+                    eths.append(min(effective_hours, tth))
                 edges['effective_time_hours']=np.array(eths)
+                dfs.append(edges)
+            self.edge_times[key] = pd.concat(dfs, axis=0)
 
             if c.zero_spike_times:
                 neurons = neurons.zero_spike_times()
@@ -974,8 +983,7 @@ class CCGDataset(AnalysisDataset):
                 pval=pval,
                 significant=significant,
                 conn_strength=conn_strength,
-                conf=grouped_ccgs[0].conf,
-                significant=significant)
+                conf=grouped_ccgs[0].conf,)
             ccg.keys = keys
             self.data[merge_key]=ccg
 
@@ -1337,18 +1345,21 @@ class EranConv:
         return sig,p_corr
     
     def spkcount_mask(self):
-        conf=self.conf
-        pair_inds = np.argwhere((self._ccg[...,conf.min_spkcnt_bin:conf.max_spkcnt_bin]>=conf.min_spkcount).all(axis=-1)) # NOTE right now it's the same criteria for E/I
+        min_bin = self.conf.min_spkcnt_bin
+        max_bin = self.conf.max_spkcnt_bin
+        threshold = self.conf.min_spkcount
+        pair_inds = np.argwhere((self._ccg[...,min_bin:max_bin]>=threshold).all(axis=-1)) 
+        # NOTE right now it's the same criteria for exctiation/inhibition
         return pair_inds
     
-    def significance_mask(self,excitability):
+    def significance_mask(self,p,excitability):
         conf = self.conf
         if excitability=='E':
-            sig, self._pval_corrected = EranConv.multiple_correction(self._pvals, conf.alpha)
+            sig, self._pval_corrected = EranConv.multiple_correction(p, conf.alpha)
             pair_inds = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1))
         elif excitability=='I':
-            sig1, self._qval_corrected = EranConv.multiple_correction(self._qvals, conf.alpha)
-            sig2, self._qval_corrected2 = EranConv.multiple_correction(self._qvals, conf.alpha2)
+            sig1, self._qval_corrected = EranConv.multiple_correction(p, conf.alpha)
+            sig2, self._qval_corrected2 = EranConv.multiple_correction(p, conf.alpha2)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
             pair_inds = np.argwhere(neighbor.any(-1))
         return pair_inds
@@ -1412,22 +1423,21 @@ class EranConv:
                 edge_times=edge_times,
             )
 
-        self._pvals, self._pred,self._qvals = EranConv._conv(self._ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
+        pvals, self._pred, qvals = EranConv._conv(self._ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
 
-        self.mask={'E':{},'I':{}}
-        self.rough_mask={'E':{},'I':{}}
+        def _hasvalue(x):
+            return x is not None and x.size > 0
 
-        for EI in ['E','I']:
-            self.rough_mask[EI] = intersect(self.significance_mask(EI), self.spkcount_mask())
-            val = self.rough_mask.get(EI)
-            if isinstance(val, np.ndarray) and val.any():
-                self.rough_mask[EI] = self._autocorr_mask(self.rough_mask[EI])
-            val = self.rough_mask.get(EI)
-            if isinstance(val, np.ndarray) and val.any():
-                self.mask[EI] = self._probe_loc_mask(self.rough_mask[EI],neurons)
-            val = self.mask.get(EI)
-            if isinstance(val, np.ndarray) and val.any():
-                self.mask[EI] = self._cell_type_mask(self.mask[EI],neurons,conf.conn_types[EI])
+        def build_inds(p, EI, conn_types):
+            rough_inds = intersect(self.significance_mask(p, EI), self.spkcount_mask())
+            inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
+            inds = self._probe_loc_mask(inds, neurons) if _hasvalue(inds) else None
+            inds = self._cell_type_mask(inds, neurons, conn_types) if _hasvalue(inds) else None
+            return rough_inds, inds
+
+        # [n_seg, n_pair, 2[]
+        rough_inds_E, inds_E = build_inds(pvals, 'E', conf.conn_types_E)
+        rough_inds_I, inds_I = build_inds(qvals, 'I', conf.conn_types_I)
 
         def process_output(key:Key, neurons:Neurons):
             """
@@ -1440,12 +1450,12 @@ class EranConv:
                     for EI in ['E','I']:
                         groups[i][EI]=[]
                 for EI in ['E','I']:
-                    for row in self.rough_mask[EI]:
+                    for row in rough_mask[EI]:
                         groups[row[0]][EI].append(row[1:])
                 for i in range(self.n_segments): 
                     for EI in ['E','I']:
                         groups[i][EI]=np.array(groups[i][EI])
-                self.rough_mask = groups
+                rough_mask = groups
 
                 groups = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
                 for i in range(self.n_segments): 
@@ -1476,7 +1486,7 @@ class EranConv:
             for seg in range(self.n_segments):
                 for EI in ['E','I']:
                     pairs=self.mask[seg][EI]
-                    spairs = self.rough_mask[seg][EI] # initialize spurious pairs
+                    spairs = rough_mask[seg][EI] # initialize spurious pairs
                     p = self._pval_corrected if EI=='E' else self._qval_corrected # TODO TODO not storing corrected p-vals. make it an option!
 
                     for conn_type, prs in pairs.items():
@@ -1522,7 +1532,7 @@ class EranConv:
         for i in range(self.n_segments):
             E_str, hasE = self._printstr_sig(self.mask[i]['E'], 'E')
             I_str, hasI = self._printstr_sig(self.mask[i]['I'], 'I')
-            overview_str += f"SLEEP{i}: E/I pairs {self.rough_mask[i]['E'].shape[0]:03d} / {self.rough_mask[i]['I'].shape[0]:03d} | "
+            overview_str += f"SLEEP{i}: E/I pairs {rough_mask[i]['E'].shape[0]:03d} / {rough_mask[i]['I'].shape[0]:03d} | "
             overview_str=overview_str+E_str+I_str+"\n" if (hasE or hasI) else overview_str+"no connections\n"
         print("eranconv (1st pass) done")
 

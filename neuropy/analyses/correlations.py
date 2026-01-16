@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 try:
     import cupy as cp
 except ImportError:
@@ -846,7 +847,7 @@ def cp_spike_correlations_2groups(
 def np_spike_correlations_snapshots(
         neurons,
         neuron_inds,
-        edge_times,
+        edge_times: pd.DataFrame,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -872,7 +873,7 @@ def np_spike_correlations_snapshots(
     """
 
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = len(edge_times[0])
+    n_segments = edge_times.shape[0]
 
     # Convert to array if int
     neuron_inds = _san(neuron_inds)
@@ -967,7 +968,7 @@ def np_spike_correlations_snapshots(
 def cp_spike_correlations_snapshots(
         neurons,
         neuron_inds,
-        edge_times,
+        edge_times: pd.DataFrame,
         bin_size=None,
         window_size=None,
         symmetrize=True,
@@ -995,7 +996,7 @@ def cp_spike_correlations_snapshots(
     """
 
     assert bin_size>=1/neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = len(edge_times[0])
+    n_segments = edge_times.shape[0]
     # Convert to array if int
     neuron_inds = _san(neuron_inds)
 

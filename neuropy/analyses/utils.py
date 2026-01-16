@@ -1,4 +1,7 @@
 import numpy as np
+from dataclasses import dataclass, field, replace
+from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
+from collections import defaultdict
 
 def _san(var,as_np=False,wrap_none=False):
     """
@@ -38,12 +41,65 @@ class Config:
         return obj    
 
 
+K = TypeVar("K", bound="GenericKey")
+
+@dataclass(frozen=True)
+class GenericKey:
+    """
+    Indexing object.
+    """
+
+    def __str__(self):
+        pass
+
+    def __eq__(self,other):
+        try:
+            return all(getattr(self, f) == getattr(other, f) for f in self.__dataclass_fields__)
+        except:
+            return False # NOTE no type check, allows comparison with other 'key' classes
+
+    def matches(self, **kwargs) -> bool:
+        """Check if this key matches given criteria (for filtering)"""
+        for k, v in kwargs.items():
+            if isinstance(v, list):
+                if getattr(self, k, None) not in v:
+                    return False
+            else:
+                if v is not None and getattr(self, k, None) != v:
+                    return False
+        return True
+
+    def _new(self: K, **kwargs) -> K:
+        return replace(self, **kwargs)
+
+    def get(self: K, *dimensions) -> K:
+        return type(self)(**{d: getattr(self, d, None) for d in dimensions})
+
+    def remove(self: K, *dimensions) -> K:
+        return type(self)(**{
+            f: getattr(self, f)
+            for f in self.__dataclass_fields__
+            if f not in dimensions
+        })
+
+    def add(self: K, **kwargs) -> K:
+        for k in kwargs:
+            assert getattr(self, k) is None
+        return self._new(**kwargs)
+
+    def change(self: K, **kwargs) -> K:
+        return self._new(**kwargs)
+
+    def nd(self) -> K:
+        return self.get('session')
+
+
 class AnalysisDataset:
     """
     Container for an analysis dataset.
     """
     def __init__(self, conf=None):
-        self.data: Dict[Key, Any] = {}
+        self.data: Dict[K, Any] = {}
         self._conf = conf
 
     def __len__(self):
@@ -56,7 +112,7 @@ class AnalysisDataset:
             return self.__dict__[field].get(item,None)
         return self.data.get(next(iter(self.data.keys())),None)
 
-    def filter(self, **criteria) -> Dict[Key, Any]:
+    def filter(self, **criteria) -> Dict[K, Any]:
         """
         Filter data by any combination of key attributes.
         
@@ -66,11 +122,11 @@ class AnalysisDataset:
         """
         return {k: v for k, v in self.data.items() if k.matches(**criteria)}
     
-    def filter_keys(self, **criteria) -> list[Key]:
+    def filter_keys(self, **criteria) -> list[K]:
         """Get all keys matching criteria"""
         return [k for k in self.data.keys() if k.matches(**criteria)]
     
-    def groupby(self, *dimensions, source='data') -> Dict[Key, Dict[Key, Any]]:
+    def groupby(self, *dimensions, source='data') -> Dict[K, Dict[K, Any]]:
         """
         Group data by specified dimensions.
         
