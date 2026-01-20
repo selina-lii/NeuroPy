@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans, SpectralClustering, AgglomerativeClustering
 from sklearn.preprocessing import StandardScaler
 from .. import core
-from .ccg import correlograms
+# from .ccg import correlograms # TODO
 from typing import List, Union
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import curve_fit

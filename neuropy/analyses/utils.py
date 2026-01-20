@@ -4,13 +4,12 @@ from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
 from collections import defaultdict
 import hickle as hkl
 
-def _san(var,as_np=False,wrap_none=False):
+def _san(var,wrap_none=False):
     """
     Sanitize array
     """
     if var is None: return [None] if wrap_none else None
-    if not isinstance(var, list): var = [var]
-    if as_np: var = np.array(var)
+    if not isinstance(var, list): return [var]
     return var
 
 class Savable():

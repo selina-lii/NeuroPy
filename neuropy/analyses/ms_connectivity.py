@@ -838,8 +838,7 @@ class CCGPointer(Savable):
                  conf:CCGConfig=None,significant=True,
                  edge_times=None):
         self.key=key
-        print("CCGPointer",inds.shape)
-        self.inds=_san(inds,as_np=True)
+        self.inds=np.asarray(inds)
         self.edge_times=edge_times
         self.frates=None
         self.conf=conf
@@ -1341,7 +1340,6 @@ class EranConv:
             inds=np.where(np.isin(pair_inds[:,-2],np.where(neuron_type==ct[0])) & 
                                 np.isin(pair_inds[:,-1],np.where(neuron_type==ct[1])))[0]
             sig_pairs[ct]=pair_inds[inds] if inds.shape[0] else None
-            print("_cell_type_mask",inds.shape)
         return sig_pairs
     
     def _probe_loc_mask(self,pair_inds,peak_channels,shank_ids):
@@ -1374,10 +1372,8 @@ class EranConv:
 
         def build_inds(p, EI, conn_types):
             rough_inds = intersect(self.significance_mask(p, EI), self.spkcount_mask(ccg))
-            inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
-            print("_autocorr_mask",inds.shape,rough_inds.shape)
-            inds = self._probe_loc_mask(inds, peak_channels, shank_ids) if _hasvalue(inds) else None
-            print("_probe_loc_mask",inds.shape)
+            rough_inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
+            inds = self._probe_loc_mask(rough_inds, peak_channels, shank_ids) if _hasvalue(rough_inds) else None
             inds = self._cell_type_mask(inds, neuron_type, conn_types) if _hasvalue(inds) else None
             return rough_inds, inds
 
@@ -1411,7 +1407,7 @@ class EranConv:
                                             inds=inds if _hasvalue(inds) else None, 
                                             edge_times=edge_times
                                             )
-                    for i,ccg in enumerate(ccg_pointer.split()):
+                    for i, ccg in enumerate(ccg_pointer.split()):
                         count[i,j]=ccg.n if ccg is not None else 0
                     ccg_inds_by_type[ccg_key] = ccg_pointer
                     spurious = setdiff(spurious,inds) # remove these pairs from spurious
@@ -1431,12 +1427,11 @@ class EranConv:
             N_totalE = (rough_inds_E[:,0]==i).sum()
             N_totalI = (rough_inds_I[:,0]==i).sum()
             printstr += f"{label}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
-            for EI in ['E','I']:
-                for N,(ref,target) in zip(count[i],self.conf.conn_types[EI]):
-                    printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else '-'} | "
+            for N,(ref,target) in zip(count[i],self.conf.conn_types_flat):
+                printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else '-'} | "
             printstr+='\n'
 
-        print("eranconv (1st pass) done")
+        print("eranconv done")
 
         return pvals, pred, qvals, ccg_inds_by_type, spur_inds_by_type, printstr
 
