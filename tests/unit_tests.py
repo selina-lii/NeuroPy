@@ -50,8 +50,8 @@ def test_spike_correlation_snapshots(sess:ProcessData):
     ccg_o=[msconn.CCGDataset(n,conf) for n in nd_o]
     for c in ccg_o:
         c.get_ccg()
-        c.set_connection_strengths(method="eran_conv")
-        c.set_connectivity()
+        c.get_connection_strengths(method="eran_conv")
+        c.get_connectivity()
         neu=c.nd.data[list(c.nd.data.keys())[0]]
         print(np.sum([n.shape[0] for n in neu.spiketrains]))
 

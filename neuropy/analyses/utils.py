@@ -37,24 +37,6 @@ class Config(Savable):
         s+=f"config file: {self.filepath}\n"
         return s
 
-    def save(self,filepath):
-        with h5py.File(filepath, "w") as f:
-            for k, v in self.__dict__.items():
-                try:
-                    f.create_dataset(k, data=v)
-                except TypeError:
-                    f.attrs[k] = str(v)  # fallback for non-array data
-
-    @classmethod
-    def load(cls, filepath):
-        obj = cls.__new__(cls)  # bypass __init__
-        with h5py.File(filepath, "r") as f:
-            for k, v in f.items():
-                obj.__dict__[k] = np.array(v)
-            for k, v in f.attrs.items():
-                obj.__dict__[k] = v
-        return obj    
-
 
 K = TypeVar("K", bound="GenericKey")
 
@@ -187,4 +169,8 @@ class AnalysisDataset(Savable):
         self._conf = conf
         print(f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary.")
 
-
+    def _attr_append(self, base_key: K, inputs: Dict[K, Any], attrname:str='data'):
+        getattr(self, attrname).update({
+            type(base_key)(**{**base_key.__dict__, **k.__dict__}): v 
+            for k, v in inputs.items()
+        })

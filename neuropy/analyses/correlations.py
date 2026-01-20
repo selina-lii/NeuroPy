@@ -55,11 +55,11 @@ def _np_assemble_spike_arrays(neurons, segments=None):
 
     if segments is not None:
         edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
-        t_starts,t_ends=np.array(segments['start']),np.array(segments['stop'])
+        t_starts,t_stops=np.array(segments['start']),np.array(segments['stop'])
         spike_segment_ids=np.full((len(t_starts),int(edges[-1])),False)
         for i in range(len(neurons.spiketrains)):
             st = np.array(neurons.spiketrains[i])[:,None]
-            x = (st < t_ends) & (st >= t_starts)
+            x = (st < t_stops) & (st >= t_starts)
             spike_segment_ids[:,edges[i]:edges[i+1]]=x.T
         spike_segment_ids = np.take_along_axis(spike_segment_ids, sort_ind[None,:], axis=1)
         return spike_times, spike_clusters, spike_samples, spike_segment_ids
@@ -96,11 +96,11 @@ def _cp_assemble_spike_arrays(neurons, segments=None):
 
     if segments is not None:
         edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
-        t_starts,t_ends=cp.array(segments[0]),cp.array(segments[1])
+        t_starts,t_stops=cp.array(segments[0]),cp.array(segments[1])
         spike_segment_ids=cp.full((len(t_starts),int(edges[-1])),False)
         for i in range(len(neurons.spiketrains)):
             st = cp.array(neurons.spiketrains[i])[:,None]
-            x = (st < t_ends) & (st >= t_starts)
+            x = (st < t_stops) & (st >= t_starts)
             spike_segment_ids[:,edges[i]:edges[i+1]]=x.T
         spike_segment_ids = np.take_along_axis(spike_segment_ids, sort_ind[None,:], axis=1)
         return spike_times, spike_clusters, spike_samples, spike_segment_ids
@@ -881,7 +881,8 @@ def np_spike_correlations_snapshots(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples, spike_segment_ids = _np_assemble_spike_arrays(neurons,segments=edge_times)
+    spike_times, spike_clusters, spike_samples, spike_segment_ids = \
+    _np_assemble_spike_arrays(neurons,segments=edge_times[['start', 'stop']].values.T)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?
@@ -986,9 +987,9 @@ def cp_spike_correlations_snapshots(
         Size of the window (width of entire CCG), in seconds.
     symmetrize : boolean (True)
         Whether the output matrix should be symmetrized or not.
-    edge_times: list[np.ndarray]
+    edge_times: pd.DataFrame
         Two element list, first item is an array of t_starts and 
-        the second item is an array of t_ends.
+        the second item is an array of t_stops.
     Returns
     -------
     correlograms : array
@@ -1003,7 +1004,8 @@ def cp_spike_correlations_snapshots(
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
     # Get spike times from neurons
-    spike_times, spike_clusters, spike_samples, spike_segment_ids = _cp_assemble_spike_arrays(neurons,segments=edge_times)
+    spike_times, spike_clusters, spike_samples, spike_segment_ids = \
+    _cp_assemble_spike_arrays(neurons,segments=edge_times[['start', 'stop']].values.T)
 
     # Find `binsize`.
     bin_size = np.clip(bin_size, 1e-5, 1e5)  # in seconds  # NRK can you make this cupy? does it matter?

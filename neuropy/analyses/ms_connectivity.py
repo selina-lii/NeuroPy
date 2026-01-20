@@ -25,7 +25,8 @@ from copy import deepcopy
 import imageio
 import neuropy.plotting.ccg as plot_ccg
 import pandas as pd
-
+import os
+import matplotlib.pyplot as plt
 
 # TODO
 CHANNELS_PER_SHANK=16
@@ -78,7 +79,7 @@ def __set_op(x,y,f):
    
     """
     ax=tuple(np.arange(len(x.shape)-1))
-    ravel_dims=np.max(np.vstack([x.max(axis=ax),y.max(axis=ax)]),axis=0)
+    ravel_dims=np.max(np.vstack([x.max(axis=ax),y.max(axis=ax)]),axis=0)+1
     xr, yr = np.ravel_multi_index(x.T, ravel_dims), np.ravel_multi_index(y.T, ravel_dims)
     res = f(xr, yr)
     return np.array(np.unravel_index(res, ravel_dims)).T
@@ -354,7 +355,15 @@ class NeuronsDataset(AnalysisDataset):
                             start, stop, total_time_hours, effective_time_hours, label)]
         data and edge_times has the same key list.
     """
+    data: dict[Neurons]
+    edge_times: defaultdict[pd.DataFrame]
+    segment_firing_rates: dict[np.ndarray]
+    _conf: NeuronsDatasetConfig
+
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
+        self.data = {}
+        self.edge_times = defaultdict(pd.DataFrame)
+        self.segment_firing_rates = {} # 1:1 with edge_times
         self._conf = conf        
         self.prep(sessions)
 
@@ -365,123 +374,149 @@ class NeuronsDataset(AnalysisDataset):
             s+=f"{k}\t{str(v)}"
             cnt+=1
         return f"NeuronsDataset #sessions = {cnt}\n{s}"
-        
+    
     def prep(self, sessions):
         """
         Filter neurons by behavioral epochs and type 
         Set segment edge timing data
         """
-        self.data={}
-        self.edge_times=defaultdict(pd.DataFrame)
         c = self.conf
 
         sessions = _san(sessions)
-        for s in sessions:
-            name = _short_session_name(s)
-            key = Key(session=name)
-            self.conf.session_names.append(name)
-            neurons = s.neurons
-            neurons.metadata['intervals']=np.array([[neurons.t_start,neurons.t_stop]])
-
-            # Filter neurons
-            if c.neuron_types is not None:
-                neurons = neurons.get_neuron_type(c.neuron_types)
-
-            if c.epochs is not None:
-                neurons = neurons.behav_slice(behav_times=s.paradigm, 
-                                        labels=c.epochs)
-                
-            if c.sleep is not None:
-                neurons = neurons.behav_slice(behav_times=s.brainstates, 
-                                        labels=c.sleep.labels, 
-                                        discard=c.sleep.discard,
-                                        min_dur=c.sleep.min_dur)
-                
-            if c.ripple is not None:
-                neurons = neurons.behav_slice(behav_times=s.ripple, 
-                                        labels=None, 
-                                        discard=c.ripple.discard,
-                                        min_dur=c.ripple.min_dur)
+        for session in sessions:
+            session_name = _short_session_name(session)
+            self.conf.session_names.append(session_name)
+            key = Key(session=session_name)
             
-            """
-            Get the start and end of each segment. The edge timing are processed by epoch
-            A segment is the smallest time period in the 
-            dataset where analysis will be performed (e.g. data used to calculate one CCG). There 
-            can be many overlapping segments within a dataset depending on configuration.
-            
-            Define segment edges of each neurons group
-            see neurons.py: 
-                _edges_time_split   time_split
-                _edges_time_window  time_windows
-                _edges_spikecount   spikecount_split
-            """
-            
-            dfs=[]
-            ivs = neurons.metadata['intervals']
-            for i, e in enumerate(_san(c.epochs,wrap_none=True)):
-                k = key.add(epoch=e)
-                t = s.paradigm.timing_by_label(e) if e else (neurons.t_start, neurons.t_stop)
-                t_start, t_stop = t
-                
-                if c.seg_spikecount is not None:
-                    # TODO spikecount segmentation code is not maintained
-                    neus = neurons.time_slice(t_start,t_stop)
-                    for i in range(neus.n_neurons):
-                        k = key.add(epoch=e, ref_ind=i)
-                        starts, stops = neus._edges_spikecount(i=i,
-                                                    n=c.seg_spikecount,
-                                                    discard_tail=False)
-                elif c.seg_stride is not None and c.seg_len is not None:
-                    starts, stops = neurons._edges_time_window(stride=c.seg_stride, 
-                                                                seg_len=c.seg_len,
-                                                                t_start=t_start,
-                                                                t_stop=t_stop) 
-                elif c.n_segments is not None and c.n_segments[i] > 1:
-                    starts, stops = neurons._edges_time_split(n_segments=c.n_segments,
-                                                                t_start=t_start,
-                                                                t_stop=t_stop)
-                else:
-                    starts, stops = np.array([t_start]),np.array([t_stop])
+            # Temporal filtering on neurons
+            neurons = self._time_filter(session)
 
+            # Store edge times
+            self.edge_times[key] = self._get_edge_times(key, neurons, session)
+            # Store firing rates
+            self.segment_firing_rates[key] = self._get_firing_rates(self.edge_times[key], neurons)
 
-                """
-                Calculate total/actual time lengths of each segment
-                """
-                edges = pd.DataFrame({"start": starts,
-                                    "stop":  stops,
-                                    "total_time_hours": (stops-starts)/3600,
-                                    "key": [k.add(segment=i) for i in range(len(starts))],
-                                    "epoch": [e for i in range(len(starts))],
-                                    })
-                #TODO does not work for spikecount edges yet
-                
-                eths = []
-                for row in edges.itertuples(index=False):
-                    start, stop, tth = row.start, row.stop, row.total_time_hours
-
-                    # find intervals that overlap the edge
-                    overlap_mask = (ivs[:,1] > start) & (ivs[:,0] < stop)
-                    overlapping_ivs = ivs[overlap_mask]
-
-                    # clip intervals to edge boundaries
-                    clipped_start = np.clip(overlapping_ivs[:,0], start, stop)
-                    clipped_stop  = np.clip(overlapping_ivs[:,1], start, stop)
-
-                    # compute effective time in hours
-                    effective_hours = np.sum(clipped_stop - clipped_start) / 3600
-                    eths.append(min(effective_hours, tth))
-                edges['effective_time_hours']=np.array(eths)
-                dfs.append(edges)
-            self.edge_times[key] = pd.concat(dfs, axis=0)
-
+            # Zero spike times
             if c.zero_spike_times:
                 neurons = neurons.zero_spike_times()
-                for _, v in self.edge_times.items(): v[['start','stop']] -= neurons.t_start
+                for _, et in self.edge_times.items(): 
+                    et[['start','stop']] -= neurons.t_start
 
             # Store filtered neurons
             self.data[key] = neurons
 
+    def _time_filter(self, session):
+        neurons = session.neurons
+        neurons.metadata['intervals']=np.array([[neurons.t_start,neurons.t_stop]]) #TODO move elsewhere
+        if self.conf.neuron_types is not None:
+            neurons = neurons.get_neuron_type(self.conf.neuron_types)
+
+        if self.conf.epochs is not None:
+            neurons = neurons.behav_slice(behav_times=session.paradigm, 
+                                    labels=self.conf.epochs)
+            
+        if self.conf.sleep is not None:
+            neurons = neurons.behav_slice(behav_times=session.brainstates, 
+                                    labels=self.conf.sleep.labels, 
+                                    discard=self.conf.sleep.discard,
+                                    min_dur=self.conf.sleep.min_dur)
+            
+        if self.conf.ripple is not None:
+            neurons = neurons.behav_slice(behav_times=session.ripple, 
+                                    labels=None, 
+                                    discard=self.conf.ripple.discard,
+                                    min_dur=self.conf.ripple.min_dur)
+        return neurons
+
+    def _get_edge_times(self, key:Key, neurons:Neurons, session):
+        """
+        Get the start and end of each segment. The edge timing are processed by epoch
+        A segment is the smallest time period in the 
+        dataset where analysis will be performed (e.g. data used to calculate one CCG). There 
+        can be many overlapping segments within a dataset depending on configuration.
+        
+        Define segment edges of each neurons group
+        see neurons.py: 
+            _edges_time_split   time_split
+            _edges_time_window  time_windows
+            _edges_spikecount   spikecount_split
+        
+        passing in key because we need to generate finer keys for objects in edge_times
+        """
+        
+        dfs=[]
+        ivs = neurons.metadata['intervals']
+        for i, e in enumerate(_san(self.conf.epochs,wrap_none=True)):
+            k = key.add(epoch=e)
+            t_start, t_stop = session.paradigm.timing_by_label(e) if e \
+                                else (neurons.t_start, neurons.t_stop)
+            
+            if self.conf.seg_spikecount is not None:
+                # TODO spikecount segmentation code is not maintained
+                neus = neurons.time_slice(t_start,t_stop)
+                for i in range(neus.n_neurons):
+                    k = key.add(epoch=e, ref_ind=i)
+                    starts, stops = neus._edges_spikecount(i=i,
+                                                n=self.conf.seg_spikecount,
+                                                discard_tail=False)
+            elif self.conf.seg_stride is not None and self.conf.seg_len is not None:
+                starts, stops = neurons._edges_time_window(stride=self.conf.seg_stride, 
+                                                            seg_len=self.conf.seg_len,
+                                                            t_start=t_start,
+                                                            t_stop=t_stop) 
+            elif self.conf.n_segments is not None and self.conf.n_segments[i] > 1:
+                starts, stops = neurons._edges_time_split(n_segments=self.conf.n_segments,
+                                                            t_start=t_start,
+                                                            t_stop=t_stop)
+            else:
+                starts, stops = np.array([t_start]),np.array([t_stop])
+
+            """
+            Calculate total/actual time lengths of each segment
+            """
+            edges = pd.DataFrame({"start": starts,
+                                "stop":  stops,
+                                "total_time_hours": (stops-starts)/3600,
+                                "key": [k.add(segment=i) for i in range(len(starts))],
+                                "epoch": [e for i in range(len(starts))],
+                                })
+            #TODO does not work for spikecount edges yet
+            
+            eths = []
+            for row in edges.itertuples(index=False):
+                start, stop, tth = row.start, row.stop, row.total_time_hours
+
+                # find intervals that overlap the edge
+                overlap_mask = (ivs[:,1] > start) & (ivs[:,0] < stop)
+                overlapping_ivs = ivs[overlap_mask]
+
+                # clip intervals to edge boundaries
+                clipped_start = np.clip(overlapping_ivs[:,0], start, stop)
+                clipped_stop  = np.clip(overlapping_ivs[:,1], start, stop)
+
+                # compute effective time in hours
+                effective_hours = np.sum(clipped_stop - clipped_start) / 3600
+                eths.append(min(effective_hours, tth))
+            edges['effective_time_hours']=np.array(eths)
+            dfs.append(edges)
+        return pd.concat(dfs, axis=0)
+
+    def _get_firing_rates(self, edge_times:pd.DataFrame, neurons:Neurons):
+        """
+            Calculate and store segment-specific firing rates
+        """
+        x = np.zeros((edge_times.shape[0], neurons.n_neurons))
+        for i,(t_start, t_end) in enumerate(zip(edge_times['start'], edge_times['stop'])):
+            x[i] = neurons.time_slice(t_start,t_end).firing_rate
+        return x
+    
     def frate_stats(self):
+        """
+        
+        Generate a stats description of firing rates
+        TODO unfinished/testing
+
+        """
         @dataclass
         class FrateStat:
             def __init__(self,n_neurons,neu_type):
@@ -565,12 +600,18 @@ class NeuronsDataset(AnalysisDataset):
 class CCGData(Savable):
     """
     Stores the whole CCG array and its p values
+
+        ccg         [N, Np, Nbins]
+        N = number of data segments
+        Np = number of neuron pairs
+        Nbins = number of bins per CCG 
+        ccg_null    [N, Np, Nbins]
     """
     key: Key
     ccg: np.ndarray
     ccg_null: np.ndarray
     pval: np.ndarray
-    qval: np.ndarray # TODO
+    qval: np.ndarray
     conn_strength: np.ndarray
 
     @staticmethod
@@ -584,66 +625,35 @@ class CCGData(Savable):
         autocorr_locations = np.broadcast_to(auto_mask, shape[:-1])
         return autocorr_locations
     
-    def _set_cs_eranconv(self, norm_factor:np.ndarray=None):
+    def _get_conn_strength_peaksize(self, norm_factor:np.ndarray=None):
         """
         Connection strength:
         
             Area under CCG curve minus baseline, within temporal ROI
             The ROI is by default the same as the interval tested for peak/trough signficance
-
-        Can be negative
+            Can be negative
         """
         auc = self.ccg-self.ccg_null # area under curve
         cs = np.sum(auc[...,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=-1) # (inds,)
         if norm_factor is not None: 
             shape=cs.shape
             cs = cs.astype(float).reshape(shape) / norm_factor # e.g. presynaptic element firing rate
-        self.conn_strength = cs.squeeze() # divided by presynaptic firing rate
+        self.conn_strength = cs.squeeze()
 
-    def _set_cs_eranconv_compound(self, norm_factor:float=None):
-        """
-        Connection strength:
-        
-            Area under CCG curve minus baseline, within temporal ROI
-            The ROI is by default the same as the interval tested for peak/trough signficance
-
-        Can be negative
-        """
-        auc = self.ccg-self.ccg_null # area under curve
-        cs = np.sum(auc[:,:,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=(1,2)) # (inds,)
-        if norm_factor is not None: cs = cs.astype(float) / norm_factor # e.g. presynaptic element firing rate
-        self.conn_strength = cs # divided by presynaptic firing rate
-
-    def _set_cs_tail(self, acgs:np.ndarray, nspks:list, norm_factor:np.ndarray=False): #TODO untested
+    def _get_conn_strength_tailed(self, nspks:list, norm_factor:np.ndarray=False):
         """
         Connection strength:
 
                 Area under CCG curve minus a 'tailed' baseline after deconvolving autocorrelograms
         
         Can be negative
+        TODO testing
         """
-        self.deconv_autocorr(acgs, nspks, target=True, ref=True)
-        self._set_baseline_by_tail()
-        auc = self.ccg-self.ccg_null # area under curve
-        cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins 
-        if norm_factor: cs /= norm_factor
-        self.conn_strength = cs
     
-    def _set_baseline_by_tail(self):
-        """
-        Baseline by 'tail' (|t|>11ms)
-        'Tail' is accurate when coupled with deconv_autocorr
-        """
-        l = self.conf.time2bin(-11e-3)
-        r = self.conf.time2bin(11e-3)
-        baseline = np.mean([self.ccg[:l],self.ccg[r+1:]])
-        self.ccg_null = np.ones_like(self.ccg)*baseline
-
-    def deconv_autocorr(self, acgs:np.ndarray, nspks, target=True, ref=True):
-        """
-        Remove auto-correlograms (ACG) from CCG
-        target/ref is set to true if corresponding ACG is to be removed
-        """
+        # Remove autocorrelograms (ACG) from CCG
+        # target/reference is set to true if corresponding ACG is to be removed
+        remove_target=True
+        remove_ref=True
 
         def _deconv_autocorr(ccg, acg1=None, nspks1=None, acg2=None, nspks2=None):
             """
@@ -688,18 +698,32 @@ class CCGData(Savable):
             dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])  # shift DC to end
             dcccg[dcccg < 0] = 0  # clip negatives to zero
             return dcccg
-    
+        
+        acgs = self.ccg[self.get_autocorr_locations()]
         for i,(ref,tgt) in enumerate(self.inds):
-            if ref and target:
+            if remove_ref and remove_target:
                 self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref], acgs[tgt], nspks[tgt])
-            elif ref:
+            elif remove_ref:
                 self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[ref], nspks[ref])
-            elif target:
+            elif remove_target:
                 self.ccg[i] = _deconv_autocorr(self.ccg[i], acgs[tgt], nspks[tgt])
             else:
                 Warning("_deconv_autocorr: No effect")
                 return
 
+        # Baseline by 'tail' (|t|>11ms)
+        # 'Tail' is accurate when coupled with autocorr deconvolution
+        l = self.conf.time2bin(-11e-3)
+        r = self.conf.time2bin(11e-3)
+        baseline = np.mean([self.ccg[:l],self.ccg[r+1:]])
+        self.ccg_null = np.ones_like(self.ccg)*baseline
+
+        # area under curve
+        auc = self.ccg-self.ccg_null 
+        cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins 
+        if norm_factor: cs /= norm_factor
+        self.conn_strength = cs
+    
     def normalize_by_ref_rate(self):
         shape=self.ccg.shape
         frates=self.frates[...,-2][...,np.newaxis] 
@@ -780,19 +804,19 @@ class CCGData(Savable):
         return inds
     
     @property
-    def conn_strength_change(self):
+    def conn_strength_change_fit(self):
+        assert self.conn_strength is not None
         r=self.conn_strength
         return (np.polyfit(range(r.shape[0]), r, 1)[0] if len(r.shape)>1 else np.full(r.shape,np.nan))
+
+    @property
+    def conn_strength_change(self):
+        assert self.conn_strength is not None
+        return self.conn_strength[:,-1]-self.conn_strength[:,0]
 
 
 class CCGPointer(Savable):
     """
-    Collection of CCGs
-    ccg         [N, Np, Nbins]
-        N = number of data segments
-        Np = number of neuron pairs
-        Nbins = number of bins per CCG 
-    ccg_null    [N, Np, Nbins]
     inds        [Np, 2]
 
     """
@@ -814,30 +838,22 @@ class CCGPointer(Savable):
                  conf:CCGConfig=None,significant=True,
                  edge_times=None):
         self.key=key
+        print("CCGPointer",inds.shape)
         self.inds=_san(inds,as_np=True)
         self.edge_times=edge_times
         self.frates=None
         self.conf=conf
-        n=self.inds.shape[0]
         if type(significant)==bool:
-            self.significant=np.full((n,),significant)
+            self.significant=np.full((self.n,),significant)
         else:
-            # assert significant.shape==(n,)#TODO
             self.significant=significant
-
-    def set_firing_rates(self, neurons:Neurons):
-        # Obtain the firing rates during the time period used to compute this CCG
-        if (self.edge_times is not None) and (neurons.firing_rate is not None):
-            n_seg, n_pairs = self.ccg.shape[0], self.inds.shape[0]
-            self.frates = np.zeros((n_seg,n_pairs,2))
-            for i,(t_start, t_end) in enumerate(zip(self.edge_times[0], self.edge_times[1])):
-                neu=neurons.time_slice(t_start,t_end)
-                self.frates[i] = neu.firing_rate[self.inds] #TODO other cases
 
     def __repr__(self):
         s = str(self.key) + "\n"
         for i,inds in enumerate(self.inds):
-            s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\tstrengths: {self.conn_strength[i]}\n"
+            s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\t"
+            # if self.conn_strength is not None: s += f"strengths: {self.conn_strength[i]}"
+            s += "\n"
         return s
         
     def __str__(self):
@@ -876,7 +892,7 @@ class CCGPointer(Savable):
     
     @property
     def n(self):
-        return self.ccg.shape[-2]
+        return self.inds.shape[0]
 
     @property
     def n_segments(self):
@@ -921,29 +937,97 @@ class CCGDataset(AnalysisDataset):
     nd : NeuronsDataset
         Source neurons for the CCGs.
     """
-    data: dict[CCGPointer] = {}
-    spurious: dict[CCGPointer] = {}
-    __ccg: dict[CCGData] = {}
-    conf: CCGConfig
-    nd: NeuronsDataset
-    
-    def get_ccg(self, method="eran_conv"):
+
+    _ccg: dict[CCGData]
+    data: dict[CCGPointer]
+    spurious: dict[CCGPointer]
+    _conf: CCGConfig
+
+    def __init__(self, conf=None, nd=None):
+        super().__init__(conf)
+        self.nd = nd
+        self._ccg = {}
+        self.data = {}
+        self.spurious = {}
+
+    def get_ccg(self, baseline_method="eran_conv"):
         """
         main function of the class
         """
-        if method=="eran_conv":
+        if baseline_method=="eran_conv":
             self._ccg_eranconv()
-        elif method=="jitter":
+        elif baseline_method=="jitter":
             NotImplementedError("CCG jitter must be run in the Jitter object, " \
             "since it generates a ton of extra data. Nothing is run...")
         else:
             ValueError("Unknown method")
-    
+
+    def _ccg_eranconv(self):
+        """
+        Run CCG and generate a convolution-based baseline for all neurons in my NeuronsDataset.
+        Run significance tests.
+        Store results in objects:
+            self._ccg
+            self.data
+            self.spurious.
+
+        Params
+        -----
+        ccg_config: Parameters for CCG, contains all configurations
+        nd: Neurons dataset, contains all input data
+        """
+        print("EranConv significant pairs")
+
+
+        conv = EranConv()
+        for key, edge_times in self.nd.edge_times.items():
+            neurons = self.nd.data[key.nd()]
+
+            ccg = correlations.spike_correlations(
+                    neurons             =neurons,
+                    neuron_inds         =np.arange(neurons.n_neurons), # all
+                    bin_size            =self.conf.bin_size,
+                    window_size         =self.conf.duration,
+                    use_acceleration    =self.conf.use_acceleration,
+                    symmetrize          =self.conf.symmetrize_ccg,
+                    edge_times          =edge_times,
+                )
+            
+            pvals, pred, qvals, ccg_inds, spur_inds, printstr = conv.eranconv(
+                    neurons_key         =key, 
+                    ccg                 =ccg, 
+                    edge_times          =edge_times, 
+                    peak_channels       =neurons.peak_channels,
+                    shank_ids           =neurons.shank_ids,
+                    neuron_type         =neurons.neuron_type,
+                    conf                =self.conf)
+
+            ccg_data = CCGData(key=key,
+                    ccg             =ccg,
+                    ccg_null        =pred,
+                    pval            =pvals,
+                    qval            =qvals,
+                    conn_strength   =None)
+            
+            self._ccg[key]=ccg_data
+            self._attr_append(key, ccg_inds, 'data')
+            self._attr_append(key, spur_inds, 'spurious')
+
+            tt=self.nd.edge_times[key]['total_time_hours'].values
+            et=self.nd.edge_times[key]['effective_time_hours'].values
+
+            s = f"======={key.session}-{key.epoch}=======\n"
+            s+=f"Segment(s) are {tt[0]:.2f}h each "
+            if self.nd.conf.sleep is not None:
+                s+=f"and contain {[f'{_:.2f}' for _ in et]} hours of actual sleep "
+            for _ in self.nd.conf.neuron_types:
+                s+=f"{_}={neurons.get_neuron_type(_).n_neurons} "
+            s+="\n"
+
+            print(s+printstr)
+
     def filter_excitability(self, E):
         return self.filter(excitability=E)
-
-    def _attr_append(self, base_key: Key, inputs: Dict[Key, CCGPointer], attrname:str='data'):
-        getattr(self, attrname).update({Key(**{**base_key.__dict__, **k.__dict__}): v for k, v in inputs.items()})
 
     def merge_CCGs(self, merge_levels):
         pass
@@ -955,99 +1039,40 @@ class CCGDataset(AnalysisDataset):
     def filepath(self):
         return ''
         
-    def _ccg_eranconv(self):
-        """
-        Run CCG and convolution based significance test for all neurons
+    # def _reCCG(self,key:Key,
+    #            indices_source=CCGIndexSource.SIGNIFICANT,
+    #            inds=None,
+    #            ):
+    #     """
+    #     Rerun CCG given list of indices
 
-        Params
-        -----
-        ccg_config: Parameters for CCG, contains all configurations
-        nd: Neurons dataset, contains all input data
-        """
-        print("EranConv significant pairs")
-        def _s(key, neurons, total_time_hours, effective_time_hours): # print helper
-            s = f"======={key.session}-{key.epoch}=======\n"
-            s+=f"Segment(s) are {total_time_hours[0]:.2f}h each "
-            if self.nd.conf.sleep is not None:
-                s+=f"and contain {[f'{_:.2f}' for _ in effective_time_hours]} hours of actual sleep "
-            for _ in self.nd.conf.neuron_types:
-                s+=f"{_}={neurons.get_neuron_type(_).n_neurons} "
-            s+="\n"
-            return s
+    #     Call one of the wrappers instead
+    #     """        
+    #     # groups=self.groupby('session','epoch',source='connectivity')
+    #     if inds is not None:
+    #         pass
 
-        conv = EranConv()
-        for key, edge_times in self.nd.edge_times.items():
-            neurons = self.nd.data[key.nd()]
-            if edge_times is None: 
-                edge_times = [np.array([neurons.t_start]),np.array([neurons.t_stop])]
+    #     elif key.ref_ind is not None:
+    #         # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
+    #         edge_times = self.nd.edge_times[key.remove('segment')]
 
-            ccg = correlations.spike_correlations(
-                    neurons=neurons,
-                    neuron_inds=np.arange(neurons.n_neurons), # all
-                    bin_size=self.conf.bin_size,
-                    window_size=self.conf.duration,
-                    use_acceleration=self.conf.use_acceleration,
-                    symmetrize=self.conf.symmetrize_ccg,
-                    edge_times=edge_times,
-                )
+    #     elif indices_source==CCGIndexSource.SIGNIFICANT:
+    #         inds = self.data[key].inds
 
-            pvals, pred, qvals, ccg_inds, spur_inds, printstr = conv.eranconv(neurons_key=key, 
-                                        ccg=ccg, 
-                                        edge_times=edge_times, 
-                                        peak_channels=neurons.peak_channels,
-                                        shank_ids=neurons.shank_ids,
-                                        neuron_type=neurons.neuron_type,
-                                        conf=self.conf)
+    #     elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
+    #         # group by
+    #         inds = self.data[key].inds
 
-            ccg_data = CCGData(key=key,
-                      ccg=ccg,
-                      ccg_null=pred,
-                      pval=pvals,
-                      qvals=qvals,
-                      conn_strength=None)
-            
-            self._attr_append(key, ccg_data, '__ccg')       
-            self._attr_append(key, ccg_inds, 'data')
-            self._attr_append(key, spur_inds, 'spurious')
+    #     elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
+    #         inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
 
-            tt=self.nd.total_time_hours[key]
-            et=self.nd.effective_time_hours[key]
-            print(_s(key,neurons,tt,et)+printstr)
-
-    def _reCCG(self,key:Key,
-               indices_source=CCGIndexSource.SIGNIFICANT,
-               inds=None,
-               ):
-        """
-        Rerun CCG given list of indices
-
-        Call one of the wrappers instead
-        """        
-        # groups=self.groupby('session','epoch',source='connectivity')
-        if inds is not None:
-            pass
-
-        elif key.ref_ind is not None:
-            # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
-            edge_times = self.nd.edge_times[key.remove('segment')]
-
-        elif indices_source==CCGIndexSource.SIGNIFICANT:
-            inds = self.data[key].inds
-
-        elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
-            # group by
-            inds = self.data[key].inds
-
-        elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
-            inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
-
-        self.data[key] = CCGPointer(key=key
-                                    inds=inds,
-                                    edge_times=self.data[key].edge_times,
-                                    conf=self.data[key].conf,
-                                    )
+    #     self.data[key] = CCGPointer(key=key,
+    #                                 inds=inds,
+    #                                 edge_times=self.data[key].edge_times,
+    #                                 conf=self.data[key].conf,
+    #                                 )
         
-        return ccg_dict
+    #     return ccg_dict
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None):
         """
@@ -1148,9 +1173,9 @@ class CCGDataset(AnalysisDataset):
 
             ccg.save_plots(
                 neuron_types=neurons.neuron_type[inds],
-                waveforms=None if neurons.waveforms is None else neurons.waveforms[inds],
-                shank_ids=None if neurons.shank_ids is None else neurons.shank_ids[inds],
-                frates_all=None if neurons.firing_rate is None else neurons.firing_rate[inds],
+                waveforms=neurons.waveforms[inds],
+                shank_ids=neurons.shank_ids[inds],
+                frates_all=neurons.firing_rate[inds],
                 discarded_channels=self.nd.conf.recinfo.skipped_channels,
                 ch_per_shank=self.nd.conf.ch_per_shank,
                 root=root,
@@ -1167,21 +1192,20 @@ class CCGDataset(AnalysisDataset):
                 ccg.normalize_by_ref_rate()
                 ccg.normalize_by_target_rate()
 
-    def set_connection_strengths(self, method="eran_conv"):
+    def get_connection_strengths(self, method="eran_conv"):
         """
-        Set value for each CCG() object of self.data based on given method.
-        Values can be found in self.data[i].conn_strengths.
+        Set connection_strengths value for each CCGData() object based on given method.
+        Values can be found in self._ccg[key].conn_strengths.
         """
-        #TODO untested
-        for key, ccg in self._ccg.items():
-            k=key.nd()
-            if ccg is None: continue # no connection
+        for key, ccg_data in self._ccg.items():
+            if ccg_data is None: continue # no connection
+            
             if method=="eran_conv":
-                ccg._set_cs_eranconv()
+                ccg_data._get_conn_strength_peaksize()
             elif method=="tail":
-                spikecount = self.nd[k].n_spikes
-                #TODO acg
-                ccg._set_cs_tail(acg,spikecount)
+                spikecount = self.nd[key.nd()].n_spikes
+                ccg_data._get_conn_strength_tailed(spikecount)
+            else:
                 return NotImplementedError("Unknown connection strength method")
 
 
@@ -1317,6 +1341,7 @@ class EranConv:
             inds=np.where(np.isin(pair_inds[:,-2],np.where(neuron_type==ct[0])) & 
                                 np.isin(pair_inds[:,-1],np.where(neuron_type==ct[1])))[0]
             sig_pairs[ct]=pair_inds[inds] if inds.shape[0] else None
+            print("_cell_type_mask",inds.shape)
         return sig_pairs
     
     def _probe_loc_mask(self,pair_inds,peak_channels,shank_ids):
@@ -1343,14 +1368,16 @@ class EranConv:
         self.n_segments = edge_times.shape[0]
 
         pvals, pred, qvals = EranConv._conv(ccg,W=conf.conv_window_bins,wintype="gauss",hollow_frac=None)
-
+        
         def _hasvalue(x):
             return x is not None and x.size > 0
 
         def build_inds(p, EI, conn_types):
             rough_inds = intersect(self.significance_mask(p, EI), self.spkcount_mask(ccg))
             inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
+            print("_autocorr_mask",inds.shape,rough_inds.shape)
             inds = self._probe_loc_mask(inds, peak_channels, shank_ids) if _hasvalue(inds) else None
+            print("_probe_loc_mask",inds.shape)
             inds = self._cell_type_mask(inds, neuron_type, conn_types) if _hasvalue(inds) else None
             return rough_inds, inds
 
@@ -1369,20 +1396,26 @@ class EranConv:
                          "_qval_corrected2"):
                 setattr(self, attr, getattr(self, attr)[None])
         
+        count = np.zeros((edge_times.shape[0],len(self.conf.conn_types_flat)),dtype=int)
+        j=0
         # Update return values
         for EI in ['E','I']:
-            all_inds = inds_E if EI=='E' else inds_I
             spurious = rough_inds_E if EI=='E' else rough_inds_I # initialize spurious pairs
 
-            for conn_type, inds in all_inds.items():
+            for conn_type in self.conf.conn_types[EI]:
+                    inds = inds_E[conn_type] if EI=='E' else inds_I[conn_type]
                     ccg_key = key.add(conn_type=conn_type, excitability=EI)
-                    ccg_inds_by_type[ccg_key] = CCGPointer(
+                    ccg_pointer = CCGPointer(
                                             key=ccg_key,
                                             conf=self.conf, 
                                             inds=inds if _hasvalue(inds) else None, 
                                             edge_times=edge_times
                                             )
+                    for i,ccg in enumerate(ccg_pointer.split()):
+                        count[i,j]=ccg.n if ccg is not None else 0
+                    ccg_inds_by_type[ccg_key] = ccg_pointer
                     spurious = setdiff(spurious,inds) # remove these pairs from spurious
+                    j+=1
 
             spur_key = key.add(excitability=EI)
             spur_inds_by_type[spur_key] = CCGPointer(
@@ -1391,21 +1424,17 @@ class EranConv:
                                 inds=spurious if _hasvalue(spurious) else None,
                                 edge_times=edge_times
                                 )
-
-        count = np.zeros((len(self.conf.conn_types_flat),edge_times.shape[0]))
-        for i,T in enumerate(self.conf.conn_types_flat):
-            for j,ccg in enumerate(ccg_inds_by_type[T].split()):
-                count[i,j]=ccg.n if ccg is not None else 0
         
         printstr=''
-        for i, N_per_segment in enumerate((count.T)):
-            label = edge_times['label'][i]
+        for i, (segment_i, edge_time) in enumerate(edge_times.iterrows()):
+            label = edge_time['epoch']+str(segment_i)
             N_totalE = (rough_inds_E[:,0]==i).sum()
             N_totalI = (rough_inds_I[:,0]==i).sum()
             printstr += f"{label}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
             for EI in ['E','I']:
-                for N,(ref,target) in zip(N_per_segment,self.conf.conn_types[EI]):
+                for N,(ref,target) in zip(count[i],self.conf.conn_types[EI]):
                     printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else '-'} | "
+            printstr+='\n'
 
         print("eranconv (1st pass) done")
 
