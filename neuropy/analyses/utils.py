@@ -2,6 +2,7 @@ import numpy as np
 from dataclasses import dataclass, field, replace
 from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
 from collections import defaultdict
+import hickle as hkl
 
 def _san(var,as_np=False,wrap_none=False):
     """
@@ -12,9 +13,23 @@ def _san(var,as_np=False,wrap_none=False):
     if as_np: var = np.array(var)
     return var
 
+class Savable():
+    def save_path(self,**kwargs):
+        return "./tmp.h5"
+    
+    def save(self, path: str=None):
+        hkl.dump(self.__dict__, path or self.save_path())
+
+    def load(self, path: str=None):
+        try:
+            self.__dict__.clear()
+            self.__dict__.update(hkl.load(path or self.save_path()))
+        except Exception as e:
+            print(f"Failed to load {self.__class__} object: {e}")
+    
 
 @dataclass(frozen=True)
-class Config:
+class Config(Savable):
     def __str__(self):
         s=""
         for key, val in self.__dict__.items():
@@ -92,9 +107,24 @@ class GenericKey:
 
     def nd(self) -> K:
         return self.get('session')
+    
+    @staticmethod
+    def groupby(data, *dimensions) -> dict:
+        """
+        Group keys by specified dimensions.
+        
+        Example:
+            dataset.groupby('session', 'epoch')
+            # Returns: {('s1', 'pre'): {key: data, ...}, ('s1', 'post'): {...}}
+        """
+        groups = defaultdict(dict)
+        for key, value in data.items():
+            # group_key = tuple(getattr(key, dim, None) for dim in dimensions)
+            groups[key.get(*dimensions)][key] = value
+        return dict(groups)
 
 
-class AnalysisDataset:
+class AnalysisDataset(Savable):
     """
     Container for an analysis dataset.
     """

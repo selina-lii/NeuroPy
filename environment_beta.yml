@@ -32,14 +32,9 @@ dependencies:
     # These modules are for importing DeepLabCut data, comment out if you don't need.
     - easydict
     - ruamel.yaml
-    # - cupy  # uncomment this if you want to run correlograms with a GPU using the ccg_gpu.py module.
-    - jax
-    - jaxlib
-    # Uncomment one of the following depending on your GPU:
-    # NVIDIA (CUDA)
-    #- jax[cuda]
-    # Apple (Metal / MPS)
-    - jax[metal] # TODO untested
+    # uncomment these if you want to run correlograms with a GPU using the correlation.py module.
+    # - cupy  
+    # - hickle # Save CCG analyses results to hdf5 file in ms_connectivity.py
     
     # Works well in RedHat8. Note you may have to comment out the following lines and then install manually "pip install scikit-posthocs" in Windows.
     - pip

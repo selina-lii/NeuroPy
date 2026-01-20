@@ -55,7 +55,7 @@ def _np_assemble_spike_arrays(neurons, segments=None):
 
     if segments is not None:
         edges = np.concatenate([[0], np.cumsum([n.shape[0] for n in neurons.spiketrains])])
-        t_starts,t_ends=np.array(segments[0]),np.array(segments[1])
+        t_starts,t_ends=np.array(segments['start']),np.array(segments['stop'])
         spike_segment_ids=np.full((len(t_starts),int(edges[-1])),False)
         for i in range(len(neurons.spiketrains)):
             st = np.array(neurons.spiketrains[i])[:,None]
