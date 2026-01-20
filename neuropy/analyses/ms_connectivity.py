@@ -625,6 +625,16 @@ class CCGData(Savable):
         autocorr_locations = np.broadcast_to(auto_mask, shape[:-1])
         return autocorr_locations
     
+    def get_conn_strength(self, method="peaksize",**kwargs):
+        if self.ccg is None: return # no connection
+        
+        if method=="peaksize":
+            self._get_conn_strength_peaksize(**kwargs)
+        elif method=="tailed":
+            self._get_conn_strength_tailed(**kwargs)
+        else:
+            return NotImplementedError("Unknown connection strength method")
+
     def _get_conn_strength_peaksize(self, norm_factor:np.ndarray=None):
         """
         Connection strength:
@@ -804,7 +814,7 @@ class CCGData(Savable):
         return inds
     
     @property
-    def conn_strength_change_fit(self):
+    def conn_strength_slope(self):
         assert self.conn_strength is not None
         r=self.conn_strength
         return (np.polyfit(range(r.shape[0]), r, 1)[0] if len(r.shape)>1 else np.full(r.shape,np.nan))
@@ -908,12 +918,14 @@ class CCGPointer(Savable):
     def split(self)->list['CCGPointer']:
         return [self.get_segment(i) for i in range(self.edge_times.shape[0])]
 
+    def print_connectivity(self):
+        pass # TODO
+        # summarize connectivity patterns by {id - significant}
 
-class CCGIndexSource(Enum):
-    SIGNIFICANT=0
-    SPURIOUS=1
-    SIGNIFICANT_ANY=2
-
+    def reCCG(self,inds_dict=None,overwrite=False,expand_segment=False):
+        pass # TODO
+        # if inds_dict: {segment_i: [[ref, target],...]}, modify my inds with these values; 
+        # if expand_segment TODO clearer naming: use inds that were significant in any segment
 
 class CCGDataset(AnalysisDataset):
     """
@@ -1197,16 +1209,13 @@ class CCGDataset(AnalysisDataset):
         Values can be found in self._ccg[key].conn_strengths.
         """
         for key, ccg_data in self._ccg.items():
-            if ccg_data is None: continue # no connection
-            
-            if method=="eran_conv":
-                ccg_data._get_conn_strength_peaksize()
-            elif method=="tail":
-                spikecount = self.nd[key.nd()].n_spikes
-                ccg_data._get_conn_strength_tailed(spikecount)
+            if method=='tailed': 
+                frate = self.nd.segment_firing_rates[key]
+                total_time = self.nd.edge_times[key]['effective_time_hours']
+                spikecount = np.round(frate*total_time) #TODO precision
+                ccg_data.get_conn_strength(method=method,spikecount=spikecount)
             else:
-                return NotImplementedError("Unknown connection strength method")
-
+                ccg_data.get_conn_strength(method=method)        
 
 class EranConv:
     """
@@ -1426,9 +1435,9 @@ class EranConv:
             label = edge_time['epoch']+str(segment_i)
             N_totalE = (rough_inds_E[:,0]==i).sum()
             N_totalI = (rough_inds_I[:,0]==i).sum()
-            printstr += f"{label}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
+            printstr += f"{label:10}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
             for N,(ref,target) in zip(count[i],self.conf.conn_types_flat):
-                printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else '-'} | "
+                printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else ' -'} | "
             printstr+='\n'
 
         print("eranconv done")
