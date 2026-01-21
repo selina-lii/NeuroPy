@@ -10,7 +10,7 @@ except ImportError:
     cp = None
 
 import neuropy.analyses.correlations as correlations
-from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable
+from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, SetOp
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows
 from scipy.stats import poisson, ttest_ind, ttest_1samp, describe
@@ -67,49 +67,6 @@ def example(var:dict):
     """
     k,v = next(iter(var.items()))
     return v
-
-
-def __set_op(x,y,f):
-    """
-    Perform set operation of two N-dim arrays by their row elements.
-    x,y: np.ndarray of shape [...,k]
-    ravel_dims: (d1,...,dk), each d is sufficiently large
-
-    Ravels row values to v = v1*d1+...+vn*dn for comparison and then conver back
-   
-    """
-    ax=tuple(np.arange(len(x.shape)-1))
-    ravel_dims=np.max(np.vstack([x.max(axis=ax),y.max(axis=ax)]),axis=0)+1
-    xr, yr = np.ravel_multi_index(x.T, ravel_dims), np.ravel_multi_index(y.T, ravel_dims)
-    res = f(xr, yr)
-    return np.array(np.unravel_index(res, ravel_dims)).T
-
-
-def intersect(x, y):
-    """
-    Intersect two N-dim arrays by their row elements
-    """
-    if x is None or y is None: return np.array([])
-    return __set_op(x,y,np.intersect1d)
-
-
-def setdiff(x, y):#n2=None
-    """
-    X minus Y for two N-dim arrays by their row elements
-    """
-    # Set difference of coordinate lists
-    if x is None or y is None: return x if x is not None else np.array([])
-    return __set_op(x,y,np.setdiff1d)
-
-
-def union(x, y):#n2=None
-    """
-    Union two N-dim arrays by their row elements
-    """
-    # Set difference of coordinate lists
-    if x is None: return y if y is not None else np.array([])
-    elif y is None: return x if x is not None else np.array([])
-    return __set_op(x,y,np.union1d)
 
 
 @dataclass(frozen=True)
@@ -268,7 +225,7 @@ class CCGConfig(Config):
                 max_lag:float = 3e-3,
                 min_spkcount = 2.5,
                 spkcount_scope = 12e-3,
-                multiple_correction_method:str = None,
+                mc_method:str = None,
                 ignore:IgnoreLevel = IgnoreLevel.SAME_CHANNEL,
                 use_acceleration = True,
                 symmetrize_ccg = True,
@@ -283,8 +240,7 @@ class CCGConfig(Config):
         self.conv_window = conv_window
         self.alpha = alpha
         self.alpha2 = alpha2
-        self.use_multiple_correction = multiple_correction_method is not None
-        self.mc_method = multiple_correction_method
+        self.mc_method = mc_method
         self.center_bin = int(self.duration/self.bin_size//2)
         self.nbins = int(self.duration/self.bin_size)+1 # NOTE
 
@@ -304,10 +260,6 @@ class CCGConfig(Config):
         self.symmetrize_ccg = symmetrize_ccg
 
         self.normalize = normalize
-
-        # if self.use_multiple_correction: 
-        #     self.corrected_alpha=alpha/(n**2-n)/self.nbins # local threshold
-        #     self.corrected_alpha2=alpha2/(n**2-n)/self.nbins
 
     def __str__(self):
         s=""
@@ -476,9 +428,9 @@ class NeuronsDataset(AnalysisDataset):
             """
             edges = pd.DataFrame({"start": starts,
                                 "stop":  stops,
-                                "total_time_hours": (stops-starts)/3600,
                                 "key": [k.add(segment=i) for i in range(len(starts))],
-                                "epoch": [e for i in range(len(starts))],
+                                "label": [e+str(i) for i in range(len(starts))],
+                                "total_time_hours": (stops-starts)/3600,
                                 })
             #TODO does not work for spikecount edges yet
             
@@ -830,8 +782,6 @@ class CCGPointer(Savable):
     inds        [Np, 2]
 
     """
-    # TODO 3 class CCGraw() sig, 
-    #  contains slicing functions
     # TODO 4 CCG() has two modes: _optimize_memory or no optimization
     # optimized CCG stores its own CCG values while unoptimized indexes a CCGraw object, avoiding recomputation at higher memory costs
     # load CCGraw as needed.
@@ -850,7 +800,6 @@ class CCGPointer(Savable):
         self.key=key
         self.inds=np.asarray(inds)
         self.edge_times=edge_times
-        self.frates=None
         self.conf=conf
         if type(significant)==bool:
             self.significant=np.full((self.n,),significant)
@@ -918,14 +867,18 @@ class CCGPointer(Savable):
     def split(self)->list['CCGPointer']:
         return [self.get_segment(i) for i in range(self.edge_times.shape[0])]
 
-    def print_connectivity(self):
-        pass # TODO
-        # summarize connectivity patterns by {id - significant}
+    def print_connectivity(self, format='ind'):
+        grouped = defaultdict(list)
+        for seg_i, x, y in self.inds:
+            grouped[(x, y)].append(seg_i)
+        for (x, y), seg_inds in grouped.items():
+            print(f"[{x},{y}] appearing in [{', '.join(map(str, seg_inds))}]")
 
-    def reCCG(self,inds_dict=None,overwrite=False,expand_segment=False):
-        pass # TODO
-        # if inds_dict: {segment_i: [[ref, target],...]}, modify my inds with these values; 
-        # if expand_segment TODO clearer naming: use inds that were significant in any segment
+    def expand_selection(self,inds=None):
+        x = np.arange(self.n)
+        yz = inds or self.inds[:,1:]
+        self.inds=np.column_stack([np.repeat(x, yz.shape[0]), np.tile(yz, (x.shape[0], 1))])
+
 
 class CCGDataset(AnalysisDataset):
     """
@@ -1050,14 +1003,6 @@ class CCGDataset(AnalysisDataset):
     def filepath(self):
         return ''
         
-    # def _reCCG(self,key:Key,
-    #            indices_source=CCGIndexSource.SIGNIFICANT,
-    #            inds=None,
-    #            ):
-    #     """
-    #     Rerun CCG given list of indices
-
-    #     Call one of the wrappers instead
     #     """        
     #     # groups=self.groupby('session','epoch',source='connectivity')
     #     if inds is not None:
@@ -1077,13 +1022,6 @@ class CCGDataset(AnalysisDataset):
     #     elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
     #         inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
 
-    #     self.data[key] = CCGPointer(key=key,
-    #                                 inds=inds,
-    #                                 edge_times=self.data[key].edge_times,
-    #                                 conf=self.data[key].conf,
-    #                                 )
-        
-    #     return ccg_dict
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None):
         """
@@ -1095,11 +1033,10 @@ class CCGDataset(AnalysisDataset):
         nd: Neurons dataset, contains all input data
         """
         # change timescale in my configurations.
-        old_bin_size = self._conf.bin_size
+        print(f"recalculated CCG from binsize={self._conf.bin_size} to binsize={bin_size}")
         self._conf.bin_size = bin_size
         if duration: self._conf.duration = duration
         if jscale: self._conf.jscale = jscale
-        print(f"recalculated CCG from binsize={old_bin_size} to binsize={bin_size}")
         self.get_ccg()
         print("rescale completed")
 
@@ -1217,6 +1154,7 @@ class CCGDataset(AnalysisDataset):
             else:
                 ccg_data.get_conn_strength(method=method)        
 
+
 class EranConv:
     """
     A device for running EranConv and other significance tests    
@@ -1300,20 +1238,20 @@ class EranConv:
         return pvals, pred, qvals
     
     @staticmethod
-    def multiple_correction(pvals,alpha,method='bonferroni'): # correct for number of bins
-        # NOTE should bump this to utils or something
-        # methods: 'fdr_bh', 'bonferroni'
-        sig = np.empty_like(pvals, dtype=bool)
-        p_corr = np.empty_like(pvals, dtype=float)
-
+    def multiple_correction(pvals,alpha,method='fdr_bh'): # correct for number of bins
+        if method is None: 
+            return pvals<=alpha,pvals
+        
+        significance = np.empty_like(pvals, dtype=bool)
+        corrected_pvals = np.empty_like(pvals, dtype=float)
         for idx in np.ndindex(pvals.shape[:-3]):
             subarray = pvals[idx]  # shape = last 3 dims
             flat = subarray.ravel()
             s, pc, _, _ = multipletests(flat, alpha=alpha, method=method)
-            sig[idx] = s.reshape(subarray.shape)
-            p_corr[idx] = pc.reshape(subarray.shape)
-        return sig,p_corr
-    
+            significance[idx] = s.reshape(subarray.shape)
+            corrected_pvals[idx] = pc.reshape(subarray.shape)
+        return significance, corrected_pvals
+
     def spkcount_mask(self, ccg):
         min_bin = self.conf.min_spkcnt_bin
         max_bin = self.conf.max_spkcnt_bin
@@ -1325,11 +1263,11 @@ class EranConv:
     def significance_mask(self,p,excitability):
         conf = self.conf
         if excitability=='E':
-            sig, self._pval_corrected = EranConv.multiple_correction(p, conf.alpha)
+            sig, self._pval_corrected = EranConv.multiple_correction(p, conf.alpha,method=self.conf.mc_method)
             pair_inds = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1))
         elif excitability=='I':
-            sig1, self._qval_corrected = EranConv.multiple_correction(p, conf.alpha)
-            sig2, self._qval_corrected2 = EranConv.multiple_correction(p, conf.alpha2)
+            sig1, self._qval_corrected = EranConv.multiple_correction(p, conf.alpha, method=self.conf.mc_method)
+            sig2, self._qval_corrected2 = EranConv.multiple_correction(p, conf.alpha2, method=self.conf.mc_method)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
             pair_inds = np.argwhere(neighbor.any(-1))
         return pair_inds
@@ -1380,7 +1318,7 @@ class EranConv:
             return x is not None and x.size > 0
 
         def build_inds(p, EI, conn_types):
-            rough_inds = intersect(self.significance_mask(p, EI), self.spkcount_mask(ccg))
+            rough_inds = SetOp.intersect(self.significance_mask(p, EI), self.spkcount_mask(ccg))
             rough_inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
             inds = self._probe_loc_mask(rough_inds, peak_channels, shank_ids) if _hasvalue(rough_inds) else None
             inds = self._cell_type_mask(inds, neuron_type, conn_types) if _hasvalue(inds) else None
@@ -1419,7 +1357,7 @@ class EranConv:
                     for i, ccg in enumerate(ccg_pointer.split()):
                         count[i,j]=ccg.n if ccg is not None else 0
                     ccg_inds_by_type[ccg_key] = ccg_pointer
-                    spurious = setdiff(spurious,inds) # remove these pairs from spurious
+                    spurious = SetOp.setdiff(spurious,inds) # remove these pairs from spurious
                     j+=1
 
             spur_key = key.add(excitability=EI)
@@ -1432,10 +1370,9 @@ class EranConv:
         
         printstr=''
         for i, (segment_i, edge_time) in enumerate(edge_times.iterrows()):
-            label = edge_time['epoch']+str(segment_i)
             N_totalE = (rough_inds_E[:,0]==i).sum()
             N_totalI = (rough_inds_I[:,0]==i).sum()
-            printstr += f"{label:10}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
+            printstr += f"{edge_time['label']:10}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
             for N,(ref,target) in zip(count[i],self.conf.conn_types_flat):
                 printstr += f"{ref}-{target}/{EI} {f'{N:02d}' if N>0 else ' -'} | "
             printstr+='\n'

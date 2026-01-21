@@ -173,3 +173,55 @@ class AnalysisDataset(Savable):
             type(base_key)(**{**base_key.__dict__, **k.__dict__}): v 
             for k, v in inputs.items()
         })
+
+
+class SetOp():
+    @staticmethod
+    def __set_op(x,y,f):
+        """
+        Perform set operation of two N-dim arrays by their row elements.
+        x,y: np.ndarray of shape [...,k]
+        ravel_dims: (d1,...,dk), each d is sufficiently large
+
+        Ravels row values to v = v1*d1+...+vn*dn for comparison and then conver back
+    
+        """
+        ax=tuple(np.arange(len(x.shape)-1))
+        ravel_dims=np.max(np.vstack([x.max(axis=ax),y.max(axis=ax)]),axis=0)+1
+        xr, yr = np.ravel_multi_index(x.T, ravel_dims), np.ravel_multi_index(y.T, ravel_dims)
+        res = f(xr, yr)
+        return np.array(np.unravel_index(res, ravel_dims)).T
+
+    @staticmethod
+    def intersect(x, y):
+        """
+        Intersect two N-dim arrays by their row elements
+        """
+        if x is None or y is None: return np.array([])
+        return SetOp.__set_op(x,y,np.intersect1d)
+
+    @staticmethod
+    def setdiff(x, y):#n2=None
+        """
+        X minus Y for two N-dim arrays by their row elements
+        """
+        # Set difference of coordinate lists
+        if x is None or y is None: return x if x is not None else np.array([])
+        return SetOp.__set_op(x,y,np.setdiff1d)
+
+    @staticmethod
+    def union(x, y):#n2=None
+        """
+        Union two N-dim arrays by their row elements
+        """
+        # Set difference of coordinate lists
+        if x is None: return y if y is not None else np.array([])
+        elif y is None: return x if x is not None else np.array([])
+        return SetOp.__set_op(x,y,np.union1d)
+
+    @staticmethod
+    def unique(x):
+        """
+        np.unique by row elements
+        """
+        return np.unique(x,axis=0)
