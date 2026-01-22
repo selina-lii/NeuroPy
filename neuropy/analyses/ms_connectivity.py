@@ -283,7 +283,7 @@ class CCGConfig(Config):
     @property
     def filepath(self):
         return f"{SAVE_ROOT}/{self.name}.ccg.meta.h5"
-    
+
 
 class NeuronsDataset(AnalysisDataset):
     """
@@ -340,7 +340,7 @@ class NeuronsDataset(AnalysisDataset):
             # Store edge times
             self.edge_times[key] = self._get_edge_times(key, neurons, session)
             # Store firing rates
-            self.segment_firing_rates[key] = self._get_firing_rates(self.edge_times[key], neurons)
+            self.segment_firing_rates[key] = self._get_firing_rates_by_segment(self.edge_times[key], neurons)
 
             # Zero spike times
             if c.zero_spike_times:
@@ -351,7 +351,7 @@ class NeuronsDataset(AnalysisDataset):
             # Store filtered neurons
             self.data[key] = neurons
 
-    def _short_session_name(session):
+    def _short_session_name(self, session):
         """
         Get a printable session name in the format of ANIMAL_DayX
         """
@@ -455,7 +455,7 @@ class NeuronsDataset(AnalysisDataset):
             dfs.append(edges)
         return pd.concat(dfs, axis=0)
 
-    def _get_firing_rates(self, edge_times:pd.DataFrame, neurons:Neurons):
+    def _get_firing_rates_by_segment(self, edge_times:pd.DataFrame, neurons:Neurons):
         """
             Calculate and store segment-specific firing rates
         """
@@ -464,53 +464,51 @@ class NeuronsDataset(AnalysisDataset):
             x[i] = neurons.time_slice(t_start,t_end).firing_rate
         return x
     
-    def frate_stats(self):
+    def frate_stats(self,key,alpha=0.05):
         """
         Generate a stats description of firing rates
-        # TODO
         """
-        def iqr(self):
-            return np.percentile(self.frates, 75)-np.percentile(self.frates, 25)
+        edge_times = self.edge_times[key]
+        frates = self.segment_firing_rates[key]
+        neuron_types = self.data[key].neuron_type
+        labels = edge_times['label'].values
+        stats_name = "firing rate"
+        neuron_type_conf = self._conf.neuron_types
 
-        def describe(self):
-            return [describe(self.frates)]
+        for neuron_type in neuron_type_conf:
+            print(f"{stats_name} stats {neuron_type}")
+            print(f"segment | num | mean | iqr | min | max | variance | skew | kurt")
+            for i, (vi) in enumerate(edge_times.itertuples()):
+                    fr = frates[i][neuron_types==neuron_type]
+                    mean = np.mean(fr)
+                    iqr = np.percentile(fr, 75)-np.percentile(fr, 25)
+                    desc = describe(fr)
+                    print(f"{str(i)+':'+str(vi.label):7} | {desc.nobs} | {mean:.2f} | {iqr:.2f} | {desc.minmax[0]:.2f} | {desc.minmax[1]:.2f} | {desc.variance:.2f} | {desc.skewness:.2f} | {desc.kurtosis:.2f}")
+            print("\n")
 
-        print("Mean firing rates P VALUES")
-        stats = {}
-        for key, edges in self.edge_times.items():
-            for epoch in self.conf.epochs:
-                overview_str = f"======={key.session}-{epoch}=======\n"
-                neurons=self.data[key.nd()]
-                for i,neu_type in enumerate(self.conf.neuron_types):
-                    neus = neurons.get_neuron_type(neu_type)
-                    for s,e in zip(edges[0],edges[1]):
-                        _neus = neus.time_slice(s,e)
-                        if _neus.n_neurons>0:
-                            stats[key] = FrateStat(
-                                i=i,
-                                neu_type=neu_type,
-                                frates=_neus.firing_rate,
-                                effective_time = _neus.effective_time_hours,
-                                n_neurons=_neus.n_neurons,
-                                )
-                        else:
-                            stats[key] = FrateStat(n_neurons=0)
-                    labels += [f"{epoch.capitalize()}{i+1}" for i in range(len(edges[0]))]
-        if neus.n_neurons>5:
-            decimal_places=int(2+-np.floor(np.log10(alpha)))
-            frates = [xx for x in frates for xx in x]
-            flag = False
-            for j in range(total_n_segments):
-                for key in range(j):
-                    p = ttest_ind(frates[key],frates[j],equal_var=True).pvalue
-                    if p<alpha:
-                        flag = True
-                        overview_str+=f"{labels[key]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
-                    # Standard t-test,  check if mean firing rate changes per cell type
-            if not flag: overview_str+="No significant difference between segments\n"            
-        return stats
+            print(f"Difference in mean {stats_name} P VALUES")
+            printstr=""
+            decimal_places=int(-np.floor(np.log10(alpha)))
 
-
+            # print p-value matrix
+            printstr = f'{neuron_type:{decimal_places+3}}|'
+            for i in range(len(labels)):
+                printstr+=f"{str(i):{decimal_places+3}}|"
+            printstr+="\n"
+            for i, (vi) in enumerate(frates):
+                printstr+=f"{str(i):{decimal_places+3}}|"
+                for j, (vj) in enumerate(frates):
+                    fri = frates[i][neuron_types==neuron_type]
+                    frj = frates[j][neuron_types==neuron_type]
+                    if j>=i: continue
+                    if len(fri)<5: printstr+=f"{'-':{decimal_places}}|"
+                    else:
+                        p = ttest_ind(fri,frj,equal_var=True).pvalue
+                        printstr+=f"{p:.{decimal_places}f}{'*' if p<=alpha else ' '}|" 
+                        # Standard t-test,  check if mean firing rate changes per cell type
+                printstr+=f"{labels[i]}"
+                printstr+="\n"
+            print(printstr)
 class CCGPointer(Savable):
     """
     inds        [Np, 2]
@@ -537,7 +535,7 @@ class CCGPointer(Savable):
         self.edge_times=edge_times
         self.conf=conf
         if type(significant)==bool:
-            self.significant=np.full((self.n,),significant)
+            self._significant=np.full((self.n,),significant)
         else:
             self.significant=significant
 
@@ -634,7 +632,7 @@ class CCGPointer(Savable):
         return inds
 
     def get_segment(self,segment:int)->'CCGPointer':
-        idx = np.where(self.inds[:, 0]== egment)[0]
+        idx = np.where(self.inds[:, 0]== segment)[0]
         return CCGPointer(
             key=self.key.add(segment=segment),
             inds=self.inds[idx][:,1:],
@@ -887,7 +885,7 @@ class CCGData(Savable):
                 duration=0.5
             )
 
-    print("done saving plots")
+        print("done saving plots")
 
 
 class CCGDataset(AnalysisDataset):
@@ -958,7 +956,7 @@ class CCGDataset(AnalysisDataset):
         print("EranConv significant pairs")
 
 
-        conv = EranConv()
+        conv = EranConv(self.conf)
         for key, edge_times in self.nd.edge_times.items():
             neurons = self.nd.data[key.nd()]
 
@@ -1089,8 +1087,8 @@ class EranConv:
     """
 
     def __init__(self,conf):
-        self._pval=[]
-        self._qval=[]
+        self._pvals=[]
+        self._qvals=[]
         self.conf=conf
 
     @staticmethod
@@ -1166,7 +1164,11 @@ class EranConv:
         return pvals, pred, qvals
     
     @staticmethod
-    def multiple_correction(pvals,alpha,method='fdr_bh'): # correct for number of bins
+    def multiple_correction(pvals,alpha,method='bonferroni'): # correct for number of bins
+        """
+        example methods: fdr_bh, bonferroni
+        See statsmodels.stats.multitest.multipletests for more.
+        """
         if method is None: 
             return pvals<=alpha,pvals
         
@@ -1263,7 +1265,7 @@ class EranConv:
         if ccg.ndim==3: 
             ccg = ccg[None]
             pred = pred[None]
-            for attr in ("_pval","_qval",):
+            for attr in ("_pvals","_qvals",):
                 setattr(self, attr, getattr(self, attr)[None])
         
         count = np.zeros((edge_times.shape[0],len(self.conf.conn_types_flat)),dtype=int)

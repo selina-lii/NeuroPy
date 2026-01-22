@@ -14,6 +14,7 @@ from typing import Self, Union
 #TODO should we complicate Neurons with cuda?
 import numpy as np
 
+
 class Neurons(DataWriter):
     """Class to hold a group of spiketrains and their labels, ids etc."""
 
@@ -198,7 +199,7 @@ class Neurons(DataWriter):
     @spiketrains.setter
     def spiketrains(self,v):
         self._spiketrains=v
-        self._n_spikes=np.asarray([len(_) for _ in self._spiketrains]) # to reduce overhead of counting spiketrain lengths
+        self._n_spikes=np.asarray([len(_) for _ in self._spiketrains]) # reduce overhead of counting spiketrain lengths
 
     @property
     def t_start(self):
@@ -662,7 +663,7 @@ class Neurons(DataWriter):
         indices = np.array([np.where(self.neuron_ids == _)[0][0] for _ in ids])
         return self[indices]
 
-    def id2int(self, v):
+    def id2ind(self, v):
         """Receives indices from neuron ids
         Fits any array shape
         TODO untested"""
@@ -678,7 +679,6 @@ class Neurons(DataWriter):
 
     def to_dataframe(self):
         """Generates a pandas dataframe with some descriptions about the neurons"""
-        # TODO deprecated
         print("Number of neurons:", self.n_neurons)
         return pd.DataFrame(
             dict(
