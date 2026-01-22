@@ -37,6 +37,12 @@ class Config(Savable):
         return s
 
 
+from enum import Enum
+class ConfigOption(Enum):
+    def __eq__(self, x):
+        return getattr(self, "name", None) == getattr(x, "name", None)
+    
+
 K = TypeVar("K", bound="GenericKey")
 
 @dataclass(frozen=True)
@@ -123,7 +129,7 @@ class AnalysisDataset(Savable):
             return self.__dict__[field].get(item,None)
         return self.data.get(next(iter(self.data.keys())),None)
 
-    def filter(self, **criteria) -> Dict[K, Any]:
+    def filter(self, attrname='data', **filters) -> Dict[K, Any]:
         """
         Filter data by any combination of key attributes.
         
@@ -131,11 +137,11 @@ class AnalysisDataset(Savable):
             dataset.filter(session='s1', epoch='pre')
             dataset.filter(analysis_type='correlogram', neuron_type='pyramidal')
         """
-        return {k: v for k, v in self.data.items() if k.matches(**criteria)}
+        return {k: v for k, v in getattr(self, attrname).items() if k.matches(**filters)}
     
-    def filter_keys(self, **criteria) -> list[K]:
+    def filter_keys(self, attrname='data', **filters) -> list[K]:
         """Get all keys matching criteria"""
-        return [k for k in self.data.keys() if k.matches(**criteria)]
+        return [k for k in getattr(self, attrname).keys() if k.matches(**filters)]
     
     def groupby(self, *dimensions, source='data') -> Dict[K, Dict[K, Any]]:
         """
@@ -158,13 +164,6 @@ class AnalysisDataset(Savable):
 
     @conf.setter
     def conf(self,conf):
-        ans = input("Clear all datafields with the new config? [y/n]").lower()
-        if ans=='y':
-            self.data={}
-            self.spurious={}
-            self.auto={}
-            self.connectivity={}
-            print(f'{self.__class__.__name__}: all data fields are cleared')
         self._conf = conf
         print(f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary.")
 
@@ -225,3 +224,4 @@ class SetOp():
         np.unique by row elements
         """
         return np.unique(x,axis=0)
+

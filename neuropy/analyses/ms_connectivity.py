@@ -10,7 +10,7 @@ except ImportError:
     cp = None
 
 import neuropy.analyses.correlations as correlations
-from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, SetOp
+from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, SetOp, ConfigOption
 from neuropy.core.neurons import Neurons
 from scipy.signal import windows
 from scipy.stats import poisson, ttest_ind, ttest_1samp, describe
@@ -20,7 +20,6 @@ import h5py
 from statsmodels.stats.multitest import multipletests
 from dataclasses import dataclass, field, replace
 from collections import defaultdict
-from enum import Enum
 from copy import deepcopy
 import imageio
 import neuropy.plotting.ccg as plot_ccg
@@ -32,7 +31,8 @@ import matplotlib.pyplot as plt
 CHANNELS_PER_SHANK=16
 SAVE_ROOT="~/Documents/Neuropy/outputs"
 
-class IgnoreLevel(Enum):
+
+class IgnoreLevel(ConfigOption):
     """Config for CCG and other analysis
     Do we ignore neurons on the same peak channel / shank?"""
     NONE = 0
@@ -40,7 +40,7 @@ class IgnoreLevel(Enum):
     SAME_SHANK = 2
 
 
-class NormalizeBy(Enum):
+class NormalizeBy(ConfigOption):
     """Config for CCG and other analysis
     Do we ignore neurons on the same peak channel / shank?"""
     NONE = 0
@@ -52,14 +52,10 @@ class NormalizeBy(Enum):
     BOTH_SPKS = 6
 
 
-def _short_session_name(session):
-    """
-    Get a printable session name in the format of ANIMAL_DayX
-    """
-    sess_name = session.filePrefix.parts[-1].split('_')[:2]
-    sess_name='_'.join(sess_name)
-    return sess_name
-
+class ConnStrengthMethod(ConfigOption):
+    PEAKSIZE=0
+    TAILED=1
+    
 
 def example(var:dict):
     """
@@ -203,10 +199,6 @@ class NeuronsDatasetConfig(Config):
         # self.ripple = EpochSlicingConfig(min_dur=0,
         #                           discard=True,)
 
-    # def get_segs_from_epoch(self,epoch):
-    #     idx = self.epochs.index(epoch)
-    #     return self.n_segments[idx]
-
 
 class CCGConfig(Config):
     """
@@ -226,7 +218,7 @@ class CCGConfig(Config):
                 min_spkcount = 2.5,
                 spkcount_scope = 12e-3,
                 mc_method:str = None,
-                ignore:IgnoreLevel = IgnoreLevel.SAME_CHANNEL,
+                ignore = IgnoreLevel.SAME_CHANNEL,
                 use_acceleration = True,
                 symmetrize_ccg = True,
                 normalize:NormalizeBy = NormalizeBy.NONE,
@@ -310,6 +302,8 @@ class NeuronsDataset(AnalysisDataset):
     data: dict[Neurons]
     edge_times: defaultdict[pd.DataFrame]
     segment_firing_rates: dict[np.ndarray]
+    # TODO segment_firing_rates needs to account for when a neuron is missing from the segment
+    # maybe segment_stats as a class is better?
     _conf: NeuronsDatasetConfig
 
     def __init__(self, sessions, conf:NeuronsDatasetConfig):
@@ -336,7 +330,7 @@ class NeuronsDataset(AnalysisDataset):
 
         sessions = _san(sessions)
         for session in sessions:
-            session_name = _short_session_name(session)
+            session_name = self._short_session_name(session)
             self.conf.session_names.append(session_name)
             key = Key(session=session_name)
             
@@ -356,6 +350,14 @@ class NeuronsDataset(AnalysisDataset):
 
             # Store filtered neurons
             self.data[key] = neurons
+
+    def _short_session_name(session):
+        """
+        Get a printable session name in the format of ANIMAL_DayX
+        """
+        sess_name = session.filePrefix.parts[-1].split('_')[:2]
+        sess_name='_'.join(sess_name)
+        return sess_name
 
     def _time_filter(self, session):
         neurons = session.neurons
@@ -464,63 +466,27 @@ class NeuronsDataset(AnalysisDataset):
     
     def frate_stats(self):
         """
-        
         Generate a stats description of firing rates
-        TODO unfinished/testing
-
+        # TODO
         """
-        @dataclass
-        class FrateStat:
-            def __init__(self,n_neurons,neu_type):
-                self.n_neurons=n_neurons
-                self.neu_type=neu_type
-                self.keys=[]
-                self.frates=[]
-                self.effective_time=[]
-                self.n_neurons=[]
-                self.neu_type=[]
-                self.i=[]
-            
-            def append(self,key,frates,effective_time,n_neurons,i):
-                self.keys.append(key)
-                self.frates.append(frates)
-                self.effective_time.append(effective_time)
-                self.n_neurons.append(n_neurons)
-                self.i.append(i)
+        def iqr(self):
+            return np.percentile(self.frates, 75)-np.percentile(self.frates, 25)
 
-            @property
-            def iqr(self):
-                return np.percentile(self.frates, 75)-np.percentile(self.frates, 25)
-            
-            @property
-            def describe(self):
-                return [describe(self.frates)]
-            
-            def __str__(self):
-                overview_str=""
-                overview_str+=f"{self.i}. {self.neu_type}\t"
-                overview_str+=f"n={int(self.n_neurons)}\t"
-                overview_str+=f"mean firing rates (Hz)|effective time (h)\n"
-                for ts,mfrs in zip(self.effective_time,self.mean_firing_rates):
-                    for t,mfr in zip(ts,mfrs):
-                        overview_str+=f"{mfr:.02f}|{t:.02f}  "
-                overview_str+="\n"
-                if self.n_neurons<2:
-                    overview_str+="Too few neurons in this category\n"
-                return overview_str
+        def describe(self):
+            return [describe(self.frates)]
 
         print("Mean firing rates P VALUES")
         stats = {}
-        for k,edges in self.edge_times.items():
+        for key, edges in self.edge_times.items():
             for epoch in self.conf.epochs:
-                overview_str = f"======={k.session}-{epoch}=======\n"
-                neurons=self.data[k.nd()]
+                overview_str = f"======={key.session}-{epoch}=======\n"
+                neurons=self.data[key.nd()]
                 for i,neu_type in enumerate(self.conf.neuron_types):
                     neus = neurons.get_neuron_type(neu_type)
                     for s,e in zip(edges[0],edges[1]):
                         _neus = neus.time_slice(s,e)
                         if _neus.n_neurons>0:
-                            stats[k] = FrateStat(
+                            stats[key] = FrateStat(
                                 i=i,
                                 neu_type=neu_type,
                                 frates=_neus.firing_rate,
@@ -528,24 +494,162 @@ class NeuronsDataset(AnalysisDataset):
                                 n_neurons=_neus.n_neurons,
                                 )
                         else:
-                            stats[k] = FrateStat(n_neurons=0)
+                            stats[key] = FrateStat(n_neurons=0)
                     labels += [f"{epoch.capitalize()}{i+1}" for i in range(len(edges[0]))]
         if neus.n_neurons>5:
-            pass
+            decimal_places=int(2+-np.floor(np.log10(alpha)))
+            frates = [xx for x in frates for xx in x]
+            flag = False
+            for j in range(total_n_segments):
+                for key in range(j):
+                    p = ttest_ind(frates[key],frates[j],equal_var=True).pvalue
+                    if p<alpha:
+                        flag = True
+                        overview_str+=f"{labels[key]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
+                    # Standard t-test,  check if mean firing rate changes per cell type
+            if not flag: overview_str+="No significant difference between segments\n"            
         return stats
 
 
-                # decimal_places=int(2+-np.floor(np.log10(alpha)))
-                # frates = [xx for x in frates for xx in x]
-                # flag = False
-                # for j in range(total_n_segments):
-                #     for k in range(j):
-                #         p = ttest_ind(frates[k],frates[j],equal_var=True).pvalue
-                #         if p<alpha:
-                #             flag = True
-                #             overview_str+=f"{labels[k]} VS SLEEP{labels[j]}\tp={p:.{decimal_places}f}\n"
-                #         # Standard t-test,  check if mean firing rate changes per cell type
-                # if not flag: overview_str+="No significant difference between segments\n"            
+class CCGPointer(Savable):
+    """
+    inds        [Np, 2]
+
+    """
+    # TODO 4 CCG() has two modes: _optimize_memory or no optimization
+    # optimized CCG stores its own CCG values while unoptimized indexes a CCGraw object, avoiding recomputation at higher memory costs
+    # load CCGraw as needed.
+    # wrt to p-values: jitter needs to be run as sparsely as possible while eran_conv can be done for the whole dataset easily.
+    # should optim CCG use sparse matrices with certain rows filled? 
+    # there should be two versions of CCG, but they should share some common methods, 
+    #           using sparse and dense matrix representations.
+    # filtered: ccg shape = ngroups,nccg,nbins     ids shape = nccg,2
+    # flat:     ccg shape = (ngroups),nneu,nneu,nbins   ids shape = nneu
+    # since segments will be abolished, ngroups dimension should always exist, even when redundant
+    # segments is a dimension such that all items in the list can have the same operations applied on them
+    #   as segments are purely for comparison analysis
+    def __init__(self, key, inds, 
+                 conf:CCGConfig=None,significant=True,
+                 edge_times=None):
+        self.key=key
+        self._inds=np.asarray(inds)
+        self._significant=None
+        self.edge_times=edge_times
+        self.conf=conf
+        if type(significant)==bool:
+            self.significant=np.full((self.n,),significant)
+        else:
+            self.significant=significant
+
+    def __repr__(self):
+        s = str(self.key) + "\n"
+        for i,inds in enumerate(self.inds):
+            s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\t"
+            # if self.conn_strength is not None: s += f"strengths: {self.conn_strength[i]}"
+            s += "\n"
+        return s
+        
+    def __str__(self):
+        s='CCG Pointer\n'
+        for key, val in self.__dict__.items():
+            if isinstance(val,np.ndarray) or isinstance(val,list):
+                s+=f"{key}\tshape={np.array(val).shape}"
+                sval="\n".join(str(val[0:2]).splitlines()[:3])
+                s+=f"\tval={sval}...\n"
+            elif isinstance(val,dict):
+                k,v = next(iter(val.items()))
+                s+=f"{key} dict keys={k}...\n"
+                item_str = str(v)
+                for line in item_str.splitlines()[:3]:
+                    s+=f"\t\t{line}\n"
+            elif key!='_conf':
+                sval="\n".join(str(val).splitlines()[:3])
+                s+=f"{key}: {sval}\n"
+        return s
+    
+    @property
+    def ndim(self):
+        return self._inds.ndim
+    
+    @property
+    def significant(self):
+        if isinstance(self._significant, bool) and self._significant:
+            return np.ones(self._inds.shape[:-1])
+    
+    @property
+    def ind2(self):
+        if self._inds.ndim==2:
+            return self._inds
+        else:
+            return SetOp.unique(self._inds[:,-2:])
+        
+    @property
+    def ind3(self):
+        if self._inds.ndim==3:
+            return self._inds
+        else:
+            x = np.arange(self.n)
+            yz = self.inds[:,1:]
+            return np.column_stack([np.repeat(x, yz.shape[0]), np.tile(yz, (x.shape[0], 1))])
+
+    @property  
+    def indsplit(self)->list[np.ndarray]:
+        return [np.where(self.inds[:, 0]==i)[0] for i in range(self.edge_times.shape[0])]
+
+    @property
+    def inds(self):
+        return self._inds
+    
+    @property
+    def ref_inds(self):
+        return self.inds[:,-2]
+    
+    @property
+    def target_inds(self):
+        return self.inds[:,-1]
+    
+    @property
+    def ref_ind(self):
+        return self.inds[-2]
+    
+    @property
+    def unique_inds(self):
+        return np.unique(self.inds)
+    
+    @property
+    def n(self):
+        return self.inds.shape[0]
+
+    @property
+    def n_segments(self):
+        return self.ccg.shape[0]
+
+    def filter(self,min_n_segment,skips):
+        if skips is not None: 
+            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.significant)) if 
+                    not ((v[0] in skips[:,0]) & (v[1] in skips[:,1])) 
+                    and (np.sum(e)>=min_n_segment)]
+        else:
+            inds = np.where(np.sum(self.significant,axis=1)>=min_n_segment)[0].astype(int)
+        return inds
+
+    def get_segment(self,segment:int)->'CCGPointer':
+        idx = np.where(self.inds[:, 0]== egment)[0]
+        return CCGPointer(
+            key=self.key.add(segment=segment),
+            inds=self.inds[idx][:,1:],
+            edge_times=self.edge_times.iloc[segment],
+        )
+    
+    def split(self)->list['CCGPointer']:
+        return [self.get_segment(i) for i in range(self.edge_times.shape[0])]
+
+    def print_connectivity(self):
+        grouped = defaultdict(list)
+        for seg_i, x, y in self.inds:
+            grouped[(x, y)].append(seg_i)
+        for (x, y), seg_inds in grouped.items():
+            print(f"[{x},{y}] appearing in [{', '.join(map(str, seg_inds))}]")
 
 
 @dataclass(frozen=True)
@@ -560,11 +664,21 @@ class CCGData(Savable):
         ccg_null    [N, Np, Nbins]
     """
     key: Key
-    ccg: np.ndarray
+
+    # [n_seg, n_ref, n_tgt, n_bins]
+    ccg: np.ndarray 
     ccg_null: np.ndarray
     pval: np.ndarray
     qval: np.ndarray
+    pval_corrected: np.ndarray
+    qval_corrected: np.ndarray
+    
+    # [n_seg, n_ref, n_tgt]
     conn_strength: np.ndarray
+
+    @property
+    def n_segment(self):
+        return self.ccg.shape[0]
 
     @staticmethod
     def get_autocorr_locations(shape):
@@ -577,17 +691,52 @@ class CCGData(Savable):
         autocorr_locations = np.broadcast_to(auto_mask, shape[:-1])
         return autocorr_locations
     
-    def get_conn_strength(self, method="peaksize",**kwargs):
+    def get_conn_strength(self, method:ConnStrengthMethod,**kwargs):
+        """
+        Wrapper
+        """
         if self.ccg is None: return # no connection
-        
-        if method=="peaksize":
-            self._get_conn_strength_peaksize(**kwargs)
-        elif method=="tailed":
-            self._get_conn_strength_tailed(**kwargs)
+        if method==ConnStrengthMethod.PEAKSIZE:
+            self.__get_conn_strength_peaksize(**kwargs)
+        elif method==ConnStrengthMethod.TAILED:
+            self.__get_conn_strength_tailed(**kwargs)
         else:
             return NotImplementedError("Unknown connection strength method")
 
-    def _get_conn_strength_peaksize(self, norm_factor:np.ndarray=None):
+    def normalize(self,frates,method:NormalizeBy):
+        if method == NormalizeBy.REF_FRATE:
+            self.__normalize(frates,ref=True)
+        elif method == NormalizeBy.TARGET_FRATE:
+            self.__normalize(frates,target=True)
+        elif method == NormalizeBy.BOTH_FRATE:
+            self.__normalize(frates,ref=True,target=True)
+
+    def save_plots(self, root, pts:CCGPointer,neurons:Neurons,neurons_confg:NeuronsDatasetConfig,
+                   split_all_plots=False):
+
+        plotdir = self.plotdir(root)
+        if not os.path.exists(plotdir):
+            os.makedirs(plotdir,exist_ok=True)
+
+        idx_dict = {n: i for i, n in enumerate(np.unique(self.inds))}
+
+        if self.n_segment>1 or split_all_plots:
+            self.__save_gif(plotdir=plotdir,pts=pts,neurons=neurons,neurons_confg=neurons_confg)
+        else:
+            self.__save_img()
+
+    def plotdir(self, root):
+        root=os.path.expanduser(root)
+        if self.key.conn_type is None:
+            return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_any"
+        return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_{self.key.conn_type[0]}-{self.key.conn_type[1]}"    
+
+    @property
+    def conn_strength_change(self):
+        assert self.conn_strength is not None
+        return self.conn_strength[:,-1]-self.conn_strength[:,0]
+
+    def __get_conn_strength_peaksize(self, norm_factor:np.ndarray=None):
         """
         Connection strength:
         
@@ -602,7 +751,7 @@ class CCGData(Savable):
             cs = cs.astype(float).reshape(shape) / norm_factor # e.g. presynaptic element firing rate
         self.conn_strength = cs.squeeze()
 
-    def _get_conn_strength_tailed(self, nspks:list, norm_factor:np.ndarray=False):
+    def __get_conn_strength_tailed(self, nspks:list, norm_factor:np.ndarray=False):
         """
         Connection strength:
 
@@ -685,199 +834,60 @@ class CCGData(Savable):
         cs = np.sum(auc[self.conf.min_lag_bin:self.conf.max_lag_bin]) # inds,nbins 
         if norm_factor: cs /= norm_factor
         self.conn_strength = cs
-    
-    def normalize_by_ref_rate(self):
-        shape=self.ccg.shape
-        frates=self.frates[...,-2][...,np.newaxis] 
-        self.ccg = self.ccg.astype(float).reshape(shape) / frates
-        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates
 
-    def normalize_by_target_rate(self):
-        shape=self.ccg.shape
-        frates=self.frates[...,-1][...,np.newaxis] 
-        self.ccg = self.ccg.astype(float).reshape(shape) / frates
-        self.ccg_null = self.ccg_null.astype(float).reshape(shape) / frates        
+    def __normalize(self, frates, ref=False, target=False):
+        for axis in (1 if ref else None, 2 if target else None):
+            if axis is None: continue
+            shape = [1] * self.ccg.ndim
+            shape[axis] = -1
+            frates_reshape = frates.reshape(shape)
+            self.ccg = self.ccg.astype(float) / frates_reshape
+            self.ccg_null = self.ccg_null.astype(float) / frates_reshape
 
-    def plotdir(self, root):
-        root=os.path.expanduser(root)
-        if self.key.conn_type is None:
-            return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_any"
-        return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_{self.key.conn_type[0]}-{self.key.conn_type[1]}"    
+    def __save_gif(self,plotdir,pts:CCGPointer,neurons:Neurons,neurons_confg:NeuronsDatasetConfig):
+        s=np.argsort(pts.ind2) #[np.random.random_integers(0,inds.shape[0]-1,5)]
+        for i,inds in enumerate(pts.indsplit):
+            figs = []
+            ymin,ymax=[],[]
+            print(i,inds)
+            for i_seg in range(self.n_segment):
+                fig = plot_ccg.plot_ccg_figure(
+                    inds                =inds,
+                    ids                 =neurons.ind2id(inds),
+                    neuron_types        =neurons.neuron_types[inds],
+                    frates_cut          =frates[i_seg][inds],
+                    frates_all          =neurons.firing_rate[inds],
+                    waveforms           =neurons.waveforms[inds] if neurons.waveforms is not None else None,
+                    shank_ids           =neurons.shank_ids[inds],
+                    discarded_channels  =neurons_confg.recinfo.skipped_channels,
+                    ch_per_shank        =neurons_confg.ch_per_shank,
+                    plotdir             =plotdir, 
+                    window_size         =self.conf.duration*1e3,
+                    bin_size            =self.conf.bin_size*1e3,
+                    ccg                 =self.ccg[i_seg][i], 
+                    ccg_null            =self.ccg_null[i_seg][i] if self.ccg_null is not None else None,
+                    pval                =self.pval[i_seg][i] if self.pval is not None else None,
+                    significant         =pts.significant[i_seg][i],
+                    show                =False,
+                    save                =False,
+                    segment_id          =i_seg)
+                _ymin, _ymax =fig.axes[0].get_ylim()
+                ymin.append(_ymin);ymax.append(_ymax)
+                figs.append(fig)
+            ymin=min(ymin);ymax=max(ymax)
+            frames=[]
+            for fig in figs:
+                fig.axes[0].set_ylim(ymin, ymax)
+                fig.canvas.draw_idle()
+                frames.append(np.array(fig.canvas.renderer.buffer_rgba()))
+                plt.close(fig)
+            imageio.mimsave(
+                f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.gif",
+                frames,
+                duration=0.5
+            )
 
-    def save_plots(self, ids, neuron_types, shank_ids, waveforms, frates_all, root, discarded_channels=None,ch_per_shank=None):
-        assert self.ccg is not None
-        plotdir = self.plotdir(root)
-        if not os.path.exists(plotdir):
-            os.makedirs(plotdir,exist_ok=True)
-
-        idx_dict = {n: i for i, n in enumerate(np.unique(self.inds))}
-        s=np.argsort(self.inds[:,-2]) #[np.random.random_integers(0,inds.shape[0]-1,5)]
-        n_seg=self.ccg.shape[0]
-
-        if len(self.ccg.shape)==3:
-            for i,inds in enumerate(self.inds[s]):
-                figs = []
-                ymin,ymax=[],[]
-                print(i,inds)
-                idx=np.array([idx_dict[inds[0]],idx_dict[inds[1]]])
-                for i_seg in range(n_seg):
-                    fig = plot_ccg.plot_ccg_figure(ids=ids,
-                                    inds=inds,
-                                    neuron_types=neuron_types[idx],
-                                    frates_cut=self.frates[i_seg][s][i],
-                                    frates_all=frates_all[idx],
-                                    waveforms=waveforms[idx] if waveforms is not None else None,
-                                    shank_ids=shank_ids[idx],
-                                    discarded_channels=discarded_channels,
-                                    ch_per_shank=ch_per_shank,
-                                    ccg=self.ccg[i_seg][s][i], 
-                                    plotdir=plotdir, 
-                                    window_size=self.conf.duration*1e3,
-                                    bin_size=self.conf.bin_size*1e3,
-                                    pval=self.pval[i_seg][s][i] if self.pval is not None else None,
-                                    ccg_null=self.ccg_null[i_seg][s][i] if self.ccg_null is not None else None,
-                                    significant=self.significant[i_seg][s][i] if self.significant else None,
-                                    show=False,save=False,
-                                    segment_id=i_seg)
-                    _ymin, _ymax =fig.axes[0].get_ylim()
-                    ymin.append(_ymin);ymax.append(_ymax)
-                    figs.append(fig)
-                ymin=min(ymin);ymax=max(ymax)
-                frames=[]
-                for fig in figs:
-                    fig.axes[0].set_ylim(ymin, ymax)
-                    fig.canvas.draw_idle()
-                    frames.append(np.array(fig.canvas.renderer.buffer_rgba()))
-                    plt.close(fig)
-                imageio.mimsave(
-                    f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.gif",
-                    frames,
-                    duration=0.5
-                )
-        print("done saving plots")
-    
-    def filter(self,min_n_segment,skips):
-        if skips is not None: 
-            inds = [int(i) for i,(v,e) in enumerate(zip(self.inds,self.significant)) if 
-                    not ((v[0] in skips[:,0]) & (v[1] in skips[:,1])) 
-                    and (np.sum(e)>=min_n_segment)]
-        else:
-            inds = np.where(np.sum(self.significant,axis=1)>=min_n_segment)[0].astype(int)
-        return inds
-    
-    @property
-    def conn_strength_slope(self):
-        assert self.conn_strength is not None
-        r=self.conn_strength
-        return (np.polyfit(range(r.shape[0]), r, 1)[0] if len(r.shape)>1 else np.full(r.shape,np.nan))
-
-    @property
-    def conn_strength_change(self):
-        assert self.conn_strength is not None
-        return self.conn_strength[:,-1]-self.conn_strength[:,0]
-
-
-class CCGPointer(Savable):
-    """
-    inds        [Np, 2]
-
-    """
-    # TODO 4 CCG() has two modes: _optimize_memory or no optimization
-    # optimized CCG stores its own CCG values while unoptimized indexes a CCGraw object, avoiding recomputation at higher memory costs
-    # load CCGraw as needed.
-    # wrt to p-values: jitter needs to be run as sparsely as possible while eran_conv can be done for the whole dataset easily.
-    # should optim CCG use sparse matrices with certain rows filled? 
-    # there should be two versions of CCG, but they should share some common methods, 
-    #           using sparse and dense matrix representations.
-    # filtered: ccg shape = ngroups,nccg,nbins     ids shape = nccg,2
-    # flat:     ccg shape = (ngroups),nneu,nneu,nbins   ids shape = nneu
-    # since segments will be abolished, ngroups dimension should always exist, even when redundant
-    # segments is a dimension such that all items in the list can have the same operations applied on them
-    #   as segments are purely for comparison analysis
-    def __init__(self, key, inds, 
-                 conf:CCGConfig=None,significant=True,
-                 edge_times=None):
-        self.key=key
-        self.inds=np.asarray(inds)
-        self.edge_times=edge_times
-        self.conf=conf
-        if type(significant)==bool:
-            self.significant=np.full((self.n,),significant)
-        else:
-            self.significant=significant
-
-    def __repr__(self):
-        s = str(self.key) + "\n"
-        for i,inds in enumerate(self.inds):
-            s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\t"
-            # if self.conn_strength is not None: s += f"strengths: {self.conn_strength[i]}"
-            s += "\n"
-        return s
-        
-    def __str__(self):
-        s='CCG Pointer\n'
-        for key, val in self.__dict__.items():
-            if isinstance(val,np.ndarray) or isinstance(val,list):
-                s+=f"{key}\tshape={np.array(val).shape}"
-                sval="\n".join(str(val[0:2]).splitlines()[:3])
-                s+=f"\tval={sval}...\n"
-            elif isinstance(val,dict):
-                k,v = next(iter(val.items()))
-                s+=f"{key} dict keys={k}...\n"
-                item_str = str(v)
-                for line in item_str.splitlines()[:3]:
-                    s+=f"\t\t{line}\n"
-            elif key!='_conf':
-                sval="\n".join(str(val).splitlines()[:3])
-                s+=f"{key}: {sval}\n"
-        return s
-    
-    @property
-    def ref_inds(self):
-        return self.inds[:,-2]
-    
-    @property
-    def target_inds(self):
-        return self.inds[:,-1]
-    
-    @property
-    def ref_ind(self):
-        return self.inds[-2]
-    
-    @property
-    def unique_inds(self):
-        return np.unique(self.inds)
-    
-    @property
-    def n(self):
-        return self.inds.shape[0]
-
-    @property
-    def n_segments(self):
-        return self.ccg.shape[0]
-    
-    def get_segment(self,segment:int)->'CCGPointer':
-        idx = np.where(self.inds[:, 0] == segment)[0]
-        return CCGPointer(
-            key=self.key.add(segment=segment),
-            inds=self.inds[idx][:,1:],
-            edge_times=self.edge_times.iloc[segment],
-        )
-
-    def split(self)->list['CCGPointer']:
-        return [self.get_segment(i) for i in range(self.edge_times.shape[0])]
-
-    def print_connectivity(self, format='ind'):
-        grouped = defaultdict(list)
-        for seg_i, x, y in self.inds:
-            grouped[(x, y)].append(seg_i)
-        for (x, y), seg_inds in grouped.items():
-            print(f"[{x},{y}] appearing in [{', '.join(map(str, seg_inds))}]")
-
-    def expand_selection(self,inds=None):
-        x = np.arange(self.n)
-        yz = inds or self.inds[:,1:]
-        self.inds=np.column_stack([np.repeat(x, yz.shape[0]), np.tile(yz, (x.shape[0], 1))])
+    print("done saving plots")
 
 
 class CCGDataset(AnalysisDataset):
@@ -906,6 +916,7 @@ class CCGDataset(AnalysisDataset):
     data: dict[CCGPointer]
     spurious: dict[CCGPointer]
     _conf: CCGConfig
+    nd: NeuronsDataset
 
     def __init__(self, conf=None, nd=None):
         super().__init__(conf)
@@ -913,6 +924,10 @@ class CCGDataset(AnalysisDataset):
         self._ccg = {}
         self.data = {}
         self.spurious = {}
+
+    @property
+    def filepath(self):
+        return ''
 
     def get_ccg(self, baseline_method="eran_conv"):
         """
@@ -947,6 +962,13 @@ class CCGDataset(AnalysisDataset):
         for key, edge_times in self.nd.edge_times.items():
             neurons = self.nd.data[key.nd()]
 
+            if self.conf.ignore==IgnoreLevel.SAME_CHANNEL:
+                neuron_locations = neurons.peak_channels
+            if self.conf.ignore==IgnoreLevel.SAME_SHANK:
+                neuron_locations = neurons.shank_ids
+            else:
+                neuron_locations=None
+
             ccg = correlations.spike_correlations(
                     neurons             =neurons,
                     neuron_inds         =np.arange(neurons.n_neurons), # all
@@ -957,12 +979,12 @@ class CCGDataset(AnalysisDataset):
                     edge_times          =edge_times,
                 )
             
+
             pvals, pred, qvals, ccg_inds, spur_inds, printstr = conv.eranconv(
                     neurons_key         =key, 
                     ccg                 =ccg, 
                     edge_times          =edge_times, 
-                    peak_channels       =neurons.peak_channels,
-                    shank_ids           =neurons.shank_ids,
+                    neuron_locations    =neuron_locations,
                     neuron_type         =neurons.neuron_type,
                     conf                =self.conf)
 
@@ -971,6 +993,8 @@ class CCGDataset(AnalysisDataset):
                     ccg_null        =pred,
                     pval            =pvals,
                     qval            =qvals,
+                    pval_corrected  =conv._pvals,
+                    qval_corrected  =conv._qvals,
                     conn_strength   =None)
             
             self._ccg[key]=ccg_data
@@ -990,38 +1014,17 @@ class CCGDataset(AnalysisDataset):
 
             print(s+printstr)
 
-    def filter_excitability(self, E):
-        return self.filter(excitability=E)
+    def merge_CCGs(self, merge_level='epoch'):
+        # TODO
+        groups = self.groupby(merge_level,source='_ccg') #TODO
+        self._ccg = {}
+        for key, group in groups:
+            self._ccg[key] = CCGData.merge(group)
 
-    def merge_CCGs(self, merge_levels):
-        pass
-
-    def split_CCG(self):
-        pass
-
-    @property
-    def filepath(self):
-        return ''
-        
-    #     """        
-    #     # groups=self.groupby('session','epoch',source='connectivity')
-    #     if inds is not None:
-    #         pass
-
-    #     elif key.ref_ind is not None:
-    #         # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=key.ref_ind,segment=key.segment)
-    #         edge_times = self.nd.edge_times[key.remove('segment')]
-
-    #     elif indices_source==CCGIndexSource.SIGNIFICANT:
-    #         inds = self.data[key].inds
-
-    #     elif indices_source==CCGIndexSource.SIGNIFICANT_ANY:
-    #         # group by
-    #         inds = self.data[key].inds
-
-    #     elif indices_source==CCGIndexSource.AUTOCORRELOGRAMS:
-    #         inds = np.vstack([self.auto[key].inds,self.auto[key].inds]).T    
-
+    def split_CCG(self,level='epoch'):
+        # TODO
+        for key, ccg in self._ccg:
+            ccg.split(level=level)
 
     def reCCG_timescale(self,bin_size,duration=None,jscale=None):
         """
@@ -1040,119 +1043,44 @@ class CCGDataset(AnalysisDataset):
         self.get_ccg()
         print("rescale completed")
 
-    def reCCG_pair_inds_1conntype(self,conn_type=('pyr','pyr'),external_inds=None,_new_data=None,_group=None):
-        """
-        modifies _new_data
-        """
-        SET_SELF_DATA=_new_data is None
-        if _group is None:
-            _group = self.groupby('conn_type',source='connectivity')[Key(conn_type=conn_type)]
-        if _new_data is None:
-            _new_data={}
-            
-        for key, old_ccg in _group.items():
-            if old_ccg is not None:
-                new_ccgs = self._reCCG(indices_source=CCGIndexSource.SIGNIFICANT_ANY,
-                                       inds=external_inds,
-                                       key=key)
-                for k,ccg in new_ccgs.items():
-                     # TODO inherit original significant markers
-                    if external_inds is not None:
-                        ccg.significant=np.zeros((old_ccg.n_segments,external_inds.shape[0]))
-                        m = (external_inds[:,None] == old_ccg.inds).all(-1)
-                        i_ext, i_old = np.where(m)
-                        ccg.significant[:,i_ext] = old_ccg[k].significant[i_old].T
-                    else:
-                        ccg.significant = self._ccg[k].significant.T
-                    _new_data[k] = ccg
-
-        if SET_SELF_DATA: 
-            for k, v in _new_data.items():
-                self.data[k]=v
-
-    def reCCG_pair_inds(self,external_inds_by_type:dict[np.ndarray]=None):
-        """
-        Rerun CCG with a list of pair indices
-        The significance of the pairs are set by whether they were significant before the rerun
-
-        overwrites self.data
-        """
-        new_data = {}
-        groups = self.groupby('conn_type',source='connectivity')
-        for k, group in groups.items():
-            inds = external_inds_by_type.get(k.conn_type) if external_inds_by_type is not None else None
-            self.reCCG_pair_inds_1conntype(conn_type=k.conn_type, 
-                                              external_inds=inds,
-                                              _new_data=new_data,
-                                              _group=group)
-        self.data = new_data
-        print("recomputed CCG for pairs that had been significant in any segment")
-
-    def reCCG_pair_inds_pairwise(self,conn_type=('pyr','pyr')):
-        """
-        TODO group by reference
-        """
-        group = self.groupby('conn_type',source='connectivity')[Key(conn_type=conn_type)]
-        self.data={}
-        for key, ccg in group.items():
-            if ccg is not None:
-                for i,pair in enumerate(ccg.inds):
-                    print(f"reCCG: {i}/{ccg.inds.shape[0]}")
-                    # REMOVE Key(session=key.session,epoch=key.epoch,ref_ind=pair[0],target_ind=pair[1],
-                    #         segment=key.segment,excitability=key.excitability,conn_type=key.conn_type)
-                    new_ccgs = self._reCCG(key=key.add(ref_ind=pair[0],target_ind=pair[1]),
-                                           inds=pair)
-                    for k,new_ccg in new_ccgs.items():
-                        self.data[k] = new_ccg
-        print("recomputed CCG using spike count segments")
-
-    def save_plots(self, root="~/Documents/NeuroPy/images/ccg_plots_tmp",
-                   conn_types:list=None):
+    def save_plots(self, root="~/Documents/NeuroPy/images/ccg_plots_tmp", source='data', **filters):
         assert os.path.isdir(os.path.expanduser(root))
-        keys = self.filter_keys(conn_type=conn_types) if conn_types else self.data.keys()
-        print(keys)
         print(f"Saving plots under {root}")
-        for key in keys:
-            ccg = self.data[key]
-            neurons = self.nd.data[key.nd()]
-            inds = ccg.unique_inds
 
+        itergroup = self.filter(attrname=source,**filters)
+
+        for key,ccg_pointers in itergroup:
             print(f"ccg {key.session} {key.conn_type}")
 
-            ccg.save_plots(
-                neuron_types=neurons.neuron_type[inds],
-                waveforms=neurons.waveforms[inds],
-                shank_ids=neurons.shank_ids[inds],
-                frates_all=neurons.firing_rate[inds],
-                discarded_channels=self.nd.conf.recinfo.skipped_channels,
-                ch_per_shank=self.nd.conf.ch_per_shank,
-                root=root,
+            self._ccg[key.nd()].save_plots(
+                pts                 =ccg_pointers,
+                neurons             =self.nd.data[key.nd()].neuron_type,
+                frates_cut          =self.nd.segment_firing_rates[key.nd()],
+                neurons_config      =self.nd.conf,
+                root                =root,
             )
         print("done")
 
     def normalize(self):
-        for _, ccg in self.data.items():
-            if self.conf.normalize.name == NormalizeBy.REF_FRATE.name:
-                ccg.normalize_by_ref_rate()
-            elif self.conf.normalize.name == NormalizeBy.TARGET_FRATE.name:
-                ccg.normalize_by_target_rate()
-            elif self.conf.normalize.name == NormalizeBy.BOTH_FRATE.name:
-                ccg.normalize_by_ref_rate()
-                ccg.normalize_by_target_rate()
+        for key, ccg in self.data.items():
+            frates = self.nd.segment_firing_rates[key.nd()]
+            ccg.normalize(frates,method=self.conf.normalize)
 
-    def get_connection_strengths(self, method="eran_conv"):
+    def get_connection_strengths(self, method=ConnStrengthMethod.PEAKSIZE):
         """
         Set connection_strengths value for each CCGData() object based on given method.
         Values can be found in self._ccg[key].conn_strengths.
         """
         for key, ccg_data in self._ccg.items():
-            if method=='tailed': 
+            if method==ConnStrengthMethod.TAILED: 
                 frate = self.nd.segment_firing_rates[key]
                 total_time = self.nd.edge_times[key]['effective_time_hours']
                 spikecount = np.round(frate*total_time) #TODO precision
                 ccg_data.get_conn_strength(method=method,spikecount=spikecount)
-            else:
+            elif method==ConnStrengthMethod.PEAKSIZE:
                 ccg_data.get_conn_strength(method=method)        
+            else:
+                raise NotImplementedError()
 
 
 class EranConv:
@@ -1160,10 +1088,10 @@ class EranConv:
     A device for running EranConv and other significance tests    
     """
 
-    _pval_corrected=[]
-    _qval_corrected=[]
-    _qval_corrected2=[]
-    conf=None
+    def __init__(self,conf):
+        self._pval=[]
+        self._qval=[]
+        self.conf=conf
 
     @staticmethod
     def _conv(ccg, W=5, wintype="gauss", hollow_frac=None):
@@ -1263,11 +1191,11 @@ class EranConv:
     def significance_mask(self,p,excitability):
         conf = self.conf
         if excitability=='E':
-            sig, self._pval_corrected = EranConv.multiple_correction(p, conf.alpha,method=self.conf.mc_method)
+            sig, self._pval = EranConv.multiple_correction(p, conf.alpha,method=self.conf.mc_method)
             pair_inds = np.argwhere((sig[...,conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1))
         elif excitability=='I':
-            sig1, self._qval_corrected = EranConv.multiple_correction(p, conf.alpha, method=self.conf.mc_method)
-            sig2, self._qval_corrected2 = EranConv.multiple_correction(p, conf.alpha2, method=self.conf.mc_method)
+            sig1, self._qval = EranConv.multiple_correction(p, conf.alpha, method=self.conf.mc_method)
+            sig2, _ = EranConv.multiple_correction(p, conf.alpha2, method=self.conf.mc_method)
             neighbor = sig1 & (np.roll(sig2,1,-1)|np.roll(sig2,-1,-1))  # significant bins must have a significant-ish neighbor
             pair_inds = np.argwhere(neighbor.any(-1))
         return pair_inds
@@ -1289,20 +1217,21 @@ class EranConv:
             sig_pairs[ct]=pair_inds[inds] if inds.shape[0] else None
         return sig_pairs
     
-    def _probe_loc_mask(self,pair_inds,peak_channels,shank_ids):
-        # Condition 2: Ref/Target are not too close by
-        ignore = self.conf.ignore
+    def _probe_loc_mask(self,pair_inds,neuron_locations):
+        """
+        Filter out pairs that are too close by
+        """
+
+        # No check
+        if neuron_locations is None: return pair_inds
+
+        # Check by locations
         x,y = pair_inds[:,-2],pair_inds[:,-1]
-        if ignore.name==IgnoreLevel.SAME_CHANNEL.name:
-            assert peak_channels is not None
-            inds=np.where(peak_channels[x]!=peak_channels[y])[0]
-        elif ignore.name==IgnoreLevel.SAME_SHANK.name:
-            assert shank_ids is not None
-            inds=np.where(shank_ids[x]!=shank_ids[y])[0]
+        inds=np.where(neuron_locations[x]!=neuron_locations[y])[0]
         return pair_inds[inds]
 
     def eranconv(self, neurons_key:Key, ccg, edge_times:pd.DataFrame,
-                       peak_channels, shank_ids, neuron_type, conf:CCGConfig,):
+                       neuron_locations, neuron_type, conf:CCGConfig,):
         """
         Main function for CCG computatinon
         Call from CCGDataset
@@ -1320,7 +1249,7 @@ class EranConv:
         def build_inds(p, EI, conn_types):
             rough_inds = SetOp.intersect(self.significance_mask(p, EI), self.spkcount_mask(ccg))
             rough_inds = self._autocorr_mask(rough_inds) if _hasvalue(rough_inds) else None
-            inds = self._probe_loc_mask(rough_inds, peak_channels, shank_ids) if _hasvalue(rough_inds) else None
+            inds = self._probe_loc_mask(rough_inds, neuron_locations) if _hasvalue(rough_inds) else None
             inds = self._cell_type_mask(inds, neuron_type, conn_types) if _hasvalue(inds) else None
             return rough_inds, inds
 
@@ -1333,10 +1262,8 @@ class EranConv:
         # Force CCG to be 4D
         if ccg.ndim==3: 
             ccg = ccg[None]
-            pred = self._pred[None]
-            for attr in ("_pval_corrected",
-                         "_qval_corrected",
-                         "_qval_corrected2"):
+            pred = pred[None]
+            for attr in ("_pval","_qval",):
                 setattr(self, attr, getattr(self, attr)[None])
         
         count = np.zeros((edge_times.shape[0],len(self.conf.conn_types_flat)),dtype=int)
