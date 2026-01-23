@@ -287,37 +287,6 @@ def plot_network(self):
     pass
 
 
-def plot_connection_strengths(self,
-                              n_segments_threshold=None,
-                              norm_by_n_sess=False,
-                              norm_by_total_strength=False,
-                              zero_first_timepoint=False,
-                              show_legend=False,
-                              skips={},
-                              save=False,
-                              root='~/Documents/NeuroPy/images/conn_strengths',
-                              debug=False):
-    for k, cp in self.data.items():
-        skip_k = skips.get(k)
-        pairs = cp.filter(min_n_segment=n_segments_threshold, skips=skip_k)
-        plot_strength(
-            key=k,
-            n_segments_threshold=n_segments_threshold,
-            plot_data=self._ccg[k.nd()].conn_strengths[:, cp.ref_inds,
-                                                       cp.target_inds],
-            pairs=pairs,
-            significant=cp.connectivity_array,
-            n_segments=cp.n_segments,
-            save=save,
-            root=root,
-            norm_by_n_sess=norm_by_n_sess,
-            norm_by_total_strength=norm_by_total_strength,
-            zero_first_timepoint=zero_first_timepoint,
-            show_legend=show_legend,
-            has_skips=skip_k is not None,
-            debug=debug)
-
-
 # def plot_connection_strength(key,n_segments_total,
 #                              pairs, x_coords, plot_data, significant,
 #                              n_segments_threshold=0,
