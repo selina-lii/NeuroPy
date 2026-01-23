@@ -173,6 +173,12 @@ class AnalysisDataset(Savable):
             for k, v in inputs.items()
         })
 
+    def copy(self) -> "AnalysisDataset":
+        """Copy only conf"""
+        new = self.__class__(conf=self._conf)
+        return new
+
+
 
 class SetOp():
     @staticmethod

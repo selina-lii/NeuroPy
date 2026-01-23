@@ -221,7 +221,8 @@ class CCGConfig(Config):
                 ignore = IgnoreLevel.SAME_CHANNEL,
                 use_acceleration = True,
                 symmetrize_ccg = True,
-                normalize:NormalizeBy = NormalizeBy.NONE,
+                normalize_method:NormalizeBy = NormalizeBy.NONE,
+                conn_strength_method:ConnStrengthMethod = ConnStrengthMethod.PEAKSIZE,
                 ):
         self.name = name
 
@@ -251,7 +252,8 @@ class CCGConfig(Config):
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
-        self.normalize = normalize
+        self.normalize_method = normalize_method
+        self.conn_strength_method = conn_strength_method
 
     def __str__(self):
         s=""
@@ -513,8 +515,7 @@ class NeuronsDataset(AnalysisDataset):
 
 class CCGPointer(Savable):
     """
-    inds        [Np, 2]
-
+    A positional pointer to CCGdata locations
     """
     # TODO 4 CCG() has two modes: _optimize_memory or no optimization
     # optimized CCG stores its own CCG values while unoptimized indexes a CCGraw object, avoiding recomputation at higher memory costs
@@ -539,7 +540,7 @@ class CCGPointer(Savable):
         if type(significant)==bool:
             self._significant=np.full((self.n,),significant)
         else:
-            self.significant=significant
+            self._significant=significant
 
     def __repr__(self):
         s = str(self.key) + "\n"
@@ -576,15 +577,15 @@ class CCGPointer(Savable):
             return np.ones(self._inds.shape[:-1])
     
     @property
-    def ind2(self):
-        if self._inds.ndim==2:
+    def inds2(self):
+        if self._inds.shape[-1]==2:
             return self._inds
         else:
             return SetOp.unique(self._inds[:,-2:])
         
     @property
-    def ind3(self):
-        if self._inds.ndim==3:
+    def inds3(self):
+        if self._inds.shape[-1]==3:
             return self._inds
         else:
             x = np.arange(self.n)
@@ -651,7 +652,7 @@ class CCGPointer(Savable):
             print(f"[{x},{y}] appearing in [{', '.join(map(str, seg_inds))}]")
 
 
-@dataclass(frozen=True)
+@dataclass
 class CCGData(Savable):
     """
     Stores the whole CCG array and its p values
@@ -663,6 +664,7 @@ class CCGData(Savable):
         ccg_null    [N, Np, Nbins]
     """
     key: Key
+    _conf: CCGConfig
 
     # [n_seg, n_ref, n_tgt, n_bins]
     ccg: np.ndarray 
@@ -674,6 +676,10 @@ class CCGData(Savable):
     
     # [n_seg, n_ref, n_tgt]
     conn_strength: np.ndarray
+
+    @property
+    def conf(self):
+        return self._conf
 
     @property
     def n_segment(self):
@@ -742,12 +748,10 @@ class CCGData(Savable):
             The ROI is by default the same as the interval tested for peak/trough signficance
             Can be negative
         """
-        auc = self.ccg-self.ccg_null # area under curve
+        auc = self.ccg - self.ccg_null # area under curve
         cs = np.sum(auc[...,self.conf.min_lag_bin:self.conf.max_lag_bin],axis=-1) # (inds,)
-        if norm_factor is not None: 
-            shape=cs.shape
-            cs = cs.astype(float).reshape(shape) / norm_factor # e.g. presynaptic element firing rate
-        self.conn_strength = cs.squeeze()
+        if norm_factor is not None:  cs = cs / norm_factor # e.g. presynaptic element firing rate
+        self.conn_strength = cs
 
     def __get_conn_strength_tailed(self, nspks:list, norm_factor:np.ndarray=False):
         """
@@ -843,7 +847,7 @@ class CCGData(Savable):
             self.ccg_null = self.ccg_null.astype(float) / frates_reshape
 
     def __save_gif(self,plotdir,pts:CCGPointer,neurons:Neurons,neurons_confg:NeuronsDatasetConfig):
-        s=np.argsort(pts.ind2) #[np.random.random_integers(0,inds.shape[0]-1,5)]
+        s=np.argsort(pts.inds2) #[np.random.random_integers(0,inds.shape[0]-1,5)]
         for i,inds in enumerate(pts.indsplit):
             figs = []
             ymin,ymax=[],[]
@@ -926,90 +930,26 @@ class CCGDataset(AnalysisDataset):
     @property
     def filepath(self):
         return ''
-
-    def get_ccg(self, baseline_method="eran_conv"):
+    
+    def get_ccg(self, baseline_method="eran_conv", use_segments=True):
         """
         main function of the class
         """
         if baseline_method=="eran_conv":
-            self._ccg_eranconv()
+            conv = EranConv(self.conf)
+            for key, edge_times in self.nd.edge_times.items():
+                self.__ccg_eranconv(key=key,conv=conv,edge_times=edge_times,use_segments=use_segments)
         elif baseline_method=="jitter":
             NotImplementedError("CCG jitter must be run in the Jitter object, " \
             "since it generates a ton of extra data. Nothing is run...")
         else:
             ValueError("Unknown method")
 
-    def _ccg_eranconv(self):
-        """
-        Run CCG and generate a convolution-based baseline for all neurons in my NeuronsDataset.
-        Run significance tests.
-        Store results in objects:
-            self._ccg
-            self.data
-            self.spurious.
-
-        Params
-        -----
-        ccg_config: Parameters for CCG, contains all configurations
-        nd: Neurons dataset, contains all input data
-        """
-        print("EranConv significant pairs")
-
-
-        conv = EranConv(self.conf)
-        for key, edge_times in self.nd.edge_times.items():
-            neurons = self.nd.data[key.nd()]
-
-            ccg = correlations.spike_correlations(
-                    neurons             =neurons,
-                    neuron_inds         =np.arange(neurons.n_neurons), # all
-                    bin_size            =self.conf.bin_size,
-                    window_size         =self.conf.duration,
-                    use_acceleration    =self.conf.use_acceleration,
-                    symmetrize          =self.conf.symmetrize_ccg,
-                    edge_times          =edge_times,
-                )
-            
-            if self.conf.ignore==IgnoreLevel.SAME_CHANNEL:
-                neuron_locations = neurons.peak_channels
-            elif self.conf.ignore==IgnoreLevel.SAME_SHANK:
-                neuron_locations = neurons.shank_ids
-            else:
-                neuron_locations=None
-
-            pvals, pred, qvals, ccg_inds, spur_inds, printstr = conv.eranconv(
-                    neurons_key         =key, 
-                    ccg                 =ccg, 
-                    edge_times          =edge_times, 
-                    neuron_locations    =neuron_locations,
-                    neuron_type         =neurons.neuron_type,
-                    conf                =self.conf)
-
-            ccg_data = CCGData(key=key,
-                    ccg             =ccg,
-                    ccg_null        =pred,
-                    pval            =pvals,
-                    qval            =qvals,
-                    pval_corrected  =conv._pvals,
-                    qval_corrected  =conv._qvals,
-                    conn_strength   =None)
-            
-            self._ccg[key]=ccg_data
-            self._attr_append(key, ccg_inds, 'data')
-            self._attr_append(key, spur_inds, 'spurious')
-
-            tt=self.nd.edge_times[key]['total_time_hours'].values
-            et=self.nd.edge_times[key]['effective_time_hours'].values
-
-            s = f"======={key.session}-{key.epoch}=======\n"
-            s+=f"Segment(s) are {tt[0]:.2f}h each "
-            if self.nd.conf.sleep is not None:
-                s+=f"and contain {[f'{_:.2f}' for _ in et]} hours of actual sleep "
-            for _ in self.nd.conf.neuron_types:
-                s+=f"{_}={neurons.get_neuron_type(_).n_neurons} "
-            s+="\n"
-
-            print(s+printstr)
+    def copy(self) -> "CCGDataset":
+        """Copy only conf and nd (nd is a shallow reference)"""
+        new = self.__class__(conf=self._conf)
+        new.nd = self.nd
+        return new
 
     def merge_CCGs(self, merge_level='epoch'):
         # TODO
@@ -1023,7 +963,7 @@ class CCGDataset(AnalysisDataset):
         for key, ccg in self._ccg:
             ccg.split(level=level)
 
-    def reCCG_timescale(self,bin_size,duration=None,jscale=None):
+    def change_timescale(self,bin_size,duration=None,jscale=None)->'CCGDataset':
         """
         Run CCG and convolution based significance test for all neurons
 
@@ -1061,11 +1001,11 @@ class CCGDataset(AnalysisDataset):
     def normalize(self):
         for key, ccg in self.data.items():
             frates = self.nd.segment_firing_rates[key.nd()]
-            ccg.normalize(frates,method=self.conf.normalize)
+            ccg.normalize(frates,method=self.conf.normalize_method)
 
     def get_connection_strengths(self, method=ConnStrengthMethod.PEAKSIZE):
         """
-        Set connection_strengths value for each CCGData() object based on given method.
+        Set connection_strengths value for ccg data based on given method.
         Values can be found in self._ccg[key].conn_strengths.
         """
         for key, ccg_data in self._ccg.items():
@@ -1078,6 +1018,76 @@ class CCGDataset(AnalysisDataset):
                 ccg_data.get_conn_strength(method=method)        
             else:
                 raise NotImplementedError()
+
+    def __ccg_eranconv(self,key,conv,edge_times,use_segments=True):
+        """
+        Run CCG and generate a convolution-based baseline for all neurons in my NeuronsDataset.
+        Run significance tests.
+        Store results in objects:
+            self._ccg
+            self.data
+            self.spurious.
+
+        Params
+        -----
+        ccg_config: Parameters for CCG, contains all configurations
+        nd: Neurons dataset, contains all input data
+        """
+        print("EranConv significant pairs")
+
+        neurons = self.nd.data[key.nd()]
+
+        ccg = correlations.spike_correlations(
+                neurons             =neurons,
+                neuron_inds         =np.arange(neurons.n_neurons), # all
+                bin_size            =self.conf.bin_size,
+                window_size         =self.conf.duration,
+                use_acceleration    =self.conf.use_acceleration,
+                symmetrize          =self.conf.symmetrize_ccg,
+                edge_times          =edge_times if use_segments else None,
+            )
+        
+        if self.conf.ignore==IgnoreLevel.SAME_CHANNEL:
+            neuron_locations = neurons.peak_channels
+        elif self.conf.ignore==IgnoreLevel.SAME_SHANK:
+            neuron_locations = neurons.shank_ids
+        else:
+            neuron_locations=None
+
+        pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
+                neurons_key         =key, 
+                ccg                 =ccg, 
+                edge_times          =edge_times, 
+                neuron_locations    =neuron_locations,
+                neuron_type         =neurons.neuron_type,
+                conf                =self.conf)
+
+        ccg_data = CCGData(key=key,
+                _conf          =self.conf,
+                ccg             =ccg,
+                ccg_null        =pred,
+                pval            =pvals,
+                qval            =qvals,
+                pval_corrected  =conv._pvals,
+                qval_corrected  =conv._qvals,
+                conn_strength   =None)
+        
+        self._ccg[key]=ccg_data
+        self._attr_append(key, ccg_pointers, 'data')
+        self._attr_append(key, spur_pointers, 'spurious')
+
+        tt=edge_times.total_time_hours.values
+        et=edge_times.effective_time_hours.values
+
+        s = f"======={key.session}-{key.epoch}=======\n"
+        s+=f"Segment(s) are {tt[0]:.2f}h each "
+        if self.nd.conf.sleep is not None:
+            s+=f"and contain {[f'{_:.2f}' for _ in et]} hours of actual sleep "
+        for _ in self.nd.conf.neuron_types:
+            s+=f"{_}={neurons.get_neuron_type(_).n_neurons} "
+        s+="\n"
+
+        print(s+printstr)
 
 
 class EranConv:
@@ -1277,10 +1287,11 @@ class EranConv:
                     inds = inds_E[conn_type] if EI=='E' else inds_I[conn_type]
                     ccg_key = key.add(conn_type=conn_type, excitability=EI)
                     ccg_pointer = CCGPointer(
-                                            key=ccg_key,
-                                            conf=self.conf, 
-                                            inds=inds if _hasvalue(inds) else None, 
-                                            edge_times=edge_times
+                                key         =ccg_key,
+                                conf        =self.conf, 
+                                inds        =inds if _hasvalue(inds) else None, 
+                                edge_times  =edge_times,
+                                significant =True
                                             )
                     for i, ccg in enumerate(ccg_pointer.split()):
                         count[i,j]=ccg.n if ccg is not None else 0
@@ -1290,10 +1301,11 @@ class EranConv:
 
             spur_key = key.add(excitability=EI)
             spur_inds_by_type[spur_key] = CCGPointer(
-                                key=spur_key,
-                                conf=self.conf, 
-                                inds=spurious if _hasvalue(spurious) else None,
-                                edge_times=edge_times
+                                key         =spur_key,
+                                conf        =self.conf, 
+                                inds        =spurious if _hasvalue(spurious) else None,
+                                edge_times  =edge_times,
+                                significant =False
                                 )
         
         printstr=''
