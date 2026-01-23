@@ -509,6 +509,8 @@ class NeuronsDataset(AnalysisDataset):
                 printstr+=f"{labels[i]}"
                 printstr+="\n"
             print(printstr)
+
+
 class CCGPointer(Savable):
     """
     inds        [Np, 2]
@@ -543,7 +545,6 @@ class CCGPointer(Savable):
         s = str(self.key) + "\n"
         for i,inds in enumerate(self.inds):
             s += f"{str(inds):<15}\tIn segments {str(np.where(self.significant[i])[0]):<20}\t"
-            # if self.conn_strength is not None: s += f"strengths: {self.conn_strength[i]}"
             s += "\n"
         return s
         
@@ -701,6 +702,10 @@ class CCGData(Savable):
         else:
             return NotImplementedError("Unknown connection strength method")
 
+    @property
+    def conn_strength_change(self):
+        return self.conn_strength[-1,...]-self.conn_strength[0,...]
+    
     def normalize(self,frates,method:NormalizeBy):
         if method == NormalizeBy.REF_FRATE:
             self.__normalize(frates,ref=True)
@@ -728,11 +733,6 @@ class CCGData(Savable):
         if self.key.conn_type is None:
             return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_any"
         return f"{root}/{self.key.session}/{self.key.session}-{self.key.epoch}{self.key.segment}/{self.key.excitability}_{self.key.conn_type[0]}-{self.key.conn_type[1]}"    
-
-    @property
-    def conn_strength_change(self):
-        assert self.conn_strength is not None
-        return self.conn_strength[:,-1]-self.conn_strength[:,0]
 
     def __get_conn_strength_peaksize(self, norm_factor:np.ndarray=None):
         """
@@ -960,13 +960,6 @@ class CCGDataset(AnalysisDataset):
         for key, edge_times in self.nd.edge_times.items():
             neurons = self.nd.data[key.nd()]
 
-            if self.conf.ignore==IgnoreLevel.SAME_CHANNEL:
-                neuron_locations = neurons.peak_channels
-            if self.conf.ignore==IgnoreLevel.SAME_SHANK:
-                neuron_locations = neurons.shank_ids
-            else:
-                neuron_locations=None
-
             ccg = correlations.spike_correlations(
                     neurons             =neurons,
                     neuron_inds         =np.arange(neurons.n_neurons), # all
@@ -977,6 +970,12 @@ class CCGDataset(AnalysisDataset):
                     edge_times          =edge_times,
                 )
             
+            if self.conf.ignore==IgnoreLevel.SAME_CHANNEL:
+                neuron_locations = neurons.peak_channels
+            elif self.conf.ignore==IgnoreLevel.SAME_SHANK:
+                neuron_locations = neurons.shank_ids
+            else:
+                neuron_locations=None
 
             pvals, pred, qvals, ccg_inds, spur_inds, printstr = conv.eranconv(
                     neurons_key         =key, 
@@ -1164,7 +1163,7 @@ class EranConv:
         return pvals, pred, qvals
     
     @staticmethod
-    def multiple_correction(pvals,alpha,method='bonferroni'): # correct for number of bins
+    def multiple_correction(pvals,alpha,method='fdr_bh'): # correct for number of bins
         """
         example methods: fdr_bh, bonferroni
         See statsmodels.stats.multitest.multipletests for more.
@@ -1377,4 +1376,5 @@ def routine_eranconv_connection_info(info, nd:NeuronsDataset, cd:CCGDataset, epo
                 overview_str += f"|| {typename:>15} || {sig:>5} | {mean:5.2f} | {std:5.2f} | {meanN0:5.2f} | {stdN0:5.2f} || {tEI:>5} | {pEI:5.2f} || {tConn:>5} | {pConn:5.2f} || \n"
     print(overview_str)
     return results
+
 
