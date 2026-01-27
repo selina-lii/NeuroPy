@@ -74,10 +74,11 @@ def plot_ccg_figure(ccg,
                     discarded_channels=None,
                     show=True,
                     save=False,
-                    plotdir=None,
+                    save_path=None,
                     waveform_plot_type="channel",
-                    segment_id=None):
+                    segment_id=None,):
     """Full figure: CCG + 2 waveforms"""
+
     if waveform_plot_type == 'channel':
         fig, axs = plt.subplots(1,
                                 2,
@@ -138,10 +139,12 @@ def plot_ccg_figure(ccg,
         sns.despine(ax=axs[1])
 
     fig.tight_layout()
-    if save and plotdir:
-        fig.savefig(f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.png")
-        assert os.path.exists(f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.png"
-                             )  #TODO why do we need this?
+    if save:
+        try:
+            fig.savefig(save_path)
+            assert os.path.exists(save_path)  #TODO why do we need this?
+        except:
+            print(f"failed to save to {save_path}")
         plt.close(fig)
     if show:
         plt.show()

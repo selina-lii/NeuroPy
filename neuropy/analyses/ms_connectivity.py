@@ -817,7 +817,8 @@ class CCGData(Savable):
                    neurons_config: NeuronsDatasetConfig,
                    frates_cut:np.ndarray,
                    plotdir:str,
-                   split_all_plots=False):
+                   split_all_plots=False,
+                   overwrite=False):
         
         if not os.path.exists(plotdir):
             os.makedirs(plotdir, exist_ok=True)
@@ -827,7 +828,9 @@ class CCGData(Savable):
                             pt=pt,
                             neurons=neurons,
                             neurons_config=neurons_config,
-                            frates_cut=frates_cut,)
+                            frates_cut=frates_cut,
+                            overwrite=overwrite,
+                            )
         else:
             self.__save_img()
 
@@ -957,8 +960,14 @@ class CCGData(Savable):
             self.ccg_null = self.ccg_null.astype(float) / frates_reshape
 
     def __save_gif(self, plotdir, pt: CCGPointer, neurons: Neurons,
-                   neurons_config: NeuronsDatasetConfig,frates_cut:np.ndarray):
+                   neurons_config: NeuronsDatasetConfig,frates_cut:np.ndarray,
+                   overwrite=False):
         for i, inds in enumerate(pt.inds2):
+            save_path = f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.gif"
+            if not overwrite and os.path.exists(save_path): 
+                print(f"{save_path} already exists")
+                continue
+
             figs = []
             ymin, ymax = [], []
             print(i, inds)
@@ -970,12 +979,11 @@ class CCGData(Savable):
                     neuron_types=neurons.neuron_type[inds],
                     frates_cut=frates_cut[i_seg][inds],
                     frates_all=neurons.firing_rate[inds],
-                    waveforms=neurons.waveforms[inds]
-                    if neurons.waveforms is not None else None,
+                    waveforms=neurons.waveforms[inds],
                     shank_ids=neurons.shank_ids[inds],
                     discarded_channels=neurons_config.recinfo.skipped_channels,
                     ch_per_shank=neurons_config.ch_per_shank,
-                    plotdir=plotdir,
+                    save_path=None,
                     window_size=self.conf.duration * 1e3,
                     bin_size=self.conf.bin_size * 1e3,
                     ccg=self.ccg[loc],
@@ -984,7 +992,8 @@ class CCGData(Savable):
                     is_significant_pair=self.significant[loc] if self.significant is not None else None,
                     show=False,
                     save=False,
-                    segment_id=i_seg)
+                    segment_id=i_seg,
+                    )
                 _ymin, _ymax = fig.axes[0].get_ylim()
                 ymin.append(_ymin)
                 ymax.append(_ymax)
@@ -997,7 +1006,7 @@ class CCGData(Savable):
                 fig.canvas.draw_idle()
                 frames.append(np.array(fig.canvas.renderer.buffer_rgba()))
                 plt.close(fig)
-            imageio.mimsave(f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.gif",
+            imageio.mimsave(save_path,
                             frames,
                             duration=0.5)
 
@@ -1106,6 +1115,7 @@ class CCGDataset(AnalysisDataset):
     def save_plots(self,
                    root="~/Documents/NeuroPy/images/ccg_plots_tmp",
                    source='data',
+                   overwrite=False,
                    **filters):
         root = os.path.expanduser(root)
         assert os.path.isdir(root)
@@ -1128,6 +1138,7 @@ class CCGDataset(AnalysisDataset):
                 frates_cut=self.nd.segment_firing_rates[key.nd()],
                 neurons_config=self.nd.conf,
                 plotdir=ccg_pointer.plotdir(root),
+                overwrite=overwrite,
             )
         print("done")
 
