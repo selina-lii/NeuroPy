@@ -3,8 +3,6 @@ import matplotlib.pyplot as plt
 import os
 import neuropy.plotting.probe as probe
 import numpy as np
-from neuropy.analyses.ms_connectivity import CCGPointer
-
 
 def plot_ccg_panel(ax,
                    ccg,
@@ -15,7 +13,9 @@ def plot_ccg_panel(ax,
                    pval=None,
                    ccg_null=None,
                    j_sig=None,
-                   segment_id=None):
+                   segment_id=None,
+                   is_significant_pair=None,
+                   neuron_type=None):
     """Single CCG plot into provided axis"""
     bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
 
@@ -47,7 +47,9 @@ def plot_ccg_panel(ax,
     ax.set_ylabel("Count")
     X, Y = ids
     x, y = inds
-    ax.set_title(f"CCG{segment_id}, neuron_ids=[{X},{Y}], indices=[{x},{y}]")
+    sig_marker = '' if is_significant_pair else '*'
+    type_str = f', type={neuron_type}' if neuron_type is not None else ''
+    ax.set_title(f"CCG{segment_id}, neuron_ids=[{X},{Y}], indices=[{x},{y}]{type_str}{sig_marker}")
     ax.legend()
     sns.despine(ax=ax)
     sns.despine(ax=ax2)
@@ -63,6 +65,7 @@ def plot_ccg_figure(ccg,
                     pval=None,
                     ccg_null=None,
                     j_sig=None,
+                    is_significant_pair=None,
                     shank_ids=None,
                     frates_all=None,
                     frates_cut=None,
@@ -89,7 +92,7 @@ def plot_ccg_figure(ccg,
     # labels = ['ref', 'target']
 
     plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval,
-                   ccg_null, j_sig, segment_id)
+                   ccg_null, j_sig, segment_id, is_significant_pair,neuron_types)
     if waveform_plot_type == 'channel' and shank_ids is not None:
 
         def get_filled_waveforms(shank_id, wf):
@@ -143,31 +146,6 @@ def plot_ccg_figure(ccg,
     if show:
         plt.show()
         plt.close(fig)
-    return fig
-
-
-def plot_ccg_only(ccg,
-                  ids,
-                  inds,
-                  window_size,
-                  bin_size,
-                  pval=None,
-                  ccg_null=None,
-                  j_sig=None,
-                  show=True,
-                  save=False,
-                  plotdir=None):
-    """Save only the CCG plot without waveforms"""
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    plot_ccg_panel(ax, ccg, ids, inds, window_size, bin_size, pval, ccg_null,
-                   j_sig)
-
-    fig.tight_layout()
-    if save and plotdir:
-        fig.savefig(f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.png")
-    if show:
-        plt.show()
-    plt.close(fig)
     return fig
 
 
