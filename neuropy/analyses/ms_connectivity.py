@@ -41,11 +41,6 @@ class IgnoreLevel(ConfigOption):
     SAME_SHANK = 2
 
 
-class MultipleCorrection(ConfigOption):
-    FDR_BH = 'fdr_bh'
-    BONFERRONI = 'bonferroni'
-
-
 class NormalizeBy(ConfigOption):
     """Config for CCG and other analysis
     Do we ignore neurons on the same peak channel / shank?"""
@@ -1489,31 +1484,26 @@ class EranConv:
     @staticmethod
     def multiple_correction(
             pvals,
-            alpha,
-            method=MultipleCorrection.FDR_BH):  # correct for number of bins
+            alpha):  # correct for number of bins
         """
-        example methods: fdr_bh, bonferroni
-        See statsmodels.stats.multitest.multipletests for more.
-        """
-        if method is None:
-            return pvals <= alpha, pvals
-        
-        # TODO hierarchical FDR simes
+        Hierarchical FDR as described in https://doi.org/10.1093/biomet/asaa086, 4.1
+        Also see statsmodels.stats.multitest.multipletests.
+        """        
         def simes_1d(p):
-            p = p[np.isfinite(p)]
-            if p.size == 0:
-                return np.nan
-            s = np.argsort(p)
-            m = p.size
-            return s, m * p[s] / np.arange(1, m + 1)
+            return np.min(p.size * np.sort(p) / np.arange(1, p.size + 1))
 
-        sort_idxs, pc = np.apply_along_axis(simes_1d, axis=-1, arr=pvals)
-        pair_p = np.min(pc,axis=-1)
-        s = pair_p.shape
-        # BH across pairs (all conditions together OR separately — choose one)
-        significance, pair_pc, _, _ = multipletests(pair_p.ravel(), alpha, 'fdr_bh')
-        
-        return significance.reshape(s), pair_pc.reshape(s)
+        p0 = np.apply_along_axis(simes_1d, axis=-1, arr=pvals)
+        s0, pc0, _, _ = multipletests(p0.ravel(), alpha, method='fdr_bh')
+        s0 = s0.reshape(p0.shape)
+        pc0 = pc0.reshape(p0.shape)
+
+        alpha1 = np.sum(s0)/ np.prod(p0.shape)
+        p1 = pvals
+        pc1=np.full_like(p1,fill_value=np.nan)
+        s1=np.full_like(p1,fill_value=np.nan)
+        s1[s0], pc1[s0] = np.apply_along_axis(multipletests,axis=-1,arr=p1[s0],\
+                                     alpha=alpha1,method='fdr_bh')
+        return s1, pc1
 
     def spkcount_mask(self, ccg):
         min_bin = self.conf.min_spkcnt_bin
