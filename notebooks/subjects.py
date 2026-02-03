@@ -682,6 +682,19 @@ class Group:
 
 # open field
 class Of(Group):
+    tag = "OF"
+
+    @property
+    def allsess(self):
+        pipelines: List[ProcessData]
+        pipelines = (
+            self.ratJday4
+            + self.ratKday4
+            + self.ratNday4
+            + self.ratUday5
+        )
+        return pipelines
+
     @property
     def ratJday4(self):
         return self._process("RatJ/Day4/")
@@ -795,8 +808,6 @@ class Sd(Group):
                 self.ratSday3re + self.ratUday1re + self.ratUday4re + self.ratVday2re + self.ratRday2re
         )
         return pipelines
-
-
 
     @property
     def handling_data_sess(self):

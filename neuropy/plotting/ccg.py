@@ -3,107 +3,192 @@ import matplotlib.pyplot as plt
 import os
 import neuropy.plotting.probe as probe
 import numpy as np
+import warnings
 
-def plot_ccg_panel(ax,
-                   ccg,
-                   ids,
-                   inds,
-                   window_size,
-                   bin_size,
-                   pval=None,
-                   ccg_null=None,
-                   j_sig=None,
-                   segment_id=None,
-                   is_significant_pair=None,
-                   neuron_type=None):
+
+def plot_ccg_panel(
+    ax,
+    ccg,
+    ids,
+    inds,
+    window_size,
+    bin_size,
+    pval=None,
+    pval_corrected=None,
+    alpha=None,
+    ccg_null=None,
+    j_sig=None,
+    segment_id=None,
+    is_significant_pair=None,
+    neuron_type=None,
+    normalize_info=None,
+    grayscale=False,
+):
     """Single CCG plot into provided axis"""
-    bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
 
-    ax.bar(bins, ccg, width=bin_size, alpha=0.5, label="ccg")
-    if ccg_null is not None:
-        ax.bar(bins, ccg_null, width=bin_size, alpha=0.5, label="ccg-smooth")
+        bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
 
-    ax2 = ax.twinx()
-    ylim = ax.get_ylim()[1] * 0.8
-    if pval is not None:
-        ax2.plot(bins,
-                 pval / pval.max() * ylim,
-                 label='p',
-                 alpha=0.3,
-                 color='gray')
-    if j_sig is not None:
-        ax2.plot(bins, j_sig / j_sig.max() * ylim, label='j-significance')
-    # Set ticks to pval values on a correct scale
-    ticks_scaled = np.linspace(0, ylim,
-                               len(ax.get_yticks()))  # positions in scaled axis
-    ticks_original = np.round(
-        ticks_scaled / ylim * pval.max(), 2
-    )  #TODO sometimes p val looks weird, is it a problem w p val calculation?
-    ax2.set_yticks(ticks_scaled)
-    ax2.set_yticklabels(ticks_original)
-    ax2.set_ylabel("p-value")
+        if grayscale:
+            dark_gray = (0.2, 0.2, 0.2)
+            light_gray = (0.8, 0.8, 0.8)
+            colors = [dark_gray, light_gray]
+        else:
+            colors = plt.rcParams["axes.prop_cycle"].by_key()["color"][:2]
 
-    ax.set_xlabel("Time (ms)")
-    ax.set_ylabel("Count")
-    X, Y = ids
-    x, y = inds
-    sig_marker = '' if is_significant_pair else '*'
-    type_str = f', type={neuron_type}' if neuron_type is not None else ''
-    ax.set_title(f"CCG{segment_id}, neuron_ids=[{X},{Y}], indices=[{x},{y}]{type_str}{sig_marker}")
-    ax.legend()
-    sns.despine(ax=ax)
-    sns.despine(ax=ax2)
+        ax.bar(bins,
+               ccg,
+               width=bin_size,
+               alpha=0.5,
+               label="ccg",
+               color=colors[0])
+        if ccg_null is not None:
+            ax.bar(bins,
+                   ccg_null,
+                   width=bin_size,
+                   alpha=0.5,
+                   label="ccg-smooth",
+                   color=colors[1])
+
+        ax.set_xlabel("Time (ms)")
+        ylabel = "Count"
+        if normalize_info is not None:
+            ylabel = "Count " + normalize_info
+        ax.set_ylabel(ylabel)
+
+        sig_marker = '' if is_significant_pair else '*'
+        type_str = f', type={neuron_type}' if neuron_type is not None else ''
+        if normalize_info is None:
+            ax.set_title(
+                f"{segment_id}: ids={ids}, inds={inds}{type_str}{sig_marker}")
+        ax.legend(fontsize=8)
+        sns.despine(ax=ax)
+
+        ax2 = ax.twinx()
+        ax2.set_ylim(0, 1)
+        ticks_scaled = np.linspace(0, 1, 21)
+        ticks_original = np.round(ticks_scaled, 2)
+        ax2.set_yticks(ticks_scaled)
+        ax2.set_yticklabels(ticks_original, fontsize=8)
+        ax2.set_ylabel("p-value")
+
+        if pval is not None:
+            ax2.plot(bins, pval, label='p', alpha=0.3, color='gray')
+        if j_sig is not None:
+            ax2.plot(bins, j_sig, label='jitter sig', color='brown')
+            # Set ticks to pval values on a correct scale
+        if pval_corrected is not None:
+            ax2.plot(bins,
+                     pval_corrected,
+                     label='corrected p',
+                     alpha=0.2,
+                     color='green')
+        if alpha is not None:
+            ax2.axhline(alpha,
+                        label='alpha',
+                        alpha=0.1,
+                        color='red',
+                        linestyle='--')
+        ax2.legend(fontsize=8)
+        sns.despine(ax=ax2)
 
 
-def plot_ccg_figure(ccg,
-                    ids,
-                    inds,
-                    neuron_types,
-                    waveforms,
-                    window_size,
-                    bin_size,
-                    pval=None,
-                    ccg_null=None,
-                    j_sig=None,
-                    is_significant_pair=None,
-                    shank_ids=None,
-                    frates_all=None,
-                    frates_cut=None,
-                    n_shanks=None,
-                    ch_per_shank=None,
-                    discarded_channels=None,
-                    show=True,
-                    save=False,
-                    save_path=None,
-                    waveform_plot_type="channel",
-                    segment_id=None,):
-    """Full figure: CCG + 2 waveforms"""
+def plot_ccg_figure(
+    ccg: np.ndarray,
+    ids: np.ndarray,
+    inds: np.ndarray,
+    neuron_types: np.ndarray,
+    waveforms: np.ndarray,
+    window_size: float,
+    bin_size: float,
+    pval: np.ndarray = None,
+    pval_corrected: np.ndarray = None,
+    alpha: float = None,
+    ccg_null: np.ndarray = None,
+    j_sig: np.ndarray = None,
+    is_significant_pair: bool = None,
+    shank_ids: tuple = None,
+    frates_all: tuple = None,
+    frates_cut: tuple = None,
+    n_shanks: int = None,
+    ch_per_shank: int = None,
+    discarded_channels: np.ndarray = None,
+    show: bool = True,
+    save: bool = False,
+    save_path: str = None,
+    waveform_plot_type="probe",  # or "all_channels"
+    segment_id: int = None,
+    normalize_info: str = None,
+    overlay_normalized: bool = False,
+    normalized_ccg: np.ndarray = None,
+    normalized_ccg_null: np.ndarray = None,
+):
+    """Full figure: CCG (1 or 2 panels) +  waveforms (1 or 2 panels depending on format)"""
+    width_ratios = [2, 1] if not overlay_normalized else [2, 2, 1]
+    if waveform_plot_type == 'all_channels':
+        width_ratios += [1]
 
-    if waveform_plot_type == 'channel':
-        fig, axs = plt.subplots(1,
-                                2,
-                                figsize=(8, 5),
-                                gridspec_kw={'width_ratios': [2, 1]})
-    else:
-        fig, axs = plt.subplots(1,
-                                3,
-                                figsize=(10, 5),
-                                gridspec_kw={'width_ratios': [2, 1, 1]})
+    fig, axs = plt.subplots(1,
+                            len(width_ratios),
+                            figsize=(np.round(np.sum(width_ratios) * 2.5), 5),
+                            gridspec_kw={'width_ratios': width_ratios})
 
-    # labels = ['ref', 'target']
+    current_ax = 0
+    plot_ccg_panel(
+        ax=axs[current_ax],
+        ccg=ccg,
+        ids=ids,
+        inds=inds,
+        window_size=window_size,
+        bin_size=bin_size,
+        pval=pval,
+        pval_corrected=pval_corrected,
+        alpha=alpha,
+        ccg_null=ccg_null,
+        j_sig=j_sig,
+        segment_id=segment_id,
+        is_significant_pair=is_significant_pair,
+        neuron_type=neuron_types,
+        normalize_info=None,
+        grayscale=False,
+    )
+    current_ax += 1
 
-    plot_ccg_panel(axs[0], ccg, ids, inds, window_size, bin_size, pval,
-                   ccg_null, j_sig, segment_id, is_significant_pair,neuron_types)
-    if waveform_plot_type == 'channel' and shank_ids is not None:
+    if overlay_normalized:
+        plot_ccg_panel(
+            ax=axs[current_ax],
+            ccg=normalized_ccg,
+            ids=ids,
+            inds=inds,
+            window_size=window_size,
+            bin_size=bin_size,
+            pval=None,
+            pval_corrected=None,
+            alpha=None,
+            ccg_null=normalized_ccg_null,
+            j_sig=None,
+            segment_id=segment_id,
+            is_significant_pair=is_significant_pair,
+            neuron_type=neuron_types,
+            normalize_info=normalize_info,
+            grayscale=True,
+        )
+        current_ax += 1
+
+    if waveform_plot_type == 'probe' and shank_ids is not None:
 
         def get_filled_waveforms(shank_id, wf):
-            channel_ids = ch_per_shank * shank_id + np.arange(ch_per_shank)
-            mask = ~np.isin(channel_ids, discarded_channels)
-            start = ch_per_shank * shank_id - np.sum(discarded_channels < 16 *
-                                                     shank_id)
-            length = np.sum(mask, axis=0)
-            clean = np.full((ch_per_shank, wf.shape[-1]), np.nan)
-            clean[mask] = wf[start:start + length]
+            if wf.ndim==1:
+                clean=np.tile(wf,(ch_per_shank,1))
+            else:
+                channel_ids = ch_per_shank * shank_id + np.arange(ch_per_shank)
+                mask = ~np.isin(channel_ids, discarded_channels)
+                start = ch_per_shank * shank_id - np.sum(discarded_channels < 16 *
+                                                        shank_id)
+                length = np.sum(mask, axis=0)
+                clean = np.full((ch_per_shank, wf.shape[-1]), np.nan)
+                clean[mask] = wf[start:start + length]
             return clean
 
         ref_waveform = get_filled_waveforms(shank_ids[0], waveforms[0])
@@ -113,21 +198,21 @@ def plot_ccg_figure(ccg,
         if frates_all is not None:
             xlabel += f"ref {frates_all[0]:.2f}Hz | tgt {frates_all[1]:.2f} all \n"
         if frates_cut is not None:
-            xlabel += f"ref {frates_cut[0]:.2f}Hz | tgt {frates_cut[1]:.2f} cut "
-        axs[1] = probe.plot_waveform_on_channel(
+            xlabel += f"ref {frates_cut[0]:.2f}Hz | tgt {frates_cut[1]:.2f} cut \n"
+        axs[current_ax] = probe.plot_waveform_on_channel(
             ref_waveform,
             shank_ids[0],
             tgt_waveform,
             shank_ids[1],
             footnote=xlabel,
             amplitude_limit=True,
-            ax=axs[1],
+            ax=axs[current_ax],
             color='green' if shank_ids[0] != shank_ids[1] else 'orange')
-        sns.despine(ax=axs[1])
+        sns.despine(ax=axs[current_ax])
     else:
         for i in range(2):
-            axs[1 + i] = probe.plot_waveform(
-                axs[1 + i],
+            axs[current_ax + i] = probe.plot_waveform(
+                axs[current_ax + i],
                 waveforms[i],
                 neuron_types[i],
                 ids[i],
@@ -136,7 +221,7 @@ def plot_ccg_figure(ccg,
                 n_shanks=n_shanks,
                 ch_per_shank=ch_per_shank,
                 discarded_channels=discarded_channels)
-        sns.despine(ax=axs[1])
+        sns.despine(ax=axs[current_ax + i])
 
     fig.tight_layout()
     if save:

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, replace
 from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
 from collections import defaultdict
 import hickle as hkl
+import os
 
 
 def _san(var, wrap_none=False):
@@ -16,23 +17,99 @@ def _san(var, wrap_none=False):
     return var
 
 
-class Savable():
+def _san_np(var, wrap_none=False):
+    """
+    Sanitize array
+    """
+    if var is None:
+        return np.array(None) if wrap_none else None
+    if not isinstance(var, np.ndarray):
+        return np.ndarray(var)
+    return var
+
+
+def _hasvalue(x):
+    """
+    Determine if a size-able object is empty
+    """
+    return x is not None and x.size > 0
+
+
+class Savable:
+
+    def __init__(self, ignored_attrs: list = []):
+        self._ignored_attrs = ignored_attrs
+
+    def __getstate__(self):
+        return {
+            k: v
+            for k, v in self.__dict__.items()
+            if k not in self._ignored_attrs
+        }
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
     def save_path(self, **kwargs):
-        return "./tmp.h5"
+        return "./tmp"
 
-    def save(self, path: str = None):
-        hkl.dump(self.__dict__, path or self.save_path())
+    def save(self,
+             path: str = None,
+             ignored_attrs: list = [],
+             split_into_chunks=False,
+             chunk_size_MB: int = 20):
+        self._ignored_attrs = _san(ignored_attrs)
+        p = (path or self.save_path()) + '.hkl'
+
+        if not split_into_chunks:
+            hkl.dump(self, p)
+        else:
+            chunk_size = chunk_size_MB * 1024 * 1024
+            folder = p
+            folder = p if os.path.isdir(p) else p + "_files"
+            os.makedirs(folder, exist_ok=True)
+            file = os.path.join(folder, "temp.hkl")
+
+            hkl.dump(self, file)
+
+            with open(file, "rb") as f:
+                i = 0
+                while chunk := f.read(chunk_size):
+                    with open(os.path.join(folder, f"part{i}"), "wb") as out:
+                        out.write(chunk)
+                    i += 1
+            os.remove(file)
 
     def load(self, path: str = None):
+        p = (path or self.save_path()) + '.hkl'
+        splitted = False
+        if not os.path.exists(p):
+            splitted = True
+            folder = p if os.path.isdir(p) else p + "_files"
+            file = os.path.join(folder, "recombined.hkl")
+
+            with open(file, "wb") as out:
+                i = 0
+                while True:
+                    part_file = os.path.join(folder, f"part{i}")
+                    if not os.path.exists(part_file):
+                        break
+                    with open(part_file, "rb") as part:
+                        out.write(part.read())
+                    i += 1
+
+        # Load object from combined file
         try:
-            self.__dict__.clear()
-            self.__dict__.update(hkl.load(path or self.save_path()))
+            obj = hkl.load(file)
+            for k, v in obj.__dict__.items():
+                setattr(self, k, v)
         except Exception as e:
             print(f"Failed to load {self.__class__} object: {e}")
+        finally:
+            if splitted:
+                os.remove(file)
 
 
-@dataclass(frozen=True)
 class Config(Savable):
 
     def __str__(self):
@@ -129,18 +206,22 @@ class AnalysisDataset(Savable):
     """
 
     def __init__(self, conf=None):
+        super().__init__()
         self.data: Dict[K, Any] = {}
         self._conf = conf
 
     def __len__(self):
         return len(self.data)
 
-    def example(self, field=None) -> Any:
+    def example(self, field=None, i=None) -> Any:
         """Get an example from data or another field"""
-        if field:
-            item = next(iter(self.__dict__[field].keys()))
-            return self.__dict__[field].get(item, None)
-        return self.data.get(next(iter(self.data.keys())), None)
+        var = self.__dict__[field] if field else self.data
+        if i:
+            try:
+                return var[list(var.keys())[i]]
+            except:
+                return None
+        return var.get(next(iter(var.keys())), None)
 
     def filter(self, attrname='data', **filters) -> Dict[K, Any]:
         """

@@ -189,11 +189,11 @@ def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_
     for ch in range(n_channels_per_side*2):
         y_center = tip_length + (n_channels_per_side*2 - ch-2) * interchannel_y + eletrode_size_y / 2
         ax.text(-shank_width-wavewidth-15, y_center, str(ch + 1), ha="center", va="center", fontsize=14)
-    ax.text(-shank_width-wavewidth-15, vertical_eletrode_span-10, f"shank#\nch#", ha="center", va="center", fontsize=10)
+    ax.text(-shank_width-wavewidth-15, vertical_eletrode_span+10, f"shank#\nch#", ha="center", va="center", fontsize=10)
     ax.text(0, vertical_eletrode_span-5, f"{str(f'{ref_shank:02d}'):{wavewidth/4}s}ref", ha="center", va="center", fontsize=12)
     if target_shank is not None: 
         ax.text(0, vertical_eletrode_span-5, f"{str(f'{target_shank:02d}'):{wavewidth/2}s}tgt", ha="center", va="center", fontsize=12)
-    ax.text(-shank_width-wavewidth-15,-interchannel_y,footnote,fontsize=12)
+    ax.text(-shank_width-wavewidth-15,-interchannel_y-30,footnote,fontsize=10)
 
     # Set limits and aspect
     ax.set_xlim(-shank_width-wavewidth, shank_width+wavewidth)
