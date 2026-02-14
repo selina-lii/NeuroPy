@@ -179,13 +179,13 @@ def plot_ccg_figure(
     if waveform_plot_type == 'probe' and shank_ids is not None:
 
         def get_filled_waveforms(shank_id, wf):
-            if wf.ndim==1:
-                clean=np.tile(wf,(ch_per_shank,1))
+            if wf.ndim == 1:
+                clean = np.tile(wf, (ch_per_shank, 1))
             else:
                 channel_ids = ch_per_shank * shank_id + np.arange(ch_per_shank)
                 mask = ~np.isin(channel_ids, discarded_channels)
-                start = ch_per_shank * shank_id - np.sum(discarded_channels < 16 *
-                                                        shank_id)
+                start = ch_per_shank * shank_id - np.sum(
+                    discarded_channels < 16 * shank_id)
                 length = np.sum(mask, axis=0)
                 clean = np.full((ch_per_shank, wf.shape[-1]), np.nan)
                 clean[mask] = wf[start:start + length]

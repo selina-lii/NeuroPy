@@ -1033,7 +1033,7 @@ class CCGData(Savable):
         if pt.inds is None:
             print(f"nothing to plot: {pt}")
             return
-        
+
         if overlay_normalized:
             normalized_ccg = self.ccg.astype(float)
             normalized_ccg_null = self.ccg_null.astype(float)
@@ -1088,7 +1088,7 @@ class CCGData(Savable):
                     normalized_ccg_null=normalized_ccg_null[loc]
                     if overlay_normalized else None,
                 )
-                figs.append(fig) 
+                figs.append(fig)
                 _ymin, _ymax = fig.axes[0].get_ylim()
                 ymin.append(_ymin)
                 ymax.append(_ymax)
@@ -1097,7 +1097,7 @@ class CCGData(Savable):
                     ymin2.append(_ymin)
                     ymax2.append(_ymax)
             ymin, ymax = min(ymin), max(ymax)
-            if overlay_normalized: 
+            if overlay_normalized:
                 ymin2, ymax2 = min(ymin2), max(ymax2)
             frames = []
             for fig in figs:
@@ -1386,7 +1386,7 @@ class CCGDataset(AnalysisDataset):
         et = edge_times.effective_time_hours.values
 
         s = f"======={key.session}=======\n"
-        s += f"Segment(s) are {[f'{_:.2f}' for _ in et]} hours long"
+        s += f"Segment(s) are {[f'{_:.2f}' for _ in et]} hours long "
         if self.nd.conf.sleep is not None:
             s += f"\nand contain {[f'{_:.2f}' for _ in et]} hours of actual sleep "
         for _ in self.nd.conf.neuron_types:
@@ -1482,27 +1482,35 @@ class EranConv:
         return pvals, pred, qvals
 
     @staticmethod
-    def multiple_correction(
-            pvals,
-            alpha):  # correct for number of bins
+    def multiple_correction(pvals, alpha):  # correct for number of bins
         """
         Hierarchical FDR as described in https://doi.org/10.1093/biomet/asaa086, 4.1
         Also see statsmodels.stats.multitest.multipletests.
-        """        
+        """
+
         def simes_1d(p):
             return np.min(p.size * np.sort(p) / np.arange(1, p.size + 1))
 
-        p0 = np.apply_along_axis(simes_1d, axis=-1, arr=pvals)
-        s0, pc0, _, _ = multipletests(p0.ravel(), alpha, method='fdr_bh')
-        s0 = s0.reshape(p0.shape)
-        pc0 = pc0.reshape(p0.shape)
+        def multipletests_wrapper(pvals):
+            reject, pvals_corrected, _, _ = multipletests(pvals, alpha=alpha1, method='fdr_bh')
+            return reject, pvals_corrected
 
-        alpha1 = np.sum(s0)/ np.prod(p0.shape)
-        p1 = pvals
-        pc1=np.full_like(p1,fill_value=np.nan)
-        s1=np.full_like(p1,fill_value=np.nan)
-        s1[s0], pc1[s0] = np.apply_along_axis(multipletests,axis=-1,arr=p1[s0],\
-                                     alpha=alpha1,method='fdr_bh')
+        mask = ~np.eye(pvals.shape[1]).astype(bool)
+        mask_locs = np.where(mask)
+        
+        pc1 = np.full_like(pvals, fill_value=np.nan)
+        s1 = np.full_like(pvals, fill_value=np.nan)
+
+        for i, p1 in enumerate(pvals):
+            p1 = p1[mask]
+            p0 = np.apply_along_axis(simes_1d, axis=-1, arr=p1)
+            s0, pc0, _, _ = multipletests(p0, alpha, method='fdr_bh')
+            alpha1 = alpha* np.sum(s0) / np.prod(p0.shape)
+            result = np.apply_along_axis(multipletests_wrapper,\
+                                        axis=-1,arr=p1[s0])
+            rows,cols=mask_locs[0][s0],mask_locs[1][s0]
+            s1[i,rows,cols]=result[:,0]
+            pc1[i,rows,cols]=result[:,1]
         return s1, pc1
 
     def spkcount_mask(self, ccg):
@@ -1517,10 +1525,9 @@ class EranConv:
     def significance_mask(self, p, excitability):
         conf = self.conf
         if excitability == 'E':
-            sig, self._pvals = EranConv.multiple_correction(
-                p, conf.alpha, method=self.conf.mc_method)
-            has_valid_peak = sig[...,
-                                 conf.min_lag_bin:conf.max_lag_bin].any(axis=-1)
+            sig, self._pvals = EranConv.multiple_correction(p, conf.alpha)
+            has_valid_peak = np.isfinite(sig[...,
+                                 conf.min_lag_bin:conf.max_lag_bin]).any(axis=-1)
             # sig2, _ = EranConv.multiple_correction(p,
             #                                        conf.alpha2,
             #                                        method=self.conf.mc_method)
@@ -1528,14 +1535,10 @@ class EranConv:
             #     ..., conf.max_lag_bin:].any(-1)
             pair_inds = np.argwhere(has_valid_peak)  # & ~has_bad_peak)
         elif excitability == 'I':
-            sig1, self._qvals = EranConv.multiple_correction(
-                p, conf.alpha, method=self.conf.mc_method)
-            sig2, _ = EranConv.multiple_correction(p,
-                                                   conf.alpha2,
-                                                   method=self.conf.mc_method)
-            neighbor = sig1 & (
-                np.roll(sig2, 1, -1) | np.roll(sig2, -1, -1)
-            )  # significant bins must have a significant-ish neighbor
+            sig1, self._qvals = EranConv.multiple_correction(p, conf.alpha)
+            sig2, _ = EranConv.multiple_correction(p, conf.alpha2)
+            neighbor = np.isfinite(sig1) & (np.isfinite(np.roll(sig2, 1, -1)) | np.isfinite(np.roll(sig2, -1, -1)))
+             # significant bins must have a significant-ish neighbor
             pair_inds = np.argwhere(neighbor.any(-1))
         return pair_inds
 

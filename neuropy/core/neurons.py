@@ -398,7 +398,7 @@ class Neurons(DataWriter):
                     merged.append([s, e])
                 else:
                     merged[-1][1] = max(merged[-1][1], e)
-            return intervals
+            return np.array(merged)
 
         # remove out of range intervals
         intervals=_merge_intervals(intervals)
