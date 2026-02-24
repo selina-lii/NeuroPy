@@ -23,6 +23,8 @@ def plot_ccg_panel(
     neuron_type=None,
     normalize_info=None,
     grayscale=False,
+    min_lag=None,
+    max_lag=None,
 ):
     """Single CCG plot into provided axis"""
     with warnings.catch_warnings():
@@ -51,13 +53,16 @@ def plot_ccg_panel(
                    label="ccg-smooth",
                    color=colors[1])
 
+        if min_lag is not None and max_lag is not None:
+            ax.axvspan(min_lag-bin_size/2, max_lag-bin_size/2, alpha=0.12, color='green', label='test window')
+
         ax.set_xlabel("Time (ms)")
         ylabel = "Count"
         if normalize_info is not None:
             ylabel = "Count " + normalize_info
         ax.set_ylabel(ylabel)
 
-        sig_marker = '' if is_significant_pair else '*'
+        sig_marker = '*' if is_significant_pair else ''
         type_str = f', type={neuron_type}' if neuron_type is not None else ''
         if normalize_info is None:
             ax.set_title(
@@ -94,6 +99,63 @@ def plot_ccg_panel(
         sns.despine(ax=ax2)
 
 
+def plot_ccg_simple(ccg, ccg_null=None, bin_size=1e-3, duration=20e-3,
+                    min_lag=1e-3, max_lag=3e-3, inds=None, segment=None,
+                    ax=None):
+    """
+    Lightweight single CCG plot for UI display.
+    Uses same bin convention as plot_ccg_panel (bins and ccg same length).
+
+    Parameters
+    ----------
+    ccg, ccg_null : np.ndarray  shape [n_bins]
+    bin_size, duration, min_lag, max_lag : float  in seconds
+    inds : tuple (ref_ind, tgt_ind), optional
+    segment : int, optional
+    ax : matplotlib.axes.Axes, optional
+        If provided, draw into this axes (for embedding in existing figures).
+        If None, a new figure is created and returned.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure  (only when ax is None)
+    """
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        return_fig = True
+    else:
+        fig = ax.get_figure()
+        return_fig = False
+
+    # Same bin generation as plot_ccg_panel (window_size=duration, bins in ms)
+    bins = np.arange(-duration / 2, duration / 2 + bin_size, bin_size) * 1e3
+
+    ax.bar(bins, ccg, width=bin_size * 1e3, alpha=0.7, label='CCG', color='steelblue')
+
+    if ccg_null is not None:
+        ax.bar(bins, ccg_null, width=bin_size * 1e3, alpha=0.5,
+               label='Expected', color='orange')
+
+    if min_lag is not None and max_lag is not None:
+        ax.axvspan(min_lag * 1e3, max_lag * 1e3, alpha=0.1, color='green',
+                   label='Test window')
+
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Count')
+
+    title = f"Pair [{inds[0]}, {inds[1]}]" if inds is not None else ""
+    if segment is not None:
+        title += f" - Segment {segment + 1}"
+    ax.set_title(title)
+
+    ax.legend(fontsize=8)
+    sns.despine(ax=ax)
+
+    if return_fig:
+        plt.tight_layout()
+        return fig
+
+
 def plot_ccg_figure(
     ccg: np.ndarray,
     ids: np.ndarray,
@@ -123,16 +185,21 @@ def plot_ccg_figure(
     overlay_normalized: bool = False,
     normalized_ccg: np.ndarray = None,
     normalized_ccg_null: np.ndarray = None,
+    fig=None,
 ):
     """Full figure: CCG (1 or 2 panels) +  waveforms (1 or 2 panels depending on format)"""
     width_ratios = [2, 1] if not overlay_normalized else [2, 2, 1]
     if waveform_plot_type == 'all_channels':
         width_ratios += [1]
 
-    fig, axs = plt.subplots(1,
-                            len(width_ratios),
-                            figsize=(np.round(np.sum(width_ratios) * 2.5), 5),
-                            gridspec_kw={'width_ratios': width_ratios})
+    if fig is None:
+        fig, axs = plt.subplots(1,
+                                len(width_ratios),
+                                figsize=(np.round(np.sum(width_ratios) * 2.5), 5),
+                                gridspec_kw={'width_ratios': width_ratios})
+    else:
+        fig.clear()
+        axs = fig.subplots(1, len(width_ratios), gridspec_kw={'width_ratios': width_ratios})
 
     current_ax = 0
     plot_ccg_panel(
@@ -211,13 +278,13 @@ def plot_ccg_figure(
         sns.despine(ax=axs[current_ax])
     else:
         for i in range(2):
-            axs[current_ax + i] = probe.plot_waveform(
+            axs[current_ax + i] = plot_waveform_panel(
                 axs[current_ax + i],
                 waveforms[i],
                 neuron_types[i],
                 ids[i],
-                frates_all[i] if frates_all is not None else None,
-                frates_cut[i] if frates_cut is not None else None,
+                frate_all=frates_all[i] if frates_all is not None else None,
+                frates_cut=frates_cut[i] if frates_cut is not None else None,
                 n_shanks=n_shanks,
                 ch_per_shank=ch_per_shank,
                 discarded_channels=discarded_channels)

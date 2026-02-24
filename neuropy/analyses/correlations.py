@@ -218,7 +218,6 @@ def _cp_index_of(arr, lookup):
     return tmp[arr]
 
 
-# TODO interesting...
 def _np_unique(x):
     """Faster version of np.unique().
     This version is restricted to 1D arrays of non-negative integers.
@@ -305,7 +304,7 @@ def _np_create_correlograms_array_2groups(n_clusters1,
     nbins = winsize_bins + 1 if symmetrize else winsize_bins // 2 + 1
     full_shape = (n_groups, n_clusters1, n_clusters2, nbins)
     return np.zeros(full_shape, dtype=np.int32) if n_groups else np.zeros(
-        full_shape[1:], dtype=cp.int32)
+        full_shape[1:], dtype=np.int32)
 
 
 def _cp_create_correlograms_array_2groups(n_clusters1,

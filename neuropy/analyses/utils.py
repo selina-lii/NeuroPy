@@ -83,6 +83,7 @@ class Savable:
     def load(self, path: str = None):
         p = (path or self.save_path()) + '.hkl'
         splitted = False
+        file = p  # default; overwritten below if loading from chunks
         if not os.path.exists(p):
             splitted = True
             folder = p if os.path.isdir(p) else p + "_files"
@@ -127,6 +128,9 @@ class ConfigOption(Enum):
 
     def __eq__(self, x):
         return getattr(self, "name", None) == getattr(x, "name", None)
+
+    # __eq__ override suppresses __hash__ in Python — restore it explicitly
+    __hash__ = Enum.__hash__
 
 
 K = TypeVar("K", bound="GenericKey")
@@ -279,6 +283,26 @@ class AnalysisDataset(Savable):
                 **k.__dict__
             }): v for k, v in inputs.items()
         })
+
+    def save_data(self, ignored_attrs=None):
+        """Save this dataset to disk at self.save_path()."""
+        path = self.save_path()
+        os.makedirs(os.path.dirname(os.path.expanduser(path)), exist_ok=True)
+        self.save(path=path, ignored_attrs=ignored_attrs or [])
+        print(f"[{self.__class__.__name__}] saved → {path}.hkl")
+
+    def load_data(self) -> bool:
+        """Load dataset from disk. Returns True if successful, False if not found."""
+        p = self.save_path() + '.hkl'
+        if not os.path.isfile(os.path.expanduser(p)):
+            return False
+        try:
+            self.load(path=self.save_path())
+            print(f"[{self.__class__.__name__}] loaded ← {p}")
+            return True
+        except Exception as e:
+            print(f"[{self.__class__.__name__}] load failed: {e}")
+            return False
 
     def copy(self) -> "AnalysisDataset":
         """Copy only conf"""

@@ -184,7 +184,6 @@ class Neurons(DataWriter):
         self.spiketrains = _safe_merge(self.spiketrains,neurons.spiketrains)
         self.neuron_ids = _safe_merge(self.neuron_ids,neurons.neuron_ids)
         self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
-        self.neuron_type = _safe_merge(self.neuron_type,neurons.neuron_type)
         self.waveforms = _safe_merge3d(self.waveforms,neurons.waveforms)
         self.waveforms_amplitude = _safe_merge(self.waveforms_amplitude,neurons.waveforms_amplitude)
         self.peak_channels = _safe_merge(self.peak_channels,neurons.peak_channels)
