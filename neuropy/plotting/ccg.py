@@ -17,6 +17,8 @@ def plot_ccg_panel(
     pval_corrected=None,
     alpha=None,
     ccg_null=None,
+    j_ccg=None,
+    j_pval=None,
     j_sig=None,
     segment_id=None,
     is_significant_pair=None,
@@ -53,6 +55,10 @@ def plot_ccg_panel(
                    label="ccg-smooth",
                    color=colors[1])
 
+        if j_ccg is not None:
+            ax.bar(bins, j_ccg, width=bin_size, alpha=0.4,
+                   label="jitter avg", color="plum")
+
         if min_lag is not None and max_lag is not None:
             ax.axvspan(min_lag-bin_size/2, max_lag-bin_size/2, alpha=0.12, color='green', label='test window')
 
@@ -79,22 +85,17 @@ def plot_ccg_panel(
         ax2.set_ylabel("p-value")
 
         if pval is not None:
-            ax2.plot(bins, pval, label='p', alpha=0.3, color='gray')
+            ax2.plot(bins, pval, label='p (EranConv)', alpha=0.6, color='orange')
         if j_sig is not None:
             ax2.plot(bins, j_sig, label='jitter sig', color='brown')
-            # Set ticks to pval values on a correct scale
         if pval_corrected is not None:
-            ax2.plot(bins,
-                     pval_corrected,
-                     label='corrected p',
-                     alpha=0.2,
-                     color='green')
+            ax2.plot(bins, pval_corrected, label='corrected p', alpha=0.4, color='green')
+        if j_pval is not None:
+            ax2.axhline(j_pval, label=f'jitter p={j_pval:.3f}', color='purple',
+                        alpha=0.85, linewidth=1.5, linestyle='--')
         if alpha is not None:
-            ax2.axhline(alpha,
-                        label='alpha',
-                        alpha=0.1,
-                        color='red',
-                        linestyle='--')
+            ax2.axhline(alpha, label=f'α={alpha}', alpha=0.8,
+                        color='red', linestyle='--', linewidth=1.5)
         ax2.legend(fontsize=8)
         sns.despine(ax=ax2)
 

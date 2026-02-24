@@ -1298,7 +1298,8 @@ class CCGDataset(AnalysisDataset):
         main function of the class
         """
         # Try to restore previously computed sessions from cache.
-        self.load_data()
+        # TODO only load if metadata if matching
+        # self.load_data()
 
         if self.nd is None:
             return

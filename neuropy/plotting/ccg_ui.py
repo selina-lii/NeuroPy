@@ -95,6 +95,14 @@ class CCGReviewUI:
         # Resolution state
         self._highres_mode = False           # True when showing _ccg_highres
 
+        # Same-scale state (Task 1)
+        self._same_scale_mode: str = None    # None | 'pair' | 'session'
+        self._pair_scale_cache: dict = {}    # (ref, tgt) -> (ymin, ymax)
+        self._session_scale_cache = None     # (ymin, ymax)
+
+        # Jitter state (Task 2)
+        self._jitter_cache: dict = {}        # (ref, tgt) -> (j_avg, j_pval)
+
         # Panel visibility state
         self._panel_vars: dict = {}          # populated in setup_panels_menu
         self._waveforms_visible = False
@@ -299,6 +307,7 @@ class CCGReviewUI:
 
         # Bottom controls packed before the canvas (Tkinter pack order)
         self.setup_norm_panel(parent)
+        self.setup_jitter_panel(parent)
         self.setup_waveforms_panel(parent)   # hidden by default
 
         # Significance chips
@@ -351,9 +360,36 @@ class CCGReviewUI:
             cb = ttk.Checkbutton(btn_frame, text=label, variable=var,
                                  command=self._on_norm_toggle)
             cb.pack(side=tk.LEFT, padx=4)
+        # Scale checkbuttons
+        scale_frame = ttk.Frame(norm_frame)
+        scale_frame.pack(side=tk.LEFT, padx=(12, 0))
+        self._pair_scale_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(scale_frame, text="Same scale (pair)",
+                        variable=self._pair_scale_var,
+                        command=self._on_pair_scale_toggle).pack(side=tk.LEFT, padx=4)
+        self._sess_scale_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(scale_frame, text="Same scale (session)",
+                        variable=self._sess_scale_var,
+                        command=self._on_session_scale_toggle).pack(side=tk.LEFT, padx=4)
+
         ttk.Button(norm_frame, text="Normalize All",
                    command=self._finalize_normalization).pack(
             side=tk.RIGHT, padx=6)
+
+    def setup_jitter_panel(self, parent):
+        """Jitter controls: run jitter on demand for the current pair."""
+        jitter_frame = ttk.LabelFrame(parent, text="Jitter", padding=4)
+        jitter_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+        ttk.Label(jitter_frame, text="n=").pack(side=tk.LEFT)
+        self._njitter_var = tk.IntVar(value=100)
+        ttk.Spinbox(jitter_frame, from_=10, to=5000, increment=50,
+                    textvariable=self._njitter_var, width=6).pack(
+            side=tk.LEFT, padx=2)
+        self._jitter_btn_text = tk.StringVar(value="Run Jitter")
+        ttk.Button(jitter_frame, textvariable=self._jitter_btn_text,
+                   command=self._on_run_jitter).pack(side=tk.LEFT, padx=6)
+        ttk.Button(jitter_frame, text="Clear",
+                   command=self._on_clear_jitter).pack(side=tk.LEFT)
 
     def setup_waveforms_panel(self, parent):
         """Waveform sub-panel in center column — hidden by default."""
@@ -480,6 +516,10 @@ class CCGReviewUI:
         """Toggle between low-res ``_ccg`` and high-res ``_ccg_highres``."""
         if not (hasattr(self.cd, '_ccg_highres') and self.cd._ccg_highres):
             return
+        # Resolution change invalidates scale caches and jitter (different bin_size)
+        self._pair_scale_cache.clear()
+        self._session_scale_cache = None
+        self._jitter_cache.clear()
         self._highres_mode = not self._highres_mode
         mode_label = 'highres' if self._highres_mode else 'lowres'
         if hasattr(self, '_res_btn_text'):
@@ -559,12 +599,167 @@ class CCGReviewUI:
             return
         self.active_norms = {nm for nm, var in self.norm_vars.items()
                              if var.get()}
+        # Norms change the y-axis values → invalidate scale caches
+        self._pair_scale_cache.clear()
+        self._session_scale_cache = None
         if self.current_pair_idx < len(self.all_inds):
             inds = self.all_inds[self.current_pair_idx]
             for seg in range(self.n_segments + 1):
                 p = self._png_path(inds, seg)
                 if os.path.exists(p):
                     os.remove(p)
+        self.update_plot()
+
+    # ------------------------------------------------------------------
+    # Same-scale helpers (Task 1)
+    # ------------------------------------------------------------------
+
+    def _effective_bin_size(self) -> float:
+        """Infer true bin_size from CCG array shape (robust to conf mutation)."""
+        conf = self.ccg_data.conf
+        n_bins = self.ccg_data.ccg.shape[-1]
+        return conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size
+
+    def _compute_pair_scale(self, ref: int, tgt: int):
+        """Return (ymin, ymax) unified across all segments for this pair."""
+        cd = self.ccg_data
+        ymin, ymax = 0.0, 0.0
+        for seg in range(self.n_segments):
+            ccg_raw = cd.ccg[seg, ref, tgt, :]
+            null_raw = cd.ccg_null[seg, ref, tgt, :] if cd.ccg_null is not None else None
+            ccg, ccg_null = self._apply_norms_to_ccg(ccg_raw, null_raw, ref, tgt, seg)
+            ymin = min(ymin, float(ccg.min()))
+            ymax = max(ymax, float(ccg.max()))
+            if ccg_null is not None:
+                ymax = max(ymax, float(ccg_null.max()))
+        return (ymin, ymax * 1.1 if ymax > 0 else 1.0)
+
+    def _compute_session_scale(self):
+        """Return (ymin, ymax) unified across all pairs and segments in this key."""
+        cd = self.ccg_data
+        ymin, ymax = 0.0, 0.0
+        for ref_tgt in self.all_inds:
+            ref, tgt = int(ref_tgt[0]), int(ref_tgt[1])
+            for seg in range(self.n_segments):
+                ccg_raw = cd.ccg[seg, ref, tgt, :]
+                null_raw = (cd.ccg_null[seg, ref, tgt, :]
+                            if cd.ccg_null is not None else None)
+                ccg, ccg_null = self._apply_norms_to_ccg(
+                    ccg_raw, null_raw, ref, tgt, seg)
+                ymin = min(ymin, float(ccg.min()))
+                ymax = max(ymax, float(ccg.max()))
+                if ccg_null is not None:
+                    ymax = max(ymax, float(ccg_null.max()))
+        return (ymin, ymax * 1.1 if ymax > 0 else 1.0)
+
+    def _get_current_scale_ylim(self, ref: int, tgt: int):
+        """Return (ymin, ymax) for the active scale mode, or None."""
+        if self._same_scale_mode == 'pair':
+            if (ref, tgt) not in self._pair_scale_cache:
+                self._pair_scale_cache[(ref, tgt)] = self._compute_pair_scale(ref, tgt)
+            return self._pair_scale_cache[(ref, tgt)]
+        if self._same_scale_mode == 'session':
+            if self._session_scale_cache is None:
+                self._session_scale_cache = self._compute_session_scale()
+            return self._session_scale_cache
+        return None
+
+    def _on_pair_scale_toggle(self):
+        if self._pair_scale_var.get():
+            self._same_scale_mode = 'pair'
+            self._sess_scale_var.set(False)   # mutual exclusion
+        else:
+            self._same_scale_mode = None
+        self._pair_scale_cache.clear()
+        self._clear_all_png_cache()
+        self.update_plot()
+
+    def _on_session_scale_toggle(self):
+        if self._sess_scale_var.get():
+            self._same_scale_mode = 'session'
+            self._pair_scale_var.set(False)   # mutual exclusion
+            self._session_scale_cache = None  # force recompute
+        else:
+            self._same_scale_mode = None
+        self._clear_all_png_cache()
+        self.update_plot()
+
+    # ------------------------------------------------------------------
+    # On-demand jitter (Task 2)
+    # ------------------------------------------------------------------
+
+    def _run_jitter_for_pair(self, ref: int, tgt: int, njitter: int):
+        """Run jitter significance test for a single pair.
+
+        Returns (j_avg [n_bins], j_pval float) or (None, None) on error.
+        """
+        from neuropy.analyses.jitter import Jitter, JitterConfig
+        import copy, types
+
+        if self.neurons is None:
+            messagebox.showerror("Jitter", "No neuron data attached.")
+            return None, None
+
+        # Build a CCGConfig copy with the correct (possibly inferred) bin_size
+        conf = self.ccg_data.conf
+        conf_eff = copy.copy(conf)
+        conf_eff.bin_size = self._effective_bin_size()
+        jconf = JitterConfig(ccg=conf_eff, njitter=njitter)
+
+        # Minimal CCGPointer-like namespace (avoids importing CCGPointer)
+        ptr = types.SimpleNamespace(
+            inds=np.array([[ref, tgt]]),
+            stored_by_segment=False,
+            edge_times=self.ccg_pointer.edge_times,
+            n_pairs=1,
+        )
+        try:
+            j = Jitter(
+                key=self.key,
+                neurons=self.neurons,
+                conf=jconf,
+                ccg_pointer=ptr,
+                ccg_data=self.ccg_data,
+            )
+            j.run()
+        except Exception as ex:
+            messagebox.showerror("Jitter", f"Jitter failed:\n{ex}")
+            return None, None
+
+        j_avg, _, _ = j._j_ccg_cache.get(0, (None, None, None))
+        j_pval = float(j.pval[0]) if j.pval is not None and len(j.pval) else None
+        return j_avg, j_pval
+
+    def _on_run_jitter(self):
+        if self.current_pair_idx >= len(self.all_inds):
+            return
+        inds = self.all_inds[self.current_pair_idx]
+        ref, tgt = int(inds[0]), int(inds[1])
+        njitter = int(self._njitter_var.get())
+        self._jitter_btn_text.set(f"Running ({njitter})…")
+        self.root.update_idletasks()
+        j_avg, j_pval = self._run_jitter_for_pair(ref, tgt, njitter)
+        self._jitter_btn_text.set("Run Jitter")
+        if j_avg is None:
+            return
+        self._jitter_cache[(ref, tgt)] = (j_avg, j_pval)
+        # Invalidate PNGs for this pair (all segments) so they are rerendered
+        for seg in range(self.n_segments + 1):
+            p = self._png_path(inds, seg)
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        self.update_plot()
+
+    def _on_clear_jitter(self):
+        if self.current_pair_idx >= len(self.all_inds):
+            return
+        inds = self.all_inds[self.current_pair_idx]
+        ref, tgt = int(inds[0]), int(inds[1])
+        self._jitter_cache.pop((ref, tgt), None)
+        self._clear_all_png_cache()
         self.update_plot()
 
     def _finalize_normalization(self):
@@ -1027,9 +1222,14 @@ class CCGReviewUI:
         if self.ccg_data is not None and self.ccg_data.pval_corrected is not None:
             alpha_key = f'_a{self.active_alpha:.3f}'
         res_key = '_hi' if getattr(self, '_highres_mode', False) else '_lo'
+        scale_key = {'pair': '_ssp', 'session': '_sss'}.get(
+            getattr(self, '_same_scale_mode', None), '')
+        j_key = '_j' if self._jitter_cache.get(
+            (int(inds[0]), int(inds[1]))) is not None else ''
         return os.path.join(
             self.tmp_dir,
-            f"pair_{int(inds[0])}_{int(inds[1])}_{seg_name}_{norm_key}{alpha_key}{res_key}.png")
+            f"pair_{int(inds[0])}_{int(inds[1])}_{seg_name}_{norm_key}"
+            f"{alpha_key}{res_key}{scale_key}{j_key}.png")
 
     def _apply_norms_to_ccg(self, ccg_raw, ccg_null_raw, ref: int, tgt: int,
                              seg: int):
@@ -1093,17 +1293,28 @@ class CCGReviewUI:
         n_bins = len(ccg)
         bin_size_eff = conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size
 
+        # Jitter overlay for this pair (if computed)
+        j_data = self._jitter_cache.get((ref, tgt))
+        j_ccg_arg = j_data[0] if j_data is not None else None
+        j_pval_arg = j_data[1] if j_data is not None else None
+
         fig, ax = plt.subplots(figsize=(7, 5))
         plot_ccg.plot_ccg_panel(
             ax=ax, ccg=ccg, ids=inds, inds=inds,
             window_size=conf.duration, bin_size=bin_size_eff,
             pval=pval_arg, pval_corrected=pval_c_arg,
             alpha=self.active_alpha, ccg_null=ccg_null,
+            j_ccg=j_ccg_arg, j_pval=j_pval_arg,
             segment_id=seg_label,
             is_significant_pair=self._is_significant(ref, tgt, segment),
             min_lag=conf.min_lag, max_lag=conf.max_lag,
             normalize_info=norm_info,
         )
+        # Same-scale y-axis override
+        ylim = self._get_current_scale_ylim(ref, tgt)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+
         png_path = self._png_path(inds, segment)
         fig.savefig(png_path, dpi=100, bbox_inches='tight')
         plt.close(fig)
