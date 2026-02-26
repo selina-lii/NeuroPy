@@ -751,8 +751,6 @@ def np_spike_correlations_2groups(
 
         shift += 1
 
-    print("shift", shift)
-    correlograms = correlograms
     return correlograms
 
 
@@ -1162,7 +1160,12 @@ def spike_correlations(
     """
     Switch between spike correlation cases.
     """
-    print("running spike correlations")
+    n_total_spikes = sum(len(st) for st in neurons.spiketrains)
+    mode = ('snapshots' if edge_times is not None
+            else '2groups' if ref_neuron_inds is not None
+            else 'all')
+    print(f"[spike_correlations] mode={mode}  n_neurons={neurons.n_neurons}  "
+          f"total_spikes={n_total_spikes}  bin={bin_size}  window={window_size}")
     if edge_times is not None:
 
         spike_correlations_snapshots = cp_spike_correlations_snapshots \
@@ -1195,5 +1198,5 @@ def spike_correlations(
                                           bin_size=bin_size,
                                           window_size=window_size,
                                           symmetrize=symmetrize)
-    print("spike correlation done")
+    print(f"[spike_correlations] done  shape={correlograms.shape}")
     return correlograms

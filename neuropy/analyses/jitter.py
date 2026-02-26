@@ -217,40 +217,49 @@ class Jitter:
         Compute CCG between ref neurons and njitter jittered target spike trains.
 
         Returns j_ccg of shape [n_ref, njitter, n_bins].
+
+        Each jitter trial is computed individually to avoid merging all
+        jittered spike trains into one massive array (which causes O(n²)
+        scaling in the shift-based CCG loop).
         """
         njitter = self.conf.njitter
         ccg_conf = self.conf.ccg
+        n_ref = len(refs)
 
-        # Slice ref neurons out of the full neuron set
-        ref_neurons = self.neurons.neuron_slice(neuron_inds=refs)
+        results = []
+        for ji in range(njitter):
+            # Slice ref neurons fresh each time (merge mutates the object)
+            ref_neurons = self.neurons.neuron_slice(neuron_inds=refs)
 
-        # Build a Neurons object for the jittered spike trains.
-        # Give each jitter a distinct ID so they're treated as separate neurons.
-        tgt_id = self.neurons.neuron_ids[refs[0]]  # use ref's ID range as base
-        j_ids = [tgt_id * 100000 + j for j in range(njitter)]
-        j_type = [self.neurons.neuron_type[refs[0]][0]] * njitter
-        j_neurons = Neurons(
-            spiketrains=j_trains,
-            t_start=self.neurons.t_start,
-            t_stop=self.neurons.t_stop,
-            neuron_ids=j_ids,
-            neuron_type=j_type,
-        )
-        combined = ref_neurons
-        combined.merge(j_neurons)
+            # Single jittered target neuron
+            tgt_id = self.neurons.neuron_ids[refs[0]]
+            j_neurons = Neurons(
+                spiketrains=[j_trains[ji]],
+                t_start=self.neurons.t_start,
+                t_stop=self.neurons.t_stop,
+                neuron_ids=[tgt_id * 100000 + ji],
+                neuron_type=[self.neurons.neuron_type[refs[0]][0]],
+            )
+            combined = ref_neurons
+            combined.merge(j_neurons)
 
-        # 2groups: refs are group 0 (inds 0..n_ref-1),
-        #          jitters are group 1 (inds n_ref..n_ref+njitter-1)
-        # Returns shape [n_ref, njitter, n_bins]
-        j_ccg = correlations.spike_correlations(
-            neurons=combined,
-            ref_neuron_inds=np.arange(len(refs)),
-            neuron_inds=len(refs) + np.arange(njitter),
-            bin_size=ccg_conf.bin_size,
-            window_size=ccg_conf.duration,
-            use_acceleration=ccg_conf.use_acceleration,
-            symmetrize=ccg_conf.symmetrize_ccg,  # match real CCG shape
-        )
+            # 2groups: refs = 0..n_ref-1, single jittered target = n_ref
+            # Returns shape [n_ref, 1, n_bins]
+            ccg_j = correlations.spike_correlations(
+                neurons=combined,
+                ref_neuron_inds=np.arange(n_ref),
+                neuron_inds=np.array([n_ref]),
+                bin_size=ccg_conf.bin_size,
+                window_size=ccg_conf.duration,
+                use_acceleration=ccg_conf.use_acceleration,
+                symmetrize=ccg_conf.symmetrize_ccg,
+            )
+            results.append(ccg_j[:, 0, :])  # [n_ref, n_bins]
+            if (ji + 1) % max(1, njitter // 5) == 0:
+                print(f"[Jitter] trial {ji+1}/{njitter} done")
+
+        # Stack: [n_ref, njitter, n_bins]
+        j_ccg = np.stack(results, axis=1)
         return j_ccg
 
     def _jbsi(self, ref, tgt, real_ccg, j_ccg_avg):

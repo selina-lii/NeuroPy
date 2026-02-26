@@ -228,8 +228,29 @@ class NeuronsDatasetConfig(Config):
 
 class CCGConfig(Config):
     """
-    All the details of CCG computation need to be predefined, kinda like a batch run
+    Configuration for CCG computation and significance detection.
+
+    Fields are split into two groups:
+      COMPUTE_FIELDS  — affect the raw CCG arrays; changing these requires
+                        re-running spike_correlations (expensive).
+      SIGNIF_FIELDS   — affect significance detection only; changing these
+                        only requires re-running EranConv (cheap).
+
+    Note: ``normalize_methods`` has been removed from the config — normalization
+    is a display-only option managed by the UI, not a computation parameter.
     """
+
+    # Fields that affect the CCG computation (spike_correlations + EranConv conv)
+    COMPUTE_FIELDS = [
+        'name', 'resolution', 'bin_size', 'duration', 'conv_window',
+        'conn_types_E', 'conn_types_I',
+        'use_acceleration', 'symmetrize_ccg', 'ignore',
+    ]
+    # Fields that affect significance detection only (rerunnable without recomputing CCG)
+    SIGNIF_FIELDS = [
+        'alpha', 'alpha2', 'min_lag', 'max_lag',
+        'min_spkcount', 'spkcnt_scope', 'mc_method',
+    ]
 
     def __init__(
         self,
@@ -252,8 +273,9 @@ class CCGConfig(Config):
         ignore=IgnoreLevel.SAME_CHANNEL,
         use_acceleration=True,
         symmetrize_ccg=True,
-        normalize_methods: list[NormalizeBy] = NormalizeBy.NONE,
         conn_strength_method: ConnStrengthMethod = ConnStrengthMethod.PEAKSIZE,
+        # Deprecated: normalize_methods is now a UI-only option; ignored if passed
+        normalize_methods=None,
     ):
         super().__init__()
         self.name = name
@@ -291,7 +313,8 @@ class CCGConfig(Config):
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
-        self.normalize_methods = _san(normalize_methods)
+        # normalize_methods removed from config — normalization is UI-only
+        self.normalize_methods = []
         self.conn_strength_method = conn_strength_method
 
     def __str__(self):
@@ -1287,6 +1310,258 @@ class CCGDataset(AnalysisDataset):
     def save_path(self) -> str:
         return self.conf.save_path
 
+    def highres_save_path(self) -> str:
+        """Base path (no extension) for saving the high-resolution CCGData dict."""
+        return self.conf.save_path + '_highres'
+
+    # ------------------------------------------------------------------
+    # Metadata helpers (I.3: cache invalidation)
+    # ------------------------------------------------------------------
+
+    def _metadata_path(self, suffix='compute') -> str:
+        """Return path to a .meta.json file.
+
+        suffix='compute' → tracks CCG computation parameters.
+        suffix='signif'  → tracks significance-detection parameters.
+        """
+        return os.path.expanduser(self.save_path()) + f'.{suffix}.meta.json'
+
+    @staticmethod
+    def _serialize_conf_value(v):
+        """Recursively serialize a config value to a JSON-safe type."""
+        if hasattr(v, 'name'):          # ConfigOption / Enum
+            return v.name
+        if isinstance(v, (list, tuple)):
+            return [CCGDataset._serialize_conf_value(x) for x in v]
+        if isinstance(v, dict):
+            return {str(k): CCGDataset._serialize_conf_value(val)
+                    for k, val in v.items()}
+        try:
+            import json as _json
+            _json.dumps(v)
+            return v
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _save_metadata(self):
+        """Write two .meta.json files — one for compute params, one for signif params."""
+        import json, datetime as _dt
+
+        _s = self._serialize_conf_value
+
+        def _write(suffix, fields):
+            conf_dict = {f: _s(getattr(self.conf, f, None)) for f in fields}
+            meta = {
+                'version': '1.1',
+                'saved_at': _dt.datetime.now().isoformat(),
+                'conf': conf_dict,
+            }
+            p = os.path.expanduser(self._metadata_path(suffix))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w') as fh:
+                json.dump(meta, fh, indent=2)
+            print(f"[CCGDataset] {suffix} metadata saved → {p}")
+
+        _write('compute', CCGConfig.COMPUTE_FIELDS)
+        _write('signif',  CCGConfig.SIGNIF_FIELDS)
+
+    def _check_metadata(self, suffix='compute') -> bool:
+        """Return True if the saved metadata for *suffix* matches the current config."""
+        import json
+        p = os.path.expanduser(self._metadata_path(suffix))
+        if not os.path.isfile(p):
+            # Fall back: try the old single-file format
+            old_p = os.path.expanduser(self.save_path()) + '.meta.json'
+            if not os.path.isfile(old_p):
+                return False
+            p = old_p
+        try:
+            with open(p) as fh:
+                meta = json.load(fh)
+        except Exception as exc:
+            print(f"[CCGDataset] metadata read error ({suffix}): {exc}")
+            return False
+        saved_conf = meta.get('conf', {})
+        fields = (CCGConfig.COMPUTE_FIELDS if suffix == 'compute'
+                  else CCGConfig.SIGNIF_FIELDS)
+        _s = self._serialize_conf_value
+        for field in fields:
+            current_val = _s(getattr(self.conf, field, None))
+            saved_val = saved_conf.get(field)
+            if saved_val != current_val:
+                print(f"[CCGDataset] cache miss ({suffix}): '{field}' "
+                      f"saved={saved_val!r} vs current={current_val!r}")
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Separate save / load for CCGData (raw arrays) vs CCGPointers (pairs)
+    # ------------------------------------------------------------------
+
+    def _ccgdata_path(self) -> str:
+        return os.path.expanduser(self.save_path()) + '_ccgdata'
+
+    def _ccgpointers_path(self) -> str:
+        return os.path.expanduser(self.save_path()) + '_ccgpointers'
+
+    def save_ccgdata(self):
+        """Save only the raw CCG arrays (``_ccg`` dict) to a separate file.
+
+        This covers the expensive spike_correlations + convolution output.
+        It is invalidated only when COMPUTE_FIELDS change.
+        """
+        import hickle as hkl
+        p = self._ccgdata_path() + '.hkl'
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        hkl.dump(self._ccg, p)
+        # Write compute metadata next to it
+        import json, datetime as _dt
+        _s = self._serialize_conf_value
+        meta = {
+            'version': '1.1',
+            'saved_at': _dt.datetime.now().isoformat(),
+            'conf': {f: _s(getattr(self.conf, f, None))
+                     for f in CCGConfig.COMPUTE_FIELDS},
+        }
+        mp = self._ccgdata_path() + '.meta.json'
+        with open(mp, 'w') as fh:
+            json.dump(meta, fh, indent=2)
+        print(f"[CCGDataset] ccgdata saved → {p}")
+
+    def load_ccgdata(self) -> bool:
+        """Load raw CCG arrays from the separate ccgdata file.
+
+        Returns True on success; False if the file does not exist or the
+        compute config has changed.
+        """
+        import hickle as hkl, json
+        mp = self._ccgdata_path() + '.meta.json'
+        p  = self._ccgdata_path() + '.hkl'
+        if not os.path.isfile(p):
+            return False
+        # Validate compute config if metadata exists
+        if os.path.isfile(mp):
+            try:
+                with open(mp) as fh:
+                    meta = json.load(fh)
+                saved = meta.get('conf', {})
+                _s = self._serialize_conf_value
+                for field in CCGConfig.COMPUTE_FIELDS:
+                    current = _s(getattr(self.conf, field, None))
+                    if saved.get(field) != current:
+                        print(f"[CCGDataset] ccgdata cache miss: "
+                              f"'{field}' saved={saved.get(field)!r} "
+                              f"current={current!r}")
+                        return False
+            except Exception as exc:
+                print(f"[CCGDataset] ccgdata metadata error: {exc}")
+                return False
+        try:
+            self._ccg = hkl.load(p)
+            print(f"[CCGDataset] ccgdata loaded ← {p}")
+            return True
+        except Exception as exc:
+            print(f"[CCGDataset] ccgdata load failed: {exc}")
+            return False
+
+    def save_ccgpointers(self):
+        """Save only the CCGPointer dicts (``data`` + ``spurious``) to a separate file.
+
+        This covers the significance-detection output and can be re-saved
+        whenever SIGNIF_FIELDS change without re-running spike_correlations.
+        """
+        import hickle as hkl, json, datetime as _dt
+        p = self._ccgpointers_path() + '.hkl'
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        hkl.dump({'data': self.data, 'spurious': self.spurious}, p)
+        _s = self._serialize_conf_value
+        meta = {
+            'version': '1.1',
+            'saved_at': _dt.datetime.now().isoformat(),
+            'conf': {f: _s(getattr(self.conf, f, None))
+                     for f in CCGConfig.SIGNIF_FIELDS},
+        }
+        mp = self._ccgpointers_path() + '.meta.json'
+        with open(mp, 'w') as fh:
+            json.dump(meta, fh, indent=2)
+        print(f"[CCGDataset] ccgpointers saved → {p}")
+
+    def load_ccgpointers(self) -> bool:
+        """Load CCGPointer dicts from the separate ccgpointers file.
+
+        Returns True on success; False if the file does not exist or the
+        significance config has changed.
+        """
+        import hickle as hkl, json
+        mp = self._ccgpointers_path() + '.meta.json'
+        p  = self._ccgpointers_path() + '.hkl'
+        if not os.path.isfile(p):
+            return False
+        if os.path.isfile(mp):
+            try:
+                with open(mp) as fh:
+                    meta = json.load(fh)
+                saved = meta.get('conf', {})
+                _s = self._serialize_conf_value
+                for field in CCGConfig.SIGNIF_FIELDS:
+                    current = _s(getattr(self.conf, field, None))
+                    if saved.get(field) != current:
+                        print(f"[CCGDataset] ccgpointers cache miss: "
+                              f"'{field}' saved={saved.get(field)!r} "
+                              f"current={current!r}")
+                        return False
+            except Exception as exc:
+                print(f"[CCGDataset] ccgpointers metadata error: {exc}")
+                return False
+        try:
+            obj = hkl.load(p)
+            self.data     = obj.get('data', {})
+            self.spurious = obj.get('spurious', {})
+            print(f"[CCGDataset] ccgpointers loaded ← {p}")
+            return True
+        except Exception as exc:
+            print(f"[CCGDataset] ccgpointers load failed: {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # High-res save / load (I.4)
+    # ------------------------------------------------------------------
+
+    def save_highres(self, path: str = None):
+        """Save self._ccg_highres dict to a separate hickle file.
+
+        Parameters
+        ----------
+        path : str, optional
+            Base path (without extension).  Defaults to ``highres_save_path()``.
+        """
+        if not self._ccg_highres:
+            print("[save_highres] Nothing to save (run load_highres() first).")
+            return
+        import hickle as hkl
+        p = os.path.expanduser((path or self.highres_save_path()) + '.hkl')
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        hkl.dump(self._ccg_highres, p)
+        print(f"[CCGDataset] highres saved → {p}")
+
+    def _load_highres_from_disk(self, path: str = None) -> bool:
+        """Try to load high-res CCGData from a previously saved file.
+
+        Returns True on success, False if the file does not exist.
+        """
+        import hickle as hkl
+        p = os.path.expanduser((path or self.highres_save_path()) + '.hkl')
+        if not os.path.isfile(p):
+            return False
+        try:
+            data = hkl.load(p)
+            self._ccg_highres = data
+            print(f"[CCGDataset] highres loaded ← {p}")
+            return True
+        except Exception as exc:
+            print(f"[CCGDataset] highres load failed: {exc}")
+            return False
+
     def get_example_key(self):
         """Get an example key from data for testing"""
         if self.data:
@@ -1296,35 +1571,67 @@ class CCGDataset(AnalysisDataset):
     def get_ccg(self, baseline_method="eran_conv", use_segments=True):
         """
         main function of the class
-        """
-        # Try to restore previously computed sessions from cache.
-        # TODO only load if metadata if matching
-        # self.load_data()
 
+        Cache strategy (split files):
+          1. Try loading ccgdata (raw arrays) — only re-computed when COMPUTE_FIELDS change.
+          2. If ccgdata loaded, try loading ccgpointers (significant pairs) — only
+             re-computed when SIGNIF_FIELDS change.
+          3. If ccgpointers stale, re-run EranConv (cheap) on cached ccgdata and save.
+          4. If ccgdata missing, run full spike_correlations + EranConv then save both.
+        """
         if self.nd is None:
             return
 
         if baseline_method == "eran_conv":
             conv = EranConv(self.conf)
+
+            # --- Step 1: try loading cached raw CCG arrays ---
+            ccgdata_ok = self.load_ccgdata()
+            if ccgdata_ok:
+                # --- Step 2: try loading cached CCGPointers ---
+                pointers_ok = self.load_ccgpointers()
+                if pointers_ok:
+                    print("[CCGDataset] Loaded CCGData + CCGPointers from split cache.")
+                    self.get_normalize_factors()
+                    return
+                # Pointers stale → re-run significance detection on cached CCGData
+                print("[CCGDataset] CCGData cached; re-running significance detection.")
+                for nd_key, ccg_data in self._ccg.items():
+                    self.__run_eranconv_on_ccgdata(nd_key, ccg_data, conv)
+                self.get_normalize_factors()
+                self.save_ccgpointers()
+                self._save_metadata()
+                return
+
+            # --- Fallback: try old monolithic cache ---
+            if self._check_metadata() and self.load_data():
+                print("[CCGDataset] Loaded from legacy monolithic cache.")
+                self.get_normalize_factors()
+                return
+
+            # --- Step 3: full computation ---
             missing_keys = [k for k in self.nd.edge_times.keys()
                             if k not in self._ccg]
 
-            # Print summaries for sessions already loaded from cache.
             for key in self.nd.edge_times.keys():
                 if key not in missing_keys:
                     print(self._session_summary(key))
 
             if not missing_keys:
-                print("[CCGDataset] All sessions found in cache, skipping computation.")
+                print("[CCGDataset] All sessions in cache, skipping computation.")
                 self.get_normalize_factors()
                 return
+
             for key in missing_keys:
                 self.__ccg_eranconv(key=key,
                                     conv=conv,
                                     edge_times=self.nd.edge_times[key],
                                     use_segments=use_segments)
             self.get_normalize_factors()
-            self.save_data(ignored_attrs=['nd'])
+            # Save both files separately
+            self.save_ccgdata()
+            self.save_ccgpointers()
+            self._save_metadata()
         elif baseline_method == "jitter":
             raise NotImplementedError(
                 "CCG jitter must be run via refine_with_jitter(). Nothing is run."
@@ -1386,6 +1693,9 @@ class CCGDataset(AnalysisDataset):
         n = sum(1 for v in self.data.values() if v is not None and v.n_pairs > 0)
         print(f"[reselect_pairs] alpha={new_alpha} → {len(self.data)} conn-type keys, "
               f"{n} non-empty")
+        # Persist updated pointers (cheap) but leave ccgdata untouched
+        self.save_ccgpointers()
+        self._save_metadata()
 
     def refine_with_jitter(self, jconf, conn_types=None):
         """
@@ -1427,9 +1737,13 @@ class CCGDataset(AnalysisDataset):
                 f"{j.j_sig.sum()}/{j.n_pairs} pairs significant"
             )
 
-    def load_highres(self, conf_highres: 'CCGConfig'=None):
+    def load_highres(self, conf_highres: 'CCGConfig'=None, force_recompute: bool=False):
         """
-        Compute high-resolution CCG arrays for all sessions and store them.
+        Load (or compute) high-resolution CCG arrays for all sessions.
+
+        Tries to load from a previously saved highres file first; falls back to
+        computing from spike trains if no file is found or ``force_recompute``
+        is True.
 
         Only raw CCG spike-count arrays are computed — no significance test is
         run.  Low-res significance data in ``self._ccg`` and ``self.data``
@@ -1440,17 +1754,22 @@ class CCGDataset(AnalysisDataset):
 
         Parameters
         ----------
-        conf_highres : CCGConfig
+        conf_highres : CCGConfig, optional
             Configuration specifying at minimum ``bin_size`` and ``duration``
-            for the high-resolution CCG.  Typically::
-
-                CCGConfig(resolution='highres', bin_size=0.5e-3, ...)
+            for the high-resolution CCG.
+        force_recompute : bool, optional
+            If True, skip the on-disk cache and always recompute from spikes.
         """
         from neuropy.analyses import correlations as _corr
 
-        if conf_highres is None: 
-            conf_highres=self.conf
-            conf_highres.bin_size=_CCG_RESOLUTION['highres']
+        # Try loading from disk first (unless forced to recompute)
+        if not force_recompute and self._load_highres_from_disk():
+            return
+
+        if conf_highres is None:
+            import copy as _copy
+            conf_highres = _copy.copy(self.conf)
+            conf_highres.bin_size = _CCG_RESOLUTION['highres']
 
         if self.nd is None:
             raise RuntimeError(
@@ -1488,6 +1807,41 @@ class CCGDataset(AnalysisDataset):
         print(f"[CCGDataset] load_highres complete — {n} session(s), "
               f"{conf_highres.bin_size * 1e3:.2f} ms bins.  "
               "No significance test run; use low-res pointers for pair selection.")
+        # Auto-save so future calls can skip re-computation
+        self.save_highres()
+
+    def run_highres_eranconv(self):
+        """Run EranConv on high-resolution CCG data and store results in _ccg_highres.
+
+        Infers bin_size from the actual CCG array shape (robust to conf.bin_size
+        mutation in load_highres).  Results are stored directly on each CCGData
+        object inside self._ccg_highres so that the high-res plot shows the
+        EranConv null distribution and significance.
+        """
+        if not self._ccg_highres:
+            print("[run_highres_eranconv] No high-res CCG loaded; call load_highres() first.")
+            return
+        for nd_key, ccg_hi in self._ccg_highres.items():
+            conf = ccg_hi._conf
+            ccg = ccg_hi.ccg  # [n_seg, n_ref, n_tgt, n_bins]
+            n_bins = ccg.shape[-1]
+            bin_size_eff = conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size
+            W = max(1, int(round(conf.conv_window / bin_size_eff)))
+            print(f"[run_highres_eranconv] {nd_key} — "
+                  f"shape={ccg.shape}, W={W} bins "
+                  f"({W * bin_size_eff * 1e3:.1f} ms conv window)")
+            pvals, pred, qvals = EranConv._conv(ccg, W=W)
+            sig, pvals_corrected = EranConv.multiple_correction(
+                pvals, alpha=conf.alpha, method=conf.mc_method)
+            ccg_hi.ccg_null = pred
+            ccg_hi.pval = pvals
+            ccg_hi.qval = qvals
+            ccg_hi.pval_corrected = pvals_corrected
+            ccg_hi.significant = sig
+            n_sig = int(sig.any(axis=-1).sum()) if sig is not None else 0
+            print(f"[run_highres_eranconv]   → null shape {pred.shape}, "
+                  f"{n_sig} significant pair-segments")
+        print(f"[run_highres_eranconv] complete — {len(self._ccg_highres)} session(s).")
 
     def _session_summary(self, key) -> str:
         """Build the session summary string from stored CCGPointers.
@@ -1729,6 +2083,42 @@ class CCGDataset(AnalysisDataset):
                 has_skips=skip_k is not None,
                 debug=debug)
 
+    def __run_eranconv_on_ccgdata(self, nd_key, ccg_data, conv):
+        """Run EranConv significance detection on already-loaded CCGData.
+
+        Used when COMPUTE_FIELDS match (ccgdata cached) but SIGNIF_FIELDS have changed.
+        Updates ``pval_corrected``, ``qval_corrected``, ``significant`` on the CCGData,
+        and rebuilds ``self.data`` / ``self.spurious`` for this nd_key.
+        """
+        neurons = self.nd.data[nd_key]
+        edge_times = self.nd.edge_times[nd_key]
+
+        if self.conf.ignore == IgnoreLevel.SAME_CHANNEL:
+            neuron_locations = neurons.peak_channels
+        elif self.conf.ignore == IgnoreLevel.SAME_SHANK:
+            neuron_locations = neurons.shank_ids
+        else:
+            neuron_locations = None
+
+        pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
+            neurons_key=nd_key,
+            ccg=ccg_data.ccg,
+            edge_times=edge_times,
+            neuron_locations=neuron_locations,
+            neuron_type=neurons.neuron_type,
+            conf=self.conf)
+
+        ccg_data.ccg_null       = pred
+        ccg_data.pval           = pvals
+        ccg_data.qval           = qvals
+        ccg_data.pval_corrected = conv._pvals
+        ccg_data.qval_corrected = conv._qvals
+        ccg_data.significant    = conv._significant
+
+        self._attr_append(nd_key, ccg_pointers, 'data')
+        self._attr_append(nd_key, spur_pointers, 'spurious')
+        print(printstr)
+
     def __ccg_eranconv(self, key, conv, edge_times, use_segments=True):
         """
         Run CCG and generate a convolution-based baseline for all neurons in my NeuronsDataset.
@@ -1931,9 +2321,12 @@ class EranConv:
         min_bin = self.conf.min_spkcnt_bin
         max_bin = self.conf.max_spkcnt_bin
         threshold = self.conf.min_spkcount
-        pair_inds = np.argwhere((ccg[..., min_bin:max_bin]
-                                 >= threshold).all(axis=-1))
-        # NOTE right now it's the same criteria for exctiation/inhibition
+        # Use mean across the spkcount window so that a hollow center bin
+        # (zero spike count at lag=0) doesn't discard the whole pair.
+        # Previously used .all(axis=-1) which required EVERY bin >= threshold.
+        pair_inds = np.argwhere(
+            ccg[..., min_bin:max_bin].mean(axis=-1) >= threshold)
+        # NOTE right now it's the same criteria for excitation/inhibition
         return pair_inds
 
     def significance_mask(self, p, excitability):
