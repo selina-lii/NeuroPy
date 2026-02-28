@@ -66,7 +66,7 @@ class CCGReviewUI:
         self.ccg_pointer = self.cd.data.get(key)
         self.ccg_data = self.cd._ccg.get(key.nd())
 
-        if self.ccg_pointer is None or self.ccg_pointer.inds is None:
+        if self.ccg_pointer is None:
             raise ValueError(f"No CCG data found for key: {key}")
 
         # Neurons (normalization + network + waveforms)
@@ -1162,7 +1162,21 @@ class CCGReviewUI:
     # ------------------------------------------------------------------
 
     def _all_nd_keys(self) -> list:
+        """Return unique nd_keys (one per session) across the dataset.
+
+        Prefers ``cd._ccg`` (keyed by nd_keys directly) so that ALL sessions
+        are represented even when some have no significant pairs in ``cd.data``.
+        Falls back to enumerating ``cd.data`` if ``_ccg`` is unavailable.
+        """
         seen, seen_str = [], set()
+        # Primary source: _ccg is keyed by nd_keys, one per session
+        ccg_source = getattr(self.cd, '_ccg', None) or {}
+        for nk in ccg_source.keys():
+            s = str(nk)
+            if s not in seen_str:
+                seen.append(nk)
+                seen_str.add(s)
+        # Secondary: pick up any sessions present only in cd.data
         for k in self.cd.data.keys():
             nk = k.nd()
             s = str(nk)
@@ -1190,6 +1204,13 @@ class CCGReviewUI:
         return ' '.join(parts) if parts else str(key)
 
     def _switch_key(self, new_key) -> bool:
+        # Persist in-session selections to the current pointer before switching,
+        # so they survive type/session changes and can be restored on return.
+        self.ccg_pointer.manually_selected_inds = (
+            np.array(sorted(self.selected_inds), dtype=int)
+            if self.selected_inds else None
+        )
+
         ptr = self.cd.data.get(new_key)
         if ptr is None or ptr.inds is None:
             messagebox.showwarning("Switch key", f"No data for key:\n{new_key}")

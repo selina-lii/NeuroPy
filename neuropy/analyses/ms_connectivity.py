@@ -795,8 +795,10 @@ class CCGPointer(Savable):
 
     @property
     def inds(self):
+        if self._inds is None:
+            return np.empty((0, 2), dtype=int)
         return self._inds
-
+    
     @property
     def ref_inds(self):
         return self.inds[:, -2]
@@ -1805,8 +1807,9 @@ class CCGDataset(AnalysisDataset):
 
         n = len(self._ccg_highres)
         print(f"[CCGDataset] load_highres complete — {n} session(s), "
-              f"{conf_highres.bin_size * 1e3:.2f} ms bins.  "
-              "No significance test run; use low-res pointers for pair selection.")
+              f"{conf_highres.bin_size * 1e3:.2f} ms bins.")
+        # Run EranConv significance on the freshly computed high-res CCGs
+        self.run_highres_eranconv()
         # Auto-save so future calls can skip re-computation
         self.save_highres()
 
