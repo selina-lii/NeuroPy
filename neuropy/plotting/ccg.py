@@ -27,6 +27,10 @@ def plot_ccg_panel(
     grayscale=False,
     min_lag=None,
     max_lag=None,
+    acg_ref=None,
+    acg_tgt=None,
+    acg_yscale=1.0,
+    acg_match_ccg=False,
 ):
     """Single CCG plot into provided axis"""
     with warnings.catch_warnings():
@@ -61,6 +65,35 @@ def plot_ccg_panel(
         if j_ccg is not None:
             ax.bar(bins, j_ccg, width=bin_w, alpha=0.4,
                    label="jitter avg", color="plum")
+
+        # Auto-correlogram overlays — each gets its own right-side y-axis
+        _acg_axis_offset = 0.14  # start past p-value axis (at 1.0)
+        for acg_data, acg_color, acg_label in [
+            (acg_ref, '#00897B', 'ACG ref'),    # teal (distinct from green test window)
+            (acg_tgt, '#7B1FA2', 'ACG tgt'),    # purple
+        ]:
+            if acg_data is None:
+                continue
+            ax_acg = ax.twinx()
+            ax_acg.spines['right'].set_position(('axes', 1.0 + _acg_axis_offset))
+            ax_acg.bar(bins, acg_data, width=bin_w, alpha=0.2,
+                       color=acg_color, edgecolor='none',
+                       label=acg_label)
+            if acg_match_ccg:
+                # Match CCG y-axis exactly
+                ccg_ylim = ax.get_ylim()
+                ax_acg.set_ylim(ccg_ylim)
+            else:
+                # acg_yscale > 1 zooms in (taller bars), < 1 zooms out
+                raw_max = np.max(acg_data) if np.max(acg_data) > 0 else 1
+                scale = max(acg_yscale, 0.01)
+                ax_acg.set_ylim(0, raw_max * 1.1 / scale)
+            ax_acg.set_ylabel(acg_label, color=acg_color, fontsize=8)
+            ax_acg.tick_params(axis='y', colors=acg_color, labelsize=7)
+            ax_acg.spines['right'].set_color(acg_color)
+            for sp in ('top', 'bottom', 'left'):
+                ax_acg.spines[sp].set_visible(False)
+            _acg_axis_offset += 0.12
 
         if min_lag is not None and max_lag is not None:
             ml_ms = min_lag * 1000
@@ -196,14 +229,10 @@ def plot_ccg_figure(
     save_path: str = None,
     waveform_plot_type="probe",  # or "all_channels"
     segment_id: int = None,
-    normalize_info: str = None,
-    overlay_normalized: bool = False,
-    normalized_ccg: np.ndarray = None,
-    normalized_ccg_null: np.ndarray = None,
     fig=None,
 ):
     """Full figure: CCG (1 or 2 panels) +  waveforms (1 or 2 panels depending on format)"""
-    width_ratios = [2, 1] if not overlay_normalized else [2, 2, 1]
+    width_ratios = [2, 1]
     if waveform_plot_type == 'all_channels':
         width_ratios += [1]
 
@@ -232,31 +261,9 @@ def plot_ccg_figure(
         segment_id=segment_id,
         is_significant_pair=is_significant_pair,
         neuron_type=neuron_types,
-        normalize_info=None,
         grayscale=False,
     )
     current_ax += 1
-
-    if overlay_normalized:
-        plot_ccg_panel(
-            ax=axs[current_ax],
-            ccg=normalized_ccg,
-            ids=ids,
-            inds=inds,
-            window_size=window_size,
-            bin_size=bin_size,
-            pval=None,
-            pval_corrected=None,
-            alpha=None,
-            ccg_null=normalized_ccg_null,
-            j_sig=None,
-            segment_id=segment_id,
-            is_significant_pair=is_significant_pair,
-            neuron_type=neuron_types,
-            normalize_info=normalize_info,
-            grayscale=True,
-        )
-        current_ax += 1
 
     if waveform_plot_type == 'probe' and shank_ids is not None:
 

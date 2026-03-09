@@ -274,8 +274,6 @@ class CCGConfig(Config):
         use_acceleration=True,
         symmetrize_ccg=True,
         conn_strength_method: ConnStrengthMethod = ConnStrengthMethod.PEAKSIZE,
-        # Deprecated: normalize_methods is now a UI-only option; ignored if passed
-        normalize_methods=None,
     ):
         super().__init__()
         self.name = name
@@ -313,8 +311,6 @@ class CCGConfig(Config):
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
-        # normalize_methods removed from config — normalization is UI-only
-        self.normalize_methods = []
         self.conn_strength_method = conn_strength_method
 
     def __str__(self):
@@ -923,34 +919,6 @@ class CCGData(Savable):
     @property
     def conn_strength_change(self):
         return self.conn_strength[-1, ...] - self.conn_strength[0, ...]
-
-    def get_normalize_factors(self, edge_times=None, frates=None):
-        """
-        Divide CCG by normalization factors
-        
-        :param edge_times: shape [n_segment,...]
-        :param frates: shape [n_segment,n_neurons]
-        """
-
-        axes = [
-            0
-        ] if NormalizeBy.TIME_SPAN in self.conf.normalize_methods else []
-        axes += [
-            1
-        ] if NormalizeBy.REF_FRATE in self.conf.normalize_methods else []
-        axes += [
-            2
-        ] if NormalizeBy.TARGET_FRATE in self.conf.normalize_methods else []
-
-        self.norm_factors = []
-        for axis in axes:
-            shape = [1] * self.ccg.ndim
-            shape[0] = self.n_segment
-            shape[axis] = -1 if axis == 0 else frates.shape[1]
-
-            arr = edge_times.effective_time_hours.values if axis == 0 else frates
-            reshaped = arr.reshape(shape)
-            self.norm_factors.append(reshaped)
 
     def save_plots(self,
                    pt: CCGPointer,
@@ -1594,13 +1562,11 @@ class CCGDataset(AnalysisDataset):
                 pointers_ok = self.load_ccgpointers()
                 if pointers_ok:
                     print("[CCGDataset] Loaded CCGData + CCGPointers from split cache.")
-                    self.get_normalize_factors()
                     return
                 # Pointers stale → re-run significance detection on cached CCGData
                 print("[CCGDataset] CCGData cached; re-running significance detection.")
                 for nd_key, ccg_data in self._ccg.items():
                     self.__run_eranconv_on_ccgdata(nd_key, ccg_data, conv)
-                self.get_normalize_factors()
                 self.save_ccgpointers()
                 self._save_metadata()
                 return
@@ -1608,7 +1574,6 @@ class CCGDataset(AnalysisDataset):
             # --- Fallback: try old monolithic cache ---
             if self._check_metadata() and self.load_data():
                 print("[CCGDataset] Loaded from legacy monolithic cache.")
-                self.get_normalize_factors()
                 return
 
             # --- Step 3: full computation ---
@@ -1621,7 +1586,6 @@ class CCGDataset(AnalysisDataset):
 
             if not missing_keys:
                 print("[CCGDataset] All sessions in cache, skipping computation.")
-                self.get_normalize_factors()
                 return
 
             for key in missing_keys:
@@ -1629,7 +1593,6 @@ class CCGDataset(AnalysisDataset):
                                     conv=conv,
                                     edge_times=self.nd.edge_times[key],
                                     use_segments=use_segments)
-            self.get_normalize_factors()
             # Save both files separately
             self.save_ccgdata()
             self.save_ccgpointers()
@@ -2012,12 +1975,6 @@ class CCGDataset(AnalysisDataset):
                 overlay_normalized=overlay_normalized,
             )
         print(f"Done! Plots saved to: {plot_folder}")
-
-    def get_normalize_factors(self):
-        for key, ccg in self._ccg.items():
-            ccg.get_normalize_factors(
-                edge_times=self.nd.edge_times[key.nd()],
-                frates=self.nd.segment_firing_rates[key.nd()])
 
     def get_connection_strengths(self, method=ConnStrengthMethod.PEAKSIZE):
         """

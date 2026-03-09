@@ -45,6 +45,7 @@ except ImportError:
 
 # Sentinel value for the virtual "All segments" view
 _ALL_SEGS = "All segments"
+_ADMITTED_GROUP = "__admitted__"
 
 
 class CCGReviewUI:
@@ -75,8 +76,14 @@ class CCGReviewUI:
                         if getattr(self.cd, 'nd', None) is not None
                         else None)
 
-        # Pair / segment state
-        self.all_inds = self.ccg_pointer.inds2          # unique (ref, tgt)
+        # Group state  {group_name -> set((ref,tgt))}
+        # Initialized early because all_inds @property reads _groups
+        self._groups: dict = {}
+        self._groups.setdefault(_ADMITTED_GROUP, set())
+        self._group_hotkeys: dict = {}       # group_name -> hotkey str e.g. 'Control-1'
+        self._group_notes: dict = {}         # group_name -> notes string
+
+        # Pair / segment state  (all_inds is a @property — see below)
         self.n_segments = self.ccg_pointer.n_segments   # real segment count
         self.segment_names = list(self.ccg_pointer.edge_times['label'].values)
         self.current_segment = 0   # 0..n_segments-1 = real; n_segments = All
@@ -90,6 +97,11 @@ class CCGReviewUI:
         else:
             self.selected_inds = set()
         self.unselected_inds = set(map(tuple, self.all_inds)) - self.selected_inds
+
+        # Undo/redo stack for pair selection changes
+        self._undo_stack: list = []  # list of (selected_inds_copy, unselected_inds_copy)
+        self._redo_stack: list = []
+        self._UNDO_LIMIT = 30
 
         # Active config
         self.active_alpha = getattr(getattr(self.cd, 'conf', None), 'alpha', 0.05)
@@ -126,11 +138,6 @@ class CCGReviewUI:
         self._net_hide_unconnected: bool = False  # hide neurons with no connections
         self._net_group_filter: str = None       # group name shown in probe network
 
-        # Group state  {group_name -> set((ref,tgt))}
-        self._groups: dict = {}
-        self._group_hotkeys: dict = {}       # group_name -> hotkey str e.g. 'Control-1'
-        self._group_notes: dict = {}         # group_name -> notes string
-
         # Versioned selections save dir
         self._sel_save_dir = os.path.expanduser(
             "~/Documents/ms_synchrony/NeuroPy/data/selections")
@@ -163,6 +170,23 @@ class CCGReviewUI:
         self.root.title("CCG Manual Review")
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.setup_ui()
+
+    # ------------------------------------------------------------------
+    # Derived state
+    # ------------------------------------------------------------------
+
+    @property
+    def all_inds(self):
+        """Significant pairs + manually admitted pairs, as Nx2 numpy array."""
+        base = self.ccg_pointer.inds2
+        admitted = self._groups.get(_ADMITTED_GROUP, set())
+        if not admitted:
+            return base
+        base_set = set(map(tuple, base))
+        extra = sorted(admitted - base_set)
+        if not extra:
+            return base
+        return np.vstack([base, np.array(extra, dtype=base.dtype)])
 
     # ------------------------------------------------------------------
     # Layout
@@ -219,6 +243,12 @@ class CCGReviewUI:
             self.root.bind(_key, lambda e: self._on_ctrl_e())
         for _key in ('<Control-s>', '<Command-s>'):
             self.root.bind(_key, lambda e: self._quick_save())
+        for _key in ('<Control-z>', '<Command-z>'):
+            self.root.bind(_key, self._undo)
+        for _key in ('<Control-y>', '<Command-y>',
+                      '<Control-Shift-z>', '<Command-Shift-z>',
+                      '<Control-Shift-Z>', '<Command-Shift-Z>'):
+            self.root.bind(_key, self._redo)
         # 'm' key moves current pair between Available / Selected
         # Guard: don't fire when typing in an Entry or Spinbox widget
         def _m_key_handler(e):
@@ -540,6 +570,47 @@ class CCGReviewUI:
         self._sig_jitter_p_cb.state(['disabled'])
         self._sig_jitter_pc_cb.state(['disabled'])
 
+        # ── ACG row (separate from significance toggles) ──────────────
+        acg_frame = ttk.LabelFrame(parent, text="Auto-correlograms", padding=4)
+        acg_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+
+        self._acg_ref_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(acg_frame, text="ref",
+                        variable=self._acg_ref_var,
+                        command=self._on_sig_toggle).pack(side=tk.LEFT, padx=2)
+        self._acg_tgt_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(acg_frame, text="tgt",
+                        variable=self._acg_tgt_var,
+                        command=self._on_sig_toggle).pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(acg_frame, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+
+        ttk.Label(acg_frame, text="Y scale:", font=('Arial', 8)).pack(
+            side=tk.LEFT, padx=(0, 2))
+        self._acg_yscale_var = tk.DoubleVar(value=1.0)
+        acg_slider = ttk.Scale(acg_frame, from_=0.1, to=1.5,
+                               variable=self._acg_yscale_var,
+                               orient=tk.HORIZONTAL, length=100,
+                               command=lambda v: self._on_acg_scale_change())
+        acg_slider.pack(side=tk.LEFT, padx=2)
+        self._acg_scale_label = ttk.Label(acg_frame, text="1.0x",
+                                           font=('Courier', 8), width=4)
+        self._acg_scale_label.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._acg_match_ccg_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(acg_frame, text="Match CCG scale",
+                        variable=self._acg_match_ccg_var,
+                        command=self._on_sig_toggle).pack(side=tk.LEFT, padx=4)
+
+    def _on_acg_scale_change(self):
+        """ACG Y-scale slider changed."""
+        val = self._acg_yscale_var.get()
+        self._acg_scale_label.config(text=f"{val:.1f}x")
+        if self._acg_ref_var.get() or self._acg_tgt_var.get():
+            self._clear_all_png_cache()
+            self.update_plot()
+
     def _on_sig_toggle(self):
         """Update significance display flags and redraw."""
         self._sig_show_conv_baseline = self._sig_conv_baseline_var.get()
@@ -661,6 +732,10 @@ class CCGReviewUI:
         ttk.Label(pair_focus_frame, textvariable=self._focus_pair_info_var,
                   font=('Arial', 8), foreground='#555').pack(
             side=tk.LEFT, padx=4)
+        self._add_pair_btn = ttk.Button(pair_focus_frame, text="Add to available",
+                                         command=self._on_add_focused_pair,
+                                         state=tk.DISABLED)
+        self._add_pair_btn.pack(side=tk.LEFT, padx=4)
 
         # ── Connection type toggles ──────────────────────────────────────
         ct_frame = ttk.Frame(parent)
@@ -785,8 +860,8 @@ class CCGReviewUI:
         bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
         ttk.Button(bottom_frame, text="Save Selections",
                    command=self._quick_save).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(bottom_frame, text="Cancel",
-                   command=self.root.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(bottom_frame, text="Quit",
+                   command=self._on_close).pack(side=tk.RIGHT, padx=5)
         self.stats_var = tk.StringVar(value=self._compute_stats_str())
         ttk.Label(bottom_frame, textvariable=self.stats_var,
                   font=('Courier', 9)).pack(side=tk.LEFT, padx=8)
@@ -1357,7 +1432,7 @@ class CCGReviewUI:
             self.ccg_data = self.cd._ccg.get(nd_key)
         self.neurons = (self.cd.nd.data[new_key.nd()]
                         if getattr(self.cd, 'nd', None) is not None else None)
-        self.all_inds = self.ccg_pointer.inds2
+        # all_inds is a @property — no assignment needed
         self.n_segments = self.ccg_pointer.n_segments
         self.segment_names = list(self.ccg_pointer.edge_times['label'].values)
         self.current_segment = 0
@@ -1508,6 +1583,45 @@ class CCGReviewUI:
             f"FR: ref={ref_fr:.1f}Hz  tgt={tgt_fr:.1f}Hz{seg_str}")
 
     # ------------------------------------------------------------------
+    # Undo / redo for pair selection
+    # ------------------------------------------------------------------
+
+    def _push_undo(self):
+        """Snapshot current selection state before a mutation."""
+        self._undo_stack.append((set(self.selected_inds),
+                                 set(self.unselected_inds)))
+        if len(self._undo_stack) > self._UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _undo(self, event=None):
+        if not self._undo_stack:
+            return
+        # Save current state to redo
+        self._redo_stack.append((set(self.selected_inds),
+                                 set(self.unselected_inds)))
+        sel, unsel = self._undo_stack.pop()
+        self.selected_inds = sel
+        self.unselected_inds = unsel
+        self.refresh_lists()
+        self.update_plot()
+        self._draw_network()
+        self._refresh_stats()
+
+    def _redo(self, event=None):
+        if not self._redo_stack:
+            return
+        self._undo_stack.append((set(self.selected_inds),
+                                 set(self.unselected_inds)))
+        sel, unsel = self._redo_stack.pop()
+        self.selected_inds = sel
+        self.unselected_inds = unsel
+        self.refresh_lists()
+        self.update_plot()
+        self._draw_network()
+        self._refresh_stats()
+
+    # ------------------------------------------------------------------
     # Pair lists
     # ------------------------------------------------------------------
 
@@ -1590,6 +1704,7 @@ class CCGReviewUI:
         inds = sorted_unsel[idx]
         # Preserve scroll position so the list doesn't jump to the top
         scroll_top = self.unselected_list.yview()[0]
+        self._push_undo()
         self.unselected_inds.discard(inds)
         self.selected_inds.add(inds)
         self.refresh_lists()
@@ -1616,6 +1731,7 @@ class CCGReviewUI:
         inds = sorted_sel[idx]
         # Preserve scroll position so the list doesn't jump to the top
         scroll_top = self.selected_list.yview()[0]
+        self._push_undo()
         self.selected_inds.discard(inds)
         self.unselected_inds.add(inds)
         self.refresh_lists()
@@ -1629,6 +1745,7 @@ class CCGReviewUI:
         if self.current_pair_idx >= len(self.all_inds):
             return
         inds = tuple(self.all_inds[self.current_pair_idx])
+        self._push_undo()
         if inds in self.unselected_inds:
             self.unselected_inds.discard(inds)
             self.selected_inds.add(inds)
@@ -1745,6 +1862,8 @@ class CCGReviewUI:
         if self._groups:
             grp_menu.add_separator()
         for gname in sorted(self._groups):
+            if gname.startswith('__'):
+                continue
             if pairs:
                 # Show ✓ if ALL selected pairs are in the group
                 all_in = all(p in self._groups[gname] for p in pairs)
@@ -1759,6 +1878,7 @@ class CCGReviewUI:
         if pair is None:
             return
         scroll_top = self.unselected_list.yview()[0]
+        self._push_undo()
         self.unselected_inds.discard(pair)
         self.selected_inds.add(pair)
         self.refresh_lists()
@@ -1772,6 +1892,7 @@ class CCGReviewUI:
         if not pairs:
             return
         scroll_top = self.unselected_list.yview()[0]
+        self._push_undo()
         for p in pairs:
             self.unselected_inds.discard(p)
             self.selected_inds.add(p)
@@ -1784,6 +1905,7 @@ class CCGReviewUI:
         if pair is None:
             return
         scroll_top = self.selected_list.yview()[0]
+        self._push_undo()
         self.selected_inds.discard(pair)
         self.unselected_inds.add(pair)
         self.refresh_lists()
@@ -1797,6 +1919,7 @@ class CCGReviewUI:
         if not pairs:
             return
         scroll_top = self.selected_list.yview()[0]
+        self._push_undo()
         for p in pairs:
             self.selected_inds.discard(p)
             self.unselected_inds.add(p)
@@ -1968,7 +2091,13 @@ class CCGReviewUI:
             ('c' if self._sig_show_conv_pc else '') +
             ('tw' if self._sig_show_test_window else '') +
             ('jp' if self._sig_show_jitter_p else '') +
-            ('jc' if self._sig_show_jitter_pc else ''))
+            ('jc' if self._sig_show_jitter_pc else '') +
+            ('ar' if getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get() else '') +
+            ('at' if getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get() else '') +
+            (f'as{self._acg_yscale_var.get():.1f}' if getattr(self, '_acg_yscale_var', None) and (
+                (getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get()) or
+                (getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get())) else '') +
+            ('am' if getattr(self, '_acg_match_ccg_var', None) and self._acg_match_ccg_var.get() else ''))
         if sig_bits:
             sig_key = f'_s{sig_bits}'
         return os.path.join(
@@ -2074,6 +2203,33 @@ class CCGReviewUI:
         show_j_ccg = j_ccg_arg if self._sig_show_jitter_p else None
         show_j_pval = j_pval_arg if self._sig_show_jitter_pc else None
 
+        # Auto-correlogram overlays (diagonal of CCG matrix)
+        acg_ref = acg_tgt = None
+        show_acg_ref = getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get()
+        show_acg_tgt = getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get()
+        if show_acg_ref or show_acg_tgt:
+            if is_custom:
+                src = cs.get('ccg_hi' if (self._highres_mode and 'ccg_hi' in cs) else 'ccg')
+            elif is_all:
+                src = cd.ccg
+            else:
+                src = cd.ccg
+            if src is not None:
+                if show_acg_ref:
+                    if is_all:
+                        acg_ref = np.sum(src[:, ref, ref, :], axis=0)
+                    elif is_custom:
+                        acg_ref = src[0, ref, ref, :]
+                    else:
+                        acg_ref = src[segment, ref, ref, :]
+                if show_acg_tgt:
+                    if is_all:
+                        acg_tgt = np.sum(src[:, tgt, tgt, :], axis=0)
+                    elif is_custom:
+                        acg_tgt = src[0, tgt, tgt, :]
+                    else:
+                        acg_tgt = src[segment, tgt, tgt, :]
+
         fig, ax = plt.subplots(figsize=(7, 5))
         plot_ccg.plot_ccg_panel(
             ax=ax, ccg=ccg, ids=inds, inds=inds,
@@ -2086,6 +2242,9 @@ class CCGReviewUI:
             min_lag=conf.min_lag if self._sig_show_test_window else None,
             max_lag=conf.max_lag if self._sig_show_test_window else None,
             normalize_info=norm_info,
+            acg_ref=acg_ref, acg_tgt=acg_tgt,
+            acg_yscale=getattr(self, '_acg_yscale_var', None) and self._acg_yscale_var.get() or 1.0,
+            acg_match_ccg=getattr(self, '_acg_match_ccg_var', None) and self._acg_match_ccg_var.get(),
         )
         # Same-scale y-axis override
         ylim = self._get_current_scale_ylim(ref, tgt)
@@ -2136,10 +2295,13 @@ class CCGReviewUI:
 
     def update_plot(self):
         try:
-            if self.current_pair_idx >= len(self.all_inds):
+            # Focus-pair override: show focused pair's CCG directly
+            if self._focused_pair is not None:
+                inds = np.array(self._focused_pair)
+            elif self.current_pair_idx >= len(self.all_inds):
                 return
-
-            inds = self.all_inds[self.current_pair_idx]
+            else:
+                inds = self.all_inds[self.current_pair_idx]
             png_path = self._png_path(inds, self.current_segment)
             if not os.path.exists(png_path):
                 png_path = self._render_png(inds, self.current_segment)
@@ -2967,26 +3129,69 @@ class CCGReviewUI:
         self._update_pair_focus_info(pair, pair_exists)
         self.refresh_lists()
         self._draw_network()
+        self.update_plot()
 
     def _update_pair_focus_info(self, pair, exists):
-        """Update the pair focus info label."""
+        """Update the pair focus info label and 'Add to available' button."""
         ref, tgt = pair
         if self.neurons is not None:
             nt = self.neurons.neuron_type
             ref_type = nt[ref] if nt is not None and ref < len(nt) else '?'
             tgt_type = nt[tgt] if nt is not None and tgt < len(nt) else '?'
-            status = "sig" if exists else "not sig"
+            # Check if already in all_inds (sig or admitted)
+            in_available = pair in set(map(tuple, self.all_inds))
+            status = "sig" if exists else ("admitted" if in_available else "not sig")
             self._focus_pair_info_var.set(
                 f"{ref}({ref_type})→{tgt}({tgt_type}) [{status}]")
         else:
+            in_available = pair in set(map(tuple, self.all_inds))
             self._focus_pair_info_var.set(f"{ref}→{tgt}")
+        # Enable "Add to available" only for pairs not already available
+        if hasattr(self, '_add_pair_btn'):
+            self._add_pair_btn.config(
+                state=tk.NORMAL if not in_available else tk.DISABLED)
 
     def _on_pair_focus_clear(self):
         self._focused_pair = None
         self._focus_pair_var.set("")
         self._focus_pair_info_var.set("")
+        if hasattr(self, '_add_pair_btn'):
+            self._add_pair_btn.config(state=tk.DISABLED)
         self.refresh_lists()
         self._draw_network()
+        self.update_plot()
+
+    def _on_add_focused_pair(self):
+        """Add the currently focused non-significant pair to available pairs."""
+        pair = self._focused_pair
+        if pair is None:
+            return
+        ref, tgt = pair
+        # Validate indices are within CCG data shape
+        cd = self.ccg_data
+        if cd is None or cd.ccg is None:
+            messagebox.showerror("Add pair", "No CCG data loaded.")
+            return
+        if ref >= cd.ccg.shape[1] or tgt >= cd.ccg.shape[2]:
+            messagebox.showerror("Add pair",
+                                 f"Pair ({ref},{tgt}) out of CCG data range "
+                                 f"({cd.ccg.shape[1]}x{cd.ccg.shape[2]}).")
+            return
+        # Add to admitted group
+        self._push_undo()
+        self._groups.setdefault(_ADMITTED_GROUP, set()).add(pair)
+        # Add to unselected (now a valid available pair)
+        self.unselected_inds.add(pair)
+        # Navigate to the pair
+        self.current_pair_idx = self.get_pair_index(pair)
+        # Clear focus and update UI
+        self._focused_pair = None
+        self._focus_pair_var.set("")
+        self._update_pair_focus_info(pair, exists=False)
+        self._add_pair_btn.config(state=tk.DISABLED)
+        self.refresh_lists()
+        self._draw_network()
+        self.update_plot()
 
     def _on_net_toggle_arrows(self):
         self._net_show_arrows = self._net_arrows_var.get()
@@ -3017,7 +3222,7 @@ class CCGReviewUI:
         """Update the group combobox values from self._groups."""
         if not hasattr(self, '_net_group_combo'):
             return
-        names = ['(none)'] + sorted(self._groups.keys())
+        names = ['(none)'] + sorted(k for k in self._groups if not k.startswith('__'))
         self._net_group_combo['values'] = names
         # If the current selection was deleted, reset
         if self._net_group_var.get() not in names:
@@ -3039,7 +3244,8 @@ class CCGReviewUI:
     def _pair_group_label(self, inds) -> str:
         """Return a short label like '[G1,G2]' for the groups this pair belongs to."""
         pair = tuple(inds)
-        tags = [gname for gname, pairs in self._groups.items() if pair in pairs]
+        tags = [gname for gname, pairs in self._groups.items()
+                if pair in pairs and not gname.startswith('__')]
         return f"[{','.join(tags)}]" if tags else ""
 
     def _toggle_pair_group(self, pair, group_name):
@@ -3107,6 +3313,8 @@ class CCGReviewUI:
         nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         for gname in sorted(self._groups):
+            if gname.startswith('__'):
+                continue
             frame = ttk.Frame(nb)
             nb.add(frame, text=gname)
 
@@ -3206,6 +3414,8 @@ class CCGReviewUI:
         frame.pack(fill=tk.BOTH, expand=True, padx=10)
         check_vars = {}
         for gname in sorted(self._groups):
+            if gname.startswith('__'):
+                continue
             var = tk.BooleanVar(value=False)
             check_vars[gname] = var
             ttk.Checkbutton(frame, text=gname, variable=var).pack(anchor='w')
@@ -3271,6 +3481,8 @@ class CCGReviewUI:
             pass
         current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
         for gname in sorted(self._groups):
+            if gname.startswith('__'):
+                continue  # hide internal groups like __admitted__
             hk = self._group_hotkeys.get(gname, '')
             n_in_session = len(self._groups.get(gname, set()) & current_pairs)
             label = f"{gname} ({n_in_session})" + (f" [Ctrl+{hk}]" if hk else "")
@@ -3307,6 +3519,7 @@ class CCGReviewUI:
                 self._toggle_pair_group(pair, gname)
                 # Also move to Selected side if currently in Available
                 if pair in self.unselected_inds:
+                    self._push_undo()
                     self.unselected_inds.discard(pair)
                     self.selected_inds.add(pair)
                     unsel_scroll = self.unselected_list.yview()[0]
@@ -3515,16 +3728,92 @@ class CCGReviewUI:
             else:
                 selected = set()
 
+        self._push_undo()
+        # Check for pairs that are no longer available (epoch/CCG change)
+        current_available = set(map(tuple, self.all_inds))
+        missing = selected - current_available
+        if missing and restore_groups:
+            # Only show dialog on explicit load (not autoload)
+            action = self._show_missing_pairs_dialog(missing)
+            if action == 'cancel':
+                return
+            elif action == 'partial':
+                selected = selected & current_available
+            elif action == 'admit_all':
+                self._groups.setdefault(_ADMITTED_GROUP, set()).update(missing)
+                # Recompute current_available now that admitted pairs are added
+                current_available = set(map(tuple, self.all_inds))
+        elif missing:
+            # Autoload: silently keep only available pairs
+            selected = selected & current_available
+
         self.selected_inds = selected
-        self.unselected_inds = set(map(tuple, self.all_inds)) - selected
+        self.unselected_inds = current_available - selected
         if restore_groups:
             self._groups = {g: set(tuple(int(v) for v in p) for p in pairs)
                             for g, pairs in data.get('groups', {}).items()}
+            self._groups.setdefault(_ADMITTED_GROUP, set())
             self._group_hotkeys = data.get('hotkeys', {})
             self._group_notes = data.get('notes', {})
             self._rebuild_groups_menu()
         self.refresh_lists()
         self._draw_network()
+
+    def _show_missing_pairs_dialog(self, missing: set) -> str:
+        """Dialog when loaded selection has pairs not in current available set.
+
+        Returns 'partial', 'admit_all', or 'cancel'.
+        """
+        win = tk.Toplevel(self.root)
+        win.title("Missing Pairs")
+        win.geometry("450x320")
+        win.transient(self.root)
+        win.grab_set()
+
+        result = {'action': 'cancel'}
+        n = len(missing)
+
+        ttk.Label(win, text=f"{n} selected pair(s) are no longer in available pairs:",
+                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
+        ttk.Label(win,
+                  text="These pairs may have lost significance after CCG/epoch changes.",
+                  font=('Arial', 9), foreground='#666').pack(pady=(0, 4))
+
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        lb = tk.Listbox(frame, font=('Courier', 9))
+        sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=lb.yview)
+        lb.config(yscrollcommand=sb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        for ref, tgt in sorted(missing):
+            lb.insert(tk.END, f"  ({ref:3d}, {tgt:3d})")
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=8)
+
+        def partial():
+            result['action'] = 'partial'
+            win.destroy()
+
+        def admit_all():
+            result['action'] = 'admit_all'
+            win.destroy()
+
+        def cancel():
+            result['action'] = 'cancel'
+            win.destroy()
+
+        ttk.Button(btn_frame, text="Keep only available",
+                   command=partial).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Admit all missing",
+                   command=admit_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel",
+                   command=cancel).pack(side=tk.RIGHT, padx=4)
+
+        win.protocol('WM_DELETE_WINDOW', cancel)
+        win.wait_window()
+        return result['action']
 
     def _load_selection_dialog(self):
         """Show a dialog listing all saved versions; user picks one to load."""
@@ -3748,8 +4037,15 @@ class CCGReviewUI:
         return gif_folder
 
     def _on_close(self):
-        """Auto-save before closing the GUI."""
-        self._autosave_current()
+        """Prompt user before closing — optionally skip autosave."""
+        answer = messagebox.askyesnocancel(
+            "Quit",
+            "Save current selections before quitting?",
+            default=messagebox.YES)
+        if answer is None:
+            return  # Cancel — don't quit
+        if answer:
+            self._autosave_current()
         self.root.destroy()
 
     def run(self):

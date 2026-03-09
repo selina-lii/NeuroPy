@@ -36,8 +36,14 @@ neurons = Neurons(spiketrains,t_stop=1000)
 plotting.plot_raster(neurons,color = 'jet')
 
 ```
-
 ![Example Image](images/raster.png)
+
+
+### CCGViewer GUI
+Launch CCGViewer from `notebooks/CCG_gui.ipynb`. (Tested on Mac)
+![Example Image](images/ccg_gui.png)
+Selina Li 2026. Powered by [Claude](https://claude.com/product/claude-code).
+
 
 ### Citing this package
 If you use NeuroPy in your research, please consider citing it.
