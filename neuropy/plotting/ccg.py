@@ -32,7 +32,10 @@ def plot_ccg_panel(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
-        bins = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
+        # Convert from seconds to milliseconds for display
+        bins_s = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
+        bins = bins_s * 1000  # ms
+        bin_w = bin_size * 1000  # ms
 
         if grayscale:
             dark_gray = (0.2, 0.2, 0.2)
@@ -43,30 +46,41 @@ def plot_ccg_panel(
 
         ax.bar(bins,
                ccg,
-               width=bin_size,
+               width=bin_w,
                alpha=0.5,
                label="ccg",
                color=colors[0])
         if ccg_null is not None:
             ax.bar(bins,
                    ccg_null,
-                   width=bin_size,
+                   width=bin_w,
                    alpha=0.5,
                    label="ccg-smooth",
                    color=colors[1])
 
         if j_ccg is not None:
-            ax.bar(bins, j_ccg, width=bin_size, alpha=0.4,
+            ax.bar(bins, j_ccg, width=bin_w, alpha=0.4,
                    label="jitter avg", color="plum")
 
         if min_lag is not None and max_lag is not None:
-            ax.axvspan(min_lag-bin_size/2, max_lag-bin_size/2, alpha=0.12, color='green', label='test window')
+            ml_ms = min_lag * 1000
+            xl_ms = max_lag * 1000
+            # Span covers all tested bins: centers from min_lag to max_lag,
+            # each bar extends ±bin_w/2 around its center
+            ax.axvspan(ml_ms - bin_w/2, xl_ms + bin_w/2, alpha=0.12,
+                       color='green', label=f'test window ({ml_ms:.0f}–{xl_ms:.0f} ms)')
 
         ax.set_xlabel("Time (ms)")
         ylabel = "Count"
         if normalize_info is not None:
             ylabel = "Count " + normalize_info
         ax.set_ylabel(ylabel)
+
+        # Set explicit ms ticks: 0 always, plus standard landmarks within range
+        half_w_ms = window_size * 1000 / 2
+        candidate_ticks = [0, 1, -1, 3, -3, 5, -5, 10, -10]
+        xticks = sorted(t for t in candidate_ticks if abs(t) <= half_w_ms)
+        ax.set_xticks(xticks)
 
         sig_marker = '*' if is_significant_pair else ''
         type_str = f', type={neuron_type}' if neuron_type is not None else ''

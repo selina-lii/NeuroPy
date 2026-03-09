@@ -19,11 +19,12 @@ Keyboard shortcuts
   Ctrl+R        toggle lo-res ↔ hi-res
   Ctrl+E        toggle waveforms sub-panel
   m             move current pair between Available / Selected
+  Ctrl+S        save selection + export groups
   Ctrl+1..0     assign / jump to group 1–10
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
@@ -111,14 +112,16 @@ class CCGReviewUI:
         self._sig_show_conv_baseline = True   # convolution baseline (ccg_null)
         self._sig_show_conv_p = False         # convolution p-value line
         self._sig_show_conv_pc = False        # convolution corrected-p line
+        self._sig_show_test_window = True     # green test-window highlight
         self._sig_show_jitter_p = False       # jitter p-value line
         self._sig_show_jitter_pc = False      # jitter corrected-p (horizontal line)
 
         # Double-click debounce
         self._select_after: int = None       # after() id for deferred pair update
 
-        # Probe-network neuron focus
+        # Probe-network neuron/pair focus
         self._focused_neuron: int = None     # neuron index to highlight (None = off)
+        self._focused_pair: tuple = None     # (ref, tgt) pair to highlight (None = off)
         self._net_show_arrows: bool = True   # show/hide connection arrows
         self._net_hide_unconnected: bool = False  # hide neurons with no connections
         self._net_group_filter: str = None       # group name shown in probe network
@@ -126,6 +129,7 @@ class CCGReviewUI:
         # Group state  {group_name -> set((ref,tgt))}
         self._groups: dict = {}
         self._group_hotkeys: dict = {}       # group_name -> hotkey str e.g. 'Control-1'
+        self._group_notes: dict = {}         # group_name -> notes string
 
         # Versioned selections save dir
         self._sel_save_dir = os.path.expanduser(
@@ -157,6 +161,7 @@ class CCGReviewUI:
         # Build UI
         self.root = tk.Tk()
         self.root.title("CCG Manual Review")
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.setup_ui()
 
     # ------------------------------------------------------------------
@@ -175,6 +180,9 @@ class CCGReviewUI:
 
         # ── Tool-strip row ─────────────────────────────────────────────
         self.setup_menu()
+
+        # ── Group hotkeys bar (below tool-strip, hidden by default) ────
+        self.setup_group_hotkeys_bar()
 
         # ── Bottom bar (packed before main so it gets space first) ─────
         self.setup_bottom_panel()
@@ -209,6 +217,8 @@ class CCGReviewUI:
             self.root.bind(_key, lambda e: self._toggle_resolution())
         for _key in ('<Control-e>', '<Command-e>'):
             self.root.bind(_key, lambda e: self._on_ctrl_e())
+        for _key in ('<Control-s>', '<Command-s>'):
+            self.root.bind(_key, lambda e: self._quick_save())
         # 'm' key moves current pair between Available / Selected
         # Guard: don't fire when typing in an Entry or Spinbox widget
         def _m_key_handler(e):
@@ -216,13 +226,21 @@ class CCGReviewUI:
                 return
             self._move_current_pair()
         self.root.bind('<m>', _m_key_handler)
-        # Ctrl+1..0 for groups
-        for i in range(10):
-            key_n = str(i + 1) if i < 9 else '0'
-            for mod in ('<Control-', '<Command-'):
-                self.root.bind(
-                    f'{mod}{key_n}>',
-                    lambda e, n=i: self._group_hotkey_handler(n))
+        # Ctrl/Cmd+1..0 for groups — use global KeyPress handler because
+        # macOS Tkinter doesn't deliver <Command-digit> events reliably.
+        def _global_key_handler(e):
+            if isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Spinbox, ttk.Spinbox,
+                                     tk.Text)):
+                return
+            # Check for Ctrl (bit 2) or Cmd (bit 3) modifier
+            has_mod = e.state & (0x4 | 0x8)
+            if not has_mod:
+                return
+            if e.keysym in ('1', '2', '3', '4', '5', '6', '7', '8', '9'):
+                self._group_hotkey_handler(int(e.keysym) - 1)
+            elif e.keysym == '0':
+                self._group_hotkey_handler(9)
+        self.root.bind('<KeyPress>', _global_key_handler)
 
     # ── Menubar ────────────────────────────────────────────────────────
 
@@ -231,11 +249,12 @@ class CCGReviewUI:
         panels_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Panels", menu=panels_menu)
         panel_defaults = [
-            ('Pair Selection', True),
-            ('CCG',            True),
-            ('Probe Network',  True),
-            ('Waveforms',      False),
-            ('Time Slider',    False),
+            ('Pair Selection',  True),
+            ('CCG',             True),
+            ('Probe Network',   True),
+            ('Waveforms',       False),
+            ('Time Slider',     False),
+            ('Group Hotkeys',   True),
         ]
         for name, default in panel_defaults:
             var = tk.BooleanVar(value=default)
@@ -252,6 +271,12 @@ class CCGReviewUI:
                                       command=self._create_group_dialog)
         self._groups_menu.add_command(label="Manage groups…",
                                       command=self._manage_groups_dialog)
+        self._groups_menu.add_command(label="Merge groups…",
+                                      command=self._merge_groups_dialog)
+        self._groups_menu.add_command(label="Export groups…",
+                                      command=self._export_groups)
+        self._groups_menu.add_command(label="Import groups…",
+                                      command=self._import_groups)
         self._groups_menu.add_separator()
         # Dynamic group entries added in _rebuild_groups_menu()
 
@@ -260,7 +285,7 @@ class CCGReviewUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Selections", menu=file_menu)
         file_menu.add_command(label="Save selection…",
-                              command=self.save_selections)
+                              command=self._quick_save)
         file_menu.add_command(label="Load selection…",
                               command=self._load_selection_dialog)
         file_menu.add_separator()
@@ -298,7 +323,54 @@ class CCGReviewUI:
         self._type_combo.pack(side=tk.LEFT, padx=2)
         self._type_combo.bind('<<ComboboxSelected>>', self._on_type_change)
 
+    # ── Group hotkeys bar ──────────────────────────────────────────────
 
+    def setup_group_hotkeys_bar(self):
+        """Horizontal bar showing Ctrl+1…0 → group-name mappings."""
+        self._hotkeys_bar = ttk.Frame(self.root, relief=tk.GROOVE, borderwidth=1)
+        self._hotkeys_bar_labels: list[tk.Label] = []
+        self._refresh_hotkeys_bar()
+        # Pack immediately if default is visible
+        if self._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get():
+            self._hotkeys_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2))
+
+    def _refresh_hotkeys_bar(self):
+        """Rebuild the labels inside the hotkeys bar."""
+        for w in self._hotkeys_bar.winfo_children():
+            w.destroy()
+        self._hotkeys_bar_labels.clear()
+
+        ttk.Label(self._hotkeys_bar, text="Groups:",
+                  font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(6, 4))
+
+        # Build ordered slots: Ctrl+1 … Ctrl+9, Ctrl+0
+        slot_order = [str(i) for i in range(1, 10)] + ['0']
+        # Invert: hotkey_str → group_name
+        hk_to_group = {v: k for k, v in self._group_hotkeys.items()}
+
+        # Current session pairs for counting
+        current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
+
+        for key_str in slot_order:
+            gname = hk_to_group.get(key_str)
+            if gname is None:
+                continue
+            # Count only pairs belonging to current session/type
+            n_in_session = len(self._groups.get(gname, set()) & current_pairs)
+            display = f"⌘{key_str}: {gname} ({n_in_session})"
+            lbl = tk.Label(self._hotkeys_bar, text=display,
+                           font=('Courier', 9), padx=6, pady=1,
+                           relief=tk.RIDGE, borderwidth=1)
+            lbl.pack(side=tk.LEFT, padx=2, pady=2)
+            # Click label → jump to group
+            lbl.bind('<Button-1>',
+                     lambda e, g=gname: self._select_group(g))
+            self._hotkeys_bar_labels.append(lbl)
+
+        if not hk_to_group:
+            ttk.Label(self._hotkeys_bar, text="(no hotkeys assigned)",
+                      font=('Arial', 9), foreground='#888').pack(
+                side=tk.LEFT, padx=4)
 
     # ── Left panel ─────────────────────────────────────────────────────
 
@@ -320,7 +392,7 @@ class CCGReviewUI:
         unsel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.unselected_list = tk.Listbox(
             unsel_frame, yscrollcommand=unsel_scroll.set,
-            selectmode=tk.BROWSE, font=('Courier', 9), activestyle='none')
+            selectmode=tk.EXTENDED, font=('Courier', 9), activestyle='none')
         self.unselected_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         unsel_scroll.config(command=self.unselected_list.yview)
         # Single click → navigate (debounced); double-click → move
@@ -332,6 +404,8 @@ class CCGReviewUI:
             lambda e: self._ctx_menu(e, self.unselected_list, 'add'))
         self.unselected_list.bind('<Button-2>',
             lambda e: self._ctx_menu(e, self.unselected_list, 'add'))
+        self.unselected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
+        self.unselected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
 
         # Selected list
         sel_frame = ttk.Frame(columns_frame)
@@ -344,7 +418,7 @@ class CCGReviewUI:
         sel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.selected_list = tk.Listbox(
             sel_frame, yscrollcommand=sel_scroll.set,
-            selectmode=tk.BROWSE, font=('Courier', 9), activestyle='none')
+            selectmode=tk.EXTENDED, font=('Courier', 9), activestyle='none')
         self.selected_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sel_scroll.config(command=self.selected_list.yview)
         self.selected_list.bind('<ButtonRelease-1>', self.on_pair_select)
@@ -354,6 +428,8 @@ class CCGReviewUI:
             lambda e: self._ctx_menu(e, self.selected_list, 'remove'))
         self.selected_list.bind('<Button-2>',
             lambda e: self._ctx_menu(e, self.selected_list, 'remove'))
+        self.selected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
+        self.selected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
 
         self.refresh_lists()
 
@@ -437,6 +513,10 @@ class CCGReviewUI:
         ttk.Checkbutton(sig_frame, text="p-corrected",
                         variable=self._sig_conv_pc_var,
                         command=self._on_sig_toggle).pack(side=tk.LEFT, padx=2)
+        self._sig_test_window_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sig_frame, text="test window",
+                        variable=self._sig_test_window_var,
+                        command=self._on_sig_toggle).pack(side=tk.LEFT, padx=2)
 
         sep = ttk.Separator(sig_frame, orient=tk.VERTICAL)
         sep.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
@@ -465,6 +545,7 @@ class CCGReviewUI:
         self._sig_show_conv_baseline = self._sig_conv_baseline_var.get()
         self._sig_show_conv_p = self._sig_conv_p_var.get()
         self._sig_show_conv_pc = self._sig_conv_pc_var.get()
+        self._sig_show_test_window = self._sig_test_window_var.get()
         self._sig_show_jitter_p = self._sig_jitter_p_var.get()
         self._sig_show_jitter_pc = self._sig_jitter_pc_var.get()
         self._clear_all_png_cache()
@@ -565,6 +646,39 @@ class CCGReviewUI:
                   font=('Arial', 8), foreground='#555').pack(
             side=tk.LEFT, padx=4)
 
+        # ── Pair-focus row ─────────────────────────────────────────────
+        pair_focus_frame = ttk.Frame(parent)
+        pair_focus_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(pair_focus_frame, text="Focus pair:").pack(side=tk.LEFT)
+        self._focus_pair_var = tk.StringVar()
+        pair_focus_entry = ttk.Entry(pair_focus_frame,
+                                     textvariable=self._focus_pair_var, width=8)
+        pair_focus_entry.pack(side=tk.LEFT, padx=2)
+        pair_focus_entry.bind('<Return>', lambda e: self._on_pair_focus())
+        ttk.Button(pair_focus_frame, text="Clear",
+                   command=self._on_pair_focus_clear).pack(side=tk.LEFT, padx=2)
+        self._focus_pair_info_var = tk.StringVar(value="")
+        ttk.Label(pair_focus_frame, textvariable=self._focus_pair_info_var,
+                  font=('Arial', 8), foreground='#555').pack(
+            side=tk.LEFT, padx=4)
+
+        # ── Connection type toggles ──────────────────────────────────────
+        ct_frame = ttk.Frame(parent)
+        ct_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        _ct_labels = {
+            ('pyr', 'pyr'):     'P→P',
+            ('pyr', 'inter'):   'P→I',
+            ('inter', 'inter'): 'I→I',
+            ('inter', 'pyr'):   'I→P',
+        }
+        self._net_ct_vars = {}
+        for ct in [('pyr', 'pyr'), ('pyr', 'inter'),
+                   ('inter', 'inter'), ('inter', 'pyr')]:
+            var = tk.BooleanVar(value=True)
+            self._net_ct_vars[ct] = var
+            ttk.Checkbutton(ct_frame, text=_ct_labels[ct], variable=var,
+                            command=self._draw_network).pack(side=tk.LEFT, padx=2)
+
         # ── Network display toggles ──────────────────────────────────────
         toggle_frame = ttk.Frame(parent)
         toggle_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
@@ -578,6 +692,11 @@ class CCGReviewUI:
                         variable=self._net_hide_var,
                         command=self._on_net_toggle_hide
                         ).pack(side=tk.LEFT)
+        self._net_hide_same_shank_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toggle_frame, text="Hide same shank",
+                        variable=self._net_hide_same_shank_var,
+                        command=self._on_net_toggle_hide_same_shank
+                        ).pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Group filter dropdown ─────────────────────────────────────────
         group_frame = ttk.Frame(parent)
@@ -665,11 +784,14 @@ class CCGReviewUI:
         bottom_frame = ttk.Frame(self.root)
         bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
         ttk.Button(bottom_frame, text="Save Selections",
-                   command=self.save_selections).pack(side=tk.RIGHT, padx=5)
+                   command=self._quick_save).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bottom_frame, text="Cancel",
                    command=self.root.destroy).pack(side=tk.RIGHT, padx=5)
         self.stats_var = tk.StringVar(value=self._compute_stats_str())
         ttk.Label(bottom_frame, textvariable=self.stats_var,
+                  font=('Courier', 9)).pack(side=tk.LEFT, padx=8)
+        self._pair_info_var = tk.StringVar(value="")
+        ttk.Label(bottom_frame, textvariable=self._pair_info_var,
                   font=('Courier', 9)).pack(side=tk.LEFT, padx=8)
 
     # ------------------------------------------------------------------
@@ -707,6 +829,14 @@ class CCGReviewUI:
             self._toggle_waveforms_panel()
         elif name == 'Time Slider':
             self._toggle_time_slider()
+        elif name == 'Group Hotkeys':
+            if show:
+                self._refresh_hotkeys_bar()
+                # Pack after the tool-strip (setup_menu frame), before the main area
+                self._hotkeys_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2),
+                                       before=self._main_frame)
+            else:
+                self._hotkeys_bar.pack_forget()
 
     def _toggle_waveforms_panel(self):
         self._waveforms_visible = self._panel_vars['Waveforms'].get()
@@ -1265,6 +1395,8 @@ class CCGReviewUI:
         idx = self._session_combo.current()
         if idx < 0 or idx >= len(self._nd_keys_list):
             return
+        # Auto-save current session before switching away
+        self._autosave_current()
         nd_key = self._nd_keys_list[idx]
         type_keys = self._available_type_keys(nd_key)
         self._type_keys_list = type_keys
@@ -1280,6 +1412,7 @@ class CCGReviewUI:
             self._type_var.set(type_labels[0])
         if self._switch_key(new_key):
             self._refresh_after_key_switch()
+            self._autoload_session_latest()
 
     def _on_type_change(self, event):
         idx = self._type_combo.current()
@@ -1342,6 +1475,38 @@ class CCGReviewUI:
         if hasattr(self, 'stats_var'):
             self.stats_var.set(self._compute_stats_str())
 
+    def _update_pair_info(self, inds):
+        """Update per-pair info (firing rates) in the stats bar."""
+        if not hasattr(self, '_pair_info_var'):
+            return
+        if self.neurons is None:
+            self._pair_info_var.set("")
+            return
+        ref, tgt = int(inds[0]), int(inds[1])
+        fr = getattr(self.neurons, 'firing_rate', None)
+        if fr is None:
+            self._pair_info_var.set("")
+            return
+        ref_fr = float(fr[ref])
+        tgt_fr = float(fr[tgt])
+
+        # Segment-level firing rate
+        seg_str = ""
+        seg = self.current_segment
+        nd_key = self.key.nd() if self.key else None
+        seg_frates = None
+        if (nd_key is not None and self.cd.nd is not None
+                and not self._is_custom_segment(seg)
+                and seg != self.n_segments):
+            seg_frates = self.cd.nd.segment_firing_rates.get(nd_key)
+        if seg_frates is not None and seg < seg_frates.shape[0]:
+            sr = float(seg_frates[seg, ref])
+            st = float(seg_frates[seg, tgt])
+            seg_str = f"  Seg FR: ref={sr:.1f}  tgt={st:.1f}"
+
+        self._pair_info_var.set(
+            f"FR: ref={ref_fr:.1f}Hz  tgt={tgt_fr:.1f}Hz{seg_str}")
+
     # ------------------------------------------------------------------
     # Pair lists
     # ------------------------------------------------------------------
@@ -1350,12 +1515,31 @@ class CCGReviewUI:
         self.unselected_list.delete(0, tk.END)
         self.selected_list.delete(0, tk.END)
 
+        # Build gray-out set based on active focus mode
+        gray_out = None
         fn = self._focused_neuron
-        focus_connected = None
+        fp = self._focused_pair
         if fn is not None:
             focus_connected = {(ref, tgt) for ref, tgt in
                                map(tuple, self.all_inds)
                                if ref == fn or tgt == fn}
+            gray_out = lambda inds: inds not in focus_connected
+        elif fp is not None:
+            gray_out = lambda inds: inds != fp
+
+        # Same-shank graying
+        hide_same_shank = (hasattr(self, '_net_hide_same_shank_var')
+                           and self._net_hide_same_shank_var.get())
+        shank_ids = (getattr(self.neurons, 'shank_ids', None)
+                     if self.neurons is not None else None)
+
+        def _should_gray(inds):
+            if gray_out is not None and gray_out(inds):
+                return True
+            if hide_same_shank and shank_ids is not None:
+                if int(shank_ids[inds[0]]) == int(shank_ids[inds[1]]):
+                    return True
+            return False
 
         for inds in sorted(self.unselected_inds):
             label = f"[{inds[0]:3d}, {inds[1]:3d}]"
@@ -1363,7 +1547,7 @@ class CCGReviewUI:
             if grp:
                 label += f" {grp}"
             self.unselected_list.insert(tk.END, label)
-            if focus_connected is not None and inds not in focus_connected:
+            if _should_gray(inds):
                 idx = self.unselected_list.size() - 1
                 self.unselected_list.itemconfig(idx, foreground='#AAAAAA')
 
@@ -1373,7 +1557,7 @@ class CCGReviewUI:
             if grp:
                 label += f" {grp}"
             self.selected_list.insert(tk.END, label)
-            if focus_connected is not None and inds not in focus_connected:
+            if _should_gray(inds):
                 idx = self.selected_list.size() - 1
                 self.selected_list.itemconfig(idx, foreground='#AAAAAA')
 
@@ -1485,6 +1669,24 @@ class CCGReviewUI:
         self.update_plot()
         self._draw_network()
 
+    def _on_arrow_key(self, event):
+        """Up/Down arrow key in a pair list: update CCG to the newly selected pair."""
+        widget = event.widget
+        sel = widget.curselection()
+        if not sel:
+            return
+        idx = sel[-1]
+        if widget == self.unselected_list:
+            sorted_items = sorted(self.unselected_inds)
+        else:
+            sorted_items = sorted(self.selected_inds)
+        if idx >= len(sorted_items):
+            return
+        inds = sorted_items[idx]
+        self.current_pair_idx = self.get_pair_index(inds)
+        self.update_plot()
+        self._draw_network()
+
     def _select_all(self):
         """Toggle between Select All and Deselect All."""
         if self.unselected_inds:
@@ -1499,30 +1701,40 @@ class CCGReviewUI:
         self._draw_network()
 
     def _ctx_menu(self, event, widget, action):
-        """Right-click context menu for the pair lists."""
-        idx = widget.nearest(event.y)
-        if idx >= 0:
-            widget.selection_clear(0, tk.END)
-            widget.selection_set(idx)
-            widget.activate(idx)
+        """Right-click context menu for the pair lists.
 
-        # Determine the pair under cursor — capture now, before event dissolves
+        Supports multi-selection: if multiple items are selected (via
+        Ctrl+click or Shift+click), the group-tag action applies to all.
+        """
+        # If right-clicked item is not already part of the selection,
+        # replace selection with just that item (standard behavior).
+        click_idx = widget.nearest(event.y)
+        if click_idx not in widget.curselection():
+            widget.selection_clear(0, tk.END)
+            widget.selection_set(click_idx)
+            widget.activate(click_idx)
+
+        # Build list of selected pairs
         if action == 'add':
             sorted_items = sorted(self.unselected_inds)
         else:
             sorted_items = sorted(self.selected_inds)
-        pair = sorted_items[idx] if 0 <= idx < len(sorted_items) else None
+        sel_indices = list(widget.curselection())
+        pairs = [sorted_items[i] for i in sel_indices
+                 if 0 <= i < len(sorted_items)]
+        n = len(pairs)
 
         menu = tk.Menu(self.root, tearoff=0)
         if action == 'add':
-            # Pass pair directly — do NOT re-derive from event coords later
-            menu.add_command(label="Move to Selected",
-                             command=lambda p=pair: self._ctx_move_to_selected(p))
+            menu.add_command(
+                label=f"Move to Selected ({n})" if n > 1 else "Move to Selected",
+                command=lambda pp=pairs: self._ctx_move_multi_to_selected(pp))
             menu.add_command(label="Select All",
                              command=self._select_all)
         else:
-            menu.add_command(label="Move to Available",
-                             command=lambda p=pair: self._ctx_move_to_unselected(p))
+            menu.add_command(
+                label=f"Move to Available ({n})" if n > 1 else "Move to Available",
+                command=lambda pp=pairs: self._ctx_move_multi_to_unselected(pp))
 
         # Group tag submenu
         menu.add_separator()
@@ -1533,14 +1745,13 @@ class CCGReviewUI:
         if self._groups:
             grp_menu.add_separator()
         for gname in sorted(self._groups):
-            if pair is not None:
-                in_grp = pair in self._groups[gname]
-                label = f"{'✓ ' if in_grp else ''}  {gname}"
+            if pairs:
+                # Show ✓ if ALL selected pairs are in the group
+                all_in = all(p in self._groups[gname] for p in pairs)
+                label = f"{'✓ ' if all_in else ''}  {gname}"
                 grp_menu.add_command(
                     label=label,
-                    command=lambda g=gname, p=pair: self._toggle_pair_group(p, g))
-        # Use tk_popup without grab_release — calling grab_release() immediately
-        # in a finally block closes the menu on macOS before the user can click.
+                    command=lambda g=gname, pp=pairs: self._toggle_pairs_group(pp, g))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _ctx_move_to_selected(self, pair):
@@ -1556,6 +1767,18 @@ class CCGReviewUI:
         self.update_plot()
         self._draw_network()
 
+    def _ctx_move_multi_to_selected(self, pairs):
+        """Context-menu: move multiple pairs from Available → Selected."""
+        if not pairs:
+            return
+        scroll_top = self.unselected_list.yview()[0]
+        for p in pairs:
+            self.unselected_inds.discard(p)
+            self.selected_inds.add(p)
+        self.refresh_lists()
+        self.unselected_list.yview_moveto(scroll_top)
+        self._draw_network()
+
     def _ctx_move_to_unselected(self, pair):
         """Context-menu: move a specific pair from Selected → Available."""
         if pair is None:
@@ -1567,6 +1790,18 @@ class CCGReviewUI:
         self.selected_list.yview_moveto(scroll_top)
         self.current_pair_idx = self.get_pair_index(pair)
         self.update_plot()
+        self._draw_network()
+
+    def _ctx_move_multi_to_unselected(self, pairs):
+        """Context-menu: move multiple pairs from Selected → Available."""
+        if not pairs:
+            return
+        scroll_top = self.selected_list.yview()[0]
+        for p in pairs:
+            self.selected_inds.discard(p)
+            self.unselected_inds.add(p)
+        self.refresh_lists()
+        self.selected_list.yview_moveto(scroll_top)
         self._draw_network()
 
     def get_pair_index(self, inds):
@@ -1693,7 +1928,11 @@ class CCGReviewUI:
                 seg_label = _ALL_SEGS
             else:
                 seg_label = self.segment_names[self.current_segment]
-            return f"Pair [{inds[0]}, {inds[1]}] — {seg_label}"
+            # Include session and connectivity type
+            sess = self.key.session if self.key else ''
+            ct = (f"{self.key.conn_type[0]}-{self.key.conn_type[1]}"
+                  if self.key and self.key.conn_type else '')
+            return f"{sess} | {ct} | Pair [{inds[0]}, {inds[1]}] — {seg_label}"
         return "No pair selected"
 
     # ------------------------------------------------------------------
@@ -1727,6 +1966,7 @@ class CCGReviewUI:
             ('b' if self._sig_show_conv_baseline else '') +
             ('p' if self._sig_show_conv_p else '') +
             ('c' if self._sig_show_conv_pc else '') +
+            ('tw' if self._sig_show_test_window else '') +
             ('jp' if self._sig_show_jitter_p else '') +
             ('jc' if self._sig_show_jitter_pc else ''))
         if sig_bits:
@@ -1843,7 +2083,8 @@ class CCGReviewUI:
             j_ccg=show_j_ccg, j_pval=show_j_pval,
             segment_id=seg_label,
             is_significant_pair=self._is_significant(ref, tgt, segment),
-            min_lag=conf.min_lag, max_lag=conf.max_lag,
+            min_lag=conf.min_lag if self._sig_show_test_window else None,
+            max_lag=conf.max_lag if self._sig_show_test_window else None,
             normalize_info=norm_info,
         )
         # Same-scale y-axis override
@@ -1860,7 +2101,37 @@ class CCGReviewUI:
     # Plot update
     # ------------------------------------------------------------------
 
+    def _autosave_current(self):
+        """Silently save current session's selections + groups as 'latest'.
+
+        Called before any operation that would overwrite self._groups or
+        self.selected_inds (session switch, GUI close).
+        """
+        try:
+            self._save_selection_version('latest')
+        except Exception as exc:
+            print(f"[CCGReviewUI] autosave failed: {exc}")
+
+    def _autoload_session_latest(self, restore_groups: bool = False):
+        """Load the 'latest' selection file for the current session, if it exists.
+
+        By default only restores pair selections — groups are shared across
+        sessions and should not be overwritten on session switch.  Pass
+        restore_groups=True on first launch to seed groups from the file.
+        """
+        latest_path = self._sel_version_path('latest')
+        if not os.path.isfile(latest_path):
+            return
+        try:
+            self._load_selection_from_file(latest_path,
+                                           restore_groups=restore_groups)
+        except Exception as exc:
+            print(f"[CCGReviewUI] failed to autoload latest: {exc}")
+
     def _deferred_initial_draw(self):
+        # On first launch, restore groups from file (subsequent session
+        # switches will keep groups intact via restore_groups=False)
+        self._autoload_session_latest(restore_groups=True)
         self.update_plot()
 
     def update_plot(self):
@@ -1884,6 +2155,7 @@ class CCGReviewUI:
             self.plot_title_var.set(self.get_plot_title())
             self._update_sig_indicators(inds)
             self._update_jitter_sig_buttons()
+            self._update_pair_info(inds)
             self._draw_waveforms()
 
         except Exception as e:
@@ -2167,8 +2439,11 @@ class CCGReviewUI:
                     use_acceleration=conf.use_acceleration,
                 )
                 ccg = ccg[np.newaxis, ...]
+                # Compute W from the actual bin_size used, not from conf
+                # (conf.bin_size may be mutated to high-res)
+                W = conf.conv_window / bin_size
                 pvals, pred, qvals = EranConv._conv(
-                    ccg, W=conf.conv_window_bins, wintype="gauss",
+                    ccg, W=W, wintype="gauss",
                     hollow_frac=None)
                 p_raw = pvals if ei == 'E' else qvals
                 _, pval_corrected = EranConv.multiple_correction(
@@ -2281,16 +2556,13 @@ class CCGReviewUI:
         x_pos, y_pos = pos
         n_neurons = len(x_pos)
         fn = self._focused_neuron  # focused neuron id or None
+        fp = self._focused_pair    # focused (ref, tgt) pair or None
         gf = self._net_group_filter  # group filter name or None
+        shank_ids = (getattr(self.neurons, 'shank_ids', None)
+                     if self.neurons is not None else None)
 
         # ── Gather pairs: current type only by default; all types when focused ──
-        # pair_entries: {(ref,tgt) -> list of dict}
-        # Group mode: show only pairs in the selected group, across all types.
-        # Focus mode: all session types, but only pairs involving the focused neuron.
-        # Default mode: current key only — keeps arrow count small for smooth rendering.
-        if gf is not None:
-            type_keys_show = self._available_type_keys(self.key.nd())
-        elif fn is not None:
+        if gf is not None or fn is not None or fp is not None:
             type_keys_show = self._available_type_keys(self.key.nd())
         else:
             type_keys_show = [self.key]
@@ -2363,9 +2635,16 @@ class CCGReviewUI:
         # in pair_entries (all_involved).  Otherwise also include cluster_neurons.
         unconnected_o, unconnected_s = [], []  # pyr / inter with no connections
         connected_by_color: dict = {}  # color → (list_o, list_s)
+        # In focus-pair mode, the two neurons in the pair are drawn separately
+        fp_neurons = set()
+        if fp is not None:
+            fp_neurons = {fp[0], fp[1]}
+
         for idx in range(n_neurons):
             if fn is not None and idx == fn:
                 continue    # focused neuron drawn individually below
+            if idx in fp_neurons:
+                continue    # focused pair neurons drawn individually below
             ntype = nt[idx] if nt is not None else None
             is_inter = (ntype == 'inter')
             if self._net_hide_unconnected:
@@ -2378,6 +2657,9 @@ class CCGReviewUI:
                     c = neuron_ct_color[idx]
                 else:
                     c = '#1565C0' if is_inter else '#2E7D32'
+                if fp is not None:
+                    # Dim all other neurons when pair is focused
+                    c = '#9E9E9E'
                 if c not in connected_by_color:
                     connected_by_color[c] = ([], [])
                 (connected_by_color[c][1] if is_inter
@@ -2398,15 +2680,25 @@ class CCGReviewUI:
             _scatter(unconnected_s, 's', '#9E9E9E', 14, 1, alpha=0.25)
         # Connected neurons: colored by connection type (focus) or neuron type
         for color, (o_list, s_list) in connected_by_color.items():
-            _scatter(o_list, 'o', color, 50, 4)
-            _scatter(s_list, 's', color, 50, 4)
-        # Focused neuron
+            a = 0.3 if fp is not None else 1.0
+            _scatter(o_list, 'o', color, 50 if fp is None else 20, 4, alpha=a)
+            _scatter(s_list, 's', color, 50 if fp is None else 20, 4, alpha=a)
+        # Focused neuron (single neuron mode)
         if fn is not None and 0 <= fn < n_neurons:
             fn_ntype = nt[fn] if nt is not None else None
             fn_marker = 's' if fn_ntype == 'inter' else 'o'
             ax.scatter([x_pos[fn]], [y_pos[fn]], s=140, marker=fn_marker,
                        color='#FF6F00', zorder=6, linewidths=2.0,
                        edgecolors='black')
+        # Focused pair neurons
+        if fp is not None:
+            for i, (nid, clr) in enumerate([(fp[0], '#FF6F00'), (fp[1], '#1E88E5')]):
+                if 0 <= nid < n_neurons:
+                    ntype = nt[nid] if nt is not None else None
+                    m = 's' if ntype == 'inter' else 'o'
+                    ax.scatter([x_pos[nid]], [y_pos[nid]], s=140, marker=m,
+                               color=clr, zorder=6, linewidths=2.0,
+                               edgecolors='black')
 
         # ── Draw edges (arrows) ──────────────────────────────────────────
         # Build a set of all (ref,tgt) so we know if a reverse edge exists
@@ -2428,20 +2720,36 @@ class CCGReviewUI:
                 is_sel   = entry['is_selected']
                 is_cpair = (is_cur and (ref, tgt) == current_pair)
 
+                # Skip if this connection type is toggled off
+                if ct is not None and not self._net_ct_vars.get(ct, tk.BooleanVar(value=True)).get():
+                    continue
+                # Skip same-shank pairs when toggle is on
+                if (self._net_hide_same_shank_var.get()
+                        and shank_ids is not None
+                        and int(shank_ids[ref]) == int(shank_ids[tgt])):
+                    continue
+
                 # Determine color — always use connection-type palette
                 ec = self._NET_TYPE_COLOR.get(
                     ct, self._NET_DEFAULT_E if ei == 'E'
                     else self._NET_DEFAULT_I)
 
-                if not in_filt:
-                    # Out of segment filter — dim the arrow
+                is_fp = (fp is not None and (ref, tgt) == fp)
+
+                if is_fp:
+                    alpha, lw, zo = 1.00, 3.0, 7
+                elif fp is not None:
+                    # Dim all other arrows when pair is focused
+                    alpha, lw, zo = 0.12, 0.3, 1
+                    ec = '#CCCCCC'
+                elif not in_filt:
                     alpha, lw, zo = 0.20, 0.4, 1
                     ec = '#CCCCCC'
                 elif not is_cur:
-                    # Other type key (focus mode context) — thin/transparent
                     alpha, lw, zo = 0.35, 0.6, 2
                 elif is_cpair:
                     alpha, lw, zo = 1.00, 3.0, 7
+                    ec = 'black'
                 elif is_sel:
                     alpha, lw, zo = 0.90, 1.8, 4
                 else:
@@ -2468,6 +2776,24 @@ class CCGReviewUI:
                 arrow.set_gid(f"{ref}_{tgt}_{entry['key']}")
                 ax.add_patch(arrow)
 
+        # ── Dashed arrow for non-existent focused pair ────────────────────
+        if (fp is not None and fp not in pair_entries
+                and self._net_show_arrows
+                and 0 <= fp[0] < n_neurons and 0 <= fp[1] < n_neurons):
+            from matplotlib.patches import FancyArrowPatch as _FAP
+            dashed = _FAP(
+                (x_pos[fp[0]], y_pos[fp[0]]),
+                (x_pos[fp[1]], y_pos[fp[1]]),
+                arrowstyle='->', color='#888888',
+                linewidth=1.5, alpha=0.7,
+                linestyle='--',
+                mutation_scale=8,
+                connectionstyle='arc3,rad=0',
+                shrinkA=5, shrinkB=5,
+                zorder=7,
+            )
+            ax.add_patch(dashed)
+
         # ── Legend ───────────────────────────────────────────────────────
         shown_types = set()
         for (ref, tgt), entries in pair_entries.items():
@@ -2484,13 +2810,25 @@ class CCGReviewUI:
         legend_handles = []
         for ct in [('pyr', 'pyr'), ('pyr', 'inter'),
                    ('inter', 'inter'), ('inter', 'pyr')]:
-            if ct in shown_types:
+            if ct in shown_types and self._net_ct_vars.get(ct, tk.BooleanVar(value=True)).get():
                 legend_handles.append(
                     Line2D([0], [0], color=self._NET_TYPE_COLOR[ct],
                            lw=2, label=_ct_label[ct]))
         if legend_handles:
             ax.legend(handles=legend_handles, fontsize=6, loc='lower left',
                       framealpha=0.75, handlelength=1.4)
+
+        # ── Shank labels at top ──────────────────────────────────────────
+        if shank_ids is not None:
+            unique_shanks = np.unique(shank_ids)
+            h_scale = getattr(self, '_net_hzoom_var', None)
+            shank_gap = 150.0 * (h_scale.get() if h_scale else 1.0)
+            y_top = np.max(y_pos) + 20
+            for sk in unique_shanks:
+                sx = float(sk) * shank_gap
+                ax.text(sx, y_top, f"S{int(sk)}",
+                        ha='center', va='bottom', fontsize=8,
+                        fontweight='bold', color='#555555')
 
         ax.axis('off')
         ax.set_aspect('equal')
@@ -2557,11 +2895,12 @@ class CCGReviewUI:
                                      f"[0, {self.neurons.n_neurons-1}]")
                 return
         self._focused_neuron = nid
-        print(f"[CCGReviewUI]   focused_neuron set to {nid}")
+        self._focused_pair = None
+        self._focus_pair_var.set("")
+        self._focus_pair_info_var.set("")
         self._update_focus_info(nid)
         self.refresh_lists()
         self._draw_network()
-        print(f"[CCGReviewUI]   _draw_network completed for focus={nid}")
 
     def _update_focus_info(self, nid):
         """Update focus info label with current-type and total connection counts."""
@@ -2588,12 +2927,77 @@ class CCGReviewUI:
         self.refresh_lists()
         self._draw_network()
 
+    def _on_pair_focus(self):
+        """Set focus to a specific (ref, tgt) pair. Clears neuron focus."""
+        val = self._focus_pair_var.get().strip()
+        if not val:
+            self._on_pair_focus_clear()
+            return
+        try:
+            parts = val.replace(' ', '').split(',')
+            ref, tgt = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            messagebox.showerror("Pair focus",
+                                 f"Invalid pair format: {val!r}\nUse ref,tgt (e.g. 1,170)")
+            return
+        # Validate neuron indices exist
+        if self.neurons is not None:
+            n = self.neurons.n_neurons
+            if ref < 0 or ref >= n or tgt < 0 or tgt >= n:
+                messagebox.showerror("Pair focus",
+                                     f"Neuron index out of range [0, {n-1}]")
+                return
+        # Check if pair exists in any type
+        pair = (ref, tgt)
+        pair_exists = False
+        for tk_ in self._available_type_keys(self.key.nd()):
+            pt = self.cd.data.get(tk_)
+            if pt is None or pt.inds is None:
+                continue
+            if pair in set(map(tuple, pt.inds2)):
+                pair_exists = True
+                break
+        if not pair_exists:
+            self._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
+        self._focused_pair = pair
+        self._focused_neuron = None
+        self._focus_var.set("")
+        self._focus_info_var.set("")
+        # Update pair info
+        self._update_pair_focus_info(pair, pair_exists)
+        self.refresh_lists()
+        self._draw_network()
+
+    def _update_pair_focus_info(self, pair, exists):
+        """Update the pair focus info label."""
+        ref, tgt = pair
+        if self.neurons is not None:
+            nt = self.neurons.neuron_type
+            ref_type = nt[ref] if nt is not None and ref < len(nt) else '?'
+            tgt_type = nt[tgt] if nt is not None and tgt < len(nt) else '?'
+            status = "sig" if exists else "not sig"
+            self._focus_pair_info_var.set(
+                f"{ref}({ref_type})→{tgt}({tgt_type}) [{status}]")
+        else:
+            self._focus_pair_info_var.set(f"{ref}→{tgt}")
+
+    def _on_pair_focus_clear(self):
+        self._focused_pair = None
+        self._focus_pair_var.set("")
+        self._focus_pair_info_var.set("")
+        self.refresh_lists()
+        self._draw_network()
+
     def _on_net_toggle_arrows(self):
         self._net_show_arrows = self._net_arrows_var.get()
         self._draw_network()
 
     def _on_net_toggle_hide(self):
         self._net_hide_unconnected = self._net_hide_var.get()
+        self._draw_network()
+
+    def _on_net_toggle_hide_same_shank(self):
+        self.refresh_lists()
         self._draw_network()
 
     def _on_net_group_select(self, _=None):
@@ -2645,7 +3049,33 @@ class CCGReviewUI:
             self._groups[group_name].discard(pair)
         else:
             self._groups[group_name].add(pair)
+        # Preserve scroll positions so the list doesn't jump to the top
+        unsel_scroll = self.unselected_list.yview()[0]
+        sel_scroll = self.selected_list.yview()[0]
         self.refresh_lists()
+        self.unselected_list.yview_moveto(unsel_scroll)
+        self.selected_list.yview_moveto(sel_scroll)
+
+    def _toggle_pairs_group(self, pairs, group_name):
+        """Toggle multiple pairs in/out of a group.
+
+        If ALL pairs are already in the group, remove them all.
+        Otherwise, add all pairs to the group.
+        """
+        if group_name not in self._groups:
+            self._groups[group_name] = set()
+        all_in = all(p in self._groups[group_name] for p in pairs)
+        if all_in:
+            for p in pairs:
+                self._groups[group_name].discard(p)
+        else:
+            for p in pairs:
+                self._groups[group_name].add(p)
+        unsel_scroll = self.unselected_list.yview()[0]
+        sel_scroll = self.selected_list.yview()[0]
+        self.refresh_lists()
+        self.unselected_list.yview_moveto(unsel_scroll)
+        self.selected_list.yview_moveto(sel_scroll)
 
     def _create_group_dialog(self):
         name = simpledialog.askstring(
@@ -2700,6 +3130,17 @@ class CCGReviewUI:
                        command=lambda g=gname, hv=hk_var: self._set_group_hotkey(g, hv.get())).pack(
                 side=tk.LEFT)
 
+            # Notes
+            ttk.Label(frame, text="Notes:").pack(anchor='w', padx=6, pady=(4, 0))
+            notes_text = tk.Text(frame, height=3, width=40, font=('Arial', 9),
+                                 wrap=tk.WORD)
+            notes_text.pack(fill=tk.X, padx=6, pady=2)
+            notes_text.insert('1.0', self._group_notes.get(gname, ''))
+            # Auto-save notes on every keystroke
+            notes_text.bind('<KeyRelease>',
+                            lambda e, g=gname, t=notes_text:
+                            self._group_notes.__setitem__(g, t.get('1.0', 'end-1c')))
+
             ttk.Label(frame, text="Pairs in group:").pack(anchor='w', padx=6)
             lb_frame = ttk.Frame(frame)
             lb_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
@@ -2726,6 +3167,8 @@ class CCGReviewUI:
         self._groups[new_name] = self._groups.pop(old_name)
         if old_name in self._group_hotkeys:
             self._group_hotkeys[new_name] = self._group_hotkeys.pop(old_name)
+        if old_name in self._group_notes:
+            self._group_notes[new_name] = self._group_notes.pop(old_name)
         self._rebuild_groups_menu()
         self.refresh_lists()
         if win:
@@ -2738,10 +3181,65 @@ class CCGReviewUI:
             return
         self._groups.pop(name, None)
         self._group_hotkeys.pop(name, None)
+        self._group_notes.pop(name, None)
         self._rebuild_groups_menu()
         self.refresh_lists()
         if win:
             win.destroy()
+
+    def _merge_groups_dialog(self):
+        """Dialog to merge two or more groups into one."""
+        if len(self._groups) < 2:
+            messagebox.showinfo("Merge groups",
+                                "Need at least 2 groups to merge.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Merge Groups")
+        win.geometry("340x320")
+        win.transient(self.root)
+        win.grab_set()
+
+        ttk.Label(win, text="Select groups to merge:",
+                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
+
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        check_vars = {}
+        for gname in sorted(self._groups):
+            var = tk.BooleanVar(value=False)
+            check_vars[gname] = var
+            ttk.Checkbutton(frame, text=gname, variable=var).pack(anchor='w')
+
+        name_frame = ttk.Frame(win)
+        name_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ttk.Label(name_frame, text="Merged group name:").pack(side=tk.LEFT)
+        name_entry = ttk.Entry(name_frame, width=20)
+        name_entry.pack(side=tk.LEFT, padx=4)
+
+        def do_merge():
+            selected = [g for g, v in check_vars.items() if v.get()]
+            if len(selected) < 2:
+                messagebox.showwarning("Merge", "Select at least 2 groups.")
+                return
+            target = name_entry.get().strip() or selected[0]
+            if not messagebox.askokcancel(
+                    "Merge groups",
+                    f"This will merge {len(selected)} groups into '{target}'.\n"
+                    "This cannot be undone. Proceed?"):
+                return
+            merged_pairs = set()
+            for g in selected:
+                merged_pairs |= self._groups.get(g, set())
+                if g != target:
+                    self._groups.pop(g, None)
+                    self._group_hotkeys.pop(g, None)
+                    self._group_notes.pop(g, None)
+            self._groups[target] = merged_pairs
+            self._rebuild_groups_menu()
+            self.refresh_lists()
+            win.destroy()
+
+        ttk.Button(win, text="Merge", command=do_merge).pack(pady=8)
 
     def _set_group_hotkey(self, group_name, key_str):
         """Assign hotkey string like '1', '2' … '0' (maps to Ctrl+n)."""
@@ -2757,26 +3255,33 @@ class CCGReviewUI:
             if k == key_str and g != group_name:
                 del self._group_hotkeys[g]
         self._group_hotkeys[group_name] = key_str
+        print(f"[_set_group_hotkey] assigned '{group_name}' → Ctrl+{key_str}, "
+              f"hotkeys now={self._group_hotkeys}, id={id(self._group_hotkeys)}")
         self._rebuild_groups_menu()
 
     def _rebuild_groups_menu(self):
         """Refresh the dynamic part of the Groups menu."""
         if not hasattr(self, '_groups_menu'):
             return
-        # Remove items after the separator (index 3+)
+        # Remove items after the separator (index 6+)
         try:
-            while self._groups_menu.index('end') >= 3:
-                self._groups_menu.delete(3)
+            while self._groups_menu.index('end') >= 6:
+                self._groups_menu.delete(6)
         except tk.TclError:
             pass
+        current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
         for gname in sorted(self._groups):
             hk = self._group_hotkeys.get(gname, '')
-            label = gname + (f" [Ctrl+{hk}]" if hk else "")
+            n_in_session = len(self._groups.get(gname, set()) & current_pairs)
+            label = f"{gname} ({n_in_session})" + (f" [Ctrl+{hk}]" if hk else "")
             self._groups_menu.add_command(
                 label=label,
                 command=lambda g=gname: self._select_group(g))
-        # Also refresh the probe-network group dropdown
+        # Also refresh the probe-network group dropdown and hotkeys bar
         self._refresh_net_group_combo()
+        if (hasattr(self, '_hotkeys_bar') and
+                self._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get()):
+            self._refresh_hotkeys_bar()
 
     def _select_group(self, group_name):
         """Navigate to the first pair in the group."""
@@ -2789,12 +3294,96 @@ class CCGReviewUI:
         self._draw_network()
 
     def _group_hotkey_handler(self, n: int):
-        """Called when Ctrl+n is pressed (n=0..9)."""
+        """Called when Ctrl+n is pressed (n=0..9).
+
+        Toggles the current pair in/out of the group assigned to that hotkey.
+        """
         key_str = str(n + 1) if n < 9 else '0'
+        if self.current_pair_idx >= len(self.all_inds):
+            return
+        pair = tuple(self.all_inds[self.current_pair_idx])
         for gname, k in self._group_hotkeys.items():
             if k == key_str:
-                self._select_group(gname)
+                self._toggle_pair_group(pair, gname)
+                # Also move to Selected side if currently in Available
+                if pair in self.unselected_inds:
+                    self.unselected_inds.discard(pair)
+                    self.selected_inds.add(pair)
+                    unsel_scroll = self.unselected_list.yview()[0]
+                    sel_scroll = self.selected_list.yview()[0]
+                    self.refresh_lists()
+                    self.unselected_list.yview_moveto(unsel_scroll)
+                    self.selected_list.yview_moveto(sel_scroll)
+                    self._draw_network()
                 return
+        # No group assigned to this hotkey — show temporary warning
+        self._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
+
+    def _show_temp_warning(self, msg: str, duration_ms: int = 2000):
+        """Show a temporary warning label at the top of the window that auto-disappears."""
+        lbl = tk.Label(self.root, text=msg, bg='#FFF3CD', fg='#856404',
+                       font=('Arial', 10, 'bold'), padx=8, pady=4)
+        lbl.place(relx=0.5, y=4, anchor='n')
+        self.root.after(duration_ms, lbl.destroy)
+
+    # ------------------------------------------------------------------
+    # Group export / import
+    # ------------------------------------------------------------------
+
+    def _export_groups(self):
+        """Export all group definitions to a standalone JSON file."""
+        if not self._groups:
+            messagebox.showinfo("Export groups", "No groups to export.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export groups",
+            defaultextension='.json',
+            filetypes=[('JSON files', '*.json')],
+            initialfile='groups_export.json',
+            initialdir=self._sel_save_dir,
+        )
+        if not path:
+            return
+        groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
+                  for g, pairs in self._groups.items()}
+        data = {
+            'groups': groups,
+            'hotkeys': dict(self._group_hotkeys),
+            'notes': dict(self._group_notes),
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2, default=self._json_default)
+        print(f"[CCGReviewUI] groups exported → {path}")
+
+    def _import_groups(self):
+        """Import group definitions from a JSON file, merging with existing."""
+        path = filedialog.askopenfilename(
+            title="Import groups",
+            filetypes=[('JSON files', '*.json')],
+            initialdir=self._sel_save_dir,
+        )
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            messagebox.showerror("Import groups", f"Failed to read file:\n{exc}")
+            return
+        imported_groups = data.get('groups', {})
+        for gname, pairs in imported_groups.items():
+            merged = self._groups.get(gname, set())
+            merged |= set(tuple(int(v) for v in p) for p in pairs)
+            self._groups[gname] = merged
+        for gname, hk in data.get('hotkeys', {}).items():
+            if gname not in self._group_hotkeys:
+                self._group_hotkeys[gname] = hk
+        for gname, note in data.get('notes', {}).items():
+            if gname not in self._group_notes:
+                self._group_notes[gname] = note
+        self._rebuild_groups_menu()
+        self.refresh_lists()
+        print(f"[CCGReviewUI] groups imported from {path}")
 
     # ------------------------------------------------------------------
     # Versioning helpers (Part II.3)
@@ -2802,8 +3391,8 @@ class CCGReviewUI:
 
     def _sel_version_path(self, name: str) -> str:
         safe = name.replace('/', '_').replace('\\', '_').replace(' ', '_')
-        key_tag = f"{getattr(self.key, 'session', 'sess')}_{getattr(self.key, 'excitability', '')}_{getattr(self.key, 'conn_type', ('', ''))[0]}-{getattr(self.key, 'conn_type', ('', ''))[1]}"
-        return os.path.join(self._sel_save_dir, f"{key_tag}__{safe}.json")
+        session_tag = getattr(self.key, 'session', 'sess')
+        return os.path.join(self._sel_save_dir, f"{session_tag}__{safe}.json")
 
     @staticmethod
     def _json_default(obj):
@@ -2815,20 +3404,38 @@ class CCGReviewUI:
         raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
 
     def _save_selection_version(self, name: str):
-        """Persist the current selection + groups to a JSON file."""
-        # Explicitly convert to Python ints to avoid numpy.int64 JSON errors
-        selected = [[int(r), int(c)] for r, c in sorted(self.selected_inds)]
+        """Persist selections for ALL types in the session to a single JSON."""
+        # Flush current type's selections to its pointer
+        self.ccg_pointer.manually_selected_inds = (
+            np.array(sorted(self.selected_inds), dtype=int)
+            if self.selected_inds else None
+        )
+
+        # Collect selections for every type key in this session
+        type_keys = self._available_type_keys(self.key.nd())
+        selections_by_type = {}
+        for tk_ in type_keys:
+            ptr = self.cd.data.get(tk_)
+            if ptr is None:
+                continue
+            sel = getattr(ptr, 'manually_selected_inds', None)
+            if sel is not None and len(sel) > 0:
+                selections_by_type[str(tk_)] = [[int(r), int(c)]
+                                                 for r, c in sorted(map(tuple, sel))]
+            else:
+                selections_by_type[str(tk_)] = []
+
         groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
                   for g, pairs in self._groups.items()}
-        hotkeys = dict(self._group_hotkeys)
         data = {
-            'version': '1.0',
+            'version': '2.0',
             'name': name,
             'saved_at': datetime.datetime.now().isoformat(),
-            'key': str(self.key),
-            'selected': selected,
+            'session': getattr(self.key, 'session', 'sess'),
+            'selections': selections_by_type,
             'groups': groups,
-            'hotkeys': hotkeys,
+            'hotkeys': dict(self._group_hotkeys),
+            'notes': dict(self._group_notes),
         }
         path = self._sel_version_path(name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2839,15 +3446,16 @@ class CCGReviewUI:
 
     def _list_selection_versions(self) -> list:
         """Return list of (name, path, saved_at, is_valid) for all matching versions."""
-        key_tag = (f"{getattr(self.key, 'session', 'sess')}_"
-                   f"{getattr(self.key, 'excitability', '')}_"
-                   f"{getattr(self.key, 'conn_type', ('', ''))[0]}-"
-                   f"{getattr(self.key, 'conn_type', ('', ''))[1]}")
+        session_tag = getattr(self.key, 'session', 'sess')
+        prefix = session_tag + '__'
         versions = []
         if not os.path.isdir(self._sel_save_dir):
             return versions
-        for fname in sorted(os.listdir(self._sel_save_dir)):
-            if not fname.startswith(key_tag) or not fname.endswith('.json'):
+        all_files = sorted(os.listdir(self._sel_save_dir))
+        print(f"[list_versions] session_tag={session_tag!r}, prefix={prefix!r}, "
+              f"files={[f for f in all_files if f.endswith('.json')]}")
+        for fname in all_files:
+            if not fname.startswith(prefix) or not fname.endswith('.json'):
                 continue
             path = os.path.join(self._sel_save_dir, fname)
             try:
@@ -2859,8 +3467,13 @@ class CCGReviewUI:
                 versions.append((fname, path, '⚠ corrupted', False))
         return versions
 
-    def _load_selection_from_file(self, path: str):
-        """Load selection + groups from a JSON file."""
+    def _load_selection_from_file(self, path: str, restore_groups: bool = True):
+        """Load selection from a JSON file (v1.0 or v2.0).
+
+        If restore_groups is False, only pair selections are loaded — groups,
+        hotkeys, and notes are left untouched.  Used by autoload on session
+        switch (groups are shared across sessions).
+        """
         try:
             with open(path, encoding='utf-8') as f:
                 data = json.load(f)
@@ -2871,17 +3484,47 @@ class CCGReviewUI:
                 f"Technical detail: {exc}\n\n"
                 f"Please delete this file and re-save your selection."
             ) from exc
-        selected = set(tuple(int(v) for v in p)
-                       for p in data.get('selected', []))
+
+        version = data.get('version', '1.0')
+        if version >= '2.0' and 'selections' in data:
+            # v2.0: session-level — restore each type's selections
+            selections_by_type = data.get('selections', {})
+            type_keys = self._available_type_keys(self.key.nd())
+            total_loaded = 0
+            for tk_ in type_keys:
+                ptr = self.cd.data.get(tk_)
+                if ptr is None:
+                    continue
+                pairs = selections_by_type.get(str(tk_), [])
+                if pairs:
+                    ptr.manually_selected_inds = np.array(
+                        [[int(r), int(c)] for r, c in pairs], dtype=int)
+                    total_loaded += len(pairs)
+                else:
+                    ptr.manually_selected_inds = None
+            # Apply current type's selections to UI
+            cur_sel = selections_by_type.get(str(self.key), [])
+            selected = set(tuple(int(v) for v in p) for p in cur_sel)
+        else:
+            # v1.0 backward compat: single-type selections
+            # Only apply selections if the file's key matches the current type
+            file_key = data.get('key', '')
+            if file_key == str(self.key):
+                selected = set(tuple(int(v) for v in p)
+                               for p in data.get('selected', []))
+            else:
+                selected = set()
+
         self.selected_inds = selected
         self.unselected_inds = set(map(tuple, self.all_inds)) - selected
-        self._groups = {g: set(tuple(int(v) for v in p) for p in pairs)
-                        for g, pairs in data.get('groups', {}).items()}
-        self._group_hotkeys = data.get('hotkeys', {})
-        self._rebuild_groups_menu()
+        if restore_groups:
+            self._groups = {g: set(tuple(int(v) for v in p) for p in pairs)
+                            for g, pairs in data.get('groups', {}).items()}
+            self._group_hotkeys = data.get('hotkeys', {})
+            self._group_notes = data.get('notes', {})
+            self._rebuild_groups_menu()
         self.refresh_lists()
         self._draw_network()
-        print(f"[CCGReviewUI] loaded {len(selected)} selected pairs from {path}")
 
     def _load_selection_dialog(self):
         """Show a dialog listing all saved versions; user picks one to load."""
@@ -2937,6 +3580,41 @@ class CCGReviewUI:
                 messagebox.showerror("Load selection",
                                      f"Failed to load:\n{ex}")
 
+        def do_delete(event=None):
+            sel = lb.curselection()
+            if not sel:
+                # Select item under cursor for right-click
+                idx = lb.nearest(event.y) if event else None
+                if idx is not None:
+                    lb.selection_clear(0, tk.END)
+                    lb.selection_set(idx)
+                    sel = (idx,)
+                else:
+                    return
+            name, path, saved_at, is_valid = versions[sel[0]]
+            if not messagebox.askyesno(
+                    "Delete selection",
+                    f"Move '{name}' to deleted folder?",
+                    parent=win):
+                return
+            deleted_dir = os.path.join(self._sel_save_dir, 'deleted')
+            os.makedirs(deleted_dir, exist_ok=True)
+            import shutil
+            try:
+                shutil.move(path, os.path.join(deleted_dir, os.path.basename(path)))
+            except OSError as ex:
+                messagebox.showerror("Delete failed", str(ex), parent=win)
+                return
+            win.destroy()
+            self._load_selection_dialog()  # reopen with updated list
+
+        def _ctx_menu_load(event):
+            menu = tk.Menu(win, tearoff=0)
+            menu.add_command(label="Delete", command=lambda: do_delete(event))
+            menu.tk_popup(event.x_root, event.y_root)
+
+        lb.bind('<Button-2>', _ctx_menu_load)
+        lb.bind('<Button-3>', _ctx_menu_load)
         lb.bind('<Double-Button-1>', lambda e: do_load())
         btn_frame = ttk.Frame(win)
         btn_frame.pack(fill=tk.X, padx=10, pady=6)
@@ -2951,30 +3629,83 @@ class CCGReviewUI:
     # Save
     # ------------------------------------------------------------------
 
-    def save_selections(self):
-        # Ask for a version name (default: timestamp)
-        default_name = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
-        name = simpledialog.askstring(
-            "Save selection",
-            "Version name (leave blank for timestamp):",
-            initialvalue=default_name,
-            parent=self.root)
-        if name is None:   # user hit Cancel
+    def _do_save(self, name: str):
+        """Core save logic: persist all types' selections + groups."""
+        try:
+            self._save_selection_version(name)
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            messagebox.showerror("Save error",
+                                 f"Failed to save selection:\n{exc}")
             return
-        name = name.strip() or default_name
 
-        selected_array = np.array(sorted(self.selected_inds))
-        self.ccg_pointer.manually_selected_inds = selected_array
-        if not hasattr(self.cd, 'manual_selections'):
-            self.cd.manual_selections = {}
-        self.cd.manual_selections[self.key] = self.ccg_pointer
-        # Persist versioned JSON
-        self._save_selection_version(name)
-        print(f"Saved {len(selected_array)} manually selected pairs for {self.key}")
+        # Count total selections across all types
+        type_keys = self._available_type_keys(self.key.nd())
+        total = sum(
+            len(self.cd.data[tk_].manually_selected_inds)
+            for tk_ in type_keys
+            if self.cd.data.get(tk_) is not None
+            and getattr(self.cd.data[tk_], 'manually_selected_inds', None) is not None
+        )
+
+        # Auto-export groups alongside the selection
+        groups_msg = ""
+        if self._groups:
+            groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
+                      for g, pairs in self._groups.items()}
+            data = {
+                'groups': groups,
+                'hotkeys': dict(self._group_hotkeys),
+                'notes': dict(self._group_notes),
+            }
+            path = os.path.join(self._sel_save_dir, 'groups_export.json')
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2, default=self._json_default)
+            groups_msg = f"\nGroups exported ({len(self._groups)} groups)."
+            print(f"[CCGReviewUI] groups auto-exported → {path}")
+
         messagebox.showinfo(
             "Saved",
-            f"Saved {len(selected_array)} pairs as '{name}'.",
+            f"Saved {total} pairs across {len(type_keys)} types as '{name}'.{groups_msg}",
             parent=self.root)
+
+    def _quick_save(self):
+        """Ctrl+S / Save button: custom dialog with name entry + Latest button."""
+        default_name = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+
+        win = tk.Toplevel(self.root)
+        win.title("Save selection")
+        win.geometry("360x130")
+        win.transient(self.root)
+        win.grab_set()
+
+        ttk.Label(win, text="Version name:").pack(pady=(10, 2))
+        name_var = tk.StringVar(value=default_name)
+        entry = ttk.Entry(win, textvariable=name_var, width=32)
+        entry.pack(padx=10)
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=10)
+
+        def _save_named():
+            name = name_var.get().strip() or default_name
+            win.destroy()
+            self._do_save(name)
+
+        def _save_latest():
+            win.destroy()
+            self._do_save('latest')
+
+        ttk.Button(btn_frame, text="Save", command=_save_named).pack(
+            side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Save as Latest", command=_save_latest).pack(
+            side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(
+            side=tk.LEFT, padx=6)
+
+        entry.bind('<Return>', lambda e: _save_named())
 
     def save_gifs(self):
         """Generate per-pair animated GIFs cycling over segments.
@@ -3015,6 +3746,11 @@ class CCGReviewUI:
             imageio.mimsave(gif_path, frames_u8, duration=0.8)
         print(f"GIFs saved to: {gif_folder}")
         return gif_folder
+
+    def _on_close(self):
+        """Auto-save before closing the GUI."""
+        self._autosave_current()
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
