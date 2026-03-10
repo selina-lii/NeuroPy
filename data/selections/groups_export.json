@@ -476,8 +476,64 @@
     ],
     "rhythm": [
       [
+        11,
+        5
+      ],
+      [
+        11,
+        6
+      ],
+      [
+        11,
+        10
+      ],
+      [
+        11,
+        27
+      ],
+      [
+        11,
+        34
+      ],
+      [
+        11,
+        39
+      ],
+      [
+        11,
+        49
+      ],
+      [
+        13,
+        23
+      ],
+      [
+        15,
+        39
+      ],
+      [
         17,
         51
+      ],
+      [
+        17,
+        80
+      ],
+      [
+        18,
+        39
+      ],
+      [
+        19,
+        39
+      ],
+      [
+        22,
+        7
+      ],
+      [
+        22,
+        10
       ],
       [
         132,
@@ -679,6 +735,10 @@
       ],
       [
         13,
+        48
+      ],
+      [
+        13,
         102
       ],
       [
@@ -696,6 +756,10 @@
       [
         23,
         182
+      ],
+      [
+        25,
+        39
       ],
       [
         26,
@@ -794,20 +858,35 @@
         119
       ]
     ],
-    "__admitted__": [
-      [
-        0,
-        0
-      ]
-    ]
+    "__admitted__": []
   },
   "hotkeys": {
     "good": "2",
     "best": "1",
-    "msconn": "5"
+    "msconn": "4",
+    "ppinhib": "5",
+    "ok": "3",
+    "?": "0",
+    "rhythm": "9",
+    "0rhythm": "8",
+    "2peakms": "7",
+    "leak": "6"
   },
   "notes": {
     "best": "",
-    "msconn": "Millisecond connectivity (sharp peak within \u00b11ms)"
+    "msconn": "Millisecond connectivity (sharp peak within \u00b11ms)",
+    "0rhythm": "pyr-pyr\n---\nbroad peak (>1ms wide) symmetric to time 0",
+    "2peakms": "pyr-pyr\n---\ntwo sharp peaks (<.5ms wide) separated by sharp dip around 0",
+    "?": "unsure pattern",
+    "burst": "pyr-pyr\n---\ntarget neuron is later spikes in source neuron burst, not an individual unit. Characterized by very broad double peaks on the positive time axis around 5-10 ms and very low co-firing on the negative time axis.",
+    "good": "pyr-pyr\n---\nidentifiable peak corrupted by low firing",
+    "inhib_rebounce": "pyr-int\n---\npairs that appear as a rebounce of int-pyr inhibition",
+    "leak": "pyr-pyr\n---\nsuspected to be the same neuron, at least partially",
+    "ok": "pyr-pyr\n---\nsuspicious peak that has a chance of being real, hindered by extremely low SNR",
+    "pos_skew": "pyr-pyr\n---\npreferentially high co-activity on the positive end of the time axis",
+    "ppinhib": "pyr-pyr\n---\ndip both sides",
+    "rhythm": "pyr-pyr\n---\nset of multiple, evenly spaced peaks likely entrained to an oscillation",
+    "EBroad": "pyr-int\n---\nbroad peak at ~2ms timing",
+    "E_rdip": "pyr-int\n---\ninhibitory dip on right side of the peak"
   }
 }

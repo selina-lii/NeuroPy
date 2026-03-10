@@ -29,7 +29,8 @@ def plot_ccg_panel(
     max_lag=None,
     acg_ref=None,
     acg_tgt=None,
-    acg_yscale=1.0,
+    acg_yscale_ref=1.0,
+    acg_yscale_tgt=1.0,
     acg_match_ccg=False,
 ):
     """Single CCG plot into provided axis"""
@@ -68,9 +69,9 @@ def plot_ccg_panel(
 
         # Auto-correlogram overlays — each gets its own right-side y-axis
         _acg_axis_offset = 0.14  # start past p-value axis (at 1.0)
-        for acg_data, acg_color, acg_label in [
-            (acg_ref, '#00897B', 'ACG ref'),    # teal (distinct from green test window)
-            (acg_tgt, '#7B1FA2', 'ACG tgt'),    # purple
+        for acg_data, acg_color, acg_label, acg_scale in [
+            (acg_ref, '#2f4f4f', 'ACG ref', acg_yscale_ref),
+            (acg_tgt, '#7B1FA2', 'ACG tgt', acg_yscale_tgt),
         ]:
             if acg_data is None:
                 continue
@@ -84,9 +85,8 @@ def plot_ccg_panel(
                 ccg_ylim = ax.get_ylim()
                 ax_acg.set_ylim(ccg_ylim)
             else:
-                # acg_yscale > 1 zooms in (taller bars), < 1 zooms out
                 raw_max = np.max(acg_data) if np.max(acg_data) > 0 else 1
-                scale = max(acg_yscale, 0.01)
+                scale = max(acg_scale, 0.01)
                 ax_acg.set_ylim(0, raw_max * 1.1 / scale)
             ax_acg.set_ylabel(acg_label, color=acg_color, fontsize=8)
             ax_acg.tick_params(axis='y', colors=acg_color, labelsize=7)

@@ -35,6 +35,7 @@ from matplotlib.figure import Figure
 import os
 import json
 import datetime
+from pathlib import Path as _Path
 from neuropy.plotting import ccg as plot_ccg
 import imageio
 
@@ -76,10 +77,10 @@ class CCGReviewUI:
                         if getattr(self.cd, 'nd', None) is not None
                         else None)
 
-        # Group state  {group_name -> set((ref,tgt))}
+        # Group state  {group_name -> {session_str -> set((ref,tgt))}}
         # Initialized early because all_inds @property reads _groups
         self._groups: dict = {}
-        self._groups.setdefault(_ADMITTED_GROUP, set())
+        self._groups.setdefault(_ADMITTED_GROUP, {})
         self._group_hotkeys: dict = {}       # group_name -> hotkey str e.g. 'Control-1'
         self._group_notes: dict = {}         # group_name -> notes string
 
@@ -139,8 +140,8 @@ class CCGReviewUI:
         self._net_group_filter: str = None       # group name shown in probe network
 
         # Versioned selections save dir
-        self._sel_save_dir = os.path.expanduser(
-            "~/Documents/ms_synchrony/NeuroPy/data/selections")
+        self._sel_save_dir = str(
+            _Path(__file__).resolve().parents[2] / "data" / "selections")
         os.makedirs(self._sel_save_dir, exist_ok=True)
 
         # Panel visibility state
@@ -179,7 +180,7 @@ class CCGReviewUI:
     def all_inds(self):
         """Significant pairs + manually admitted pairs, as Nx2 numpy array."""
         base = self.ccg_pointer.inds2
-        admitted = self._groups.get(_ADMITTED_GROUP, set())
+        admitted = self._group_pairs(_ADMITTED_GROUP)
         if not admitted:
             return base
         base_set = set(map(tuple, base))
@@ -187,6 +188,43 @@ class CCGReviewUI:
         if not extra:
             return base
         return np.vstack([base, np.array(extra, dtype=base.dtype)])
+
+    # ------------------------------------------------------------------
+    # Per-session group helpers
+    # ------------------------------------------------------------------
+
+    def _current_session_str(self):
+        return getattr(self.key, 'session', 'sess')
+
+    def _group_pairs(self, gname, session=None):
+        """Return pairs set for group in the given session (default: current)."""
+        g = self._groups.get(gname, {})
+        if isinstance(g, set):
+            return g  # legacy flat format
+        sess = session or self._current_session_str()
+        return g.get(sess, set())
+
+    def _group_pairs_all_sessions(self, gname):
+        """Return all pairs across all sessions for a group."""
+        g = self._groups.get(gname, {})
+        if isinstance(g, set):
+            return g
+        all_pairs = set()
+        for pairs in g.values():
+            all_pairs |= pairs
+        return all_pairs
+
+    def _group_add_pair(self, gname, pair, session=None):
+        sess = session or self._current_session_str()
+        self._groups.setdefault(gname, {}).setdefault(sess, set()).add(pair)
+
+    def _group_discard_pair(self, gname, pair, session=None):
+        sess = session or self._current_session_str()
+        g = self._groups.get(gname, {})
+        if isinstance(g, set):
+            g.discard(pair)
+        elif sess in g:
+            g[sess].discard(pair)
 
     # ------------------------------------------------------------------
     # Layout
@@ -378,16 +416,11 @@ class CCGReviewUI:
         # Invert: hotkey_str → group_name
         hk_to_group = {v: k for k, v in self._group_hotkeys.items()}
 
-        # Current session pairs for counting
-        current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
-
         for key_str in slot_order:
             gname = hk_to_group.get(key_str)
             if gname is None:
                 continue
-            # Count only pairs belonging to current session/type
-            n_in_session = len(self._groups.get(gname, set()) & current_pairs)
-            display = f"⌘{key_str}: {gname} ({n_in_session})"
+            display = f"⌘{key_str}: {gname}"
             lbl = tk.Label(self._hotkeys_bar, text=display,
                            font=('Courier', 9), padx=6, pady=1,
                            relief=tk.RIDGE, borderwidth=1)
@@ -605,8 +638,10 @@ class CCGReviewUI:
 
     def _on_acg_scale_change(self):
         """ACG Y-scale slider changed."""
-        val = self._acg_yscale_var.get()
-        self._acg_scale_label.config(text=f"{val:.1f}x")
+        ref_val = self._acg_yscale_ref_var.get()
+        tgt_val = self._acg_yscale_tgt_var.get()
+        self._acg_scale_ref_label.config(text=f"{ref_val:.1f}x")
+        self._acg_scale_tgt_label.config(text=f"{tgt_val:.1f}x")
         if self._acg_ref_var.get() or self._acg_tgt_var.get():
             self._clear_all_png_cache()
             self.update_plot()
@@ -771,6 +806,11 @@ class CCGReviewUI:
         ttk.Checkbutton(toggle_frame, text="Hide same shank",
                         variable=self._net_hide_same_shank_var,
                         command=self._on_net_toggle_hide_same_shank
+                        ).pack(side=tk.LEFT, padx=(6, 0))
+        self._net_show_chid_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toggle_frame, text="Ch IDs",
+                        variable=self._net_show_chid_var,
+                        command=self._draw_network
                         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Group filter dropdown ─────────────────────────────────────────
@@ -1866,7 +1906,7 @@ class CCGReviewUI:
                 continue
             if pairs:
                 # Show ✓ if ALL selected pairs are in the group
-                all_in = all(p in self._groups[gname] for p in pairs)
+                all_in = all(p in self._group_pairs(gname) for p in pairs)
                 label = f"{'✓ ' if all_in else ''}  {gname}"
                 grp_menu.add_command(
                     label=label,
@@ -2055,7 +2095,13 @@ class CCGReviewUI:
             sess = self.key.session if self.key else ''
             ct = (f"{self.key.conn_type[0]}-{self.key.conn_type[1]}"
                   if self.key and self.key.conn_type else '')
-            return f"{sess} | {ct} | Pair [{inds[0]}, {inds[1]}] — {seg_label}"
+            neuron_ids = getattr(self.neurons, 'neuron_ids', None)
+            if neuron_ids is not None:
+                id_r, id_t = int(neuron_ids[inds[0]]), int(neuron_ids[inds[1]])
+                pair_str = f"IDs [{id_r}, {id_t}] (inds [{inds[0]}, {inds[1]}])"
+            else:
+                pair_str = f"Pair [{inds[0]}, {inds[1]}]"
+            return f"{sess} | {ct} | {pair_str} — {seg_label}"
         return "No pair selected"
 
     # ------------------------------------------------------------------
@@ -2094,9 +2140,10 @@ class CCGReviewUI:
             ('jc' if self._sig_show_jitter_pc else '') +
             ('ar' if getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get() else '') +
             ('at' if getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get() else '') +
-            (f'as{self._acg_yscale_var.get():.1f}' if getattr(self, '_acg_yscale_var', None) and (
-                (getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get()) or
-                (getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get())) else '') +
+            (f'asr{self._acg_yscale_ref_var.get():.1f}' if getattr(self, '_acg_yscale_ref_var', None) and
+                getattr(self, '_acg_ref_var', None) and self._acg_ref_var.get() else '') +
+            (f'ast{self._acg_yscale_tgt_var.get():.1f}' if getattr(self, '_acg_yscale_tgt_var', None) and
+                getattr(self, '_acg_tgt_var', None) and self._acg_tgt_var.get() else '') +
             ('am' if getattr(self, '_acg_match_ccg_var', None) and self._acg_match_ccg_var.get() else ''))
         if sig_bits:
             sig_key = f'_s{sig_bits}'
@@ -2230,9 +2277,16 @@ class CCGReviewUI:
                     else:
                         acg_tgt = src[segment, tgt, tgt, :]
 
+        # Resolve actual neuron IDs (distinct from array indices)
+        neuron_ids = getattr(self.neurons, 'neuron_ids', None)
+        if neuron_ids is not None:
+            ids = (int(neuron_ids[ref]), int(neuron_ids[tgt]))
+        else:
+            ids = (ref, tgt)
+
         fig, ax = plt.subplots(figsize=(7, 5))
         plot_ccg.plot_ccg_panel(
-            ax=ax, ccg=ccg, ids=inds, inds=inds,
+            ax=ax, ccg=ccg, ids=ids, inds=inds,
             window_size=conf.duration, bin_size=bin_size_eff,
             pval=show_pval, pval_corrected=show_pval_c,
             alpha=self.active_alpha, ccg_null=show_null,
@@ -2243,7 +2297,8 @@ class CCGReviewUI:
             max_lag=conf.max_lag if self._sig_show_test_window else None,
             normalize_info=norm_info,
             acg_ref=acg_ref, acg_tgt=acg_tgt,
-            acg_yscale=getattr(self, '_acg_yscale_var', None) and self._acg_yscale_var.get() or 1.0,
+            acg_yscale_ref=getattr(self, '_acg_yscale_ref_var', None) and self._acg_yscale_ref_var.get() or 1.0,
+            acg_yscale_tgt=getattr(self, '_acg_yscale_tgt_var', None) and self._acg_yscale_tgt_var.get() or 1.0,
             acg_match_ccg=getattr(self, '_acg_match_ccg_var', None) and self._acg_match_ccg_var.get(),
         )
         # Same-scale y-axis override
@@ -2652,23 +2707,48 @@ class CCGReviewUI:
     # ------------------------------------------------------------------
 
     def _get_neuron_positions(self):
+        """Return (x, y, peak_channels, on_skipped) or None."""
         neurons = self.neurons
-        if neurons is None:
+        if neurons is None or neurons.peak_channels is None:
             return None
-        if neurons.shank_ids is None or neurons.peak_channels is None:
+
+        h_scale = getattr(self, '_net_hzoom_var', None)
+        v_scale = getattr(self, '_net_vzoom_var', None)
+        h_mult = h_scale.get() if h_scale else 1.0
+        v_mult = v_scale.get() if v_scale else 1.0
+
+        # Try ProbeGroup-based positions
+        pg = getattr(getattr(self.cd, 'nd', None), '_probegroup', None)
+        if pg is not None:
+            pg_df = pg.to_dataframe().set_index('channel_id')
+            peak_ch = np.asarray(neurons.peak_channels)
+            x = np.zeros(len(peak_ch))
+            y = np.zeros(len(peak_ch))
+            on_skipped = np.zeros(len(peak_ch), dtype=bool)
+            for i, ch in enumerate(peak_ch):
+                if ch in pg_df.index:
+                    row = pg_df.loc[ch]
+                    x[i] = float(row['x'])
+                    y[i] = float(row['y'])
+                    on_skipped[i] = not bool(row['connected'])
+                else:
+                    x[i] = 0
+                    y[i] = float(ch) * 20.0
+                    on_skipped[i] = True
+            return x * h_mult, y * v_mult, peak_ch, on_skipped
+
+        # Fallback: old linear layout
+        if neurons.shank_ids is None:
             return None
         ch_per_shank = 16
         nd_conf = getattr(getattr(self.cd, 'nd', None), 'conf', None)
         if nd_conf is not None and hasattr(nd_conf, 'ch_per_shank'):
             ch_per_shank = nd_conf.ch_per_shank
-        # Base spacing scaled by H/V sliders
-        h_scale = getattr(self, '_net_hzoom_var', None)
-        v_scale = getattr(self, '_net_vzoom_var', None)
-        shank_gap = 150.0 * (h_scale.get() if h_scale else 1.0)
-        chan_gap  = 20.0  * (v_scale.get() if v_scale else 1.0)
+        shank_gap = 150.0 * h_mult
+        chan_gap  = 20.0  * v_mult
         x = np.asarray(neurons.shank_ids, dtype=float) * shank_gap
         y = (np.asarray(neurons.peak_channels, dtype=float) % ch_per_shank) * chan_gap
-        return x, y
+        return x, y, np.asarray(neurons.peak_channels), np.zeros(len(x), dtype=bool)
 
     def _pairs_for_segment_filter(self):
         if self.active_segment_filter is None:
@@ -2715,7 +2795,7 @@ class CCGReviewUI:
             self.net_canvas.draw()
             return
 
-        x_pos, y_pos = pos
+        x_pos, y_pos, peak_ch, on_skipped = pos
         n_neurons = len(x_pos)
         fn = self._focused_neuron  # focused neuron id or None
         fp = self._focused_pair    # focused (ref, tgt) pair or None
@@ -2729,7 +2809,7 @@ class CCGReviewUI:
         else:
             type_keys_show = [self.key]
 
-        group_pairs = self._groups.get(gf, set()) if gf is not None else None
+        group_pairs = self._group_pairs(gf) if gf is not None else None
         visible_pairs_current = self._pairs_for_segment_filter()
         current_pair = (tuple(self.all_inds[self.current_pair_idx])
                         if self.current_pair_idx < len(self.all_inds) else None)
@@ -2862,6 +2942,21 @@ class CCGReviewUI:
                                color=clr, zorder=6, linewidths=2.0,
                                edgecolors='black')
 
+        # ── Mark neurons on skipped channels with red ring ────────────────
+        skipped_indices = [i for i in range(n_neurons) if on_skipped[i]]
+        if skipped_indices:
+            ax.scatter(x_pos[skipped_indices], y_pos[skipped_indices],
+                       s=60, marker='o', facecolors='none',
+                       edgecolors='#FF5252', linewidths=1.5, zorder=10)
+
+        # ── Channel ID annotations ───────────────────────────────────────
+        if self._net_show_chid_var.get() and peak_ch is not None:
+            for i in range(n_neurons):
+                color = '#FF5252' if on_skipped[i] else '#666'
+                ax.annotate(str(int(peak_ch[i])), (x_pos[i], y_pos[i]),
+                            fontsize=5, color=color, ha='left', va='bottom',
+                            xytext=(3, 3), textcoords='offset points')
+
         # ── Draw edges (arrows) ──────────────────────────────────────────
         # Build a set of all (ref,tgt) so we know if a reverse edge exists
         # (for arc-offset to keep both arrows visible)
@@ -2981,16 +3076,42 @@ class CCGReviewUI:
                       framealpha=0.75, handlelength=1.4)
 
         # ── Shank labels at top ──────────────────────────────────────────
-        if shank_ids is not None:
+        pg = getattr(getattr(self.cd, 'nd', None), '_probegroup', None)
+        y_top = np.max(y_pos) + 20
+        if pg is not None:
+            h_mult = (getattr(self, '_net_hzoom_var', None) or tk.DoubleVar(value=1.0)).get()
+            for sk in pg._data['shank_id'].unique():
+                shank_data = pg._data[pg._data['shank_id'] == sk]
+                sx = shank_data['x'].mean() * h_mult
+                ax.text(sx, y_top, f"S{int(sk)}",
+                        ha='center', va='bottom', fontsize=8,
+                        fontweight='bold', color='#555555')
+        elif shank_ids is not None:
             unique_shanks = np.unique(shank_ids)
             h_scale = getattr(self, '_net_hzoom_var', None)
             shank_gap = 150.0 * (h_scale.get() if h_scale else 1.0)
-            y_top = np.max(y_pos) + 20
             for sk in unique_shanks:
                 sx = float(sk) * shank_gap
                 ax.text(sx, y_top, f"S{int(sk)}",
                         ha='center', va='bottom', fontsize=8,
                         fontweight='bold', color='#555555')
+
+        # ── Group counts ──────────────────────────────────────────────────
+        current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
+        slot_order = [str(i) for i in range(1, 10)] + ['0']
+        hk_to_group = {v: k for k, v in self._group_hotkeys.items()}
+        group_lines = []
+        for key_str in slot_order:
+            gname = hk_to_group.get(key_str)
+            if gname is None:
+                continue
+            n = len(self._group_pairs(gname) & current_pairs)
+            group_lines.append(f"\u2318{key_str} {gname}: {n}")
+        if group_lines:
+            ax.text(0.98, 0.02, '\n'.join(group_lines),
+                    transform=ax.transAxes, fontsize=6,
+                    ha='right', va='bottom', fontfamily='monospace',
+                    color='#444444', alpha=0.85)
 
         ax.axis('off')
         ax.set_aspect('equal')
@@ -3179,7 +3300,7 @@ class CCGReviewUI:
             return
         # Add to admitted group
         self._push_undo()
-        self._groups.setdefault(_ADMITTED_GROUP, set()).add(pair)
+        self._group_add_pair(_ADMITTED_GROUP, pair)
         # Add to unselected (now a valid available pair)
         self.unselected_inds.add(pair)
         # Navigate to the pair
@@ -3244,17 +3365,17 @@ class CCGReviewUI:
     def _pair_group_label(self, inds) -> str:
         """Return a short label like '[G1,G2]' for the groups this pair belongs to."""
         pair = tuple(inds)
-        tags = [gname for gname, pairs in self._groups.items()
-                if pair in pairs and not gname.startswith('__')]
+        tags = [gname for gname in self._groups
+                if pair in self._group_pairs(gname) and not gname.startswith('__')]
         return f"[{','.join(tags)}]" if tags else ""
 
     def _toggle_pair_group(self, pair, group_name):
         if group_name not in self._groups:
-            self._groups[group_name] = set()
-        if pair in self._groups[group_name]:
-            self._groups[group_name].discard(pair)
+            self._groups[group_name] = {}
+        if pair in self._group_pairs(group_name):
+            self._group_discard_pair(group_name, pair)
         else:
-            self._groups[group_name].add(pair)
+            self._group_add_pair(group_name, pair)
         # Preserve scroll positions so the list doesn't jump to the top
         unsel_scroll = self.unselected_list.yview()[0]
         sel_scroll = self.selected_list.yview()[0]
@@ -3269,14 +3390,15 @@ class CCGReviewUI:
         Otherwise, add all pairs to the group.
         """
         if group_name not in self._groups:
-            self._groups[group_name] = set()
-        all_in = all(p in self._groups[group_name] for p in pairs)
+            self._groups[group_name] = {}
+        cur_pairs = self._group_pairs(group_name)
+        all_in = all(p in cur_pairs for p in pairs)
         if all_in:
             for p in pairs:
-                self._groups[group_name].discard(p)
+                self._group_discard_pair(group_name, p)
         else:
             for p in pairs:
-                self._groups[group_name].add(p)
+                self._group_add_pair(group_name, p)
         unsel_scroll = self.unselected_list.yview()[0]
         sel_scroll = self.selected_list.yview()[0]
         self.refresh_lists()
@@ -3294,7 +3416,7 @@ class CCGReviewUI:
         if name in self._groups:
             messagebox.showinfo("Create group", f"Group '{name}' already exists.")
             return
-        self._groups[name] = set()
+        self._groups[name] = {}
         self._rebuild_groups_menu()
         self.refresh_lists()
 
@@ -3357,8 +3479,18 @@ class CCGReviewUI:
             lb = tk.Listbox(lb_frame, yscrollcommand=sb.set, font=('Courier', 9))
             lb.pack(fill=tk.BOTH, expand=True)
             sb.config(command=lb.yview)
-            for pair in sorted(self._groups.get(gname, [])):
-                lb.insert(tk.END, f"[{pair[0]:3d}, {pair[1]:3d}]")
+            g = self._groups.get(gname, {})
+            if isinstance(g, dict):
+                for sess in sorted(g):
+                    pairs = g[sess]
+                    if not pairs:
+                        continue
+                    lb.insert(tk.END, f"── {sess} ──")
+                    for pair in sorted(pairs):
+                        lb.insert(tk.END, f"  [{pair[0]:3d}, {pair[1]:3d}]")
+            else:
+                for pair in sorted(g):
+                    lb.insert(tk.END, f"[{pair[0]:3d}, {pair[1]:3d}]")
             ttk.Button(frame, text=f"Delete group '{gname}'",
                        command=lambda g=gname: self._delete_group(g, win)).pack(
                 pady=4)
@@ -3437,14 +3569,21 @@ class CCGReviewUI:
                     f"This will merge {len(selected)} groups into '{target}'.\n"
                     "This cannot be undone. Proceed?"):
                 return
-            merged_pairs = set()
+            merged = {}
             for g in selected:
-                merged_pairs |= self._groups.get(g, set())
+                g_data = self._groups.get(g, {})
+                if isinstance(g_data, set):
+                    # Legacy flat format
+                    sess = self._current_session_str()
+                    merged.setdefault(sess, set()).update(g_data)
+                else:
+                    for sess, pairs in g_data.items():
+                        merged.setdefault(sess, set()).update(pairs)
                 if g != target:
                     self._groups.pop(g, None)
                     self._group_hotkeys.pop(g, None)
                     self._group_notes.pop(g, None)
-            self._groups[target] = merged_pairs
+            self._groups[target] = merged
             self._rebuild_groups_menu()
             self.refresh_lists()
             win.destroy()
@@ -3484,7 +3623,7 @@ class CCGReviewUI:
             if gname.startswith('__'):
                 continue  # hide internal groups like __admitted__
             hk = self._group_hotkeys.get(gname, '')
-            n_in_session = len(self._groups.get(gname, set()) & current_pairs)
+            n_in_session = len(self._group_pairs(gname) & current_pairs)
             label = f"{gname} ({n_in_session})" + (f" [Ctrl+{hk}]" if hk else "")
             self._groups_menu.add_command(
                 label=label,
@@ -3497,7 +3636,7 @@ class CCGReviewUI:
 
     def _select_group(self, group_name):
         """Navigate to the first pair in the group."""
-        pairs = self._groups.get(group_name, set())
+        pairs = self._group_pairs(group_name)
         if not pairs:
             return
         first = sorted(pairs)[0]
@@ -3557,8 +3696,14 @@ class CCGReviewUI:
         )
         if not path:
             return
-        groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
-                  for g, pairs in self._groups.items()}
+        groups = {}
+        for g, sessions_dict in self._groups.items():
+            if isinstance(sessions_dict, set):
+                groups[g] = {self._current_session_str():
+                             [[int(r), int(c)] for r, c in sorted(sessions_dict)]}
+            else:
+                groups[g] = {sess: [[int(r), int(c)] for r, c in sorted(pairs)]
+                             for sess, pairs in sessions_dict.items() if pairs}
         data = {
             'groups': groups,
             'hotkeys': dict(self._group_hotkeys),
@@ -3584,10 +3729,19 @@ class CCGReviewUI:
             messagebox.showerror("Import groups", f"Failed to read file:\n{exc}")
             return
         imported_groups = data.get('groups', {})
-        for gname, pairs in imported_groups.items():
-            merged = self._groups.get(gname, set())
-            merged |= set(tuple(int(v) for v in p) for p in pairs)
-            self._groups[gname] = merged
+        for gname, val in imported_groups.items():
+            if isinstance(val, list):
+                # Flat format → current session
+                sess = self._current_session_str()
+                for p in val:
+                    self._group_add_pair(gname, tuple(int(v) for v in p), sess)
+            elif isinstance(val, dict):
+                # Per-session format
+                for sess, pairs in val.items():
+                    for p in pairs:
+                        self._group_add_pair(gname, tuple(int(v) for v in p), sess)
+            else:
+                self._groups.setdefault(gname, {})
         for gname, hk in data.get('hotkeys', {}).items():
             if gname not in self._group_hotkeys:
                 self._group_hotkeys[gname] = hk
@@ -3638,10 +3792,17 @@ class CCGReviewUI:
             else:
                 selections_by_type[str(tk_)] = []
 
-        groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
-                  for g, pairs in self._groups.items()}
+        groups = {}
+        for g, sessions_dict in self._groups.items():
+            if isinstance(sessions_dict, set):
+                # Legacy flat → wrap in current session
+                groups[g] = {self._current_session_str():
+                             [[int(r), int(c)] for r, c in sorted(sessions_dict)]}
+            else:
+                groups[g] = {sess: [[int(r), int(c)] for r, c in sorted(pairs)]
+                             for sess, pairs in sessions_dict.items() if pairs}
         data = {
-            'version': '2.0',
+            'version': '3.0',
             'name': name,
             'saved_at': datetime.datetime.now().isoformat(),
             'session': getattr(self.key, 'session', 'sess'),
@@ -3740,7 +3901,8 @@ class CCGReviewUI:
             elif action == 'partial':
                 selected = selected & current_available
             elif action == 'admit_all':
-                self._groups.setdefault(_ADMITTED_GROUP, set()).update(missing)
+                for pair in missing:
+                    self._group_add_pair(_ADMITTED_GROUP, pair)
                 # Recompute current_available now that admitted pairs are added
                 current_available = set(map(tuple, self.all_inds))
         elif missing:
@@ -3750,9 +3912,22 @@ class CCGReviewUI:
         self.selected_inds = selected
         self.unselected_inds = current_available - selected
         if restore_groups:
-            self._groups = {g: set(tuple(int(v) for v in p) for p in pairs)
-                            for g, pairs in data.get('groups', {}).items()}
-            self._groups.setdefault(_ADMITTED_GROUP, set())
+            raw_groups = data.get('groups', {})
+            file_session = data.get('session', self._current_session_str())
+            self._groups = {}
+            for g, val in raw_groups.items():
+                if isinstance(val, list):
+                    # v2.0 flat format: list of [ref, tgt] → assign to file's session
+                    self._groups[g] = {file_session: set(
+                        tuple(int(v) for v in p) for p in val)}
+                elif isinstance(val, dict):
+                    # v3.0 per-session format
+                    self._groups[g] = {sess: set(
+                        tuple(int(v) for v in p) for p in pairs)
+                        for sess, pairs in val.items()}
+                else:
+                    self._groups[g] = {}
+            self._groups.setdefault(_ADMITTED_GROUP, {})
             self._group_hotkeys = data.get('hotkeys', {})
             self._group_notes = data.get('notes', {})
             self._rebuild_groups_menu()
@@ -3940,8 +4115,14 @@ class CCGReviewUI:
         # Auto-export groups alongside the selection
         groups_msg = ""
         if self._groups:
-            groups = {g: [[int(r), int(c)] for r, c in sorted(pairs)]
-                      for g, pairs in self._groups.items()}
+            groups = {}
+            for g, sessions_dict in self._groups.items():
+                if isinstance(sessions_dict, set):
+                    groups[g] = {self._current_session_str():
+                                 [[int(r), int(c)] for r, c in sorted(sessions_dict)]}
+                else:
+                    groups[g] = {sess: [[int(r), int(c)] for r, c in sorted(pairs)]
+                                 for sess, pairs in sessions_dict.items() if pairs}
             data = {
                 'groups': groups,
                 'hotkeys': dict(self._group_hotkeys),

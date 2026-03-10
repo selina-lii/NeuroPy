@@ -28,8 +28,10 @@ import os
 import matplotlib.pyplot as plt
 import shutil
 
+from pathlib import Path as _Path
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
 SAVE_ROOT = "~/Documents/Neuropy/outputs"
-DATA_ROOT = "~/Documents/ms_synchrony/NeuroPy/data"
+DATA_ROOT = str(_REPO_ROOT / "data")
 
 # CCG resolution presets (bin_size in seconds)
 _CCG_RESOLUTION = {
@@ -44,17 +46,6 @@ class IgnoreLevel(ConfigOption):
     NONE = 0
     SAME_CHANNEL = 1
     SAME_SHANK = 2
-
-
-class NormalizeBy(ConfigOption):
-    """Config for CCG and other analysis
-    Do we ignore neurons on the same peak channel / shank?"""
-    NONE = 0
-    REF_FRATE = 1
-    REF_SPKS = 2
-    TARGET_FRATE = 3
-    TARGET_SPKS = 4
-    TIME_SPAN = 5
 
 
 class ConnStrengthMethod(ConfigOption):
@@ -235,9 +226,6 @@ class CCGConfig(Config):
                         re-running spike_correlations (expensive).
       SIGNIF_FIELDS   — affect significance detection only; changing these
                         only requires re-running EranConv (cheap).
-
-    Note: ``normalize_methods`` has been removed from the config — normalization
-    is a display-only option managed by the UI, not a computation parameter.
     """
 
     # Fields that affect the CCG computation (spike_correlations + EranConv conv)
@@ -403,7 +391,7 @@ class CCGConfig(Config):
     @property
     def save_path(self) -> str:
         """Base path (no extension) for saving this config's CCGDataset."""
-        root = os.path.expanduser(f"{DATA_ROOT}/ccg")
+        root = os.path.join(DATA_ROOT, "ccg")
         return os.path.join(root, f"{self.name}_{self.resolution}")
 
 
@@ -454,10 +442,11 @@ class NeuronsDataset(AnalysisDataset):
 
     def prep(self, sessions):
         """
-        Filter neurons by behavioral epochs and type 
+        Filter neurons by behavioral epochs and type
         Set segment edge timing data
         """
         c = self.conf
+        self._probegroup = None
 
         sessions = _san(sessions)
         for session in sessions:
@@ -482,6 +471,20 @@ class NeuronsDataset(AnalysisDataset):
 
             # Store filtered neurons
             self.data[key] = neurons
+
+            # Load ProbeGroup (once, from first session with a file)
+            if self._probegroup is None:
+                pg_files = sorted(session.basepath.glob('*.probegroup.npy'))
+                if pg_files:
+                    from neuropy.core.probe import ProbeGroup
+                    self._probegroup = ProbeGroup.from_file(pg_files[0])
+                    # Mark skipped channels as disconnected
+                    recinfo = getattr(session, 'recinfo', None)
+                    skipped = getattr(recinfo, 'skipped_channels', None)
+                    if skipped is not None and len(skipped) > 0:
+                        mask = self._probegroup._data['channel_id'].isin(
+                            np.asarray(skipped))
+                        self._probegroup._data.loc[mask, 'connected'] = False
 
     def _short_session_name(self, session):
         """
@@ -927,24 +930,10 @@ class CCGData(Savable):
                    frates_cut: np.ndarray,
                    plotdir: str,
                    split_all_plots=False,
-                   overwrite=False,
-                   overlay_normalized=False):
+                   overwrite=False):
 
         if not os.path.exists(plotdir):
             os.makedirs(plotdir, exist_ok=True)
-
-        if overlay_normalized:
-            normalize_info = []
-            if NormalizeBy.REF_FRATE in self.conf.normalize_methods:
-                normalize_info.append(
-                    'normalized by reference neuron firing rate')
-            if NormalizeBy.TARGET_FRATE in self.conf.normalize_methods:
-                normalize_info.append('normalized by target neuron firing rate')
-            if NormalizeBy.TIME_SPAN in self.conf.normalize_methods:
-                normalize_info.append('normalized by total time (hours)')
-            normalize_info = '\n'.join(normalize_info)
-        else:
-            normalize_info = None
 
         if self.n_segment > 1 or split_all_plots:
             self.__save_gif(
@@ -954,8 +943,6 @@ class CCGData(Savable):
                 neurons_config=neurons_config,
                 frates_cut=frates_cut,
                 overwrite=overwrite,
-                normalize_info=normalize_info,
-                overlay_normalized=overlay_normalized,
             )
         else:
             self.__save_img(
@@ -965,8 +952,6 @@ class CCGData(Savable):
                 neurons_config=neurons_config,
                 frates_cut=frates_cut,
                 overwrite=overwrite,
-                normalize_info=normalize_info,
-                overlay_normalized=overlay_normalized,
             )
 
     def __save_img(
@@ -977,20 +962,11 @@ class CCGData(Savable):
         neurons_config: NeuronsDatasetConfig,
         frates_cut: np.ndarray,
         overwrite=False,
-        overlay_normalized=False,
-        normalize_info=None,
     ):
         """Save a single PNG for each significant pair (single-segment case)."""
         if pt.inds is None:
             print(f"nothing to plot: {pt}")
             return
-
-        if overlay_normalized:
-            normalized_ccg = self.ccg.astype(float)
-            normalized_ccg_null = self.ccg_null.astype(float)
-            for nf in self.norm_factors:
-                normalized_ccg /= nf
-                normalized_ccg_null /= nf
 
         for inds in pt.inds2:
             save_path = f"{plotdir}/ccg-inds{inds[0]}-{inds[1]}.png"
@@ -1024,12 +1000,6 @@ class CCGData(Savable):
                 show=False,
                 save=True,
                 segment_id=0,
-                normalize_info=normalize_info,
-                overlay_normalized=overlay_normalized,
-                normalized_ccg=normalized_ccg[loc]
-                if overlay_normalized else None,
-                normalized_ccg_null=normalized_ccg_null[loc]
-                if overlay_normalized else None,
             )
             plt.close(fig)
 
@@ -1145,19 +1115,10 @@ class CCGData(Savable):
         neurons_config: NeuronsDatasetConfig,
         frates_cut: np.ndarray,
         overwrite=False,
-        overlay_normalized=False,
-        normalize_info=None,
     ):
         if pt.inds is None:
             print(f"nothing to plot: {pt}")
             return
-
-        if overlay_normalized:
-            normalized_ccg = self.ccg.astype(float)
-            normalized_ccg_null = self.ccg_null.astype(float)
-            for nf in self.norm_factors:
-                normalized_ccg /= nf
-                normalized_ccg_null /= nf
 
         for i, inds in enumerate(pt.inds2):
             sig = self.significant[:,
@@ -1199,29 +1160,15 @@ class CCGData(Savable):
                     show=False,
                     save=False,
                     segment_id=i_seg,
-                    normalize_info=normalize_info,
-                    overlay_normalized=overlay_normalized,
-                    normalized_ccg=normalized_ccg[loc]
-                    if overlay_normalized else None,
-                    normalized_ccg_null=normalized_ccg_null[loc]
-                    if overlay_normalized else None,
                 )
                 figs.append(fig)
                 _ymin, _ymax = fig.axes[0].get_ylim()
                 ymin.append(_ymin)
                 ymax.append(_ymax)
-                if overlay_normalized:
-                    _ymin, _ymax = fig.axes[1].get_ylim()
-                    ymin2.append(_ymin)
-                    ymax2.append(_ymax)
             ymin, ymax = min(ymin), max(ymax)
-            if overlay_normalized:
-                ymin2, ymax2 = min(ymin2), max(ymax2)
             frames = []
             for fig in figs:
                 fig.axes[0].set_ylim(ymin, ymax)
-                if overlay_normalized:
-                    fig.axes[1].set_ylim(ymin2, ymax2)
                 fig.canvas.draw_idle()
                 frames.append(np.array(fig.canvas.renderer.buffer_rgba()))
                 plt.close(fig)
@@ -1398,17 +1345,20 @@ class CCGDataset(AnalysisDataset):
             json.dump(meta, fh, indent=2)
         print(f"[CCGDataset] ccgdata saved → {p}")
 
-    def load_ccgdata(self) -> bool:
+    def load_ccgdata(self) -> str:
         """Load raw CCG arrays from the separate ccgdata file.
 
-        Returns True on success; False if the file does not exist or the
-        compute config has changed.
+        Returns
+        -------
+        'loaded'  — successfully loaded (config matches).
+        'missing' — file does not exist on disk.
+        'stale'   — file exists but compute config has changed.
         """
         import hickle as hkl, json
         mp = self._ccgdata_path() + '.meta.json'
         p  = self._ccgdata_path() + '.hkl'
         if not os.path.isfile(p):
-            return False
+            return 'missing'
         # Validate compute config if metadata exists
         if os.path.isfile(mp):
             try:
@@ -1422,17 +1372,17 @@ class CCGDataset(AnalysisDataset):
                         print(f"[CCGDataset] ccgdata cache miss: "
                               f"'{field}' saved={saved.get(field)!r} "
                               f"current={current!r}")
-                        return False
+                        return 'stale'
             except Exception as exc:
                 print(f"[CCGDataset] ccgdata metadata error: {exc}")
-                return False
+                return 'stale'
         try:
             self._ccg = hkl.load(p)
             print(f"[CCGDataset] ccgdata loaded ← {p}")
-            return True
+            return 'loaded'
         except Exception as exc:
             print(f"[CCGDataset] ccgdata load failed: {exc}")
-            return False
+            return 'stale'
 
     def save_ccgpointers(self):
         """Save only the CCGPointer dicts (``data`` + ``spurious``) to a separate file.
@@ -1456,17 +1406,20 @@ class CCGDataset(AnalysisDataset):
             json.dump(meta, fh, indent=2)
         print(f"[CCGDataset] ccgpointers saved → {p}")
 
-    def load_ccgpointers(self) -> bool:
+    def load_ccgpointers(self) -> str:
         """Load CCGPointer dicts from the separate ccgpointers file.
 
-        Returns True on success; False if the file does not exist or the
-        significance config has changed.
+        Returns
+        -------
+        'loaded'  — successfully loaded (config matches).
+        'missing' — file does not exist on disk.
+        'stale'   — file exists but significance config has changed.
         """
         import hickle as hkl, json
         mp = self._ccgpointers_path() + '.meta.json'
         p  = self._ccgpointers_path() + '.hkl'
         if not os.path.isfile(p):
-            return False
+            return 'missing'
         if os.path.isfile(mp):
             try:
                 with open(mp) as fh:
@@ -1479,19 +1432,19 @@ class CCGDataset(AnalysisDataset):
                         print(f"[CCGDataset] ccgpointers cache miss: "
                               f"'{field}' saved={saved.get(field)!r} "
                               f"current={current!r}")
-                        return False
+                        return 'stale'
             except Exception as exc:
                 print(f"[CCGDataset] ccgpointers metadata error: {exc}")
-                return False
+                return 'stale'
         try:
             obj = hkl.load(p)
             self.data     = obj.get('data', {})
             self.spurious = obj.get('spurious', {})
             print(f"[CCGDataset] ccgpointers loaded ← {p}")
-            return True
+            return 'loaded'
         except Exception as exc:
             print(f"[CCGDataset] ccgpointers load failed: {exc}")
-            return False
+            return 'stale'
 
     # ------------------------------------------------------------------
     # High-res save / load (I.4)
@@ -1538,6 +1491,19 @@ class CCGDataset(AnalysisDataset):
             return next(iter(self.data.keys()))
         return None
 
+    @staticmethod
+    def _ask_overwrite(path: str, label: str) -> bool:
+        """Prompt user before overwriting an existing cache file.
+
+        Returns True if the user agrees to overwrite, False otherwise.
+        """
+        print(f"\n[CCGDataset] {label} file already exists at:\n  {path}")
+        try:
+            answer = input(f"  Overwrite with new computation? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = ''
+        return answer in ('y', 'yes')
+
     def get_ccg(self, baseline_method="eran_conv", use_segments=True):
         """
         main function of the class
@@ -1548,6 +1514,9 @@ class CCGDataset(AnalysisDataset):
              re-computed when SIGNIF_FIELDS change.
           3. If ccgpointers stale, re-run EranConv (cheap) on cached ccgdata and save.
           4. If ccgdata missing, run full spike_correlations + EranConv then save both.
+
+        When a named file exists but config has changed, the user is asked
+        before overwriting.
         """
         if self.nd is None:
             return
@@ -1556,20 +1525,32 @@ class CCGDataset(AnalysisDataset):
             conv = EranConv(self.conf)
 
             # --- Step 1: try loading cached raw CCG arrays ---
-            ccgdata_ok = self.load_ccgdata()
-            if ccgdata_ok:
+            ccgdata_status = self.load_ccgdata()
+            if ccgdata_status == 'loaded':
                 # --- Step 2: try loading cached CCGPointers ---
-                pointers_ok = self.load_ccgpointers()
-                if pointers_ok:
+                ptr_status = self.load_ccgpointers()
+                if ptr_status == 'loaded':
                     print("[CCGDataset] Loaded CCGData + CCGPointers from split cache.")
                     return
-                # Pointers stale → re-run significance detection on cached CCGData
+                # Pointers stale/missing → re-run significance detection on cached CCGData
+                if ptr_status == 'stale':
+                    if not self._ask_overwrite(
+                            self._ccgpointers_path() + '.hkl', 'CCGPointers'):
+                        print("[CCGDataset] Aborted — keeping existing ccgpointers.")
+                        return
                 print("[CCGDataset] CCGData cached; re-running significance detection.")
                 for nd_key, ccg_data in self._ccg.items():
                     self.__run_eranconv_on_ccgdata(nd_key, ccg_data, conv)
                 self.save_ccgpointers()
                 self._save_metadata()
                 return
+
+            if ccgdata_status == 'stale':
+                # File exists but config changed — ask before overwriting
+                if not self._ask_overwrite(
+                        self._ccgdata_path() + '.hkl', 'CCGData'):
+                    print("[CCGDataset] Aborted — keeping existing files.")
+                    return
 
             # --- Fallback: try old monolithic cache ---
             if self._check_metadata() and self.load_data():
@@ -1728,8 +1709,16 @@ class CCGDataset(AnalysisDataset):
         from neuropy.analyses import correlations as _corr
 
         # Try loading from disk first (unless forced to recompute)
-        if not force_recompute and self._load_highres_from_disk():
-            return
+        if not force_recompute:
+            if self._load_highres_from_disk():
+                return
+        else:
+            # Force recompute requested — check if file exists and ask
+            p = os.path.expanduser(self.highres_save_path() + '.hkl')
+            if os.path.isfile(p):
+                if not self._ask_overwrite(p, 'High-res CCG'):
+                    print("[load_highres] Aborted — keeping existing file.")
+                    return
 
         if conf_highres is None:
             import copy as _copy
@@ -1928,10 +1917,9 @@ class CCGDataset(AnalysisDataset):
         print("rescale completed")
 
     def save_plots(self,
-                   root="~/Documents/ms_synchrony/NeuroPy/images/ccg_plots",
+                   root=str(_REPO_ROOT / "images" / "ccg_plots"),
                    source='data',
                    overwrite=False,
-                   overlay_normalized=False,
                    **filters):
         from datetime import datetime
 
@@ -1972,7 +1960,6 @@ class CCGDataset(AnalysisDataset):
                 neurons_config=self.nd.conf,
                 plotdir=ccg_pointer.plotdir(plot_folder),
                 overwrite=overwrite,
-                overlay_normalized=overlay_normalized,
             )
         print(f"Done! Plots saved to: {plot_folder}")
 
