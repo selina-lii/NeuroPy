@@ -32,8 +32,22 @@ def plot_ccg_panel(
     acg_yscale_ref=1.0,
     acg_yscale_tgt=1.0,
     acg_match_ccg=False,
+    show_ccg=True,
+    plot_style='bar',
+    line_ccg=False,
+    line_baseline=False,
+    line_ref=False,
+    line_tgt=False,
+    line_jitter=False,
 ):
-    """Single CCG plot into provided axis"""
+    """Single CCG plot into provided axis.
+
+    Per-item line flags (line_ccg, line_baseline, line_ref, line_tgt)
+    control whether each histogram renders as a step outline
+    (histtype='step' via ax.stairs) or a filled bar plot.
+    The legacy ``plot_style`` parameter sets the default for all items
+    when ``'line'``, but per-item flags take precedence.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
@@ -41,6 +55,8 @@ def plot_ccg_panel(
         bins_s = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
         bins = bins_s * 1000  # ms
         bin_w = bin_size * 1000  # ms
+        # Bin edges for ax.stairs (n_bins + 1 edges)
+        edges = np.append(bins - bin_w / 2, bins[-1] + bin_w / 2)
 
         if grayscale:
             dark_gray = (0.2, 0.2, 0.2)
@@ -49,37 +65,57 @@ def plot_ccg_panel(
         else:
             colors = plt.rcParams["axes.prop_cycle"].by_key()["color"][:2]
 
-        ax.bar(bins,
-               ccg,
-               width=bin_w,
-               alpha=0.5,
-               label="ccg",
-               color=colors[0])
+        # Resolve per-item line mode (legacy plot_style as fallback)
+        _legacy_line = (plot_style == 'line')
+        _ccg_line = line_ccg or _legacy_line
+        _baseline_line = line_baseline or _legacy_line
+
+        # Always set y-axis range based on CCG data so hiding CCG
+        # doesn't zoom into the baseline alone.
+        ccg_ymax = np.max(ccg) * 1.1 if np.max(ccg) > 0 else 1
+        ax.set_ylim(0, ccg_ymax)
+        # set CCG transparency here
+        if show_ccg:
+            if _ccg_line:
+                ax.stairs(ccg, edges, label="ccg", alpha=0.5,
+                          color=colors[0], linewidth=1.5)
+            else:
+                ax.bar(bins, ccg, width=bin_w, alpha=0.5, label="ccg", color=colors[0])
         if ccg_null is not None:
-            ax.bar(bins,
-                   ccg_null,
-                   width=bin_w,
-                   alpha=0.5,
-                   label="ccg-smooth",
-                   color=colors[1])
+            if _baseline_line:
+                ax.stairs(ccg_null, edges, alpha=0.3, label="ccg-smooth",
+                          color=colors[1], linewidth=1.5, linestyle='--')
+            else:
+                ax.bar(bins, ccg_null, width=bin_w, alpha=0.3,
+                       label="ccg-smooth", color=colors[1])
 
+        _jitter_line = line_jitter or _legacy_line
         if j_ccg is not None:
-            ax.bar(bins, j_ccg, width=bin_w, alpha=0.4,
-                   label="jitter avg", color="plum")
+            if _jitter_line:
+                ax.stairs(j_ccg, edges, alpha=0.6, label="jitter avg",
+                          color="plum", linewidth=1.2)
+            else:
+                ax.bar(bins, j_ccg, width=bin_w, alpha=0.4,
+                       label="jitter avg", color="plum")
 
-        # Auto-correlogram overlays — each gets its own right-side y-axis
+        # Correlogram overlays — each gets its own right-side y-axis
+        # ACGs render as hollow bar outlines by default; per-item line flag
+        # switches to step outline (ax.stairs)
         _acg_axis_offset = 0.14  # start past p-value axis (at 1.0)
-        for acg_data, acg_color, acg_label, acg_scale in [
-            (acg_ref, '#2f4f4f', 'ACG ref', acg_yscale_ref),
-            (acg_tgt, '#7B1FA2', 'ACG tgt', acg_yscale_tgt),
+        for acg_data, acg_color, acg_label, acg_scale, acg_line in [
+            (acg_ref, '#007434', 'ACG ref', acg_yscale_ref, line_ref),
+            (acg_tgt, '#9638AB', 'ACG tgt', acg_yscale_tgt, line_tgt),
         ]:
             if acg_data is None:
                 continue
             ax_acg = ax.twinx()
             ax_acg.spines['right'].set_position(('axes', 1.0 + _acg_axis_offset))
-            ax_acg.bar(bins, acg_data, width=bin_w, alpha=0.2,
-                       color=acg_color, edgecolor='none',
-                       label=acg_label)
+            if acg_line:
+                ax_acg.stairs(acg_data, edges, alpha=0.6,
+                              color=acg_color, linewidth=1.2, label=acg_label)
+            else:
+                ax_acg.bar(bins, acg_data, width=bin_w, alpha=0.4,
+                           color=acg_color, label=acg_label)
             if acg_match_ccg:
                 # Match CCG y-axis exactly
                 ccg_ylim = ax.get_ylim()
@@ -138,8 +174,15 @@ def plot_ccg_panel(
         if pval_corrected is not None:
             ax2.plot(bins, pval_corrected, label='corrected p', alpha=0.4, color='green')
         if j_pval is not None:
-            ax2.axhline(j_pval, label=f'jitter p={j_pval:.3f}', color='purple',
-                        alpha=0.85, linewidth=1.5, linestyle='--')
+            j_pval = np.asarray(j_pval)
+            if j_pval.ndim == 0:
+                # Scalar: single empirical p-value (legacy)
+                ax2.axhline(float(j_pval), label=f'jitter p={float(j_pval):.3f}',
+                            color='purple', alpha=0.85, linewidth=1.5, linestyle='--')
+            else:
+                # Per-bin p-values
+                ax2.plot(bins, j_pval, label='jitter p-corrected',
+                         alpha=0.6, color='purple')
         if alpha is not None:
             ax2.axhline(alpha, label=f'α={alpha}', alpha=0.8,
                         color='red', linestyle='--', linewidth=1.5)
@@ -178,7 +221,7 @@ def plot_ccg_simple(ccg, ccg_null=None, bin_size=1e-3, duration=20e-3,
     # Same bin generation as plot_ccg_panel (window_size=duration, bins in ms)
     bins = np.arange(-duration / 2, duration / 2 + bin_size, bin_size) * 1e3
 
-    ax.bar(bins, ccg, width=bin_size * 1e3, alpha=0.7, label='CCG', color='steelblue')
+    ax.bar(bins, ccg, width=bin_size * 1e3, alpha=0.5, label='CCG', color='steelblue')
 
     if ccg_null is not None:
         ax.bar(bins, ccg_null, width=bin_size * 1e3, alpha=0.5,
@@ -369,7 +412,6 @@ def plot_strength(key,
                   norm_by_total_strength=False,
                   zero_first_timepoint=False,
                   show_legend=False,
-                  has_skips=None,
                   save=False,
                   root=None,
                   debug=False):
@@ -385,8 +427,6 @@ def plot_strength(key,
         return
 
     ylabel = "connection strength"
-    if has_skips:
-        ylabel += "\nremoving outliers"
     if norm_by_total_strength:
         plot_data /= np.nansum(plot_data, axis=1, keepdims=True)
         ylabel = ylabel + " \nnormalized by total strength"

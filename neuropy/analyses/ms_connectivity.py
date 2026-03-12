@@ -6,8 +6,9 @@ import numpy as np
 try:
     import cupy as cp
 except ImportError:
-    print("Error importing CuPy")
     cp = None
+
+_CUPY_AVAILABLE = cp is not None
 
 import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import _san, _san_np, _hasvalue, Config, AnalysisDataset, Savable, SetOp, ConfigOption
@@ -38,14 +39,6 @@ _CCG_RESOLUTION = {
     'lowres':  1e-3,    # 1 ms   — default, fast
     'highres': 1e-4,  # 0.1 ms — finer temporal resolution (must exceed 1/sample_rate)
 }
-
-
-class IgnoreLevel(ConfigOption):
-    """Config for CCG and other analysis
-    Do we ignore neurons on the same peak channel / shank?"""
-    NONE = 0
-    SAME_CHANNEL = 1
-    SAME_SHANK = 2
 
 
 class ConnStrengthMethod(ConfigOption):
@@ -232,12 +225,12 @@ class CCGConfig(Config):
     COMPUTE_FIELDS = [
         'name', 'resolution', 'bin_size', 'duration', 'conv_window',
         'conn_types_E', 'conn_types_I',
-        'use_acceleration', 'symmetrize_ccg', 'ignore',
+        'use_acceleration', 'symmetrize_ccg',
     ]
     # Fields that affect significance detection only (rerunnable without recomputing CCG)
     SIGNIF_FIELDS = [
         'alpha', 'alpha2', 'min_lag', 'max_lag',
-        'min_spkcount', 'spkcnt_scope', 'mc_method',
+        'min_spkcount', 'spkcnt_scope', 'multiple_correction',
     ]
 
     def __init__(
@@ -257,9 +250,8 @@ class CCGConfig(Config):
         max_lag: float = 3e-3,
         min_spkcount=2.5,
         spkcount_scope=12e-3,
-        mc_method: str = 'bonferroni',  # None → no correction; 'fdr_bh' → FDR-BH
-        ignore=IgnoreLevel.SAME_CHANNEL,
-        use_acceleration=True,
+        multiple_correction: str = 'bonferroni',  # 'bonferroni' or 'fdr_bh'
+        use_acceleration=None,  # None → auto-detect CuPy; True/False to override
         symmetrize_ccg=True,
         conn_strength_method: ConnStrengthMethod = ConnStrengthMethod.PEAKSIZE,
     ):
@@ -278,7 +270,7 @@ class CCGConfig(Config):
         self.conv_window = conv_window
         self.alpha = alpha
         self.alpha2 = alpha2
-        self.mc_method = mc_method
+        self.multiple_correction = multiple_correction
         self.center_bin = int(self.duration / self.bin_size // 2)
         self.nbins = int(self.duration / self.bin_size) + 1  # NOTE
 
@@ -287,7 +279,6 @@ class CCGConfig(Config):
         self.min_spkcount = min_spkcount
         self.spkcnt_scope = spkcount_scope
         self.spkcnt_bins = int(self.spkcnt_scope / self.bin_size)
-        self.ignore = ignore
 
         self.min_lag_bin = self.center_bin + int(
             self.min_lag / self.bin_size)  # leftmost bin for p value test
@@ -296,7 +287,7 @@ class CCGConfig(Config):
         self.min_spkcnt_bin = self.center_bin - self.spkcnt_bins // 2  # leftmost bin requiring minimum spike count
         self.max_spkcnt_bin = self.center_bin + self.spkcnt_bins // 2 + 1  # rightmost bin requiring minimum spike count
 
-        self.use_acceleration = use_acceleration
+        self.use_acceleration = _CUPY_AVAILABLE if use_acceleration is None else use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
         self.conn_strength_method = conn_strength_method
@@ -376,8 +367,7 @@ class CCGConfig(Config):
             "max_lag":              self.max_lag,
             "min_spkcount":         self.min_spkcount,
             "spkcount_scope":       self.spkcnt_scope,
-            "mc_method":            self.mc_method,
-            "ignore":               _enum_name(self.ignore),
+            "multiple_correction":            self.multiple_correction,
             "symmetrize_ccg":       self.symmetrize_ccg,
             "conn_types_E":         _to_list(self.conn_types_E),
             "conn_types_I":         _to_list(self.conn_types_I),
@@ -391,7 +381,7 @@ class CCGConfig(Config):
     @property
     def save_path(self) -> str:
         """Base path (no extension) for saving this config's CCGDataset."""
-        root = os.path.join(DATA_ROOT, "ccg")
+        root = os.path.join(DATA_ROOT, "ccg", self.name)
         return os.path.join(root, f"{self.name}_{self.resolution}")
 
 
@@ -430,7 +420,30 @@ class NeuronsDataset(AnalysisDataset):
         self.edge_times = {}
         self.segment_firing_rates = {}  # 1:1 with edge_times
         self._conf = conf
+        self._sessions = sessions  # keep reference for lazy ProbeGroup loading
+        self._probegroups = {}     # session Key → ProbeGroup
         self.prep(sessions)
+
+    @property
+    def probegroups(self):
+        """Lazy-load ProbeGroups if not yet populated."""
+        if not getattr(self, '_probegroups', None):
+            self._probegroups = {}
+            sessions = _san(getattr(self, '_sessions', None) or [])
+            for session in sessions:
+                session_name = self._short_session_name(session)
+                key = Key(session=session_name)
+                pg_files = sorted(session.basepath.glob('*.probegroup.npy'))
+                if pg_files:
+                    from neuropy.core.probe import ProbeGroup
+                    pg = ProbeGroup.from_file(pg_files[0])
+                    recinfo = getattr(session, 'recinfo', None)
+                    skipped = getattr(recinfo, 'skipped_channels', None)
+                    if skipped is not None and len(skipped) > 0:
+                        mask = pg._data['channel_id'].isin(np.asarray(skipped))
+                        pg._data.loc[mask, 'connected'] = False
+                    self._probegroups[key] = pg
+        return self._probegroups
 
     def __str__(self):
         s = ''
@@ -446,7 +459,7 @@ class NeuronsDataset(AnalysisDataset):
         Set segment edge timing data
         """
         c = self.conf
-        self._probegroup = None
+        self._probegroups = {}  # session Key → ProbeGroup
 
         sessions = _san(sessions)
         for session in sessions:
@@ -472,19 +485,18 @@ class NeuronsDataset(AnalysisDataset):
             # Store filtered neurons
             self.data[key] = neurons
 
-            # Load ProbeGroup (once, from first session with a file)
-            if self._probegroup is None:
-                pg_files = sorted(session.basepath.glob('*.probegroup.npy'))
-                if pg_files:
-                    from neuropy.core.probe import ProbeGroup
-                    self._probegroup = ProbeGroup.from_file(pg_files[0])
-                    # Mark skipped channels as disconnected
-                    recinfo = getattr(session, 'recinfo', None)
-                    skipped = getattr(recinfo, 'skipped_channels', None)
-                    if skipped is not None and len(skipped) > 0:
-                        mask = self._probegroup._data['channel_id'].isin(
-                            np.asarray(skipped))
-                        self._probegroup._data.loc[mask, 'connected'] = False
+            # Load ProbeGroup for this session
+            pg_files = sorted(session.basepath.glob('*.probegroup.npy'))
+            if pg_files:
+                from neuropy.core.probe import ProbeGroup
+                pg = ProbeGroup.from_file(pg_files[0])
+                # Mark skipped channels as disconnected
+                recinfo = getattr(session, 'recinfo', None)
+                skipped = getattr(recinfo, 'skipped_channels', None)
+                if skipped is not None and len(skipped) > 0:
+                    mask = pg._data['channel_id'].isin(np.asarray(skipped))
+                    pg._data.loc[mask, 'connected'] = False
+                self._probegroups[key] = pg
 
     def _short_session_name(self, session):
         """
@@ -1440,6 +1452,14 @@ class CCGDataset(AnalysisDataset):
             obj = hkl.load(p)
             self.data     = obj.get('data', {})
             self.spurious = obj.get('spurious', {})
+            # Detect hickle RecoveredDataset fallbacks (class not found)
+            for d in (self.data, self.spurious):
+                for v in d.values():
+                    if v is not None and not isinstance(v, CCGPointer):
+                        print(f"[CCGDataset] ccgpointers stale: "
+                              f"found {type(v).__name__} instead of CCGPointer")
+                        self.data, self.spurious = {}, {}
+                        return 'stale'
             print(f"[CCGDataset] ccgpointers loaded ← {p}")
             return 'loaded'
         except Exception as exc:
@@ -1611,19 +1631,11 @@ class CCGDataset(AnalysisDataset):
             neurons = self.nd.data[nd_key]
             edge_times = self.nd.edge_times[nd_key]
 
-            if self.conf.ignore == IgnoreLevel.SAME_CHANNEL:
-                neuron_locations = neurons.peak_channels
-            elif self.conf.ignore == IgnoreLevel.SAME_SHANK:
-                neuron_locations = neurons.shank_ids
-            else:
-                neuron_locations = None
-
             conv = EranConv(self.conf)
             _, _, _, ccg_pointers, spur_pointers, printstr = conv.eranconv(
                 neurons_key=nd_key,
                 ccg=ccg_data.ccg,
                 edge_times=edge_times,
-                neuron_locations=neuron_locations,
                 neuron_type=neurons.neuron_type,
                 conf=self.conf,
             )
@@ -1787,7 +1799,7 @@ class CCGDataset(AnalysisDataset):
                   f"({W * bin_size_eff * 1e3:.1f} ms conv window)")
             pvals, pred, qvals = EranConv._conv(ccg, W=W)
             sig, pvals_corrected = EranConv.multiple_correction(
-                pvals, alpha=conf.alpha, method=conf.mc_method)
+                pvals, alpha=conf.alpha, method=conf.multiple_correction)
             ccg_hi.ccg_null = pred
             ccg_hi.pval = pvals
             ccg_hi.qval = qvals
@@ -1988,31 +2000,17 @@ class CCGDataset(AnalysisDataset):
             norm_by_total_strength=False,
             zero_first_timepoint=False,
             show_legend=False,
-            skips={},
             save=False,
-            root='~/Documents/NeuroPy/images/conn_strengths',
+            root=str(_REPO_ROOT / "images" / "conn_strengths"),
             debug=False):
 
-        def filter(self, inds, min_n_segment, skips):
-            if skips is not None:
-                inds = [
-                    int(i)
-                    for i, (x, y) in enumerate(inds)
-                    if not ((x in skips[:, 0]) & (y in skips[:, 1])) and
-                    (np.sum(self.significant[:, x, y]) >= min_n_segment)
-                ]
-            else:
-                inds = np.where(
-                    np.sum(self.significant[(
-                        slice(None),
-                        *inds.T)], axis=1) >= min_n_segment)[0].astype(int)
-            return inds
-
         for k, cp in self.data.items():
-            skip_k = skips.get(k)
-            pairs = filter(cp.inds,
-                           min_n_segment=n_segments_threshold,
-                           skips=skip_k)
+            pairs = cp.inds
+            if n_segments_threshold is not None:
+                ccg_data = self._ccg[k.nd()]
+                mask = np.sum(ccg_data.significant[(
+                    slice(None), *pairs.T)], axis=1) >= n_segments_threshold
+                pairs = pairs[mask]
             ccg_data = self._ccg[k.nd()]
             plot_ccg.plot_strength(
                 key=k,
@@ -2027,7 +2025,6 @@ class CCGDataset(AnalysisDataset):
                 norm_by_total_strength=norm_by_total_strength,
                 zero_first_timepoint=zero_first_timepoint,
                 show_legend=show_legend,
-                has_skips=skip_k is not None,
                 debug=debug)
 
     def __run_eranconv_on_ccgdata(self, nd_key, ccg_data, conv):
@@ -2040,18 +2037,10 @@ class CCGDataset(AnalysisDataset):
         neurons = self.nd.data[nd_key]
         edge_times = self.nd.edge_times[nd_key]
 
-        if self.conf.ignore == IgnoreLevel.SAME_CHANNEL:
-            neuron_locations = neurons.peak_channels
-        elif self.conf.ignore == IgnoreLevel.SAME_SHANK:
-            neuron_locations = neurons.shank_ids
-        else:
-            neuron_locations = None
-
         pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
             neurons_key=nd_key,
             ccg=ccg_data.ccg,
             edge_times=edge_times,
-            neuron_locations=neuron_locations,
             neuron_type=neurons.neuron_type,
             conf=self.conf)
 
@@ -2094,18 +2083,10 @@ class CCGDataset(AnalysisDataset):
             edge_times=edge_times if use_segments else None,
         )
 
-        if self.conf.ignore == IgnoreLevel.SAME_CHANNEL:
-            neuron_locations = neurons.peak_channels
-        elif self.conf.ignore == IgnoreLevel.SAME_SHANK:
-            neuron_locations = neurons.shank_ids
-        else:
-            neuron_locations = None
-
         pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
             neurons_key=key,
             ccg=ccg,
             edge_times=edge_times,
-            neuron_locations=neuron_locations,
             neuron_type=neurons.neuron_type,
             conf=self.conf)
 
@@ -2236,29 +2217,22 @@ class EranConv:
             Any other string accepted by
             ``statsmodels.stats.multitest.multipletests`` also works
             (e.g. ``'fdr_bh'``).
-            ``None`` — no correction (use raw p-values).
 
         Returns
         -------
         significance : bool ndarray, same shape as *pvals*
         corrected_pvals : float ndarray, same shape as *pvals*
         """
-        if method is None:
-            return pvals <= alpha, pvals.copy()
-
         if method == 'bonferroni':
-            # Vectorised: multiply each p-value by the number of bins tested,
-            # then clip at 1.  Equivalent to statsmodels bonferroni but ~50×
-            # faster because it avoids the Python loop.
             n_bins = pvals.shape[-1]
             corrected = np.minimum(pvals * n_bins, 1.0)
             return corrected <= alpha, corrected
 
-        # General fallback for FDR-BH and other statsmodels methods.
+        # Fallback for FDR-BH and other statsmodels methods.
         significance = np.zeros_like(pvals, dtype=bool)
         corrected_pvals = np.ones_like(pvals, dtype=float)
         for idx in np.ndindex(pvals.shape[:-1]):
-            row = pvals[idx]          # shape [n_bins]
+            row = pvals[idx]
             s, pc, _, _ = multipletests(row, alpha=alpha, method=method)
             significance[idx] = s
             corrected_pvals[idx] = pc
@@ -2284,8 +2258,7 @@ class EranConv:
         looser ``alpha2`` threshold (ensures trough, not just noise).
         """
         conf = self.conf
-        # Default to Bonferroni; caller may override via conf.mc_method.
-        method = conf.mc_method if conf.mc_method is not None else 'bonferroni'
+        method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
 
         if excitability == 'E':
             sig, self._pvals = EranConv.multiple_correction(p, conf.alpha, method=method)
@@ -2300,12 +2273,6 @@ class EranConv:
             pair_inds = np.argwhere(neighbor.any(-1))
         else:
             raise ValueError(f"Unknown excitability: {excitability!r}")
-        return pair_inds
-
-    def _autocorr_mask(self, pair_inds):
-        if _hasvalue(pair_inds):
-            pair_inds = np.array(
-                [inds for inds in pair_inds if inds[-2] != inds[-1]])
         return pair_inds
 
     def _cell_type_mask(self, pair_inds, neuron_type, conn_types):
@@ -2323,23 +2290,11 @@ class EranConv:
             sig_pairs[ct] = pair_inds[inds] if inds.shape[0] else None
         return sig_pairs
 
-    def _probe_loc_mask(self, pair_inds, neuron_locations):
-        """
-        Filter out pairs that are too close by
-        """
-        if _hasvalue(neuron_locations) and _hasvalue(pair_inds):
-            # Check by locations
-            x, y = pair_inds[:, -2], pair_inds[:, -1]
-            inds = np.where(neuron_locations[x] != neuron_locations[y])[0]
-            return pair_inds[inds]
-        return pair_inds
-
     def eranconv(
         self,
         neurons_key: Key,
         ccg,
         edge_times: pd.DataFrame,
-        neuron_locations,
         neuron_type,
         conf: CCGConfig,
     ):
@@ -2360,9 +2315,7 @@ class EranConv:
         def build_inds(p, EI, conn_types):
             rough_inds = SetOp.intersect(self.significance_mask(p, EI),
                                          self.spkcount_mask(ccg))
-            rough_inds = self._autocorr_mask(rough_inds)
-            inds = self._probe_loc_mask(rough_inds, neuron_locations)
-            inds = self._cell_type_mask(inds, neuron_type, conn_types)
+            inds = self._cell_type_mask(rough_inds, neuron_type, conn_types)
             return rough_inds, inds
 
         # [n_seg, n_pair, 2]

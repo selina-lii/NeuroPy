@@ -8,14 +8,27 @@ def plot_probe(
     annotate_channels=None,
     channel_id=True,
     disconnected=True,
+    x_scale=1.0,
+    y_scale=1.0,
     ax=None,
 ):
+    """Plot probe channel layout.
+
+    Parameters
+    ----------
+    x_scale, y_scale : float
+        Multiply the raw probe x/y coordinates to adjust horizontal (shank)
+        and vertical (channel) spacing.  Default 1.0 = micron coordinates.
+    """
     if ax is None:
         _, ax = plt.subplots()
 
+    px = probe.x * x_scale
+    py = probe.y * y_scale
+
     ax.scatter(
-        probe.x,
-        probe.y,
+        px,
+        py,
         s=12,
         marker="o",
         color="gray",
@@ -24,13 +37,14 @@ def plot_probe(
         alpha=0.5,
     )
     if channel_id:
-        for x, y, chan_id in zip(probe.x, probe.y, probe.channel_id):
+        for x, y, chan_id in zip(px, py, probe.channel_id):
             ax.annotate(chan_id, (x, y), fontsize=8)
 
     if disconnected:
+        disc = probe.get_disconnected
         ax.scatter(
-            probe.get_disconnected.x,
-            probe.get_disconnected.y,
+            disc.x.values * x_scale,
+            disc.y.values * y_scale,
             s=18,
             edgecolors="#FF5252",
             facecolors="none",
@@ -39,13 +53,10 @@ def plot_probe(
     if annotate_channels is not None:
         prb_data = probe.to_dataframe().set_index("channel_id")
         for channel in annotate_channels:
-            x, y = (
-                prb_data.loc[[channel]].x.values[0],
-                prb_data.loc[[channel]].y.values[0],
-            )
+            x = prb_data.loc[[channel]].x.values[0] * x_scale
+            y = prb_data.loc[[channel]].y.values[0] * y_scale
             ax.scatter(x, y, s=30, edgecolors="g", facecolors="none", linewidths=2)
 
-    # ax.axhline(probe.y_max + 10, probe.x_min, probe.x_max, lw=4)
     ax.axis("off")
     ax.set_title(f"Probe {probe.n_contacts}ch")
 

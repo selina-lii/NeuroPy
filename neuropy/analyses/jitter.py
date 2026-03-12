@@ -1,4 +1,5 @@
 from enum import Enum
+from pathlib import Path as _Path
 from typing import Union
 
 import numpy as np
@@ -7,6 +8,8 @@ import pandas as pd
 import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import _san, AnalysisDataset
 from neuropy.core.neurons import Neurons
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
 
 try:
     import cupy as cp
@@ -115,6 +118,7 @@ class Jitter:
         # Filled by run()
         self.j_sig = None    # [n_pairs] bool
         self.pval = None     # [n_pairs] float
+        self.pval_bins = None  # [n_pairs, n_bins] per-bin empirical p-values
         self.JBSI = None     # [n_pairs, n_bins] float
         # pair_idx → (j_avg [n_bins], j_lo [n_bins], j_hi [n_bins])
         self._j_ccg_cache: dict = {}
@@ -164,6 +168,7 @@ class Jitter:
         n_pairs = len(inds)
         self.j_sig = np.zeros(n_pairs, dtype=bool)
         self.pval = np.ones(n_pairs, dtype=float)
+        self.pval_bins = np.ones((n_pairs, self.conf.ccg.nbins), dtype=float)
         self.JBSI = np.zeros((n_pairs, self.conf.ccg.nbins))
 
         stored_by_segment = self.ccg_pointer.stored_by_segment
@@ -205,6 +210,12 @@ class Jitter:
                 j_ccg_lo = np.percentile(j_ccg[ref_i], 5, axis=0)
                 j_ccg_hi = np.percentile(j_ccg[ref_i], 95, axis=0)
                 self._j_ccg_cache[pair_idx] = (j_ccg_avg, j_ccg_lo, j_ccg_hi)
+
+                # Per-bin empirical p-values: fraction of jitter trials
+                # where the jitter count >= real count at each bin
+                # j_ccg[ref_i] shape: [njitter, n_bins], real_ccg shape: [n_bins]
+                self.pval_bins[pair_idx] = np.mean(
+                    j_ccg[ref_i] >= real_ccg[np.newaxis, :], axis=0)
 
                 pval = float(np.mean(j_vals >= real_val))
                 self.pval[pair_idx] = pval
@@ -358,7 +369,7 @@ class Jitter:
         ----------
         save_dir : str, optional
             Destination directory.  Defaults to
-            ``~/Documents/ms_synchrony/NeuroPy/data/jitter/<key_str>``.
+            ``<repo>/data/jitter/<key_str>``.
 
         Returns
         -------
@@ -368,8 +379,7 @@ class Jitter:
 
         if save_dir is None:
             key_str = str(self.key).replace(' ', '_').replace('/', '-')
-            save_dir = os.path.expanduser(
-                f"~/Documents/ms_synchrony/NeuroPy/data/jitter/{key_str}")
+            save_dir = str(_REPO_ROOT / "data" / "jitter" / key_str)
         os.makedirs(save_dir, exist_ok=True)
 
         np.save(os.path.join(save_dir, 'jitter_inds.npy'), self.ccg_pointer.inds)
