@@ -616,10 +616,10 @@ class CCGReviewUI:
         sig_hdr = ttk.Frame(sig_outer)
         sig_hdr.pack(fill=tk.X)
         self._sig_fold_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(sig_hdr, text="▾ Significance",
+        ttk.Checkbutton(sig_hdr, text="Significance",
                         variable=self._sig_fold_var,
                         command=lambda: self._toggle_fold(
-                            self._sig_fold_var, sig_frame, '▾ Significance', '▸ Significance',
+                            self._sig_fold_var, sig_frame, 'Significance', '▸ Significance',
                             sig_hdr)).pack(side=tk.LEFT)
         sig_frame = ttk.Frame(sig_outer, padding=4)
         sig_frame.pack(fill=tk.X)
@@ -678,10 +678,10 @@ class CCGReviewUI:
         acg_hdr = ttk.Frame(acg_outer)
         acg_hdr.pack(fill=tk.X)
         self._acg_fold_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(acg_hdr, text="▾ Correlograms",
+        ttk.Checkbutton(acg_hdr, text="Correlograms",
                         variable=self._acg_fold_var,
                         command=lambda: self._toggle_fold(
-                            self._acg_fold_var, acg_frame, '▾ Correlograms', '▸ Correlograms',
+                            self._acg_fold_var, acg_frame, 'Correlograms', '▸ Correlograms',
                             acg_hdr)).pack(side=tk.LEFT)
         acg_frame = ttk.Frame(acg_outer, padding=4)
         acg_frame.pack(fill=tk.X)
