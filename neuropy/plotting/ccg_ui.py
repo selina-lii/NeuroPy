@@ -656,7 +656,7 @@ class CCGReviewUI:
         j_lbl.pack(side=tk.LEFT, padx=(0, 1))
         self._sig_jitter_p_var = tk.BooleanVar(value=False)
         self._jitter_style_btn = tk.Label(
-            sig_frame, text="✕ jitter", font=('TkDefaultFont', 9),
+            sig_frame, text="X jitter", font=('TkDefaultFont', 9),
             relief='raised', bd=1, padx=2, cursor='hand2',
             state=tk.DISABLED, fg='gray')
         self._jitter_style_btn.pack(side=tk.LEFT, padx=2)
@@ -687,7 +687,7 @@ class CCGReviewUI:
         acg_frame.pack(fill=tk.X)
         self._acg_inner_frame = acg_frame
 
-        # CCG tri-state: ■ solid → □ outline → ✕ hidden → ■ ...
+        # CCG tri-state: ■ solid → □ outline → X hidden → ■ ...
         self._ccg_show_var = tk.BooleanVar(value=True)
         self._ccg_style_btn = tk.Label(
             acg_frame, text="■ CCG", font=('TkDefaultFont', 9),
@@ -699,7 +699,7 @@ class CCGReviewUI:
         ttk.Separator(acg_frame, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
 
-        # Ref/Tgt ACG tri-state buttons (default: hidden ✕)
+        # Ref/Tgt ACG tri-state buttons (default: hidden X)
         self._acg_ref_var = tk.BooleanVar(value=False)
         self._ref_style_btn = tk.Label(
             acg_frame, text="□ ref", font=('TkDefaultFont', 9),
@@ -1151,7 +1151,7 @@ class CCGReviewUI:
             cb.config(text=text_closed)
 
     def _cycle_style(self, item):
-        """Tri-state cycle: ■ solid → □ outline → ✕ hidden → ■ solid ..."""
+        """Tri-state cycle: ■ solid → □ outline → X hidden → ■ solid ..."""
         line_map = {
             'ccg':      self._line_ccg_var,
             'baseline': self._line_baseline_var,
@@ -1186,7 +1186,7 @@ class CCGReviewUI:
         self.update_plot()
 
     def _cycle_style_acg(self, item):
-        """Tri-state: ✕ hidden → □ outline → ■ solid → ✕ hidden ..."""
+        """Tri-state: X hidden → □ outline → ■ solid → X hidden ..."""
         line_map = {
             'ccg': self._line_ccg_var,
             'baseline': self._line_baseline_var,
@@ -1225,7 +1225,7 @@ class CCGReviewUI:
         self.update_plot()
 
     def _update_style_btns(self):
-        """Refresh tri-state button labels: ■ name / □ name / ✕ name."""
+        """Refresh tri-state button labels: ■ name / □ name / X name."""
         for line_var, show_var, btn_attr, name in [
             (self._line_ccg_var,      self._ccg_show_var,          '_ccg_style_btn',      'CCG'),
             (self._line_baseline_var, self._sig_conv_baseline_var, '_baseline_style_btn', 'baseline'),
@@ -1237,7 +1237,7 @@ class CCGReviewUI:
             if not btn:
                 continue
             if not show_var.get():
-                btn.config(text=f"✕ {name}")
+                btn.config(text=f"X {name}")
             elif line_var.get():
                 btn.config(text=f"□ {name}")
             else:
@@ -4001,8 +4001,8 @@ class CCGReviewUI:
             snb.pack(fill=tk.BOTH, expand=True)
             for gname in special_names:
                 _add_group_tab(snb, gname, is_special=True)
-
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=4)
+
 
     def _rename_group(self, old_name, new_name, win=None):
         new_name = new_name.strip()
