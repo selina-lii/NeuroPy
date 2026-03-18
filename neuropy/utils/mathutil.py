@@ -6,7 +6,6 @@ from scipy import stats
 from hmmlearn.hmm import GaussianHMM
 from sklearn.mixture import GaussianMixture
 # from .ccg import correlograms # TODO
-from neuropy.analyses import correlations
 import scipy.signal as sg
 import typing
 

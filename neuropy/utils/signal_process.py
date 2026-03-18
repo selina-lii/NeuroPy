@@ -14,13 +14,20 @@ from scipy.interpolate import interp2d
 
 try:
     from ..plotting import Fig
-    from .. import core
+    from ..core.signal import Signal as _Signal
+    from ..core import epoch as _epoch_mod
 except ImportError:
     from neuropy.plotting.figure import Fig
-    from neuropy import core
+    from neuropy.core.signal import Signal as _Signal
+    from neuropy.core import epoch as _epoch_mod
+
+# Alias for type hints / isinstance checks throughout this file.
+# Using direct module import (core.signal) instead of the package (core)
+# avoids circular import: core.__init__ → position → mathutil → analyses → oscillations → here.
+core = type('_core_ns', (), {'Signal': _Signal, 'Epoch': _epoch_mod.Epoch})()
 
 
-class Spectrogram(core.Signal):
+class Spectrogram(_Signal):
     def __init__(self, traces, freqs, sampling_rate=1, t_start=0) -> None:
         super().__init__(traces, sampling_rate, t_start=t_start, channel_id=freqs)
 

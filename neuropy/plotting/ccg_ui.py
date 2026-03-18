@@ -36,6 +36,8 @@ from matplotlib.figure import Figure
 import os
 import json
 import datetime
+import collections
+import multiprocessing as _mp
 from pathlib import Path as _Path
 from neuropy.plotting import ccg as plot_ccg
 import imageio
@@ -45,10 +47,18 @@ try:
 except ImportError:
     NormalizeBy = None
 
+try:
+    from neuropy.core.epoch import Epoch as _Epoch
+except ImportError:
+    _Epoch = None
+
 # Sentinel value for the virtual "All segments" view
 _ALL_SEGS = "All segments"
 _ADMITTED_GROUP = "__admitted__"
 _SPECIAL_PREFIX = "__special_"
+
+# maximum number of queued jitters (including the currently running one)
+_MAX_JITTER_QUEUE = 50
 
 
 class CCGReviewUI:
@@ -127,8 +137,14 @@ class CCGReviewUI:
         self._pair_scale_cache: dict = {}    # (ref, tgt) -> (ymin, ymax)
         self._session_scale_cache = None     # (ymin, ymax)
 
-        # Jitter state
-        self._jitter_cache: dict = {}        # (ref, tgt) -> (j_avg, j_pval, j_pval_bins)
+        # Jitter state — LRU cache with max size to avoid memory overflow
+        self._JITTER_CACHE_MAX = 500         # max cached pairs before LRU eviction
+        self._jitter_cache = collections.OrderedDict()  # (ref,tgt,res) -> (j_avg, j_pval, j_pval_bins)
+        self._jitter_proc: _mp.Process = None            # currently running process
+        self._jitter_result_queue: _mp.Queue = None      # result queue from running process
+        self._jitter_pending: collections.deque = collections.deque()  # queued (ref, tgt, njitter, res_key, bin_size_eff)
+        self._jitter_poll_id = None                      # after() id for polling
+        self._jitter_unviewed: set = set()               # (ref, tgt) pairs with unviewed results
 
         # Significance display toggles live in BooleanVars (created after Tk root).
         # Use _sig(name) helper to read them.
@@ -158,12 +174,29 @@ class CCGReviewUI:
         self._slider_dragging: str = None    # 'start' | 'end' | None
         self._ts_epoch_bounds = []           # [(t0_sec, t1_sec, label), …]
         self._ts_total_sec: float = 0.0
+        self._ts_active_label: str = None    # label filter for overlapping themes (None = show all)
         self._ts_segment_name: str = ""      # name for the next custom segment
         # Custom segments: each entry =
         #   {'name':str, 't0':float, 't1':float,
         #    'ccg': [1,N,N,bins], 'ccg_null', 'pval', 'pval_corrected',
         #    (optional hi-res): 'ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'}
         self._custom_segments: list = []
+
+        # Time slider theme state
+        self._ts_themes: dict = {}            # name -> Epoch object
+        self._ts_current_theme: str = 'segments'  # default = CCG segment edges
+
+        # Zoom/selection state (selection tool cursors, independent of custom-window cursors)
+        self._ts_zoom_start: float = None
+        self._ts_zoom_end: float = None
+        self._ts_zoom_dragging: str = None   # 'start' | 'end' | None
+
+        # Spike attribution state
+        self._sa_enabled = False              # toggle state
+        self._sa_bin_ms: float = 0.0          # target bin lag in ms
+        self._sa_spike_pairs: list = []       # [(ref_spike_t, tgt_spike_t), ...]
+        self._sa_selected_idx: int = -1       # selected spike pair index
+        self._sa_raster_window: float = 0.050 # ±50 ms raster window (seconds)
 
         # PNG cache
         self.tmp_dir = str(
@@ -192,6 +225,7 @@ class CCGReviewUI:
         self._line_jitter_var = tk.BooleanVar(master=self.root, value=False)
         # Heartbeat: keep event loop responsive even when Jupyter cell finishes
         self._heartbeat_id = None
+        self._closing = False
         self._start_heartbeat()
         self.setup_ui()
 
@@ -200,14 +234,25 @@ class CCGReviewUI:
     # ------------------------------------------------------------------
 
     @property
+    def _res_key(self):
+        """Current resolution key for cache keying ('hi' or 'lo')."""
+        return 'hi' if getattr(self, '_highres_mode', False) else 'lo'
+
+    @property
     def all_inds(self):
-        """Significant pairs + manually admitted pairs, as Nx2 numpy array."""
+        """Significant pairs + manually admitted pairs, as Nx2 numpy array.
+
+        Autocorrelograms (ref == tgt) are always excluded.
+        """
         base = self.ccg_pointer.inds2
+        # Filter out self-pairs (autocorrelograms)
+        mask = base[:, 0] != base[:, 1]
+        base = base[mask]
         admitted = self._group_pairs(_ADMITTED_GROUP)
         if not admitted:
             return base
         base_set = set(map(tuple, base))
-        extra = sorted(admitted - base_set)
+        extra = sorted((p for p in admitted if p[0] != p[1]) - base_set)
         if not extra:
             return base
         return np.vstack([base, np.array(extra, dtype=base.dtype)])
@@ -477,7 +522,7 @@ class CCGReviewUI:
             gname = hk_to_group.get(key_str)
             if gname is None:
                 continue
-            display = f"⌘{key_str}: {gname}"
+            display = f"{key_str}: {gname}"
             lbl = tk.Label(self._hotkeys_bar, text=display,
                            font=('Courier', 9), padx=6, pady=1,
                            relief=tk.RIDGE, borderwidth=1)
@@ -495,10 +540,15 @@ class CCGReviewUI:
     # ── Left panel ─────────────────────────────────────────────────────
 
     def setup_left_panel(self, parent):
-        ttk.Label(parent, text="Pair Selection",
-                  font=('Arial', 11, 'bold')).pack()
+        # Tabbed notebook: Pair Selection | Spike Pairs
+        self._left_notebook = ttk.Notebook(parent)
+        self._left_notebook.pack(fill=tk.BOTH, expand=True)
 
-        columns_frame = ttk.Frame(parent)
+        # ── Tab 1: Pair Selection ─────────────────────────────────────
+        pair_tab = ttk.Frame(self._left_notebook)
+        self._left_notebook.add(pair_tab, text="Pair Selection")
+
+        columns_frame = ttk.Frame(pair_tab)
         columns_frame.pack(fill=tk.BOTH, expand=True, pady=6)
 
         # Unselected list
@@ -554,7 +604,7 @@ class CCGReviewUI:
         self.refresh_lists()
 
         # Buttons row: Select All/Deselect All / resolution toggle
-        btn_frame = ttk.Frame(parent)
+        btn_frame = ttk.Frame(pair_tab)
         btn_frame.pack(fill=tk.X, pady=(4, 0))
         self._select_all_btn = ttk.Button(btn_frame, text="Select All",
                                           command=self._select_all)
@@ -571,6 +621,25 @@ class CCGReviewUI:
         if not _has_highres:
             res_btn.state(['disabled'])
 
+        # ── Tab 2: Spike Pairs (spike attribution) ────────────────────
+        sa_tab = ttk.Frame(self._left_notebook)
+        self._left_notebook.add(sa_tab, text="Spike Pairs", state='disabled')
+        self._sa_tab = sa_tab
+        self._sa_tab_index = 1
+
+        self._sa_count_var = tk.StringVar(value="")
+        ttk.Label(sa_tab, textvariable=self._sa_count_var,
+                  font=('Courier', 9)).pack(side=tk.TOP, anchor='w', padx=4, pady=2)
+
+        sa_scroll = ttk.Scrollbar(sa_tab)
+        sa_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._sa_listbox = tk.Listbox(
+            sa_tab, yscrollcommand=sa_scroll.set,
+            selectmode=tk.BROWSE, font=('Courier', 9), activestyle='none')
+        self._sa_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sa_scroll.config(command=self._sa_listbox.yview)
+        self._sa_listbox.bind('<<ListboxSelect>>', self._on_sa_pair_click)
+
     # ── Center panel ───────────────────────────────────────────────────
 
     def setup_center_panel(self, parent):
@@ -582,6 +651,7 @@ class CCGReviewUI:
         self.setup_sig_display_panel(parent)
         self.setup_norm_panel(parent)
         self.setup_jitter_panel(parent)
+        self.setup_spike_attrib_panel(parent)
         self.setup_waveforms_panel(parent)   # hidden by default
 
         # Significance chips
@@ -780,12 +850,16 @@ class CCGReviewUI:
         self.update_plot()
 
     def _update_jitter_sig_buttons(self):
-        """Enable/disable jitter significance buttons based on cache."""
+        """Enable/disable jitter significance buttons based on cache.
+
+        When the current pair has cached jitter data, auto-enable the
+        display toggles so the overlay is visible immediately.
+        """
         inds = self.all_inds[self.current_pair_idx] if self.current_pair_idx < len(self.all_inds) else None
         has_jitter = False
         if inds is not None:
             has_jitter = self._jitter_cache.get(
-                (int(inds[0]), int(inds[1]))) is not None
+                (int(inds[0]), int(inds[1]), self._res_key)) is not None
         # Tri-state jitter label button
         btn = getattr(self, '_jitter_style_btn', None)
         if btn:
@@ -853,6 +927,200 @@ class CCGReviewUI:
         ttk.Button(jitter_frame, text="Clear",
                    command=self._on_clear_jitter).pack(side=tk.LEFT)
 
+    def setup_spike_attrib_panel(self, parent):
+        """Spike attribution controls: toggle on row 1, bin+set+back on row 2."""
+        sa_frame = ttk.LabelFrame(parent, text="Spike Attribution", padding=4)
+        sa_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+
+        # Row 1: toggle only
+        row1 = ttk.Frame(sa_frame)
+        row1.pack(fill=tk.X)
+        self._sa_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row1, text="Allow spike attribution",
+                        variable=self._sa_enabled_var,
+                        command=self._on_sa_toggle).pack(side=tk.LEFT)
+
+        # Row 2: bin input, Set, Back to CCG
+        row2 = ttk.Frame(sa_frame)
+        row2.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(row2, text="Bin (ms):").pack(side=tk.LEFT)
+        self._sa_bin_var = tk.StringVar(value="0")
+        self._sa_bin_entry = ttk.Entry(row2, textvariable=self._sa_bin_var,
+                                       width=6, state='disabled')
+        self._sa_bin_entry.pack(side=tk.LEFT, padx=2)
+        self._sa_bin_entry.bind('<Return>', lambda _: self._on_sa_set())
+        self._sa_set_btn = ttk.Button(row2, text="Set",
+                                      command=self._on_sa_set,
+                                      state='disabled')
+        self._sa_set_btn.pack(side=tk.LEFT, padx=4)
+
+    # ------------------------------------------------------------------
+    # Spike Attribution logic
+    # ------------------------------------------------------------------
+
+    def _on_sa_toggle(self):
+        """Toggle unlock: enable/disable the bin entry and Set button."""
+        enabled = self._sa_enabled_var.get()
+        self._sa_enabled = enabled
+        state = 'normal' if enabled else 'disabled'
+        self._sa_bin_entry.config(state=state)
+        self._sa_set_btn.config(state=state)
+        if not enabled:
+            # Disable tab, clear spike pairs, restore CCG
+            self._left_notebook.tab(self._sa_tab_index, state='disabled')
+            self._left_notebook.select(0)  # back to Pair Selection
+            self._sa_spike_pairs = []
+            self._sa_selected_idx = -1
+            self._sa_count_var.set("")
+            self.update_plot()
+
+    def _on_sa_set(self):
+        """Query spike pairs for the current CCG pair + bin offset."""
+        if not self._sa_enabled or self.neurons is None:
+            return
+        if self.current_pair_idx >= len(self.all_inds):
+            return
+        try:
+            self._sa_bin_ms = float(self._sa_bin_var.get())
+        except ValueError:
+            self._sa_count_var.set("Invalid bin")
+            return
+        inds = self.all_inds[self.current_pair_idx]
+        ref, tgt = int(inds[0]), int(inds[1])
+        self._compute_spike_pairs(ref, tgt, self._sa_bin_ms)
+        # Enable and switch to Spike Pairs tab
+        self._left_notebook.tab(self._sa_tab_index, state='normal')
+        self._left_notebook.select(self._sa_tab_index)
+
+    def _exit_spike_attribution_view(self):
+        """Exit spike attribution raster and restore normal CCG view."""
+        if self._sa_selected_idx < 0:
+            return  # not in raster view
+        self._sa_selected_idx = -1
+        self.update_plot()
+
+    def _compute_spike_pairs(self, ref: int, tgt: int, bin_ms: float):
+        """Find all spike pairs contributing to the given CCG time bin.
+
+        For a CCG bin at lag ``bin_ms``, a spike pair (ref_t, tgt_t) contributes
+        when ``tgt_t - ref_t`` falls within the bin's half-open interval.
+        """
+        conf = self.ccg_data.conf if self.ccg_data is not None else None
+        if conf is None:
+            return
+
+        # Infer bin width from current resolution
+        n_bins = self.ccg_data.ccg.shape[-1] if self.ccg_data.ccg is not None else conf.nbins
+        bin_size = conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size
+
+        # Bin center in seconds; bin edges
+        lag_sec = bin_ms / 1000.0
+        bin_lo = lag_sec - bin_size / 2.0
+        bin_hi = lag_sec + bin_size / 2.0
+
+        # Get spike trains
+        ref_spikes = self.neurons.spiketrains[ref]
+        tgt_spikes = self.neurons.spiketrains[tgt]
+
+        # Optionally restrict to current segment's time window
+        seg = self.current_segment
+        if seg < self.n_segments:
+            et = self.ccg_pointer.edge_times
+            t0 = float(et.iloc[seg]['start']) if 'start' in et.columns else None
+            t1 = float(et.iloc[seg]['stop']) if 'stop' in et.columns else None
+            if t0 is not None and t1 is not None:
+                ref_spikes = ref_spikes[(ref_spikes >= t0) & (ref_spikes <= t1)]
+                tgt_spikes = tgt_spikes[(tgt_spikes >= t0) & (tgt_spikes <= t1)]
+
+        # Find all (ref_spike_time, tgt_spike_time) where lag is in [bin_lo, bin_hi)
+        pairs = []
+        tgt_sorted = np.sort(tgt_spikes)
+        for rt in ref_spikes:
+            # Target spikes at absolute time rt + bin_lo to rt + bin_hi
+            lo = rt + bin_lo
+            hi = rt + bin_hi
+            idx_lo = np.searchsorted(tgt_sorted, lo, side='left')
+            idx_hi = np.searchsorted(tgt_sorted, hi, side='right')
+            for j in range(idx_lo, idx_hi):
+                pairs.append((float(rt), float(tgt_sorted[j])))
+
+        self._sa_spike_pairs = pairs
+        self._sa_selected_idx = -1
+
+        # Populate listbox
+        self._sa_listbox.delete(0, tk.END)
+        for i, (rt, tt) in enumerate(pairs):
+            lag_ms = (tt - rt) * 1000.0
+            self._sa_listbox.insert(
+                tk.END,
+                f"{i+1:>5}  ref {rt:10.4f}  tgt {tt:10.4f}  lag {lag_ms:+6.2f}ms")
+        self._sa_count_var.set(f"{len(pairs)} spike pairs")
+
+    def _on_sa_pair_click(self, _event=None):
+        """Handle click on a spike pair — show raster in center panel."""
+        sel = self._sa_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self._sa_spike_pairs):
+            return
+        self._sa_selected_idx = idx
+        self._draw_sa_raster(idx)
+
+    def _draw_sa_raster(self, idx: int):
+        """Draw a 2-row raster of ref/tgt spike trains around the selected pair."""
+        ref_t, tgt_t = self._sa_spike_pairs[idx]
+        inds = self.all_inds[self.current_pair_idx]
+        ref, tgt = int(inds[0]), int(inds[1])
+
+        # Time window centered on the ref spike
+        center = ref_t
+        win = self._sa_raster_window  # ±50ms in seconds
+        t0 = center - win
+        t1 = center + win
+
+        ref_spikes = self.neurons.spiketrains[ref]
+        tgt_spikes = self.neurons.spiketrains[tgt]
+        ref_win = ref_spikes[(ref_spikes >= t0) & (ref_spikes <= t1)]
+        tgt_win = tgt_spikes[(tgt_spikes >= t0) & (tgt_spikes <= t1)]
+
+        # Neuron IDs for labels
+        nids = getattr(self.neurons, 'neuron_ids', None)
+        ref_label = f"Ref #{nids[ref]}" if nids is not None else f"Ref [{ref}]"
+        tgt_label = f"Tgt #{nids[tgt]}" if nids is not None else f"Tgt [{tgt}]"
+
+        self.fig.clear()
+        ax_ref = self.fig.add_subplot(211)
+        ax_tgt = self.fig.add_subplot(212, sharex=ax_ref)
+
+        # Ref raster
+        if len(ref_win):
+            ax_ref.eventplot([ref_win - center], lineoffsets=0,
+                             linelengths=0.8, colors='#1565C0')
+        # Highlight the selected ref spike
+        ax_ref.axvline(0, color='#E53935', lw=1.5, ls='--', alpha=0.7)
+        ax_ref.set_ylabel(ref_label, fontsize=9)
+        ax_ref.set_yticks([])
+        ax_ref.set_title(
+            f"Spike pair #{idx+1}: ref={ref_t:.4f}s  tgt={tgt_t:.4f}s  "
+            f"lag={(tgt_t - ref_t)*1000:.2f}ms",
+            fontsize=9)
+
+        # Tgt raster
+        if len(tgt_win):
+            ax_tgt.eventplot([tgt_win - center], lineoffsets=0,
+                             linelengths=0.8, colors='#2E7D32')
+        # Highlight the selected tgt spike
+        tgt_offset = tgt_t - center
+        ax_tgt.axvline(tgt_offset, color='#E53935', lw=1.5, ls='--', alpha=0.7)
+        ax_tgt.set_ylabel(tgt_label, fontsize=9)
+        ax_tgt.set_yticks([])
+        ax_tgt.set_xlabel("Time relative to ref spike (s)", fontsize=9)
+        ax_tgt.set_xlim(-win, win)
+
+        self.fig.tight_layout()
+        self.canvas.draw()
+
     def setup_waveforms_panel(self, parent):
         """Waveform sub-panel in center column — hidden by default."""
         self.wave_frame = ttk.LabelFrame(parent, text="Waveforms")
@@ -906,6 +1174,13 @@ class CCGReviewUI:
         # ── Connection type toggles ──────────────────────────────────────
         ct_frame = ttk.Frame(parent)
         ct_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        # "Current pair" toggle — highlights only the current pair
+        self._net_cur_pair_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ct_frame, text="Current pair",
+                        variable=self._net_cur_pair_var,
+                        command=self._draw_network).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(ct_frame, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
+        ttk.Label(ct_frame, text="Conn type:").pack(side=tk.LEFT, padx=(0, 2))
         _ct_labels = {
             ('pyr', 'pyr'):     'P→P',
             ('pyr', 'inter'):   'P→I',
@@ -994,9 +1269,54 @@ class CCGReviewUI:
     def setup_time_slider_panel(self, parent):
         """Full-width time-window selector — hidden by default."""
         self.time_slider_frame = ttk.LabelFrame(
-            parent, text="Time Window (Custom CCG)")
+            parent, text="Time Window")
         # Not packed — shown when 'Time Slider' panel is enabled
 
+        # Theme selector row
+        theme_row = ttk.Frame(self.time_slider_frame)
+        theme_row.pack(fill=tk.X, padx=4, pady=(2, 0))
+        ttk.Label(theme_row, text="Theme:").pack(side=tk.LEFT)
+        self._ts_theme_var = tk.StringVar(value='segments')
+        self._ts_theme_combo = ttk.Combobox(
+            theme_row, textvariable=self._ts_theme_var,
+            values=['segments'], width=16, state='readonly')
+        self._ts_theme_combo.pack(side=tk.LEFT, padx=4)
+        self._ts_theme_combo.bind('<<ComboboxSelected>>', self._on_ts_theme_change)
+        self._ts_theme_info_var = tk.StringVar(value="")
+        ttk.Label(theme_row, textvariable=self._ts_theme_info_var,
+                  font=('Courier', 8), foreground='#666').pack(
+            side=tk.LEFT, padx=6)
+
+        # ── Overlap label selector (inline, hidden until multi-label theme) ──
+        self._ts_overlap_row = ttk.Frame(theme_row)
+        # Not packed initially — shown inline when theme has multiple labels
+        ttk.Label(self._ts_overlap_row, text="Show:").pack(side=tk.LEFT, padx=(0, 2))
+        self._ts_label_var = tk.StringVar(value='All')
+        self._ts_label_combo = ttk.Combobox(
+            self._ts_overlap_row, textvariable=self._ts_label_var,
+            values=['All'], width=12, state='readonly')
+        self._ts_label_combo.pack(side=tk.LEFT)
+        self._ts_label_combo.bind('<<ComboboxSelected>>', self._on_ts_label_change)
+        ttk.Button(self._ts_overlap_row, text="All",
+                   command=self._on_ts_label_reset).pack(side=tk.LEFT, padx=2)
+
+        # ── Tool bar (right side of theme row) ──
+        toolbar = ttk.Frame(theme_row)
+        toolbar.pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Label(toolbar, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
+        self._ts_tool_var = tk.StringVar(value='none')
+        self._ts_selection_btn = ttk.Checkbutton(
+            toolbar, text="\u25AD Selection", variable=self._ts_tool_var,
+            onvalue='selection', offvalue='none',
+            command=self._on_ts_tool_change)
+        self._ts_selection_btn.pack(side=tk.LEFT, padx=2)
+        self._ts_lock_var = tk.BooleanVar(value=False)
+        self._ts_lock_btn = ttk.Checkbutton(
+            toolbar, text="\U0001F512 Lock", variable=self._ts_lock_var,
+            command=self._on_ts_tool_change)
+        self._ts_lock_btn.pack(side=tk.LEFT, padx=2)
+
+        # ── Main canvas ──
         top = ttk.Frame(self.time_slider_frame)
         top.pack(fill=tk.X, padx=4, pady=(2, 0))
 
@@ -1006,6 +1326,21 @@ class CCGReviewUI:
         self.ts_canvas.bind('<Button-1>',        self._ts_mouse_press)
         self.ts_canvas.bind('<B1-Motion>',       self._ts_mouse_drag)
         self.ts_canvas.bind('<ButtonRelease-1>', self._ts_mouse_release)
+
+        # ── Zoom detail canvas (hidden until zoom is active) ──
+        self._ts_zoom_frame = ttk.Frame(self.time_slider_frame)
+        # Not packed initially — shown when zoom region is set
+        self._ts_zoom_canvas = tk.Canvas(
+            self._ts_zoom_frame, height=44, bg='#FAFAFA', cursor='crosshair')
+        self._ts_zoom_canvas.pack(fill=tk.X, expand=True)
+        self._ts_zoom_canvas.bind('<Configure>', self._ts_zoom_redraw)
+        # Radiating lines canvas (thin strip between main and zoom)
+        self._ts_radiate_canvas = tk.Canvas(
+            self._ts_zoom_frame, height=16, bg='#FEFEFE',
+            highlightthickness=0)
+        # Pack order: radiate on top, zoom below
+        self._ts_radiate_canvas.pack(fill=tk.X, expand=True, side=tk.TOP,
+                                     before=self._ts_zoom_canvas)
 
         ctrl = ttk.Frame(self.time_slider_frame)
         ctrl.pack(fill=tk.X, padx=4, pady=(2, 4))
@@ -1108,6 +1443,7 @@ class CCGReviewUI:
                 self.time_slider_frame.pack(
                     in_=self._main_frame, side=tk.TOP,
                     fill=tk.X, before=self._paned, pady=(0, 4))
+                self._ts_discover_themes()
                 self._ts_init_times()
                 print(f"[CCGReviewUI]   epoch_bounds={len(self._ts_epoch_bounds)} "
                       f"total_sec={self._ts_total_sec:.1f}")
@@ -1123,10 +1459,9 @@ class CCGReviewUI:
         """Toggle between low-res ``_ccg`` and high-res ``_ccg_highres``."""
         if not (hasattr(self.cd, '_ccg_highres') and self.cd._ccg_highres):
             return
-        # Resolution change invalidates scale caches and jitter (different bin_size)
+        # Resolution change invalidates scale caches (jitter cache keyed by res)
         self._pair_scale_cache.clear()
         self._session_scale_cache = None
-        self._jitter_cache.clear()
         self._highres_mode = not self._highres_mode
         mode_label = 'highres' if self._highres_mode else 'lowres'
         if hasattr(self, '_res_btn_text'):
@@ -1515,80 +1850,197 @@ class CCGReviewUI:
     # On-demand jitter (Task 2)
     # ------------------------------------------------------------------
 
-    def _run_jitter_for_pair(self, ref: int, tgt: int, njitter: int):
-        """Run jitter significance test for a single pair.
-
-        Returns (j_avg [n_bins], j_pval float, j_pval_bins [n_bins])
-        or (None, None, None) on error.
-        """
-        from neuropy.analyses.jitter import Jitter, JitterConfig
-        import copy, types
-
-        if self.neurons is None:
-            messagebox.showerror("Jitter", "No neuron data attached.")
-            return None, None, None
-
-        # Build a CCGConfig copy with the correct (possibly inferred) bin_size
-        conf = self.ccg_data.conf
-        conf_eff = copy.copy(conf)
-        conf_eff.bin_size = self._effective_bin_size()
-        jconf = JitterConfig(ccg=conf_eff, njitter=njitter)
-
-        # Minimal CCGPointer-like namespace (avoids importing CCGPointer)
-        ptr = types.SimpleNamespace(
-            inds=np.array([[ref, tgt]]),
-            stored_by_segment=False,
-            edge_times=self.ccg_pointer.edge_times,
-            n_pairs=1,
-        )
-        try:
-            j = Jitter(
-                key=self.key,
-                neurons=self.neurons,
-                conf=jconf,
-                ccg_pointer=ptr,
-                ccg_data=self.ccg_data,
-            )
-            j.run()
-        except Exception as ex:
-            messagebox.showerror("Jitter", f"Jitter failed:\n{ex}")
-            return None, None, None
-
-        j_avg, _, _ = j._j_ccg_cache.get(0, (None, None, None))
-        j_pval = float(j.pval[0]) if j.pval is not None and len(j.pval) else None
-        j_pval_bins = j.pval_bins[0] if j.pval_bins is not None else None
-        return j_avg, j_pval, j_pval_bins
-
     def _on_run_jitter(self):
         if self.current_pair_idx >= len(self.all_inds):
+            return
+        if self.neurons is None:
+            messagebox.showerror("Jitter", "No neuron data attached.")
             return
         inds = self.all_inds[self.current_pair_idx]
         ref, tgt = int(inds[0]), int(inds[1])
         njitter = int(self._njitter_var.get())
-        self._jitter_btn_text.set(f"Running ({njitter})…")
-        self.root.update_idletasks()
-        j_avg, j_pval, j_pval_bins = self._run_jitter_for_pair(ref, tgt, njitter)
-        self._jitter_btn_text.set("Run Jitter")
-        if j_avg is None:
+        res_key = self._res_key
+        bin_size_eff = self._effective_bin_size()
+
+        # Count running + queued tasks
+        running = 1 if (self._jitter_proc is not None
+                        and self._jitter_proc.is_alive()) else 0
+        total = running + len(self._jitter_pending)
+        if total >= _MAX_JITTER_QUEUE:
+            messagebox.showwarning(
+                "Jitter", f"Queue full ({total}/{_MAX_JITTER_QUEUE}).\n"
+                          "Wait for running jitters to complete.")
             return
-        self._jitter_cache[(ref, tgt)] = (j_avg, j_pval, j_pval_bins)
-        # Auto-show jitter overlay after running
-        self._sig_jitter_p_var.set(True)
-        self._sig_jitter_pc_var.set(True)
-        self._line_jitter_var.set(False)  # solid bars
-        self._clear_all_png_cache()
-        self._update_jitter_sig_buttons()
-        self.update_plot()
+
+        # Enqueue the task
+        self._jitter_pending.append((ref, tgt, njitter, res_key, bin_size_eff))
+        self._update_jitter_btn_text()
+        # Kick off processing if nothing is running
+        self._jitter_start_next()
+
+    def _jitter_start_next(self):
+        """Start the next queued jitter task if none is running."""
+        if self._jitter_proc is not None and self._jitter_proc.is_alive():
+            return  # already running
+        if not self._jitter_pending:
+            self._update_jitter_btn_text()
+            return
+        ref, tgt, njitter, res_key, bin_size_eff = self._jitter_pending[0]
+
+        from neuropy.plotting._jitter_worker import jitter_worker
+        self._jitter_result_queue = _mp.Queue()
+        self._jitter_proc = _mp.Process(
+            target=jitter_worker,
+            args=(self._jitter_result_queue, self.key, self.neurons,
+                  self.ccg_data, self.ccg_pointer.edge_times,
+                  ref, tgt, njitter, bin_size_eff),
+            daemon=True,
+        )
+        self._jitter_proc.start()
+        self._update_jitter_btn_text()
+        if self._jitter_poll_id is None:
+            self._jitter_poll_id = self.root.after(300, self._poll_jitter)
+
+    def _update_jitter_btn_text(self):
+        running = (self._jitter_proc is not None
+                   and self._jitter_proc.is_alive())
+        queued = len(self._jitter_pending)
+        if running and self._jitter_pending:
+            ref, tgt = self._jitter_pending[0][0], self._jitter_pending[0][1]
+            pair_str = f"[{ref},{tgt}]"
+            if queued > 1:
+                self._jitter_btn_text.set(
+                    f"Jitter {pair_str}… +{queued - 1} queued")
+            else:
+                self._jitter_btn_text.set(f"Jitter {pair_str}…")
+        else:
+            self._jitter_btn_text.set("Run Jitter")
+
+    def _poll_jitter(self):
+        """Poll background jitter process; collect result and start next."""
+        if self._jitter_proc is not None and self._jitter_proc.is_alive():
+            self._jitter_poll_id = self.root.after(300, self._poll_jitter)
+            return
+        self._jitter_poll_id = None
+
+        # Read result from queue
+        result = None
+        try:
+            if (self._jitter_result_queue is not None
+                    and not self._jitter_result_queue.empty()):
+                result = self._jitter_result_queue.get_nowait()
+        except Exception:
+            pass
+
+        # Clean up finished process
+        if self._jitter_proc is not None:
+            self._jitter_proc.join(timeout=1)
+            self._jitter_proc = None
+        self._jitter_result_queue = None
+
+        # Pop the completed task from front of queue
+        completed = self._jitter_pending.popleft() if self._jitter_pending else None
+
+        if result is not None and not result.get('error') and result.get('j_avg') is not None:
+            res_key = completed[3] if completed else 'lo'
+            cache_key = (result['ref'], result['tgt'], res_key)
+            self._jitter_cache_put(cache_key,
+                                   (result['j_avg'], result['j_pval'],
+                                    result['j_pval_bins']))
+            completed_pair = (result['ref'], result['tgt'])
+            self._jitter_unviewed.add(completed_pair)
+            self._apply_jitter_list_colors(pair=completed_pair)
+            # If user is on this pair right now, auto-view it
+            if self._mark_jitter_viewed():
+                self._update_jitter_sig_buttons()
+                self.update_plot()
+            self.root.bell()
+        elif result is not None and result.get('error'):
+            messagebox.showerror("Jitter",
+                                 f"Jitter failed:\n{result['error']}")
+
+        # Start next in queue
+        self._jitter_start_next()
+        if self._jitter_proc is not None and self._jitter_proc.is_alive():
+            self._jitter_poll_id = self.root.after(300, self._poll_jitter)
+
+    def _jitter_cache_put(self, key, value):
+        """Insert into jitter cache with LRU eviction when full."""
+        if key in self._jitter_cache:
+            self._jitter_cache.move_to_end(key)
+            self._jitter_cache[key] = value
+        else:
+            self._jitter_cache[key] = value
+            while len(self._jitter_cache) > self._JITTER_CACHE_MAX:
+                self._jitter_cache.popitem(last=False)  # evict oldest
 
     def _on_clear_jitter(self):
         if self.current_pair_idx >= len(self.all_inds):
             return
         inds = self.all_inds[self.current_pair_idx]
         ref, tgt = int(inds[0]), int(inds[1])
-        self._jitter_cache.pop((ref, tgt), None)
+        self._jitter_cache.pop((ref, tgt, self._res_key), None)
+        self._jitter_unviewed.discard((ref, tgt))
         self._clear_all_png_cache()
         self._update_jitter_sig_buttons()
+        self._apply_jitter_list_colors()
         self.update_plot()
+
+    # Jitter list highlight colors (fg set explicitly for dark-mode visibility)
+    _JITTER_UNVIEWED_BG = '#FFEE58'   # bright yellow — ready, not yet viewed
+    _JITTER_UNVIEWED_FG = '#333333'
+    _JITTER_VIEWED_BG   = '#FFF9C4'   # muted light yellow — has jitter (viewed)
+    _JITTER_VIEWED_FG   = '#333333'
+
+    def _apply_jitter_list_colors(self, pair=None):
+        """Color pair list items based on jitter cache state.
+
+        Parameters
+        ----------
+        pair : tuple or None
+            If given as (ref, tgt), update only that pair's item.
+            If None, update all items in both listboxes.
+        """
+        for listbox, inds_set in [(self.unselected_list, self.unselected_inds),
+                                  (self.selected_list, self.selected_inds)]:
+            sorted_items = sorted(inds_set)
+            for idx, inds in enumerate(sorted_items):
+                ref, tgt = int(inds[0]), int(inds[1])
+                p = (ref, tgt)
+                if pair is not None and p != pair:
+                    continue
+                has_any_res = any(
+                    (ref, tgt, r) in self._jitter_cache for r in ('hi', 'lo'))
+                if p in self._jitter_unviewed:
+                    listbox.itemconfig(idx, background=self._JITTER_UNVIEWED_BG,
+                                       foreground=self._JITTER_UNVIEWED_FG)
+                elif has_any_res:
+                    listbox.itemconfig(idx, background=self._JITTER_VIEWED_BG,
+                                       foreground=self._JITTER_VIEWED_FG)
+                else:
+                    listbox.itemconfig(idx, background='', foreground='')
+                if pair is not None:
+                    return  # found and updated the single pair
+
+    def _mark_jitter_viewed(self) -> bool:
+        """Mark current pair's jitter as viewed; auto-enable overlay.
+
+        Does NOT call update_plot() — the caller is responsible for that.
+        Returns True if a pair was newly marked as viewed.
+        """
+        if self.current_pair_idx >= len(self.all_inds):
+            return False
+        inds = self.all_inds[self.current_pair_idx]
+        pair = (int(inds[0]), int(inds[1]))
+        if pair in self._jitter_unviewed:
+            self._jitter_unviewed.discard(pair)
+            self._apply_jitter_list_colors(pair=pair)
+            # Auto-enable jitter overlay on first view
+            self._sig_jitter_p_var.set(True)
+            self._sig_jitter_pc_var.set(True)
+            self._line_jitter_var.set(False)
+            return True
+        return False
 
     def _finalize_normalization(self):
         if not self.active_norms:
@@ -1874,6 +2326,7 @@ class CCGReviewUI:
         elif name in self.segment_names:
             self.current_segment = self.segment_names.index(name)
         self.plot_title_var.set(self.get_plot_title())
+        self._exit_spike_attribution_view()
         self.update_plot()
 
     # ------------------------------------------------------------------
@@ -2090,6 +2543,7 @@ class CCGReviewUI:
         if hasattr(self, '_select_all_btn'):
             self._select_all_btn.config(
                 text="Deselect All" if not self.unselected_inds else "Select All")
+        self._apply_jitter_list_colors()
         self._refresh_stats()
 
     def move_to_selected(self, event=None):
@@ -2193,6 +2647,8 @@ class CCGReviewUI:
     def _do_pair_select_update(self):
         """Execute the deferred pair-select update (after debounce timeout)."""
         self._select_after = None
+        self._exit_spike_attribution_view()
+        self._mark_jitter_viewed()
         self.update_plot()
         self._draw_network()
 
@@ -2211,6 +2667,8 @@ class CCGReviewUI:
             return
         inds = sorted_items[idx]
         self.current_pair_idx = self.get_pair_index(inds)
+        self._exit_spike_attribution_view()
+        self._mark_jitter_viewed()
         self.update_plot()
         self._draw_network()
 
@@ -2390,11 +2848,13 @@ class CCGReviewUI:
         total = self._n_total_segments()
         self.current_segment = (self.current_segment + delta) % total
         self._update_segment_label()
+        self._exit_spike_attribution_view()
         self.update_plot()
 
     def _jump_to_segment(self, idx):
         self.current_segment = idx
         self._update_segment_label()
+        self._exit_spike_attribution_view()
         self.update_plot()
 
     def _update_segment_label(self):
@@ -2507,7 +2967,8 @@ class CCGReviewUI:
             ci = self._custom_seg_index(segment)
             cs = self._custom_segments[ci]
             # Use name + time range for uniqueness
-            seg_name = f"custom_{cs['name']}_{cs['t0']:.0f}_{cs['t1']:.0f}"
+            ci = self._custom_seg_index(segment)
+            seg_name = f"custom{ci}_{cs['name']}_{cs['t0']:.2f}_{cs['t1']:.2f}"
             seg_name = seg_name.replace(' ', '_').replace(':', '-')
         elif segment == self.n_segments:
             seg_name = _ALL_SEGS.replace(' ', '_')
@@ -2522,7 +2983,7 @@ class CCGReviewUI:
         scale_key = {'pair': '_ssp', 'session': '_sss'}.get(
             getattr(self, '_same_scale_mode', None), '')
         j_key = '_j' if self._jitter_cache.get(
-            (int(inds[0]), int(inds[1]))) is not None else ''
+            (int(inds[0]), int(inds[1]), self._res_key)) is not None else ''
         # Significance display state
         sig_key = ''
         sig_bits = (
@@ -2640,7 +3101,7 @@ class CCGReviewUI:
 
         # Jitter overlay for this pair (if computed)
         # Cache stores (j_avg, j_pval_scalar, j_pval_bins)
-        j_data = self._jitter_cache.get((ref, tgt))
+        j_data = self._jitter_cache.get((ref, tgt, self._res_key))
         j_ccg_arg = j_data[0] if j_data is not None else None
         j_pval_bins_arg = j_data[2] if j_data is not None and len(j_data) > 2 else None
 
@@ -2685,7 +3146,8 @@ class CCGReviewUI:
         else:
             ids = (ref, tgt)
 
-        fig, ax = plt.subplots(figsize=(7, 5))
+        fig = Figure(figsize=(7, 5))
+        ax = fig.add_subplot(111)
         plot_ccg.plot_ccg_panel(
             ax=ax, ccg=ccg, ids=ids, inds=inds,
             window_size=conf.duration, bin_size=bin_size_eff,
@@ -2715,7 +3177,7 @@ class CCGReviewUI:
 
         png_path = self._png_path(inds, segment)
         fig.savefig(png_path, dpi=100, bbox_inches='tight')
-        plt.close(fig)
+        matplotlib.pyplot.close(fig)
         return png_path
 
     # ------------------------------------------------------------------
@@ -2757,6 +3219,10 @@ class CCGReviewUI:
 
     def update_plot(self):
         try:
+            # If spike attribution raster is active, keep showing it
+            if self._sa_selected_idx >= 0 and self._sa_spike_pairs:
+                return
+
             # Focus-pair override: show focused pair's CCG directly
             if self._focused_pair is not None:
                 inds = np.array(self._focused_pair)
@@ -2849,8 +3315,94 @@ class CCGReviewUI:
     # Time slider
     # ------------------------------------------------------------------
 
+    def _ts_discover_themes(self):
+        """Discover available Epoch objects from the session for theme switching."""
+        self._ts_themes = {}
+        # Known Epoch attribute names on session objects (ProcessData)
+        _EPOCH_ATTRS = [
+            'paradigm', 'brainstates', 'theta', 'theta_epochs',
+            'ripple', 'sw', 'spindle', 'pbe', 'off_epochs',
+            'micro_arousals', 'artifact', 'handling',
+            'maze1_run', 'maze2_run', 'maze_run', 'remaze_run',
+        ]
+        sessions = getattr(getattr(self.cd, 'nd', None), '_sessions', None)
+        if not sessions:
+            return
+        if not isinstance(sessions, (list, tuple)):
+            sessions = [sessions]
+        # Use the first session that matches our current key
+        session_name = getattr(self.key, 'session', None)
+        session = None
+        for s in sessions:
+            nd = getattr(self.cd, 'nd', None)
+            if nd is not None:
+                sname = nd._short_session_name(s)
+                if sname == session_name:
+                    session = s
+                    break
+        if session is None and sessions:
+            session = sessions[0]
+        if session is None:
+            return
+        for attr in _EPOCH_ATTRS:
+            obj = getattr(session, attr, None)
+            if obj is not None and _Epoch is not None and isinstance(obj, _Epoch):
+                if obj.n_epochs > 0:
+                    self._ts_themes[attr] = obj
+        # Update combobox values
+        theme_names = ['segments'] + sorted(self._ts_themes.keys())
+        self._ts_theme_combo['values'] = theme_names
+        n_themes = len(self._ts_themes)
+        self._ts_theme_info_var.set(
+            f"{n_themes} theme{'s' if n_themes != 1 else ''} available")
+
+    def _on_ts_theme_change(self, _event=None):
+        """Handle theme combobox selection — repopulate epoch bounds."""
+        theme = self._ts_theme_var.get()
+        self._ts_current_theme = theme
+        # Reset handles
+        self._slider_t_start = None
+        self._slider_t_end = None
+        # Reset zoom
+        self._ts_zoom_start = None
+        self._ts_zoom_end = None
+        self._ts_zoom_frame.pack_forget()
+        self._ts_init_times()
+        self._ts_redraw()
+
+    def _ts_update_overlap_ui(self):
+        """Show/hide the label-filter row whenever the theme has multiple distinct labels."""
+        combo = getattr(self, '_ts_label_combo', None)
+        row = getattr(self, '_ts_overlap_row', None)
+        if combo is None or row is None:
+            return
+        all_labels = sorted(set(lbl for _, _, lbl in self._ts_epoch_bounds))
+        if len(all_labels) > 1:
+            sorted_labels = ['All'] + all_labels
+            combo['values'] = sorted_labels
+            self._ts_label_var.set('All')
+            row.pack(side=tk.LEFT, padx=(8, 0))
+        else:
+            row.pack_forget()
+            self._ts_label_var.set('All')
+        self._ts_active_label = None
+
     def _ts_init_times(self):
-        """Populate epoch bounds from edge_times; detect column names."""
+        """Populate epoch bounds from the selected theme or edge_times."""
+        theme = getattr(self, '_ts_current_theme', 'segments')
+
+        if theme != 'segments' and theme in self._ts_themes:
+            # Use Epoch object directly
+            epoch = self._ts_themes[theme]
+            self._ts_epoch_bounds = []
+            for start, stop, label in zip(epoch.starts, epoch.stops, epoch.labels):
+                self._ts_epoch_bounds.append((float(start), float(stop), str(label)))
+            self._ts_total_sec = (float(epoch.stops.max())
+                                  if len(epoch.stops) else 1.0)
+            self._ts_update_overlap_ui()
+            return
+
+        # Default: use CCG segment edge_times
         et = self.ccg_pointer.edge_times
         cols = et.columns.tolist()
 
@@ -2880,6 +3432,7 @@ class CCGReviewUI:
                 self._ts_epoch_bounds.append((t, t + dur, str(row['label'])))
                 t += dur
             self._ts_total_sec = t if t > 0 else 1.0
+        self._ts_update_overlap_ui()
 
     def _ts_t_to_x(self, t: float) -> int:
         w = max(self.ts_canvas.winfo_width(), 20)
@@ -2890,6 +3443,73 @@ class CCGReviewUI:
         return max(0.0, min(self._ts_total_sec,
                             (x - 10) / max(w - 20, 1) * self._ts_total_sec))
 
+    def _on_ts_tool_change(self):
+        """Handle toolbar selection / lock toggle."""
+        locked = self._ts_lock_var.get()
+        selection = self._ts_tool_var.get() == 'selection'
+        if locked:
+            self.ts_canvas.config(cursor='arrow')
+        elif selection:
+            self.ts_canvas.config(cursor='plus')
+        else:
+            self.ts_canvas.config(cursor='crosshair')
+        # Hide zoom panel when selection is off
+        if not selection:
+            self._ts_zoom_frame.pack_forget()
+            self._ts_zoom_start = None
+            self._ts_zoom_end = None
+        self._ts_redraw()
+
+    # ── Drawing ───────────────────────────────────────────────────────
+
+    _TS_COLORS = ['#BBDEFB', '#C8E6C9', '#FFF9C4', '#FFE0B2', '#E1BEE7',
+                  '#F8BBD0', '#D7CCC8']
+
+    def _ts_draw_epochs(self, canvas, t_to_x, bounds, h):
+        """Draw epoch rectangles on a canvas using given t_to_x mapping."""
+        for i, (t0, t1, lbl) in enumerate(bounds):
+            x0, x1 = t_to_x(t0), t_to_x(t1)
+            canvas.create_rectangle(x0, 8, x1, h - 8,
+                                    fill=self._TS_COLORS[i % len(self._TS_COLORS)],
+                                    outline='#90A4AE')
+            if x1 - x0 > 22:
+                canvas.create_text((x0 + x1) // 2, h // 2,
+                                   text=lbl, font=('Arial', 7), fill='#333')
+
+    def _ts_draw_handles(self, canvas, t_to_x, h, t_start, t_end,
+                         color_start='#1565C0', color_end='#B71C1C'):
+        """Draw cursor handles and selection range on a canvas."""
+        for t, color in [(t_start, color_start), (t_end, color_end)]:
+            if t is not None:
+                x = t_to_x(t)
+                canvas.create_line(x, 2, x, h - 2, fill=color, width=2)
+                canvas.create_polygon(x - 5, 2, x + 5, 2, x, 10,
+                                      fill=color, outline='')
+        if t_start is not None and t_end is not None:
+            x0, x1 = t_to_x(t_start), t_to_x(t_end)
+            canvas.create_rectangle(x0, 8, x1, h - 8,
+                                    fill='', outline=color_start,
+                                    width=2, dash=(4, 2))
+
+    def _on_ts_label_change(self, _event=None):
+        """Handle overlap label combobox selection."""
+        val = self._ts_label_var.get()
+        self._ts_active_label = None if val == 'All' else val
+        self._ts_redraw()
+
+    def _on_ts_label_reset(self):
+        """Revert to showing all labels."""
+        self._ts_active_label = None
+        self._ts_label_var.set('All')
+        self._ts_redraw()
+
+    def _ts_visible_bounds(self):
+        """Return epoch bounds filtered by active label (or all if None)."""
+        if self._ts_active_label is None:
+            return self._ts_epoch_bounds
+        return [(t0, t1, lbl) for t0, t1, lbl in self._ts_epoch_bounds
+                if lbl == self._ts_active_label]
+
     def _ts_redraw(self, event=None):
         c = self.ts_canvas
         c.delete('all')
@@ -2897,33 +3517,98 @@ class CCGReviewUI:
         h = c.winfo_height()
         if w < 20 or not self._ts_epoch_bounds:
             return
-        colors = ['#BBDEFB', '#C8E6C9', '#FFF9C4', '#FFE0B2', '#E1BEE7',
-                  '#F8BBD0', '#D7CCC8']
-        for i, (t0, t1, lbl) in enumerate(self._ts_epoch_bounds):
-            x0, x1 = self._ts_t_to_x(t0), self._ts_t_to_x(t1)
-            c.create_rectangle(x0, 8, x1, h - 8,
-                                fill=colors[i % len(colors)],
-                                outline='#90A4AE')
-            if x1 - x0 > 22:
-                c.create_text((x0 + x1) // 2, h // 2,
-                              text=lbl, font=('Arial', 7), fill='#333')
-        # Handles
-        for t, color in [(self._slider_t_start, '#1565C0'),
-                         (self._slider_t_end,   '#B71C1C')]:
-            if t is not None:
-                x = self._ts_t_to_x(t)
-                c.create_line(x, 2, x, h - 2, fill=color, width=2)
-                c.create_polygon(x - 5, 2, x + 5, 2, x, 10,
-                                 fill=color, outline='')
-        # Selected range shading
-        if self._slider_t_start is not None and self._slider_t_end is not None:
-            x0 = self._ts_t_to_x(self._slider_t_start)
-            x1 = self._ts_t_to_x(self._slider_t_end)
-            c.create_rectangle(x0, 8, x1, h - 8,
-                                fill='', outline='#1565C0',
-                                width=2, dash=(4, 2))
+
+        self._ts_draw_epochs(c, self._ts_t_to_x, self._ts_visible_bounds(), h)
+
+        # Draw select-mode handles (custom window cursors)
+        self._ts_draw_handles(c, self._ts_t_to_x, h,
+                              self._slider_t_start, self._slider_t_end)
+
+        # Draw selection/zoom handles (orange) when selection tool active
+        if self._ts_tool_var.get() == 'selection':
+            self._ts_draw_handles(c, self._ts_t_to_x, h,
+                                  self._ts_zoom_start, self._ts_zoom_end,
+                                  color_start='#E65100', color_end='#BF360C')
+            # Shade zoom region
+            if self._ts_zoom_start is not None and self._ts_zoom_end is not None:
+                zx0 = self._ts_t_to_x(self._ts_zoom_start)
+                zx1 = self._ts_t_to_x(self._ts_zoom_end)
+                c.create_rectangle(zx0, 4, zx1, h - 4,
+                                   fill='#FFF3E0', outline='#E65100',
+                                   width=1, stipple='gray25')
+            self._ts_zoom_redraw()
+            self._ts_draw_radiate_lines()
+
+    # ── Zoom detail canvas ────────────────────────────────────────────
+
+    def _ts_zoom_t_to_x(self, t: float) -> int:
+        """Map time to x within the zoom canvas, using zoom region bounds."""
+        w = max(self._ts_zoom_canvas.winfo_width(), 20)
+        z0 = self._ts_zoom_start if self._ts_zoom_start is not None else 0
+        z1 = self._ts_zoom_end if self._ts_zoom_end is not None else self._ts_total_sec
+        span = max(z1 - z0, 1e-6)
+        return int(((t - z0) / span) * (w - 20) + 10)
+
+    def _ts_zoom_redraw(self, event=None):
+        """Redraw the zoomed-in detail canvas."""
+        zc = self._ts_zoom_canvas
+        zc.delete('all')
+        if self._ts_zoom_start is None or self._ts_zoom_end is None:
+            return
+        w = zc.winfo_width()
+        h = zc.winfo_height()
+        if w < 20:
+            return
+
+        z0, z1 = self._ts_zoom_start, self._ts_zoom_end
+
+        # Filter epoch bounds that overlap the zoom region (respects active label)
+        zoomed_bounds = [
+            (max(t0, z0), min(t1, z1), lbl)
+            for t0, t1, lbl in self._ts_visible_bounds()
+            if t1 > z0 and t0 < z1
+        ]
+        self._ts_draw_epochs(zc, self._ts_zoom_t_to_x, zoomed_bounds, h)
+
+        # Draw select-mode handles within zoom view
+        self._ts_draw_handles(zc, self._ts_zoom_t_to_x, h,
+                              self._slider_t_start, self._slider_t_end)
+
+    def _ts_draw_radiate_lines(self):
+        """Draw radiating lines connecting zoom region on main canvas to zoom canvas."""
+        rc = self._ts_radiate_canvas
+        rc.delete('all')
+        if self._ts_zoom_start is None or self._ts_zoom_end is None:
+            return
+        w = rc.winfo_width()
+        rh = rc.winfo_height()
+        if w < 20:
+            return
+
+        # Top points: zoom region edges on main canvas
+        zx0_main = self._ts_t_to_x(self._ts_zoom_start)
+        zx1_main = self._ts_t_to_x(self._ts_zoom_end)
+
+        # Bottom points: full width of zoom canvas
+        zx0_zoom = 10
+        zx1_zoom = max(self._ts_zoom_canvas.winfo_width(), 20) - 10
+
+        # Draw radiating lines
+        rc.create_line(zx0_main, 0, zx0_zoom, rh,
+                       fill='#E65100', width=1, dash=(3, 3))
+        rc.create_line(zx1_main, 0, zx1_zoom, rh,
+                       fill='#E65100', width=1, dash=(3, 3))
+
+    # ── Mouse interaction ─────────────────────────────────────────────
 
     def _ts_mouse_press(self, event):
+        if self._ts_lock_var.get():
+            return  # all cursor interaction disabled
+        selection = self._ts_tool_var.get() == 'selection'
+        if selection:
+            self._ts_zoom_mouse_press(event)
+            return
+        # Default: custom CCG window tool
         if self._slider_t_start is None:
             self._slider_dragging = 'start'
         elif self._slider_t_end is None:
@@ -2937,9 +3622,19 @@ class CCGReviewUI:
         self._ts_update_handle(event.x)
 
     def _ts_mouse_drag(self, event):
+        if self._ts_lock_var.get():
+            return
+        if self._ts_tool_var.get() == 'selection':
+            self._ts_zoom_mouse_drag(event)
+            return
         self._ts_update_handle(event.x)
 
     def _ts_mouse_release(self, event):
+        if self._ts_lock_var.get():
+            return
+        if self._ts_tool_var.get() == 'selection':
+            self._ts_zoom_mouse_release(event)
+            return
         self._ts_update_handle(event.x, snap=True)
         self._slider_dragging = None
 
@@ -2960,6 +3655,51 @@ class CCGReviewUI:
             floor = self._slider_t_start if self._slider_t_start is not None else 0.0
             self._slider_t_end = max(t, floor)
             self._ts_end_var.set(self._ts_sec_to_hms(self._slider_t_end))
+        self._ts_redraw()
+
+    # ── Zoom tool mouse handlers ──────────────────────────────────────
+
+    def _ts_zoom_mouse_press(self, event):
+        if self._ts_zoom_start is None:
+            self._ts_zoom_dragging = 'start'
+        elif self._ts_zoom_end is None:
+            self._ts_zoom_dragging = 'end'
+        else:
+            xs = self._ts_t_to_x(self._ts_zoom_start)
+            xe = self._ts_t_to_x(self._ts_zoom_end)
+            self._ts_zoom_dragging = ('start'
+                                      if abs(event.x - xs) <= abs(event.x - xe)
+                                      else 'end')
+        self._ts_zoom_update(event.x)
+
+    def _ts_zoom_mouse_drag(self, event):
+        self._ts_zoom_update(event.x)
+
+    def _ts_zoom_mouse_release(self, event):
+        self._ts_zoom_update(event.x, snap=True)
+        self._ts_zoom_dragging = None
+        # Show zoom canvas once both ends are placed
+        if self._ts_zoom_start is not None and self._ts_zoom_end is not None:
+            self._ts_zoom_frame.pack(fill=tk.X, padx=4, pady=(0, 0),
+                                     after=self.ts_canvas.master)
+            self._ts_zoom_redraw()
+            self._ts_draw_radiate_lines()
+
+    def _ts_zoom_update(self, canvas_x: int, snap: bool = False):
+        t = self._ts_x_to_t(canvas_x)
+        if snap and self._ts_epoch_bounds:
+            bounds_t = [b for (t0, t1, _) in self._ts_epoch_bounds
+                        for b in (t0, t1)]
+            for bt in bounds_t:
+                if abs(self._ts_t_to_x(bt) - canvas_x) <= 25:
+                    t = bt
+                    break
+        if self._ts_zoom_dragging == 'start':
+            cap = self._ts_zoom_end if self._ts_zoom_end is not None else self._ts_total_sec
+            self._ts_zoom_start = min(t, cap)
+        elif self._ts_zoom_dragging == 'end':
+            floor = self._ts_zoom_start if self._ts_zoom_start is not None else 0.0
+            self._ts_zoom_end = max(t, floor)
         self._ts_redraw()
 
     @staticmethod
@@ -3015,6 +3755,13 @@ class CCGReviewUI:
         self._custom_segments.clear()
         if hasattr(self, '_ts_status_var'):
             self._ts_status_var.set("")
+        # Reset time selection
+        self._slider_t_start = None
+        self._slider_t_end = None
+        # Reset zoom
+        self._ts_zoom_start = None
+        self._ts_zoom_end = None
+        self._ts_zoom_frame.pack_forget()
         # Reset to first real segment
         self.current_segment = 0
         self._build_sig_chips()
@@ -3463,6 +4210,25 @@ class CCGReviewUI:
                 zorder=7,
             )
             ax.add_patch(dashed)
+
+        # ── Current pair arrow (additive, drawn on top) ──────────────────
+        cur_pair_on = (getattr(self, '_net_cur_pair_var', None) and
+                       self._net_cur_pair_var.get())
+        if (cur_pair_on and current_pair is not None
+                and self._net_show_arrows
+                and 0 <= current_pair[0] < n_neurons
+                and 0 <= current_pair[1] < n_neurons):
+            cp_arrow = FancyArrowPatch(
+                (x_pos[current_pair[0]], y_pos[current_pair[0]]),
+                (x_pos[current_pair[1]], y_pos[current_pair[1]]),
+                arrowstyle='->', color='black',
+                linewidth=3.0, alpha=1.0,
+                mutation_scale=10,
+                connectionstyle='arc3,rad=0',
+                shrinkA=5, shrinkB=5,
+                zorder=8,
+            )
+            ax.add_patch(cp_arrow)
 
         # ── Legend ───────────────────────────────────────────────────────
         shown_types = set()
@@ -4125,6 +4891,7 @@ class CCGReviewUI:
                 self._groups_menu.delete(6)
         except tk.TclError:
             pass
+        self._groups_menu.add_separator()
         current_pairs = set(map(tuple, self.all_inds)) if len(self.all_inds) else set()
         special_groups = []
         for gname in sorted(self._groups):
@@ -4754,6 +5521,8 @@ class CCGReviewUI:
     def _start_heartbeat(self):
         """Periodic no-op to keep the Tk event loop alive in Jupyter."""
         def _beat():
+            if self._closing:
+                return
             try:
                 if self.root.winfo_exists():
                     self._heartbeat_id = self.root.after(2000, _beat)
@@ -4763,17 +5532,31 @@ class CCGReviewUI:
 
     def _on_close(self):
         """Prompt user before closing — optionally skip autosave."""
+        self._closing = True
         if self._heartbeat_id is not None:
             try:
                 self.root.after_cancel(self._heartbeat_id)
             except tk.TclError:
                 pass
+            self._heartbeat_id = None
+        if self._jitter_poll_id is not None:
+            try:
+                self.root.after_cancel(self._jitter_poll_id)
+            except tk.TclError:
+                pass
+            self._jitter_poll_id = None
+        if self._jitter_proc is not None and self._jitter_proc.is_alive():
+            self._jitter_proc.terminate()
+        self._jitter_pending.clear()
         answer = messagebox.askyesnocancel(
             "Quit",
             "Save current selections before quitting?",
             default=messagebox.YES)
         if answer is None:
-            return  # Cancel — don't quit
+            # Cancel — resume normal operation
+            self._closing = False
+            self._start_heartbeat()
+            return
         if answer:
             self._autosave_current()
         self.root.destroy()
