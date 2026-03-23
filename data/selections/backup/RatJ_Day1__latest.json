@@ -1,13 +1,13 @@
 {
   "version": "3.2",
   "name": "latest",
-  "saved_at": "2026-03-20T14:05:34.252835",
-  "session": "RatN_Day1",
+  "saved_at": "2026-03-20T14:05:20.852128",
+  "session": "RatJ_Day1",
   "selections": {
-    "sess_RatN_Day1.ex_E.type_pyr-pyr": [],
-    "sess_RatN_Day1.ex_E.type_pyr-inter": [],
-    "sess_RatN_Day1.ex_I.type_inter-inter": [],
-    "sess_RatN_Day1.ex_I.type_inter-pyr": []
+    "sess_RatJ_Day1.ex_E.type_pyr-pyr": [],
+    "sess_RatJ_Day1.ex_E.type_pyr-inter": [],
+    "sess_RatJ_Day1.ex_I.type_inter-inter": [],
+    "sess_RatJ_Day1.ex_I.type_inter-pyr": []
   },
   "groups": {
     "ppinhib": {

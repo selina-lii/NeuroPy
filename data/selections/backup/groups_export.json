@@ -1,27 +1,4 @@
 {
-  "version": "3.2",
-  "name": "latest",
-  "saved_at": "2026-03-23T18:36:14.727321",
-  "session": "RatV_Day3NSD",
-  "selections": {
-    "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [],
-    "sess_RatV_Day3NSD.ex_E.type_pyr-inter": [],
-    "sess_RatV_Day3NSD.ex_I.type_inter-inter": [],
-    "sess_RatV_Day3NSD.ex_I.type_inter-pyr": [
-      [
-        0,
-        4
-      ],
-      [
-        0,
-        75
-      ],
-      [
-        0,
-        79
-      ]
-    ]
-  },
   "groups": {
     "good": {
       "RatU_Day2NSD": [
@@ -5035,7 +5012,5 @@
     "lateWidePeak": "pyr-int\n---\n3-5ms very wide peak likely due to oscillatory coupling",
     "Disinhib": "pyr-int\n---\nSignificant dip <0ms followed by significant peak at synaptic timescale\nDisinhibition pairs can be valid pyr-ints; they should be selectively included when counting best/good pairs",
     "rift": "pyr-int\n---\nSimilar to 2peakms, but instead of having two visible peaks flanking there is just a sharp dip at 0ms"
-  },
-  "pair_tags": {},
-  "deleted": []
+  }
 }

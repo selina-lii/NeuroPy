@@ -1,13 +1,13 @@
 {
   "version": "3.2",
   "name": "latest",
-  "saved_at": "2026-03-20T12:58:57.325073",
-  "session": "RatU_Day4SD",
+  "saved_at": "2026-03-20T12:58:30.107434",
+  "session": "RatU_Day1SD",
   "selections": {
-    "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
-    "sess_RatU_Day4SD.ex_E.type_pyr-inter": [],
-    "sess_RatU_Day4SD.ex_I.type_inter-inter": [],
-    "sess_RatU_Day4SD.ex_I.type_inter-pyr": []
+    "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
+    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
+    "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
+    "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
   },
   "groups": {},
   "hotkeys": {
