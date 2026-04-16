@@ -41,6 +41,8 @@ class JitterConfig:
             Number of jitter repetitions.
         jitter_type : JitterType
             INTERVAL (Agmon 2012) or SPIKE_TIMING (uniform spike shift).
+            See Platkiewicz et al., Neural Comput 2017; 29(3): 783–803
+            (doi:10.1162/NECO_a_00927) for caveats on interval jitter.
         jscale : float
             Full jitter interval width in seconds (default 5 ms intervals).
             Spikes are placed uniformly within the jscale-wide interval they
@@ -298,10 +300,20 @@ class Jitter:
         """
         Generate self.conf.njitter jittered spike trains for neuron tgt_ind.
 
-        INTERVAL jitter (Agmon 2012): each spike is placed uniformly at random
-        within the jscale-wide interval it originally fell in.  jscale is the
-        full interval width (not a half-width).
-        SPIKE_TIMING: each spike is shifted by a uniform draw over [-jscale, +jscale].
+        INTERVAL jitter (Agmon 2012): the recording is partitioned into
+        non-overlapping windows of width ``jscale``.  Each spike is placed
+        uniformly at random within the window it originally fell in.
+        ``jscale`` is the full interval width (not a half-width).
+
+        Caveat: interval jitter can introduce spurious correlations when the
+        window width is comparable to the timescale of interest.  See:
+        Platkiewicz J, Stark E, Bhatt D & Bhatt D, Bhatt D & Amarasingham A.
+        Spike-Centered Jitter Can Mistake Temporal Structure.
+        Neural Comput 2017; 29(3): 783–803.
+        doi: https://doi.org/10.1162/NECO_a_00927
+
+        SPIKE_TIMING: each spike is shifted by a uniform draw over
+        [-jscale, +jscale].
         """
         spiketrain = np.asarray(self.neurons.spiketrains[tgt_ind])
         n_spikes = len(spiketrain)
@@ -310,6 +322,14 @@ class Jitter:
         jscale_samples = int(self.conf.jscale * sr)
 
         if self.conf.jitter_type == JitterType.INTERVAL:
+            # Interval jitter procedure (Agmon 2012; see Platkiewicz et al. 2017
+            # for caveats on spike-centered vs interval jitter):
+            #   1. Convert spike times to integer samples
+            #   2. Assign each spike to its jscale-wide window:
+            #      window_idx = floor(sample / jscale_samples)
+            #   3. Place uniformly within that window:
+            #      new_sample = floor((window_idx + U[0,1)) * jscale_samples)
+            #   4. Convert back to seconds and sort to maintain ordering
             if self.conf.use_acceleration and cp is not None:
                 trains = (
                     cp.sort(cp.floor(
@@ -629,3 +649,183 @@ class JitterDataset(AnalysisDataset):
                 f"[Jitter] {key}: "
                 f"{j.j_sig.sum()}/{j.n_pairs} pairs passed"
             )
+
+
+import collections as _collections
+import multiprocessing as _mp
+import threading as _threading
+import time as _time
+
+_MAX_JITTER_QUEUE = 50
+
+
+class JitterManager:
+    """Backend manager for on-demand single-pair jitter computation.
+
+    Handles subprocess/thread task queue and LRU result cache.
+    UI callbacks (on_jitter_done, on_custom_done) are called on completion.
+    """
+    CACHE_MAX = 500
+    UNVIEWED_BG = '#FFEE58'
+    UNVIEWED_FG = '#333333'
+    VIEWED_BG   = '#FFF9C4'
+    VIEWED_FG   = '#333333'
+
+    def __init__(self, key, neurons, ccg_data, ccg_pointer,
+                 compute_custom_fn, on_jitter_done, on_custom_done):
+        self.key = key
+        self.neurons = neurons
+        self.ccg_data = ccg_data
+        self.ccg_pointer = ccg_pointer
+        self._compute_custom = compute_custom_fn
+        self._on_jitter_done = on_jitter_done
+        self._on_custom_done = on_custom_done
+        self._cache = _collections.OrderedDict()
+        self._unviewed: set = set()
+        self._pending: _collections.deque = _collections.deque()
+        self._proc: _mp.Process = None
+        self._result_queue: _mp.Queue = None
+        self._thread: _threading.Thread = None
+        self._thread_result: list = []
+
+    # ── Cache ──────────────────────────────────────────────────────────
+
+    def cache_get(self, key):
+        return self._cache.get(key)
+
+    def cache_put(self, key, value):
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = value
+        while len(self._cache) > self.CACHE_MAX:
+            self._cache.popitem(last=False)
+
+    def cache_pop(self, key):
+        return self._cache.pop(key, None)
+
+    def has_any_res(self, ref, tgt):
+        return any((ref, tgt, r) in self._cache for r in ('hi', 'lo'))
+
+    def mark_viewed(self, ref, tgt):
+        """Mark pair as viewed; returns True if it was unviewed."""
+        pair = (ref, tgt)
+        if pair in self._unviewed:
+            self._unviewed.discard(pair)
+            return True
+        return False
+
+    def discard_unviewed(self, ref, tgt):
+        self._unviewed.discard((ref, tgt))
+
+    def is_unviewed(self, ref, tgt):
+        return (ref, tgt) in self._unviewed
+
+    # ── Queue management ───────────────────────────────────────────────
+
+    def is_running(self):
+        return ((self._proc is not None and self._proc.is_alive()) or
+                (self._thread is not None and self._thread.is_alive()))
+
+    def queue_size(self):
+        return len(self._pending)
+
+    def current_task(self):
+        return self._pending[0] if self._pending else None
+
+    def enqueue_jitter(self, ref, tgt, njitter, res_key, bin_size_eff):
+        """Enqueue a jitter task. Returns False if queue full."""
+        running = 1 if self.is_running() else 0
+        if running + len(self._pending) >= _MAX_JITTER_QUEUE:
+            return False
+        self._pending.append(('jitter', ref, tgt, njitter, res_key, bin_size_eff))
+        self.start_next()
+        return True
+
+    def enqueue_custom_ccg(self, t0, t1, name, neurons_override, active_duration, filter_state):
+        """Enqueue a custom-CCG task. Returns False if queue full."""
+        running = 1 if self.is_running() else 0
+        if running + len(self._pending) >= _MAX_JITTER_QUEUE:
+            return False
+        self._pending.append(('custom_ccg', t0, t1, name, neurons_override, active_duration, filter_state))
+        self.start_next()
+        return True
+
+    def start_next(self):
+        """Start the next queued task if none is running."""
+        if self.is_running() or not self._pending:
+            return
+        task = self._pending[0]
+        if task[0] == 'jitter':
+            from neuropy.plotting._jitter_worker import jitter_worker
+            _, ref, tgt, njitter, res_key, bin_size_eff = task
+            self._result_queue = _mp.Queue()
+            self._proc = _mp.Process(
+                target=jitter_worker,
+                args=(self._result_queue, self.key, self.neurons,
+                      self.ccg_data, self.ccg_pointer.edge_times,
+                      ref, tgt, njitter, bin_size_eff),
+                daemon=True,
+            )
+            self._proc.start()
+        elif task[0] == 'custom_ccg':
+            _, t0, t1, name, neurons_override, active_duration, filter_state = task
+            self._thread_result.clear()
+            t_start = _time.monotonic()
+
+            def _worker(_t0=t0, _t1=t1, _name=name, _no=neurons_override,
+                        _ad=active_duration, _fs=filter_state):
+                try:
+                    result = self._compute_custom(_t0, _t1, _name,
+                                                  neurons_override=_no,
+                                                  active_duration=_ad)
+                    if result is not None:
+                        result['filter_state'] = _fs
+                        result['compute_sec'] = _time.monotonic() - t_start
+                    self._thread_result.append(
+                        result if result is not None else {'error': 'compute returned None'})
+                except Exception as ex:
+                    self._thread_result.append({'error': str(ex)})
+
+            self._thread = _threading.Thread(target=_worker, daemon=True)
+            self._thread.start()
+
+    def poll(self):
+        """Poll for completed tasks; call callbacks on completion. Returns True if still running."""
+        if self.is_running():
+            return True
+        completed = self._pending.popleft() if self._pending else None
+        if completed is None:
+            return False
+        task_type = completed[0]
+
+        if task_type == 'jitter':
+            result = None
+            try:
+                if self._result_queue is not None and not self._result_queue.empty():
+                    result = self._result_queue.get_nowait()
+            except Exception:
+                pass
+            if self._proc is not None:
+                self._proc.join(timeout=1)
+                self._proc = None
+            self._result_queue = None
+            if result is not None and not result.get('error') and result.get('j_avg') is not None:
+                res_key = completed[4]
+                cache_key = (result['ref'], result['tgt'], res_key)
+                self.cache_put(cache_key, (result['j_avg'], result['j_pval'], result['j_pval_bins']))
+                self._unviewed.add((result['ref'], result['tgt']))
+                self._on_jitter_done(result['ref'], result['tgt'], res_key,
+                                     result['j_avg'], result['j_pval'], result['j_pval_bins'])
+            elif result is not None and result.get('error'):
+                self._on_jitter_done(None, None, None, None, None, None,
+                                     error=result['error'])
+        elif task_type == 'custom_ccg':
+            if self._thread is not None:
+                self._thread.join(timeout=1)
+                self._thread = None
+            result = self._thread_result[0] if self._thread_result else None
+            self._thread_result.clear()
+            self._on_custom_done(result)
+
+        self.start_next()
+        return self.is_running()

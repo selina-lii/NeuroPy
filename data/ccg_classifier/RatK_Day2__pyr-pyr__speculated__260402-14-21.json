@@ -1,0 +1,2157 @@
+{
+  "session": "RatK_Day2",
+  "conn_type": "pyr-pyr",
+  "predictions": [
+    {
+      "pair": [
+        1,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        3,
+        23
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        3,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        23
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        5,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        10
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        7,
+        24
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        7,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        7,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        4
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        21
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        22
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        24
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        34
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        9,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        10,
+        1
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        10,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        10,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        36
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        12,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        12,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        10
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        34
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        14,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        15,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        22
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rhythm",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        18,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        18,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "msconn",
+        "rhythm",
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        19,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rhythm",
+        "pos_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        20,
+        26
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        20,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        8
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        21
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        24,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        24,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        25,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        25,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        25,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        26,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        29,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        20
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        31,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "rhythm",
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        31,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        5
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "burst",
+        "pos_skew",
+        "neg_skew",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "burst": 1.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        17
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        36
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        34,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        34,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        35,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        35,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "pos_skew",
+        "neg_skew"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 1.0,
+        "neg_skew": 1.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        36,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 0.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        36,
+        13
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "burst": 0.0,
+        "2side_dips": 0.0,
+        "rhythm": 1.0,
+        "pos_skew": 0.0,
+        "neg_skew": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "panels": {
+    "Pair Selection": true,
+    "CCG": true,
+    "Probe Network": false,
+    "Waveforms": false,
+    "Time Slider": false,
+    "Group Hotkeys": true
+  },
+  "settings": {
+    "max_show_together": 5
+  },
+  "cache_config": {
+    "_sig_conv_baseline_var": true,
+    "_sig_tailed_baseline_var": false,
+    "_sig_conv_p_var": false,
+    "_sig_conv_pc_var": false,
+    "_sig_test_window_var": true,
+    "_sig_jitter_p_var": false,
+    "_sig_jitter_pc_var": false,
+    "_acg_ref_var": false,
+    "_acg_tgt_var": false,
+    "_acg_yscale_ref_var": 1.0,
+    "_acg_yscale_tgt_var": 1.0,
+    "_acg_match_ccg_var": false,
+    "_ccg_show_var": true,
+    "_line_ccg_var": false,
+    "_line_baseline_var": true,
+    "_line_ref_var": true,
+    "_line_tgt_var": true,
+    "_line_jitter_var": false,
+    "active_norms": [],
+    "active_alpha": 0.05
+  }
+}

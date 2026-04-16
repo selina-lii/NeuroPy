@@ -147,6 +147,7 @@ dmypy.json
 # Images
 images/**/*test*/
 images/**/*tmp*/
+images/tmp/
 
 # Local data cache (CCG computation results, etc.)
 data/*
@@ -161,3 +162,4 @@ data/jitter/
 
 
 
+data/images/random/

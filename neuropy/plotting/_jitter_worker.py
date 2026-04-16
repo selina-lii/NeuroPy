@@ -3,10 +3,20 @@ import numpy as np
 
 
 def jitter_worker(queue, key, neurons, ccg_data, edge_times,
-                  ref, tgt, njitter, bin_size_eff):
+                  ref, tgt, njitter, bin_size_eff,
+                  segment=None, t0=None, t1=None):
     """Run jitter in a separate process (no GIL contention).
 
     Communicates result back via *queue*.  All arguments must be picklable.
+
+    Parameters
+    ----------
+    segment : int or None
+        If not None, run jitter for this specific segment only (spike trains
+        filtered to [t0, t1] and real CCG taken from ccg_data.ccg[segment]).
+        None means whole-session (all segments summed).
+    t0, t1 : float or None
+        Time boundaries for the segment window (used when segment is not None).
     """
     try:
         import copy
@@ -17,13 +27,24 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
         conf_eff.bin_size = bin_size_eff
         jconf = JitterConfig(ccg=conf_eff, njitter=njitter)
 
-        ptr = types.SimpleNamespace(
-            inds=np.array([[ref, tgt]]),
-            stored_by_segment=False,
-            edge_times=edge_times,
-            n_pairs=1,
-        )
-        j = Jitter(key=key, neurons=neurons, conf=jconf,
+        if segment is not None and t0 is not None and t1 is not None:
+            # Segment-specific jitter: filter spike trains to [t0, t1]
+            neurons_eff = neurons.time_slice(t_start=t0, t_stop=t1)
+            ptr = types.SimpleNamespace(
+                inds=np.array([[segment, ref, tgt]]),
+                stored_by_segment=True,
+                edge_times=edge_times,
+                n_pairs=1,
+            )
+        else:
+            neurons_eff = neurons
+            ptr = types.SimpleNamespace(
+                inds=np.array([[ref, tgt]]),
+                stored_by_segment=False,
+                edge_times=edge_times,
+                n_pairs=1,
+            )
+        j = Jitter(key=key, neurons=neurons_eff, conf=jconf,
                     ccg_pointer=ptr, ccg_data=ccg_data)
         j.run()
 

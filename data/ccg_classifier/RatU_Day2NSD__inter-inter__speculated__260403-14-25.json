@@ -1,0 +1,1696 @@
+{
+  "session": "RatU_Day2NSD",
+  "conn_type": "inter-inter",
+  "predictions": [
+    {
+      "pair": [
+        0,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        0,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        42
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        137
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        42
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        137
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        102,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        119,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        42
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        125,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        102
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        129,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        137,
+        42
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        137,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        137,
+        137
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        137,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        42
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        137
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        139,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        139
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        156,
+        156
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        0
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        6
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        21
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        64
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        70
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        119
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        125
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        129
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        170,
+        170
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "leak": 0.0,
+        "burst": 0.0
+      },
+      "trash_confidence": 0.0
+    }
+  ]
+}

@@ -1,6 +1,7 @@
-﻿"""Calculate and test millisecond-scale connectivity between neurons a la Diba et al. (2014) and English/McKenzie
+"""Calculate and test millisecond-scale connectivity between neurons a la Diba et al. (2014) and English/McKenzie
  et al. (2017)"""
 
+from enum import Enum as _Enum, auto as _auto
 from neuropy.io import NeuroscopeIO
 import numpy as np
 try:
@@ -39,6 +40,70 @@ _CCG_RESOLUTION = {
     'lowres':  1e-3,    # 1 ms   — default, fast
     'highres': 1e-4,  # 0.1 ms — finer temporal resolution (must exceed 1/sample_rate)
 }
+
+
+class NormalizeBy(_Enum):
+    REF_FRATE = _auto()
+    TARGET_FRATE = _auto()
+    TIME_SPAN = _auto()
+
+
+def apply_norms_to_ccg(ccg_raw, ccg_null_raw, ref, tgt, seg,
+                        active_norms, neurons=None, nd=None, nd_key=None,
+                        n_segments=0, is_custom_seg=False):
+    """Return (ccg, ccg_null) with active normalizations applied (copies)."""
+    if not active_norms:
+        return ccg_raw, ccg_null_raw
+    ccg = ccg_raw.copy().astype(float)
+    ccg_null = ccg_null_raw.copy().astype(float) if ccg_null_raw is not None else None
+    if NormalizeBy.REF_FRATE in active_norms and neurons is not None:
+        fr = float(neurons.firing_rate[ref])
+        ccg /= max(fr, 1e-12)
+        if ccg_null is not None:
+            ccg_null /= max(fr, 1e-12)
+    if NormalizeBy.TARGET_FRATE in active_norms and neurons is not None:
+        fr = float(neurons.firing_rate[tgt])
+        ccg /= max(fr, 1e-12)
+        if ccg_null is not None:
+            ccg_null /= max(fr, 1e-12)
+    if (NormalizeBy.TIME_SPAN in active_norms and nd is not None
+            and seg != n_segments and not is_custom_seg):
+        et = float(nd.edge_times[nd_key].iloc[seg]['effective_time_hours'])
+        ccg /= max(et, 1e-12)
+        if ccg_null is not None:
+            ccg_null /= max(et, 1e-12)
+    return ccg, ccg_null
+
+
+def deconv_autocorr(ccg, acg1, nspks1, acg2, nspks2):
+    """
+    Deconvolve ACGs from a single CCG trace (1-D, n_bins).
+    Translated from Eran Stark's cchdeconv.m.
+    """
+    m = len(ccg)
+    if m % 2 == 0:
+        m -= 1
+        ccg = ccg[:m]
+        acg1 = acg1[:m]
+        acg2 = acg2[:m]
+    hw = (m - 1) // 2
+
+    a1 = acg1.copy()
+    a1 = (a1 - np.mean(a1)) / max(nspks1, 1)
+    hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
+    a1[hw] = 1 - np.sum(a1[hidx])
+    den = np.fft.fft(a1)
+
+    a2 = acg2.copy()
+    a2 = (a2 - np.mean(a2)) / max(nspks2, 1)
+    a2[hw] = 1 - np.sum(a2[hidx])
+    den = den * np.fft.fft(a2)
+
+    den = np.where(np.abs(den) < 1e-10, 1e-10, den)
+    dcccg = np.real(np.fft.ifft(np.fft.fft(ccg) / den))
+    dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])
+    dcccg[dcccg < 0] = 0
+    return dcccg
 
 
 class ConnStrengthMethod(ConfigOption):
@@ -785,6 +850,7 @@ class CCGDataset(AnalysisDataset):
         self.spurious = {}
         self._jitter = {}       # Key → Jitter (populated by refine_with_jitter)
         self._ccg_highres = {}  # nd_key → CCGData (raw only; loaded by load_highres)
+        self._jitter_results = {}  # nd_key → {(ref, tgt, res_key): (j_avg, j_pval, j_pval_bins)}
         self.get_ccg()
 
     @property
@@ -797,6 +863,36 @@ class CCGDataset(AnalysisDataset):
     def highres_save_path(self) -> str:
         """Base path (no extension) for saving the high-resolution CCGData dict."""
         return self.conf.save_path + '_highres'
+
+    def find(self, query: str):
+        """Return the key of the first CCGPointer whose session matches *query*.
+
+        Matching is case-insensitive and ignores underscores/spaces, so e.g.
+        ``cd.find("RatUDay2")`` matches ``RatU_Day2NSD``.
+
+        Prefers the excitatory pyr→pyr type when present; otherwise returns
+        the first matching key.  Pass the returned key directly to
+        ``launch_ccg_review``::
+
+            launch_ccg_review(cd, cd.find("RatUDay2"))
+
+        Raises KeyError if no session matches.
+        """
+        q = query.replace('_', '').replace(' ', '').lower()
+        # Collect all full keys from cd.data whose session matches
+        matches = [
+            k for k in self.data.keys()
+            if k.session and q in k.session.replace('_', '').replace(' ', '').lower()
+        ]
+        if not matches:
+            raise KeyError(f"No CCG session matching {query!r}")
+        # Prefer E excitability + pyr-pyr conn_type; fall back to first match
+        preferred = [
+            k for k in matches
+            if getattr(k, 'excitability', None) == 'E'
+            and getattr(k, 'conn_type', None) == ('pyr', 'pyr')
+        ]
+        return (preferred or matches)[0]
 
     # ------------------------------------------------------------------
     # Metadata helpers (I.3: cache invalidation)
@@ -1058,6 +1154,80 @@ class CCGDataset(AnalysisDataset):
             return True
         except Exception as exc:
             print(f"[CCGDataset] highres load failed: {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Jitter save / load
+    # ------------------------------------------------------------------
+
+    def jitter_save_path(self) -> str:
+        """Base path (no extension) for saving jitter results."""
+        return self.conf.save_path + '_jitter'
+
+    def save_jitter(self, path: str = None):
+        """Save _jitter_results to a hickle file.
+
+        Structure on disk:
+            nd_str → pair_key → {ref, tgt, res_key, j_avg, j_pval, j_pval_bins}
+        """
+        if not self._jitter_results:
+            print("[save_jitter] Nothing to save.")
+            return
+        import hickle as hkl, numpy as np
+        p = os.path.expanduser((path or self.jitter_save_path()) + '.hkl')
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        serializable = {}
+        for nd_key, pairs in self._jitter_results.items():
+            nd_str = str(nd_key)
+            serializable[nd_str] = {}
+            for cache_key, (j_avg, j_pval, j_pval_bins) in pairs.items():
+                ref, tgt, res_key = cache_key[0], cache_key[1], cache_key[2]
+                seg = cache_key[3] if len(cache_key) > 3 else None
+                k = f"{ref}_{tgt}_{res_key}" + (f"_s{seg}" if seg is not None else "")
+                serializable[nd_str][k] = {
+                    'ref': np.int64(ref),
+                    'tgt': np.int64(tgt),
+                    'res_key': res_key,
+                    'seg': np.int64(seg) if seg is not None else np.int64(-1),
+                    'j_avg': np.asarray(j_avg, dtype=float),
+                    'j_pval': np.float64(j_pval),
+                    'j_pval_bins': np.asarray(j_pval_bins, dtype=float),
+                }
+        hkl.dump(serializable, p)
+        total = sum(len(v) for v in self._jitter_results.values())
+        print(f"[CCGDataset] jitter saved ({total} pairs) → {p}")
+
+    def load_jitter(self, path: str = None) -> bool:
+        """Load jitter results from disk into _jitter_results.
+
+        Returns True on success, False if file not found.
+        """
+        import hickle as hkl
+        p = os.path.expanduser((path or self.jitter_save_path()) + '.hkl')
+        if not os.path.isfile(p):
+            return False
+        try:
+            data = hkl.load(p)
+            nd_key_map = {str(k): k for k in self._ccg}
+            for nd_str, pairs in data.items():
+                nd_key = nd_key_map.get(nd_str)
+                if nd_key is None:
+                    continue
+                if nd_key not in self._jitter_results:
+                    self._jitter_results[nd_key] = {}
+                for k, v in pairs.items():
+                    ref = int(v['ref'])
+                    tgt = int(v['tgt'])
+                    res_key = str(v['res_key'])
+                    seg_raw = v.get('seg', None)
+                    seg = None if (seg_raw is None or int(seg_raw) < 0) else int(seg_raw)
+                    self._jitter_results[nd_key][(ref, tgt, res_key, seg)] = (
+                        v['j_avg'], float(v['j_pval']), v['j_pval_bins'])
+            total = sum(len(v) for v in self._jitter_results.values())
+            print(f"[CCGDataset] jitter loaded ({total} pairs) ← {p}")
+            return True
+        except Exception as exc:
+            print(f"[CCGDataset] jitter load failed: {exc}")
             return False
 
     def get_example_key(self):

@@ -1,0 +1,1525 @@
+{
+  "session": "RatV_Day1NSD",
+  "conn_type": "pyr-inter",
+  "predictions": [
+    {
+      "pair": [
+        4,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        5,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        5,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        9,
+        25
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        9,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        10,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        12,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        32
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        18,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        26,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        26,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        28,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        28,
+        45
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        28,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        29,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        29,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        45
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        31,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        31,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        34,
+        65
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        36,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        36,
+        25
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        37,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        38,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        39,
+        45
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        40,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        41,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        41,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        41,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        42,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        43,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        44,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        47,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        47,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        48,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        48,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        50,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        52,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        54,
+        65
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        56,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        56,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        62,
+        14
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        62,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        63,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        63,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        64,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        67,
+        45
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        69,
+        14
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        70,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "leak",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 1.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        71,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        71,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        72,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        72,
+        65
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        74,
+        25
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        75,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        76,
+        25
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        76,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        76,
+        73
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 0.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        78,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        78,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        80,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        80,
+        73
+      ],
+      "action": "assign",
+      "groups": [
+        "msconn",
+        "rift"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "2peakms": 0.0,
+        "leak": 0.0,
+        "msconn": 1.0,
+        "rhythm": 0.0,
+        "best": 0.0,
+        "rift": 1.0
+      },
+      "trash_confidence": 0.0
+    }
+  ]
+}

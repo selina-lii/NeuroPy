@@ -39,6 +39,7 @@ def plot_ccg_panel(
     line_ref=False,
     line_tgt=False,
     line_jitter=False,
+    conn_strength_baseline=None,
 ):
     """Single CCG plot into provided axis.
 
@@ -88,6 +89,19 @@ def plot_ccg_panel(
             else:
                 ax.bar(bins, ccg_null, width=bin_w, alpha=0.3,
                        label="ccg-smooth", color=colors[1])
+
+        if conn_strength_baseline is not None and min_lag is not None and max_lag is not None:
+            min_lag_ms = min_lag * 1000
+            max_lag_ms = max_lag * 1000
+            bl = np.asarray(conn_strength_baseline)
+            if len(bl) == len(bins):
+                # Select bins whose bar body [center-bin_w/2, center+bin_w/2]
+                # overlaps [min_lag_ms, max_lag_ms] — matches axvspan geometry exactly.
+                mask = (bins > min_lag_ms - bin_w / 2 - 1e-9) & (bins < max_lag_ms + bin_w / 2 + 1e-9)
+                bottoms = bl[mask]
+                heights = np.maximum(ccg[mask] - bottoms, 0)
+                ax.bar(bins[mask], heights, width=bin_w, bottom=bottoms,
+                       color='#1a6b2e', alpha=1.0, label='excess sync', zorder=3)
 
         _jitter_line = line_jitter or _legacy_line
         if j_ccg is not None:
@@ -155,7 +169,7 @@ def plot_ccg_panel(
         type_str = f', type={neuron_type}' if neuron_type is not None else ''
         if normalize_info is None:
             ax.set_title(
-                f"{segment_id}: ids={ids}, inds={inds}{type_str}{sig_marker}")
+                f"{segment_id}: shank={ids}, inds={inds}{type_str}{sig_marker}")
         ax.legend(fontsize=8)
         sns.despine(ax=ax)
 
@@ -183,7 +197,7 @@ def plot_ccg_panel(
                 # Per-bin p-values
                 ax2.plot(bins, j_pval, label='jitter p-corrected',
                          alpha=0.6, color='purple')
-        if alpha is not None:
+        if alpha is not None and any(x is not None for x in (pval, pval_corrected, j_pval, j_sig)):
             ax2.axhline(alpha, label=f'α={alpha}', alpha=0.8,
                         color='red', linestyle='--', linewidth=1.5)
         ax2.legend(fontsize=8)

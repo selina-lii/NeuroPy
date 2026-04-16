@@ -1,0 +1,538 @@
+{
+  "session": "RatK_Day2",
+  "conn_type": "pyr-pyr",
+  "predictions": [
+    {
+      "pair": [
+        3,
+        23
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        3,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        23
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        4,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        10
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        6,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        7,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        24
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        8,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        10,
+        1
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        11
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        11,
+        36
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        10
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        34
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        13,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        22
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        16,
+        35
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        17,
+        11
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        18,
+        29
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        20,
+        26
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        27
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        21,
+        32
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        22,
+        21
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        25
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        23,
+        32
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        25,
+        16
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        25,
+        25
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        30,
+        20
+      ],
+      "action": "review",
+      "groups": [],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        31,
+        32
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        5
+      ],
+      "action": "assign",
+      "groups": [
+        "rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 0.0,
+        "leak": 0.0,
+        "rhythm": 1.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        17
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        32,
+        36
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    },
+    {
+      "pair": [
+        36,
+        13
+      ],
+      "action": "assign",
+      "groups": [
+        "0rhythm"
+      ],
+      "confidences": {
+        "0rhythm": 1.0,
+        "leak": 0.0,
+        "rhythm": 0.0
+      },
+      "trash_confidence": 0.0
+    }
+  ]
+}

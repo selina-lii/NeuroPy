@@ -1,0 +1,12 @@
+{
+  "session": "RatU_Day2NSD",
+  "conn_type": "pyr-pyr",
+  "templates": {
+    "0rhythm": {
+      "peak_rules": [],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    }
+  }
+}

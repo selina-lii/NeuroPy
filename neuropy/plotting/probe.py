@@ -10,6 +10,7 @@ def plot_probe(
     disconnected=True,
     x_scale=1.0,
     y_scale=1.0,
+    hidden_shanks=None,
     ax=None,
 ):
     """Plot probe channel layout.
@@ -19,12 +20,20 @@ def plot_probe(
     x_scale, y_scale : float
         Multiply the raw probe x/y coordinates to adjust horizontal (shank)
         and vertical (channel) spacing.  Default 1.0 = micron coordinates.
+    hidden_shanks : set or None
+        Set of shank_id integers to hide completely from the plot.
     """
     if ax is None:
         _, ax = plt.subplots()
 
-    px = probe.x * x_scale
-    py = probe.y * y_scale
+    shank_ids_all = probe.shank_id
+    if hidden_shanks:
+        mask = np.array([int(s) not in hidden_shanks for s in shank_ids_all])
+    else:
+        mask = np.ones(len(shank_ids_all), dtype=bool)
+
+    px = probe.x[mask] * x_scale
+    py = probe.y[mask] * y_scale
 
     ax.scatter(
         px,
@@ -37,11 +46,13 @@ def plot_probe(
         alpha=0.5,
     )
     if channel_id:
-        for x, y, chan_id in zip(px, py, probe.channel_id):
+        for x, y, chan_id in zip(px, py, probe.channel_id[mask]):
             ax.annotate(chan_id, (x, y), fontsize=8)
 
     if disconnected:
         disc = probe.get_disconnected
+        if hidden_shanks and 'shank_id' in disc.columns:
+            disc = disc[~disc['shank_id'].apply(lambda s: int(s) in hidden_shanks)]
         ax.scatter(
             disc.x.values * x_scale,
             disc.y.values * y_scale,

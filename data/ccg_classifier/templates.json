@@ -1,0 +1,703 @@
+{
+  "smooth_ms": 0.2,
+  "classify_with": [
+    "0rhythm",
+    "2peakms",
+    "best",
+    "burst",
+    "leak",
+    "msconn",
+    "rhythm",
+    "rift"
+  ],
+  "templates": {
+    "0rhythm": {
+      "peak_rules": [
+        {
+          "lag_min": -3.0,
+          "lag_max": 3.0,
+          "width_min": 1.1,
+          "width_max": 4.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": 0.7,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "msconn",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "rhythm",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "leak",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 0.0,
+          "min_count": 2.0
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "rift",
+          "smooth_ms": null,
+          "min_count": null
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "2peakms": {
+      "peak_rules": [
+        {
+          "lag_min": 0.2,
+          "lag_max": 1.5,
+          "width_min": 0.1,
+          "width_max": 0.5,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -1.0,
+          "lag_max": 0.5,
+          "width_min": 0.1,
+          "width_max": 0.5,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": -2.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 2.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "leak",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "leak": {
+      "peak_rules": [
+        {
+          "lag_min": -10.0,
+          "lag_max": -0.2,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 2.0,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.2,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 2.0,
+          "min_count": null
+        },
+        {
+          "lag_min": -0.1,
+          "lag_max": 0.1,
+          "width_min": null,
+          "width_max": 0.2,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 0.0,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 5,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 0.0,
+          "min_count": 50.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "msconn": {
+      "peak_rules": [
+        {
+          "lag_min": -1.0,
+          "lag_max": 1.0,
+          "width_min": null,
+          "width_max": 1.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "Excitatory",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "leak",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "pos_skew",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "burst": {
+      "peak_rules": [
+        {
+          "lag_min": 3.0,
+          "lag_max": 6.0,
+          "width_min": 2.0,
+          "width_max": 4.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 5.0,
+          "lag_max": 10.0,
+          "width_min": 2.0,
+          "width_max": 4.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 5.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "2side_dips": {
+      "peak_rules": [
+        {
+          "lag_min": -3.0,
+          "lag_max": -1.0,
+          "width_min": 0.5,
+          "width_max": 1.0,
+          "polarity": -1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 5.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 2.0,
+          "lag_max": 6.0,
+          "width_min": 1.0,
+          "width_max": 3.0,
+          "polarity": -1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "rhythm": {
+      "peak_rules": [
+        {
+          "lag_min": -3.0,
+          "lag_max": 3.0,
+          "width_min": 1.0,
+          "width_max": 4.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": 0.7,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": -2.0,
+          "width_min": 1.0,
+          "width_max": 3.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": 0.7,
+          "min_count": null
+        },
+        {
+          "lag_min": 2.0,
+          "lag_max": 10.0,
+          "width_min": 1.0,
+          "width_max": 3.0,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": 0.7,
+          "min_count": null
+        },
+        {
+          "lag_min": -5.0,
+          "lag_max": 5.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 2.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "pos_skew": {
+      "peak_rules": [
+        {
+          "lag_min": -10.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "neg_skew": {
+      "peak_rules": [
+        {
+          "lag_min": 0.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -10.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "best": {
+      "peak_rules": [
+        {
+          "lag_min": 0.0,
+          "lag_max": 3.0,
+          "width_min": 0.2,
+          "width_max": 1.5,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 3.0,
+          "width_min": 0.2,
+          "width_max": 1.5,
+          "polarity": 1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "pyr-inter",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 5.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-pyr",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 1.0,
+          "lag_max": 4.0,
+          "width_min": 0.2,
+          "width_max": 2.5,
+          "polarity": -1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "inter-inter",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 1.0,
+          "lag_max": 4.0,
+          "width_min": 0.2,
+          "width_max": 2.5,
+          "polarity": -1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "inter-pyr",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 5.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 0,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "pyr-inter",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "rift": {
+      "peak_rules": [
+        {
+          "lag_min": -1.0,
+          "lag_max": 1.0,
+          "width_min": null,
+          "width_max": 0.5,
+          "polarity": -1,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 0.0,
+          "lag_max": 0.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 2,
+          "required": true,
+          "resolution": "hi",
+          "conn_type": "(all)",
+          "ref_group": "2peakms",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": 5.0,
+          "lag_max": 10.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 6,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": 0.0,
+          "min_count": 1.0
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "Disinhib": {
+      "peak_rules": [],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    },
+    "Main": {
+      "peak_rules": [
+        {
+          "lag_min": 1.0,
+          "lag_max": 3.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 1,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": null
+        },
+        {
+          "lag_min": -6.0,
+          "lag_max": 6.0,
+          "width_min": null,
+          "width_max": null,
+          "polarity": 5,
+          "required": true,
+          "resolution": "both",
+          "conn_type": "(all)",
+          "ref_group": "",
+          "smooth_ms": null,
+          "min_count": 2.5
+        }
+      ],
+      "n_peaks_min": null,
+      "n_peaks_max": null,
+      "baseline_low_before_zero": false
+    }
+  }
+}
