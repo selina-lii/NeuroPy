@@ -1,0 +1,81 @@
+{
+  "version": "4.0",
+  "name": "autosaved",
+  "saved_at": "2026-05-03T14:58:06.900749",
+  "session": "RatR_Day1NSD",
+  "selections": {
+    "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [
+      [
+        2,
+        11
+      ],
+      [
+        5,
+        0
+      ],
+      [
+        5,
+        11
+      ],
+      [
+        6,
+        9
+      ],
+      [
+        6,
+        11
+      ],
+      [
+        6,
+        43
+      ]
+    ],
+    "sess_RatR_Day1NSD.ex_I.type_inter-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "2,11": {
+      "groups": [
+        8,
+        12,
+        18,
+        31
+      ]
+    },
+    "5,0": {
+      "groups": [
+        6
+      ]
+    },
+    "5,11": {
+      "groups": [
+        6
+      ]
+    },
+    "6,9": {
+      "groups": [
+        6,
+        8
+      ]
+    },
+    "6,11": {
+      "groups": [
+        6
+      ]
+    },
+    "6,43": {
+      "groups": [
+        3,
+        4,
+        31
+      ]
+    }
+  },
+  "deleted": [
+    [
+      2,
+      9
+    ]
+  ]
+}

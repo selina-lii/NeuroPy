@@ -45,13 +45,20 @@ _CCG_RESOLUTION = {
 class NormalizeBy(_Enum):
     REF_FRATE = _auto()
     TARGET_FRATE = _auto()
-    TIME_SPAN = _auto()
+    TIME_SPAN = _auto()    # divide by effective recording time in hours
+    TIME_SECOND = _auto()  # divide by effective recording time in seconds
+    TOTAL_AREA = _auto()   # divide by sum of all bin counts (area under CCG)
+    BASELINE = _auto()     # subtract conv baseline (ccg_null) from ccg
 
 
 def apply_norms_to_ccg(ccg_raw, ccg_null_raw, ref, tgt, seg,
                         active_norms, neurons=None, nd=None, nd_key=None,
-                        n_segments=0, is_custom_seg=False):
-    """Return (ccg, ccg_null) with active normalizations applied (copies)."""
+                        n_segments=0, is_custom_seg=False, custom_time_hours=None):
+    """Return (ccg, ccg_null) with active normalizations applied (copies).
+
+    For TIME_SPAN on custom segments pass ``custom_time_hours`` (active recording
+    duration in hours for that window).  Without it the norm is silently skipped.
+    """
     if not active_norms:
         return ccg_raw, ccg_null_raw
     ccg = ccg_raw.copy().astype(float)
@@ -66,13 +73,84 @@ def apply_norms_to_ccg(ccg_raw, ccg_null_raw, ref, tgt, seg,
         ccg /= max(fr, 1e-12)
         if ccg_null is not None:
             ccg_null /= max(fr, 1e-12)
-    if (NormalizeBy.TIME_SPAN in active_norms and nd is not None
-            and seg != n_segments and not is_custom_seg):
-        et = float(nd.edge_times[nd_key].iloc[seg]['effective_time_hours'])
-        ccg /= max(et, 1e-12)
+    if NormalizeBy.TIME_SPAN in active_norms:
+        et = None
+        if is_custom_seg and custom_time_hours is not None:
+            et = float(custom_time_hours)
+        elif nd is not None and not is_custom_seg:
+            if seg == n_segments and n_segments > 0:
+                et = sum(float(nd.edge_times[nd_key].iloc[s]['effective_time_hours'])
+                         for s in range(n_segments))
+            else:
+                et = float(nd.edge_times[nd_key].iloc[seg]['effective_time_hours'])
+        if et is not None:
+            ccg /= max(et, 1e-12)
+            if ccg_null is not None:
+                ccg_null /= max(et, 1e-12)
+    if NormalizeBy.TIME_SECOND in active_norms:
+        et_s = None
+        if is_custom_seg and custom_time_hours is not None:
+            et_s = float(custom_time_hours) * 3600.0
+        elif nd is not None and not is_custom_seg:
+            if seg == n_segments and n_segments > 0:
+                et_s = sum(float(nd.edge_times[nd_key].iloc[s]['effective_time_hours'])
+                           for s in range(n_segments)) * 3600.0
+            else:
+                et_s = float(nd.edge_times[nd_key].iloc[seg]['effective_time_hours']) * 3600.0
+        if et_s is not None:
+            ccg /= max(et_s, 1e-12)
+            if ccg_null is not None:
+                ccg_null /= max(et_s, 1e-12)
+    if NormalizeBy.TOTAL_AREA in active_norms:
+        total = float(np.sum(np.abs(ccg)))
+        if total > 1e-12:
+            ccg /= total
+            if ccg_null is not None:
+                ccg_null /= total
+    if NormalizeBy.BASELINE in active_norms:
         if ccg_null is not None:
-            ccg_null /= max(et, 1e-12)
+            ccg -= ccg_null  # subtract already-normalized baseline; result can be negative
+            ccg_null = None  # baseline is now at 0; suppress the overlay
     return ccg, ccg_null
+
+
+@dataclass
+class CCGPanelData:
+    """Fully-prepared data for rendering one CCG panel.
+
+    Produced by :func:`compute_ccg_panel_data`.  All arrays are 1-D and
+    already normalized.  Callers pass fields directly into
+    ``plot_ccg.plot_ccg_panel`` without further processing.
+
+    Attributes
+    ----------
+    ccg : ndarray
+        Normalized CCG (BASELINE-subtracted if ``NormalizeBy.BASELINE`` was
+        active).
+    ccg_null : ndarray or None
+        Null/expected trace for display.  ``None`` when baseline subtraction
+        was applied (baseline now sits at zero).
+    baseline_1d : ndarray or None
+        The baseline array used by the active CS method:
+        - conv   → copy of ccg_null (EranConv expected)
+        - tailed → flat array at tail-mean value
+        - global → flat array at max-outside-window value
+        Passed as ``conn_strength_baseline`` to ``plot_ccg_panel`` for the
+        green CS-overlay bars.
+    cs_val : float or None
+        Connection-strength scalar (AUC above baseline in test window).
+    eff_min_lag : float or None
+        Effective minimum test-window lag (seconds), after adaptive-TW
+        resolution.
+    eff_max_lag : float or None
+        Effective maximum test-window lag (seconds).
+    """
+    ccg: np.ndarray
+    ccg_null: Optional[np.ndarray]
+    baseline_1d: Optional[np.ndarray]
+    cs_val: Optional[float]
+    eff_min_lag: Optional[float]
+    eff_max_lag: Optional[float]
 
 
 def deconv_autocorr(ccg, acg1, nspks1, acg2, nspks2):
@@ -104,6 +182,197 @@ def deconv_autocorr(ccg, acg1, nspks1, acg2, nspks2):
     dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])
     dcccg[dcccg < 0] = 0
     return dcccg
+
+
+def compute_pair_conn_strength_1d(ccg, ccg_null, conf, method,
+                                   acg_ref=None, acg_tgt=None,
+                                   nspks_ref=1.0, nspks_tgt=1.0,
+                                   min_lag_override=None, max_lag_override=None):
+    """Compute connection strength scalar and baseline for a single 1-D CCG.
+
+    Parameters
+    ----------
+    ccg : ndarray (n_bins,)  — already normalized
+    ccg_null : ndarray or None
+    conf : CCGConfig
+    method : str — 'conv', 'tailed', or 'global'
+    acg_ref, acg_tgt : ndarray or None — required for 'tailed'
+    nspks_ref, nspks_tgt : float
+    min_lag_override, max_lag_override : float or None
+        Override conf.min_lag / conf.max_lag (e.g. for adaptive test window).
+
+    Returns
+    -------
+    cs : float or None
+    baseline_1d : ndarray or None
+    """
+    n_bins = len(ccg)
+    bin_size_eff = conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size
+    center = n_bins // 2
+    eff_min_lag = min_lag_override if min_lag_override is not None else conf.min_lag
+    eff_max_lag = max_lag_override if max_lag_override is not None else conf.max_lag
+    lo = max(0, center + int(eff_min_lag / bin_size_eff))
+    hi_bin = min(n_bins, center + int(eff_max_lag / bin_size_eff) + 1)
+
+    if method == 'conv':
+        if ccg_null is not None:
+            baseline = ccg_null.copy()
+            cs = float(np.sum((ccg - ccg_null)[lo:hi_bin]))
+        else:
+            baseline = np.zeros_like(ccg)
+            cs = float(np.sum(ccg[lo:hi_bin]))
+        return cs, baseline
+
+    if method == 'tailed':
+        if acg_ref is None or acg_tgt is None:
+            return None, None
+        try:
+            dcccg = deconv_autocorr(ccg.copy().astype(float),
+                                    acg_ref, nspks_ref, acg_tgt, nspks_tgt)
+            hw = max(1, int(11e-3 / bin_size_eff))
+            l_idx = center - hw
+            r_idx = center + hw + 1
+            if l_idx > 0 and r_idx < n_bins:
+                tail = np.concatenate([dcccg[:l_idx], dcccg[r_idx:]])
+            else:
+                edge = max(1, n_bins // 10)
+                tail = np.concatenate([dcccg[:edge], dcccg[-edge:]])
+            baseline_val = float(np.mean(tail))
+            baseline = np.full(n_bins, baseline_val)
+            cs = float(np.sum((dcccg - baseline_val)[lo:hi_bin]))
+            return cs, baseline
+        except Exception:
+            return None, None
+
+    if method == 'global':
+        # Baseline = max of bins OUTSIDE the test window [lo, hi_bin)
+        outside_mask = np.ones(n_bins, dtype=bool)
+        outside_mask[lo:hi_bin] = False
+        if not np.any(outside_mask):
+            return None, None
+        baseline_val = float(np.max(ccg[outside_mask]))
+        baseline = np.full(n_bins, baseline_val)
+        cs = float(np.sum((ccg - baseline_val)[lo:hi_bin]))
+        return cs, baseline
+
+    return None, None
+
+
+def compute_ccg_panel_data(
+    ccg_raw: np.ndarray,
+    ccg_null_raw: Optional[np.ndarray],
+    conf: 'CCGConfig',
+    method: str,
+    active_norms: set,
+    ref: int,
+    tgt: int,
+    segment: int,
+    n_segments: int,
+    is_custom: bool,
+    custom_time_hours: Optional[float],
+    eff_min_lag: Optional[float],
+    eff_max_lag: Optional[float],
+    neurons=None,
+    nd=None,
+    nd_key=None,
+    acg_ref: Optional[np.ndarray] = None,
+    acg_tgt: Optional[np.ndarray] = None,
+    nspks_ref: float = 1.0,
+    nspks_tgt: float = 1.0,
+) -> CCGPanelData:
+    """Normalize a raw CCG pair and compute connection-strength in one pass.
+
+    This is the single authoritative pipeline for preparing CCG data for
+    display and CS computation.  It must be used instead of calling
+    :func:`apply_norms_to_ccg` and :func:`compute_pair_conn_strength_1d`
+    separately, because the ordering of normalization and baseline
+    computation matters:
+
+    1. Apply all normalisations **except** ``NormalizeBy.BASELINE``.
+    2. Compute CS + ``baseline_1d`` on the resulting signal (so the global
+       or tailed baseline is derived from the pre-subtraction CCG).
+    3. Apply ``NormalizeBy.BASELINE`` using the *method's own* baseline
+       (not always the EranConv null).
+
+    Parameters
+    ----------
+    ccg_raw, ccg_null_raw : ndarray
+        Raw spike-count CCG and its EranConv null, as returned by
+        :meth:`_resolve_segment_data`.
+    conf : CCGConfig
+    method : str
+        ``'conv'``, ``'tailed'``, or ``'global'``.
+    active_norms : set of NormalizeBy
+        Currently active normalizations (may include NormalizeBy.BASELINE).
+    ref, tgt : int
+        Neuron indices.
+    segment, n_segments : int
+        Current segment index and total count.
+    is_custom : bool
+        Whether *segment* is a custom (user-defined) time window.
+    custom_time_hours : float or None
+        Recording duration for a custom segment (for TIME_SPAN norm).
+    eff_min_lag, eff_max_lag : float or None
+        Effective test-window bounds in seconds, already resolved by the
+        caller (e.g. via ``_effective_lags``).  Passed directly as
+        ``min_lag_override``/``max_lag_override`` to
+        :func:`compute_pair_conn_strength_1d`.
+    neurons, nd, nd_key : optional
+        Passed through to :func:`apply_norms_to_ccg` for firing-rate and
+        time-span normalizations.
+    acg_ref, acg_tgt : ndarray or None
+        Auto-correlograms required by the ``'tailed'`` method.
+    nspks_ref, nspks_tgt : float
+        Spike counts used by ``'tailed'`` deconvolution.
+
+    Returns
+    -------
+    CCGPanelData
+    """
+    # ── Step 1: normalize without BASELINE ───────────────────────────────
+    has_baseline_norm = NormalizeBy.BASELINE in active_norms
+    norms_no_bl = active_norms - {NormalizeBy.BASELINE}
+    ccg, ccg_null = apply_norms_to_ccg(
+        ccg_raw, ccg_null_raw, ref, tgt, segment, norms_no_bl,
+        neurons, nd, nd_key, n_segments, is_custom, custom_time_hours)
+
+    # ── Step 2: compute CS + baseline_1d on the step-1 signal ────────────
+    cs_val, baseline_1d = compute_pair_conn_strength_1d(
+        ccg, ccg_null, conf, method,
+        acg_ref=acg_ref, acg_tgt=acg_tgt,
+        nspks_ref=nspks_ref, nspks_tgt=nspks_tgt,
+        min_lag_override=eff_min_lag,
+        max_lag_override=eff_max_lag)
+
+    # ── Step 3: apply BASELINE norm using the method's own baseline ───────
+    if has_baseline_norm:
+        bl = baseline_1d if baseline_1d is not None else ccg_null
+        if bl is not None:
+            ccg = ccg - bl
+            ccg_null = None     # baseline is now at zero; suppress the null overlay
+
+    # ── Step 4: choose which null trace to show (method-dependent) ────────
+    # conv  → EranConv predicted null (varies per bin)
+    # tailed → flat array at tail-mean value
+    # global → flat array at max-outside-window value (same shape, drawn as h-line)
+    # All three are suppressed when BASELINE norm is active because the CCG is
+    # already baseline-subtracted and the baseline sits at zero.
+    if has_baseline_norm:
+        display_null = None
+    elif method == 'conv':
+        display_null = ccg_null
+    else:
+        # tailed and global both produce a flat baseline_1d; display identically
+        display_null = baseline_1d
+
+    return CCGPanelData(
+        ccg=ccg,
+        ccg_null=display_null,
+        baseline_1d=baseline_1d,
+        cs_val=cs_val,
+        eff_min_lag=eff_min_lag,
+        eff_max_lag=eff_max_lag,
+    )
 
 
 class ConnStrengthMethod(ConfigOption):
@@ -671,31 +940,6 @@ class CCGData(Savable):
             Optional element-wise divisor applied to conn_strength.
         """
 
-        def _deconv_autocorr(ccg, acg1, nspks1, acg2, nspks2):
-            """
-            Deconvolve ACGs from a single CCG trace (1-D, n_bins).
-            Translated from MATLAB:
-            https://github.com/EranStarkLab/CCH-deconvolution/cchdeconv.m
-            """
-            m = len(ccg)
-            assert m % 2 == 1, "CCG must have an odd number of bins"
-            hw = (m - 1) // 2
-
-            acg1 = (acg1.copy() - np.mean(acg1)) / nspks1
-            hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
-            acg1[hw] = 1 - np.sum(acg1[hidx])
-            den = np.fft.fft(acg1)
-
-            acg2 = (acg2.copy() - np.mean(acg2)) / nspks2
-            hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
-            acg2[hw] = 1 - np.sum(acg2[hidx])
-            den = den * np.fft.fft(acg2)
-
-            dcccg = np.real(np.fft.ifft(np.fft.fft(ccg) / den))
-            dcccg = np.concatenate([dcccg[1:], [dcccg[0]]])  # shift DC to end
-            dcccg[dcccg < 0] = 0
-            return dcccg
-
         n_seg, n_ref, n_tgt, n_bins = self.ccg.shape
         n_neurons = min(n_ref, n_tgt)
         center = self.conf.center_bin
@@ -710,7 +954,7 @@ class CCGData(Savable):
                 for tgt in range(n_tgt):
                     if ref == tgt:
                         continue
-                    dcccg[s, ref, tgt] = _deconv_autocorr(
+                    dcccg[s, ref, tgt] = deconv_autocorr(
                         self.ccg[s, ref, tgt].copy(),
                         acgs[s, ref], float(nspks[s, ref]),
                         acgs[s, tgt], float(nspks[s, tgt]),

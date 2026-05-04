@@ -1,8 +1,8 @@
 {
   "panels": {
-    "Pair Selection": true,
+    "Pair Selection": false,
     "CCG": true,
-    "Probe Network": false,
+    "Probe Network": true,
     "Waveforms": false,
     "Time Slider": false,
     "Group Hotkeys": true
@@ -31,5 +31,32 @@
     "_line_jitter_var": false,
     "active_norms": [],
     "active_alpha": 0.05
-  }
+  },
+  "auto_pregen_enabled": false,
+  "last_key": {
+    "session": "RatN_Day2",
+    "epoch": null,
+    "ref_ind": null,
+    "target_ind": null,
+    "segment": null,
+    "excitability": "E",
+    "conn_type": [
+      "pyr",
+      "inter"
+    ]
+  },
+  "active_norms": [],
+  "conn_str_method": "conv",
+  "current_segment": 4,
+  "sort_selected": true,
+  "sort_by_tag": false,
+  "sort_by_mean": false,
+  "sort_by_min_p": false,
+  "pair_scale": false,
+  "sess_scale": false,
+  "sash_pos": 134,
+  "loaded_custom_ccgs": [
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatN_Day2__pyr-inter__ripple__260504-00-11.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatN_Day2__pyr-inter__nonripple__260504-00-11.npz"
+  ]
 }

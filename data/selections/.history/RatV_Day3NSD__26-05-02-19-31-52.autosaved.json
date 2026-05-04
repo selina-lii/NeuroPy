@@ -1,0 +1,103 @@
+{
+  "version": "4.0",
+  "name": "autosaved",
+  "saved_at": "2026-05-02T19:31:52.205854",
+  "session": "RatV_Day3NSD",
+  "selections": {
+    "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day3NSD.ex_E.type_pyr-inter": [
+      [
+        1,
+        18
+      ],
+      [
+        2,
+        10
+      ],
+      [
+        4,
+        10
+      ],
+      [
+        5,
+        15
+      ],
+      [
+        5,
+        18
+      ],
+      [
+        6,
+        37
+      ],
+      [
+        7,
+        37
+      ],
+      [
+        8,
+        37
+      ]
+    ],
+    "sess_RatV_Day3NSD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day3NSD.ex_I.type_inter-pyr": [
+      [
+        0,
+        4
+      ],
+      [
+        0,
+        75
+      ],
+      [
+        0,
+        79
+      ]
+    ]
+  },
+  "pair_tags": {
+    "1,18": {
+      "groups": [
+        7
+      ]
+    },
+    "2,10": {
+      "groups": [
+        10
+      ]
+    },
+    "4,10": {
+      "groups": [
+        10
+      ]
+    },
+    "5,15": {
+      "groups": [
+        6
+      ]
+    },
+    "5,18": {
+      "groups": [
+        8,
+        10
+      ]
+    },
+    "6,37": {
+      "groups": [
+        8
+      ]
+    },
+    "7,37": {
+      "groups": [
+        8
+      ]
+    },
+    "8,37": {
+      "groups": [
+        2,
+        6
+      ]
+    }
+  },
+  "deleted": []
+}

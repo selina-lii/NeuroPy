@@ -44,6 +44,14 @@ class NetworkPanel:
         self.ui = ui
         self._setup(parent)
 
+    def _highlighted_ct_labels(self) -> set[str]:
+        """Return conn-type labels currently highlighted in this panel."""
+        labels = set()
+        for (a, b), var in getattr(self, '_net_ct_vars', {}).items():
+            if var.get():
+                labels.add(f"{a}→{b}")
+        return labels
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
@@ -52,11 +60,44 @@ class NetworkPanel:
         """Build all widgets — body of the old setup_network_panel."""
         ui = self.ui
 
-        ttk.Label(parent, text="Probe Network",
+        # ── Scrollable controls area ────────────────────────────────────
+        # All control widgets go into `ctrl` (inside a scrollable canvas).
+        # The matplotlib figure canvas stays in `parent` below.
+        _ctrl_outer = tk.Frame(parent)
+        _ctrl_outer.pack(side=tk.TOP, fill=tk.X)
+        _ctrl_outer.configure(height=240)
+        _ctrl_outer.pack_propagate(False)
+
+        _ctrl_sb = ttk.Scrollbar(_ctrl_outer, orient=tk.VERTICAL)
+        _ctrl_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        _ctrl_canvas = tk.Canvas(_ctrl_outer, highlightthickness=0,
+                                  yscrollcommand=_ctrl_sb.set)
+        _ctrl_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _ctrl_sb.config(command=_ctrl_canvas.yview)
+
+        ctrl = ttk.Frame(_ctrl_canvas)
+        _ctrl_win = _ctrl_canvas.create_window((0, 0), window=ctrl, anchor='nw')
+
+        def _on_ctrl_frame_configure(e):
+            _ctrl_canvas.configure(scrollregion=_ctrl_canvas.bbox('all'))
+        ctrl.bind('<Configure>', _on_ctrl_frame_configure)
+
+        def _on_ctrl_canvas_configure(e):
+            _ctrl_canvas.itemconfig(_ctrl_win, width=e.width)
+        _ctrl_canvas.bind('<Configure>', _on_ctrl_canvas_configure)
+
+        def _on_mousewheel(e):
+            _ctrl_canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+        _ctrl_canvas.bind('<MouseWheel>', _on_mousewheel)
+        ctrl.bind('<MouseWheel>', _on_mousewheel)
+        # ── (end scrollable wrapper) ────────────────────────────────────
+
+        ttk.Label(ctrl, text="Probe Network",
                   font=('Arial', 10, 'bold')).pack(pady=(0, 2))
 
         # ── Neuron-focus (foldable) ─────────────────────────────────────
-        _fn_outer = ttk.Frame(parent)
+        _fn_outer = ttk.Frame(ctrl)
         _fn_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
         _fn_hdr = ttk.Frame(_fn_outer)
         _fn_hdr.pack(fill=tk.X)
@@ -79,7 +120,7 @@ class NetworkPanel:
                   font=('Arial', 8), foreground='#555').pack(side=tk.LEFT, padx=4)
 
         # ── Pair-focus (foldable) ───────────────────────────────────────
-        _fp_outer = ttk.Frame(parent)
+        _fp_outer = ttk.Frame(ctrl)
         _fp_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
         _fp_hdr = ttk.Frame(_fp_outer)
         _fp_hdr.pack(fill=tk.X)
@@ -107,7 +148,7 @@ class NetworkPanel:
         self._add_pair_btn.pack(side=tk.LEFT, padx=4)
 
         # ── Connection type toggles ──────────────────────────────────────
-        ct_frame = ttk.Frame(parent)
+        ct_frame = ttk.Frame(ctrl)
         ct_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
         # "Current pair" toggle — highlights only the current pair
         self._net_cur_pair_var = tk.BooleanVar(value=False)
@@ -132,7 +173,7 @@ class NetworkPanel:
                             command=self.draw).pack(side=tk.LEFT, padx=2)
 
         # ── Network display toggles ──────────────────────────────────────
-        toggle_frame = ttk.Frame(parent)
+        toggle_frame = ttk.Frame(ctrl)
         toggle_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
         self._net_arrows_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(toggle_frame, text="Lines",
@@ -161,7 +202,7 @@ class NetworkPanel:
                         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Group filter — wrapping toggle checkbuttons (multi-select / merge) ──
-        group_lf = ttk.Frame(parent, relief='groove', borderwidth=1)
+        group_lf = ttk.Frame(ctrl, relief='groove', borderwidth=1)
         group_lf.pack(fill=tk.X, padx=4, pady=(0, 2))
         # Header row: fold arrow + "Groups" label + "Clear all" button
         grp_hdr = ttk.Frame(group_lf)
@@ -170,13 +211,16 @@ class NetworkPanel:
         self._net_grp_arrow = tk.Label(grp_hdr, text='▾', cursor='hand2',
                                        font=('Arial', 9))
         self._net_grp_arrow.pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Label(grp_hdr, text="Groups", font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
+        ttk.Label(grp_hdr, text="Groups (highlighted/session/all)",
+                  font=('Arial', 8, 'bold')).pack(side=tk.LEFT)
         ttk.Button(grp_hdr, text="Clear all", width=7,
                    command=self._on_group_clear
                    ).pack(side=tk.RIGHT, padx=(2, 0))
-        ttk.Button(grp_hdr, text="Save selections", width=14,
-                   command=self._on_save_selections_to_group
-                   ).pack(side=tk.RIGHT, padx=(2, 0))
+        self._net_grp_counts_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(grp_hdr, text="counts",
+                        variable=self._net_grp_counts_var,
+                        command=self.refresh_group_buttons
+                        ).pack(side=tk.RIGHT, padx=(2, 0))
         # Wrapping body — buttons are laid out by refresh_group_buttons
         self._net_grp_body = ttk.Frame(group_lf)
         self._net_grp_body.pack(fill=tk.X, expand=False, padx=2, pady=(0, 2))
@@ -201,7 +245,7 @@ class NetworkPanel:
         )
 
         # ── Probe (shank) visibility ──────────────────────────────────────
-        probe_lf = ttk.Frame(parent, relief='groove', borderwidth=1)
+        probe_lf = ttk.Frame(ctrl, relief='groove', borderwidth=1)
         probe_lf.pack(fill=tk.X, padx=4, pady=(0, 2))
         probe_hdr = ttk.Frame(probe_lf)
         probe_hdr.pack(fill=tk.X, padx=2, pady=(2, 0))
@@ -237,7 +281,7 @@ class NetworkPanel:
         self._net_probe_arrow.bind('<Button-1>', lambda e: _toggle_probe_body())
 
         # ── Zoom sliders ─────────────────────────────────────────────────
-        zoom_frame = ttk.Frame(parent)
+        zoom_frame = ttk.Frame(ctrl)
         zoom_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
         ttk.Label(zoom_frame, text="H:", font=('Arial', 7)).pack(side=tk.LEFT)
         self._net_hzoom_var = tk.DoubleVar(value=1.0)
@@ -398,11 +442,7 @@ class NetworkPanel:
             if 0 <= ref < n_neurons and 0 <= tgt < n_neurons:
                 deleted_pair_entries[(ref, tgt)] = True
 
-        # Debug: how many pairs gathered vs expected
-        _n_ui = len(ui.all_inds) if hasattr(ui, 'all_inds') else '?'
-        print(f"[ProbeNetwork] pair_entries={len(pair_entries)} unique pairs, "
-              f"type_keys={len(type_keys_show)}, "
-              f"all_inds(UI)={_n_ui}, fn={fn}, groups={active_groups or None}")
+
 
         # ── Neuron sets ──────────────────────────────────────────────────
         cur_arr = ui.ccg_pointer.inds[:, -2:]
@@ -856,11 +896,17 @@ class NetworkPanel:
             if gname not in ui._net_group_filter_vars:
                 ui._net_group_filter_vars[gname] = tk.BooleanVar(
                     master=ui.root, value=False)
-            n_sess = len(ui._group_pairs(gname))
+            sess = ui._current_session_str()
+            pairs_sess = ui._group_pairs(gname)
+            n_sess = len(pairs_sess)
             n_all  = len(ui._group_pairs_all_sessions(gname))
-            count  = f"{n_sess}/{n_all}" if n_all != n_sess else str(n_sess)
+            n_hl = len(ui._filter_pairs_to_conn_types(
+                sess, pairs_sess, self._highlighted_ct_labels()))
+            count = f"{n_hl}/{n_sess}/{n_all}"
+            show_counts = (getattr(self, '_net_grp_counts_var', None) is None
+                           or self._net_grp_counts_var.get())
             btn = ttk.Checkbutton(
-                self._net_grp_body, text=f"{gname} ({count})",
+                self._net_grp_body, text=(f"{gname} ({count})" if show_counts else gname),
                 variable=ui._net_group_filter_vars[gname],
                 command=lambda g=gname: self._on_group_toggle(g))
             ui._net_grp_items.append((btn, False))
@@ -886,11 +932,17 @@ class NetworkPanel:
                 if gname not in ui._net_group_filter_vars:
                     ui._net_group_filter_vars[gname] = tk.BooleanVar(
                         master=ui.root, value=False)
-                n_sess = len(ui._group_pairs(gname))
+                sess = ui._current_session_str()
+                pairs_sess = ui._group_pairs(gname)
+                n_sess = len(pairs_sess)
                 n_all  = len(ui._group_pairs_all_sessions(gname))
-                count  = f"{n_sess}/{n_all}" if n_all != n_sess else str(n_sess)
+                n_hl = len(ui._filter_pairs_to_conn_types(
+                    sess, pairs_sess, self._highlighted_ct_labels()))
+                count = f"{n_hl}/{n_sess}/{n_all}"
+                show_counts = (getattr(self, '_net_grp_counts_var', None) is None
+                               or self._net_grp_counts_var.get())
                 btn = ttk.Checkbutton(
-                    self._net_grp_body, text=f"{display} ({count})",
+                    self._net_grp_body, text=(f"{display} ({count})" if show_counts else display),
                     variable=ui._net_group_filter_vars[gname],
                     command=lambda g=gname: self._on_group_toggle(g))
                 ui._net_grp_items.append((btn, False))

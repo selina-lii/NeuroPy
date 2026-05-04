@@ -1,0 +1,34 @@
+{
+  "version": "4.0",
+  "name": "autosaved",
+  "saved_at": "2026-05-01T14:54:47.051338",
+  "session": "RatU_Day4SD",
+  "selections": {
+    "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
+    "sess_RatU_Day4SD.ex_E.type_pyr-inter": [
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        11
+      ]
+    ],
+    "sess_RatU_Day4SD.ex_I.type_inter-inter": [],
+    "sess_RatU_Day4SD.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "1,0": {
+      "groups": [
+        2
+      ]
+    },
+    "1,11": {
+      "groups": [
+        9
+      ]
+    }
+  },
+  "deleted": []
+}

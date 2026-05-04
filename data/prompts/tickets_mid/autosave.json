@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "priority": "mid",
+  "files": [
+    {
+      "name": "Default File",
+      "items": [
+        "hotkey: CTRL+Z sometimes shows 'no pair tag to redo' when there is."
+      ]
+    }
+  ],
+  "saved_at": "2026-04-28T11:54:12.539936"
+}

@@ -1,0 +1,44 @@
+{
+  "version": "4.0",
+  "name": "autosaved",
+  "saved_at": "2026-05-02T16:13:44.277478",
+  "session": "RatV_Day2SD",
+  "selections": {
+    "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [
+      [
+        4,
+        10
+      ],
+      [
+        4,
+        14
+      ],
+      [
+        20,
+        14
+      ]
+    ],
+    "sess_RatV_Day2SD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "4,10": {
+      "groups": [
+        6
+      ]
+    },
+    "4,14": {
+      "groups": [
+        6
+      ]
+    },
+    "20,14": {
+      "groups": [
+        6,
+        9
+      ]
+    }
+  },
+  "deleted": []
+}

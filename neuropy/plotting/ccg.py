@@ -72,9 +72,15 @@ def plot_ccg_panel(
         _baseline_line = line_baseline or _legacy_line
 
         # Always set y-axis range based on CCG data so hiding CCG
-        # doesn't zoom into the baseline alone.
-        ccg_ymax = np.max(ccg) * 1.1 if np.max(ccg) > 0 else 1
-        ax.set_ylim(0, ccg_ymax)
+        # doesn't zoom into the baseline alone.  When data contains negative
+        # values (e.g. baseline-subtracted), show full range with 10% buffer.
+        ccg_min = float(np.min(ccg))
+        ccg_max = float(np.max(ccg))
+        rng = max(ccg_max - ccg_min, 1e-12)
+        buf = rng * 0.1
+        y_lo = (ccg_min - buf) if ccg_min < 0 else 0
+        y_hi = (ccg_max + buf) if ccg_max > 0 else 1
+        ax.set_ylim(y_lo, y_hi)
         # set CCG transparency here
         if show_ccg:
             if _ccg_line:
@@ -167,9 +173,8 @@ def plot_ccg_panel(
 
         sig_marker = '*' if is_significant_pair else ''
         type_str = f', type={neuron_type}' if neuron_type is not None else ''
-        if normalize_info is None:
-            ax.set_title(
-                f"{segment_id}: shank={ids}, inds={inds}{type_str}{sig_marker}")
+        ax.set_title(
+            f"{segment_id}: shank={ids}, inds={inds}{type_str}{sig_marker}")
         ax.legend(fontsize=8)
         sns.despine(ax=ax)
 
