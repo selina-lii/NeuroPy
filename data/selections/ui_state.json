@@ -52,7 +52,7 @@
   },
   "auto_pregen_enabled": false,
   "last_key": {
-    "session": "RatV_Day3NSD",
+    "session": "RatV_Day2SD",
     "epoch": null,
     "ref_ind": null,
     "target_ind": null,
@@ -68,14 +68,14 @@
   "conn_str_metric": "STG",
   "jitter_run_lo": true,
   "jitter_run_hi": true,
-  "current_segment": 4,
+  "current_segment": 6,
   "sort_selected": false,
-  "sort_by_tag": true,
+  "sort_by_tag": false,
   "sort_by_mean": false,
   "sort_by_min_p": false,
-  "pair_scale": true,
+  "pair_scale": false,
   "sess_scale": false,
-  "sash_pos": 175,
+  "sash_pos": 103,
   "display_vars": {
     "_sig_conv_p_var": false,
     "_sig_conv_pc_var": false,
@@ -89,7 +89,7 @@
     "_acg_deconv_ref_var": false,
     "_acg_deconv_tgt_var": false,
     "_extend_enable_var": false,
-    "_extend_ms_var": 500,
+    "_extend_ms_var": 50,
     "_extend_bin_ms_var": 1,
     "_peak_wf_var": false,
     "_acg_yscale_ref_var": 1.0,
@@ -107,6 +107,9 @@
     "active_alpha": 0.05
   },
   "highres_mode": true,
-  "sbs_mode": false,
-  "loaded_custom_ccgs": []
+  "sbs_mode": true,
+  "loaded_custom_ccgs": [
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day2SD__nonripple__260511-03-08.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day2SD__ripple__260511-03-07.npz"
+  ]
 }

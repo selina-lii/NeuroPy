@@ -52,7 +52,7 @@
   },
   "auto_pregen_enabled": false,
   "last_key": {
-    "session": "RatR_Day1NSD",
+    "session": "RatV_Day3NSD",
     "epoch": null,
     "ref_ind": null,
     "target_ind": null,
@@ -60,7 +60,7 @@
     "excitability": "E",
     "conn_type": [
       "pyr",
-      "pyr"
+      "inter"
     ]
   },
   "active_norms": [],
@@ -68,14 +68,14 @@
   "conn_str_metric": "STG",
   "jitter_run_lo": true,
   "jitter_run_hi": true,
-  "current_segment": 0,
+  "current_segment": 4,
   "sort_selected": false,
   "sort_by_tag": true,
   "sort_by_mean": false,
   "sort_by_min_p": false,
   "pair_scale": true,
   "sess_scale": false,
-  "sash_pos": 9,
+  "sash_pos": 175,
   "display_vars": {
     "_sig_conv_p_var": false,
     "_sig_conv_pc_var": false,

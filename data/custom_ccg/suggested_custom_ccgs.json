@@ -1,0 +1,1299 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 33146.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 56089.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 51616.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 52056.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 33120.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 54609.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 53563.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 46588.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 43156.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 47042.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 40281.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 32818.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 52053.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 46093.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 45160.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 48877.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 45845.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 49023.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ]
+    },
+    {
+      "name": "nonripple",
+      "t0": 13860.0,
+      "t1": 48498.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": false,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 6031.0,
+      "t1": 21418.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "re-maze0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 6033.0,
+      "t1": 21466.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 11870.0,
+      "t1": 27398.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 12856.0,
+      "t1": 29086.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 13272.0,
+      "t1": 29497.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 13354.0,
+      "t1": 29440.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 13545.0,
+      "t1": 34894.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 13863.0,
+      "t1": 33722.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 14239.0,
+      "t1": 33105.5,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "post1",
+      "t0": 15090.0,
+      "t1": 36414.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ]
+    },
+    {
+      "name": "post1st",
+      "t0": 12855.0,
+      "t1": 29050.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "re-maze0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 21363.0,
+      "t1": 36899.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "re-maze0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 21466.0,
+      "t1": 36899.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 27398.0,
+      "t1": 42926.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 29086.0,
+      "t1": 45316.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 29440.0,
+      "t1": 45526.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 29497.0,
+      "t1": 45722.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 33105.5,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 33722.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 34680.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "post2",
+      "t0": 36414.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {}
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ]
+    },
+    {
+      "name": "post2nd",
+      "t0": 28853.0,
+      "t1": 45316.0,
+      "filter_state": {
+        "theme": "segments",
+        "labels": {
+          "maze0": true,
+          "post0": true,
+          "pre0": true,
+          "re-maze0": true,
+          "NONE": true
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 56089.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 33146.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 51616.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 52056.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 54609.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 33120.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 53563.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 46588.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 47042.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 43156.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 40281.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 52053.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 32818.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 46093.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 45160.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 48877.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 49023.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 45845.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ]
+    },
+    {
+      "name": "ripple",
+      "t0": 13860.0,
+      "t1": 48498.0,
+      "filter_state": {
+        "theme": "ripple",
+        "labels": {
+          "ripple": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ]
+    }
+  ]
+}

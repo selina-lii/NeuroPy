@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-08T11:26:25.736756",
+  "saved_at": "2026-05-11T12:41:51.362885",
   "session": "RatU_Day1SD",
   "selections": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [
@@ -539,10 +539,6 @@
       ],
       [
         65,
-        56
-      ],
-      [
-        65,
         61
       ],
       [
@@ -714,144 +710,7 @@
         79
       ]
     ],
-    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [
-      [
-        0,
-        28
-      ],
-      [
-        3,
-        28
-      ],
-      [
-        5,
-        47
-      ],
-      [
-        6,
-        10
-      ],
-      [
-        14,
-        9
-      ],
-      [
-        14,
-        10
-      ],
-      [
-        14,
-        47
-      ],
-      [
-        16,
-        47
-      ],
-      [
-        25,
-        47
-      ],
-      [
-        35,
-        24
-      ],
-      [
-        35,
-        47
-      ],
-      [
-        36,
-        10
-      ],
-      [
-        36,
-        47
-      ],
-      [
-        38,
-        47
-      ],
-      [
-        44,
-        47
-      ],
-      [
-        48,
-        82
-      ],
-      [
-        52,
-        47
-      ],
-      [
-        54,
-        10
-      ],
-      [
-        55,
-        24
-      ],
-      [
-        55,
-        47
-      ],
-      [
-        56,
-        47
-      ],
-      [
-        57,
-        82
-      ],
-      [
-        62,
-        10
-      ],
-      [
-        62,
-        24
-      ],
-      [
-        62,
-        47
-      ],
-      [
-        63,
-        47
-      ],
-      [
-        66,
-        47
-      ],
-      [
-        68,
-        10
-      ],
-      [
-        68,
-        47
-      ],
-      [
-        70,
-        47
-      ],
-      [
-        72,
-        82
-      ],
-      [
-        73,
-        47
-      ],
-      [
-        74,
-        47
-      ],
-      [
-        79,
-        56
-      ]
-    ],
+    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
   },
@@ -998,6 +857,9 @@
         "triple"
       ]
     },
+    "15,6": {
+      "notes": "good 2peakms"
+    },
     "15,40": {
       "groups": [
         "msconn"
@@ -1125,6 +987,9 @@
       "groups": [
         "rift"
       ]
+    },
+    "27,119": {
+      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "31,76": {
       "groups": [
@@ -1324,6 +1189,9 @@
         "?",
         "ok"
       ]
+    },
+    "41,98": {
+      "notes": "2peak ms pattern is heavy during ripple-only intervals"
     },
     "42,61": {
       "groups": [
@@ -1583,6 +1451,9 @@
       "groups": [
         "good"
       ]
+    },
+    "59,170": {
+      "notes": "active during pre and remaze"
     },
     "60,14": {
       "groups": [
@@ -1955,6 +1826,12 @@
         "2peakms",
         "Disinhib"
       ]
+    },
+    "173,129": {
+      "notes": "is rift just sharp inhibition, if a peak follows?"
+    },
+    "177,6": {
+      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
   "deleted": [],
