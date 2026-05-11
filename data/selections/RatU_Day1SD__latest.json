@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-02T23:57:43.071701",
+  "saved_at": "2026-05-08T11:26:25.736756",
   "session": "RatU_Day1SD",
   "selections": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [
@@ -858,1126 +858,1110 @@
   "pair_tags": {
     "0,27": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "0,28": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "0,50": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "0,69": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "2,8": {
       "groups": [
-        25
+        "neg_skew"
       ]
     },
     "2,15": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "3,28": {
       "groups": [
-        2
+        "good"
       ]
     },
     "3,53": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "4,0": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "4,13": {
       "groups": [
-        4,
-        11
+        "msconn",
+        "pos_skew"
       ]
     },
     "5,36": {
       "groups": [
-        4,
-        8,
-        10,
-        20
+        "2peakms",
+        "msconn",
+        "ok",
+        "rift"
       ]
     },
     "5,47": {
       "groups": [
-        9
+        "best"
       ]
     },
     "5,81": {
       "groups": [
-        20,
-        25
+        "neg_skew",
+        "rift"
       ]
     },
     "6,10": {
       "groups": [
-        9
+        "best"
       ]
     },
     "6,35": {
       "groups": [
-        2,
-        3
+        "?",
+        "good"
       ]
     },
     "8,2": {
       "groups": [
-        7
+        "burst"
       ]
     },
     "12,0": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
     },
     "12,5": {
       "groups": [
-        3
+        "?"
       ]
     },
     "13,15": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "14,9": {
       "groups": [
-        4,
-        17
+        "2side_dips",
+        "msconn"
       ]
     },
     "14,10": {
       "groups": [
-        4,
-        12
+        "leak",
+        "msconn"
       ]
     },
     "14,40": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "14,47": {
       "groups": [
-        4,
-        8,
-        17
+        "2side_dips",
+        "msconn",
+        "ok"
       ]
     },
     "14,75": {
       "groups": [
-        2
+        "good"
       ]
     },
     "14,79": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "14,81": {
       "groups": [
-        32
+        "triple"
       ]
     },
     "15,40": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "16,14": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "16,47": {
       "groups": [
-        9
+        "best"
       ]
     },
     "18,16": {
       "groups": [
-        2
+        "good"
       ]
     },
     "18,35": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "18,36": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "19,69": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "23,62": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "23,63": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "25,14": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "25,26": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "25,35": {
       "groups": [
-        11,
-        20
+        "pos_skew",
+        "rift"
       ]
     },
     "25,38": {
       "groups": [
-        3,
-        4
+        "?",
+        "msconn"
       ]
     },
     "25,47": {
       "groups": [
-        9
+        "best"
       ]
     },
     "25,55": {
       "groups": [
-        10,
-        11,
-        20
+        "2peakms",
+        "pos_skew",
+        "rift"
       ]
     },
     "25,62": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "25,63": {
       "groups": [
-        11,
-        20
+        "pos_skew",
+        "rift"
       ]
     },
     "25,79": {
       "groups": [
-        4,
-        20
+        "msconn",
+        "rift"
       ]
     },
     "25,81": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "26,36": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "26,81": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "27,39": {
       "groups": [
-        5,
-        20
+        "0rhythm",
+        "rift"
       ]
     },
     "27,69": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "27,72": {
       "groups": [
-        20
+        "rift"
       ]
-    },
-    "27,119": {
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "31,76": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "32,14": {
       "groups": [
-        3,
-        4
+        "?",
+        "msconn"
       ]
     },
     "32,69": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "32,75": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "34,16": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "34,53": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "34,56": {
       "groups": [
-        3
+        "?"
       ]
     },
     "34,73": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "34,79": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "34,81": {
       "groups": [
-        5
+        "0rhythm"
       ]
     },
     "35,5": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "35,16": {
       "groups": [
-        2
+        "good"
       ]
     },
     "35,24": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "35,36": {
       "groups": [
-        20,
-        31
+        "refractory",
+        "rift"
       ]
     },
     "35,47": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "35,53": {
       "groups": [
-        5
+        "0rhythm"
       ]
     },
     "35,55": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "35,56": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "35,62": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "35,79": {
       "groups": [
-        17,
-        31
+        "2side_dips",
+        "refractory"
       ]
     },
     "35,81": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "36,5": {
       "groups": [
-        10
-      ],
-      "notes": "pre"
+        "2peakms"
+      ]
     },
     "36,10": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "36,26": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "36,35": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "36,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "36,56": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "36,78": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "36,79": {
       "groups": [
-        3,
-        31
+        "?",
+        "refractory"
       ]
     },
     "36,81": {
       "groups": [
-        10,
-        20
+        "2peakms",
+        "rift"
       ]
     },
     "38,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "39,49": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "39,67": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
     },
     "40,32": {
       "groups": [
-        2
+        "good"
       ]
     },
     "40,49": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "40,60": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "41,44": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "41,80": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
-    },
-    "41,98": {
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
     },
     "42,61": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "42,62": {
       "groups": [
-        5
+        "0rhythm"
       ]
     },
     "42,66": {
       "groups": [
-        11,
-        31
+        "pos_skew",
+        "refractory"
       ]
     },
     "42,81": {
       "groups": [
-        8
-      ],
-      "notes": "sd"
+        "ok"
+      ]
     },
     "43,61": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "44,25": {
       "groups": [
-        8
-      ],
-      "notes": "sd"
+        "ok"
+      ]
     },
     "44,47": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "44,48": {
       "groups": [
-        3
+        "?"
       ]
     },
     "44,74": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "45,0": {
       "groups": [
-        3
+        "?"
       ]
     },
     "45,56": {
       "groups": [
-        2
+        "good"
       ]
     },
     "46,43": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "46,68": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "46,81": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "48,69": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "48,82": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "49,0": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "49,51": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "51,54": {
       "groups": [
-        8
-      ],
-      "notes": "maze"
+        "ok"
+      ]
     },
     "52,14": {
       "groups": [
-        2
+        "good"
       ]
     },
     "52,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "53,62": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,8": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,10": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "54,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,42": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "54,49": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,56": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "54,58": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,78": {
       "groups": [
-        5
+        "0rhythm"
       ]
     },
     "55,14": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "55,24": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "55,47": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "55,56": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "55,62": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "55,75": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "55,76": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "56,16": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "56,35": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "56,36": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "56,47": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "56,55": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "56,74": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "56,77": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "56,81": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "57,82": {
       "groups": [
-        2
+        "good"
       ]
     },
     "58,6": {
       "groups": [
-        3,
-        11,
-        31
+        "?",
+        "pos_skew",
+        "refractory"
       ]
     },
     "58,27": {
       "groups": [
-        2
+        "good"
       ]
     },
     "58,65": {
       "groups": [
-        2
+        "good"
       ]
     },
     "58,67": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "59,31": {
       "groups": [
-        2
+        "good"
       ]
-    },
-    "59,170": {
-      "notes": "active during pre and remaze"
     },
     "60,14": {
       "groups": [
-        3,
-        10,
-        31
+        "2peakms",
+        "?",
+        "refractory"
       ]
     },
     "60,55": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "61,68": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "62,10": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "62,24": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "62,32": {
       "groups": [
-        3
+        "?"
       ]
     },
     "62,47": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "62,52": {
       "groups": [
-        2
+        "good"
       ]
     },
     "62,54": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "62,63": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "62,79": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "62,81": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "63,41": {
       "groups": [
-        8
-      ],
-      "notes": "remaze"
+        "ok"
+      ]
     },
     "63,47": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "63,55": {
       "groups": [
-        8,
-        20
+        "ok",
+        "rift"
       ]
     },
     "63,62": {
       "groups": [
-        8,
-        20,
-        31
+        "ok",
+        "refractory",
+        "rift"
       ]
     },
     "63,81": {
       "groups": [
-        2,
-        3
+        "?",
+        "good"
       ]
     },
     "64,35": {
       "groups": [
-        11,
-        31
+        "pos_skew",
+        "refractory"
       ]
     },
     "64,36": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "64,56": {
       "groups": [
-        2,
-        20
-      ],
-      "notes": "re-maze"
+        "good",
+        "rift"
+      ]
     },
     "65,61": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "65,68": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "66,25": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "66,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "66,62": {
       "groups": [
-        5
+        "0rhythm"
       ]
     },
     "67,74": {
       "groups": [
-        4,
-        20
+        "msconn",
+        "rift"
       ]
     },
     "68,10": {
       "groups": [
-        2
+        "good"
       ]
     },
     "68,47": {
       "groups": [
-        9
+        "best"
       ]
     },
     "68,48": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "68,72": {
       "groups": [
-        8
-      ],
-      "notes": "pre"
+        "ok"
+      ]
     },
     "69,51": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "70,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "72,0": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "72,8": {
       "groups": [
-        4,
-        12
+        "leak",
+        "msconn"
       ]
     },
     "72,40": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "72,69": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
     },
     "72,82": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "73,47": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "73,70": {
       "groups": [
-        11
+        "pos_skew"
       ]
     },
     "73,75": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "73,76": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "74,44": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "74,47": {
       "groups": [
-        2
+        "good"
       ]
     },
     "75,16": {
       "groups": [
-        3
+        "?"
       ]
     },
     "75,26": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "75,34": {
       "groups": [
-        2
+        "good"
       ]
     },
     "75,70": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "75,71": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "75,76": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "75,81": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "77,36": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "78,36": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "78,75": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "78,81": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "79,26": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "79,35": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "79,36": {
       "groups": [
-        3,
-        8,
-        31
+        "?",
+        "ok",
+        "refractory"
       ]
     },
     "79,56": {
       "groups": [
-        2,
-        7
+        "burst",
+        "good"
       ]
     },
     "79,78": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "79,81": {
       "groups": [
-        4,
-        10
+        "2peakms",
+        "msconn"
       ]
     },
     "80,30": {
       "groups": [
-        2
+        "good"
       ]
     },
     "80,38": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "81,5": {
       "groups": [
-        10,
-        20
+        "2peakms",
+        "rift"
       ]
     },
     "81,14": {
       "groups": [
-        32
+        "triple"
       ]
     },
     "81,35": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "81,37": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "81,48": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
     },
     "81,56": {
       "groups": [
-        4,
-        10,
-        20
+        "2peakms",
+        "msconn",
+        "rift"
       ]
     },
     "81,75": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "81,79": {
       "groups": [
-        10,
-        18
+        "2peakms",
+        "Disinhib"
       ]
-    },
-    "173,129": {
-      "notes": "is rift just sharp inhibition, if a peak follows?"
-    },
-    "177,6": {
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
-  "deleted": []
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
+    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
+    "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
+    "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
+  }
 }

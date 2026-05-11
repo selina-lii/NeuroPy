@@ -48,13 +48,14 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
                     ccg_pointer=ptr, ccg_data=ccg_data)
         j.run()
 
-        j_avg, _, _ = j._j_ccg_cache.get(0, (None, None, None))
+        j_avg, j_lo, j_hi = j._j_ccg_cache.get(0, (None, None, None))
         j_pval = (float(j.pval[0])
                   if j.pval is not None and len(j.pval) else None)
         j_pval_bins = j.pval_bins[0] if j.pval_bins is not None else None
         queue.put({
             'ref': ref, 'tgt': tgt,
-            'j_avg': j_avg, 'j_pval': j_pval, 'j_pval_bins': j_pval_bins,
+            'j_avg': j_avg, 'j_lo': j_lo, 'j_hi': j_hi,
+            'j_pval': j_pval, 'j_pval_bins': j_pval_bins,
             'error': None,
         })
     except Exception as ex:

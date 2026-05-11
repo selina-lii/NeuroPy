@@ -156,6 +156,8 @@ data/*
 !data/*/*/
 # Track JSON files (selections, configs, etc.)
 !data/**/*.json
+# But never track history snapshots (even though they are JSON)
+data/selections/.history/
 # But ignore everything under ccg/ and jitter/ (hkl + meta.json)
 data/ccg/
 data/jitter/

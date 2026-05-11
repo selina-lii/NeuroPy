@@ -224,36 +224,44 @@ def compute_pair_conn_strength_1d(ccg, ccg_null, conf, method,
         return cs, baseline
 
     if method == 'tailed':
-        if acg_ref is None or acg_tgt is None:
-            return None, None
+        # Tailed baseline: mean of far-lag "tail" bins of the CURRENT CCG.
+        # No ACG deconvolution is performed here; deconvolution (if desired) is a
+        # separate upstream display transform.
         try:
-            dcccg = deconv_autocorr(ccg.copy().astype(float),
-                                    acg_ref, nspks_ref, acg_tgt, nspks_tgt)
             hw = max(1, int(11e-3 / bin_size_eff))
             l_idx = center - hw
             r_idx = center + hw + 1
             if l_idx > 0 and r_idx < n_bins:
-                tail = np.concatenate([dcccg[:l_idx], dcccg[r_idx:]])
+                tail = np.concatenate([ccg[:l_idx], ccg[r_idx:]])
             else:
                 edge = max(1, n_bins // 10)
-                tail = np.concatenate([dcccg[:edge], dcccg[-edge:]])
+                tail = np.concatenate([ccg[:edge], ccg[-edge:]])
             baseline_val = float(np.mean(tail))
             baseline = np.full(n_bins, baseline_val)
-            cs = float(np.sum((dcccg - baseline_val)[lo:hi_bin]))
+            cs = float(np.sum((ccg - baseline_val)[lo:hi_bin]))
             return cs, baseline
         except Exception:
             return None, None
 
     if method == 'global':
-        # Baseline = max of bins OUTSIDE the test window [lo, hi_bin)
-        outside_mask = np.ones(n_bins, dtype=bool)
-        outside_mask[lo:hi_bin] = False
-        if not np.any(outside_mask):
+        # Global baseline: flat baseline at the maximum of the ACTIVE baseline.
+        # - If convolution null exists, use its maximum.
+        # - Otherwise fall back to the maximum outside the test window of the current CCG.
+        try:
+            if ccg_null is not None:
+                baseline_val = float(np.max(ccg_null))
+            else:
+                outside_mask = np.ones(n_bins, dtype=bool)
+                outside_mask[lo:hi_bin] = False
+                if not np.any(outside_mask):
+                    baseline_val = float(np.max(ccg))
+                else:
+                    baseline_val = float(np.max(ccg[outside_mask]))
+            baseline = np.full(n_bins, baseline_val)
+            cs = float(np.sum((ccg - baseline_val)[lo:hi_bin]))
+            return cs, baseline
+        except Exception:
             return None, None
-        baseline_val = float(np.max(ccg[outside_mask]))
-        baseline = np.full(n_bins, baseline_val)
-        cs = float(np.sum((ccg - baseline_val)[lo:hi_bin]))
-        return cs, baseline
 
     return None, None
 
@@ -886,6 +894,9 @@ class CCGData(Savable):
                 shank_ids=neurons.shank_ids[inds],
                 discarded_channels=neurons_config.recinfo.skipped_channels,
                 ch_per_shank=neurons_config.ch_per_shank,
+                peak_channels=(neurons.peak_channels[inds]
+                               if getattr(neurons, 'peak_channels', None) is not None
+                               else None),
                 save_path=save_path,
                 window_size=self.conf.duration * 1e3,
                 bin_size=self.conf.bin_size * 1e3,
@@ -1020,6 +1031,9 @@ class CCGData(Savable):
                     shank_ids=neurons.shank_ids[inds],
                     discarded_channels=neurons_config.recinfo.skipped_channels,
                     ch_per_shank=neurons_config.ch_per_shank,
+                    peak_channels=(neurons.peak_channels[inds]
+                                   if getattr(neurons, 'peak_channels', None) is not None
+                                   else None),
                     save_path=None,
                     window_size=self.conf.duration * 1e3,
                     bin_size=self.conf.bin_size * 1e3,
@@ -1092,7 +1106,7 @@ class CCGDataset(AnalysisDataset):
         self._ccg = {}
         self.data = {}
         self.spurious = {}
-        self._jitter = {}       # Key → Jitter (populated by refine_with_jitter)
+        # Jitter significance testing lives in neuropy.analyses.jitter (Jitter/JitterDataset).
         self._ccg_highres = {}  # nd_key → CCGData (raw only; loaded by load_highres)
         self._jitter_results = {}  # nd_key → {(ref, tgt, res_key): (j_avg, j_pval, j_pval_bins)}
         self.get_ccg()
@@ -1569,7 +1583,8 @@ class CCGDataset(AnalysisDataset):
             self._save_metadata()
         elif baseline_method == "jitter":
             raise NotImplementedError(
-                "CCG jitter must be run via refine_with_jitter(). Nothing is run."
+                "CCG jitter is implemented in neuropy.analyses.jitter. "
+                "Use Jitter/JitterDataset (or the GUI on-demand jitter)."
             )
         else:
             raise ValueError(f"Unknown baseline_method: {baseline_method!r}")
@@ -1623,46 +1638,6 @@ class CCGDataset(AnalysisDataset):
         # Persist updated pointers (cheap) but leave ccgdata untouched
         self.save_ccgpointers()
         self._save_metadata()
-
-    def refine_with_jitter(self, jconf, conn_types=None):
-        """
-        Second-pass significance test using interval jitter.
-
-        Runs jitter only on the EranConv-selected pairs (self.data).
-        Does NOT modify self.data or self.spurious — stores per-pair
-        significance in self._jitter (Key → Jitter).
-
-        Parameters
-        ----------
-        jconf : JitterConfig
-            Jitter configuration (njitter, jscale, alpha, etc.)
-        """
-        from neuropy.analyses.jitter import Jitter
-
-        for key, ccg_pointer in self.data.items():
-            if ccg_pointer.n_pairs == 0:
-                continue
-            if ccg_pointer.key.conn_type not in conn_types:
-                continue
-
-            nd_key = key.nd()
-            neurons = self.nd.data[nd_key]
-            ccg_data = self._ccg[nd_key]
-
-            j = Jitter(
-                key=key,
-                neurons=neurons,
-                conf=jconf,
-                ccg_pointer=ccg_pointer,
-                ccg_data=ccg_data,
-            )
-            j.run()
-            self._jitter[key] = j
-
-            print(
-                f"[refine_with_jitter] {key}: "
-                f"{j.j_sig.sum()}/{j.n_pairs} pairs significant"
-            )
 
     def load_highres(self, conf_highres: 'CCGConfig'=None, force_recompute: bool=False):
         """
@@ -1849,23 +1824,6 @@ class CCGDataset(AnalysisDataset):
             printstr += '\n'
 
         return s + printstr
-
-    def jitter_pval(self, key, ref: int, tgt: int) -> Optional[float]:
-        """Return the minimum jitter p-value for a (ref, tgt) pair under *key*.
-
-        Returns None if jitter has not been run for this key or the pair is not
-        present in the jitter results.
-        """
-        j = self._jitter.get(key)
-        if j is None:
-            return None
-        inds = j.ccg_pointer.inds
-        if inds is None:
-            return None
-        mask = (inds[:, -2] == ref) & (inds[:, -1] == tgt)
-        if not mask.any():
-            return None
-        return float(j.pval[mask].min())
 
     def copy(self) -> "CCGDataset":
         """Copy only conf and nd (nd is a shallow reference)"""

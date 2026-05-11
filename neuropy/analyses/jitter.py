@@ -31,6 +31,7 @@ class JitterConfig:
         jscale: float = 5e-3,
         alpha: float = 0.05,
         use_acceleration: bool = True,
+        ccg_batch_bytes: int = 256_000_000,
     ):
         """
         Parameters
@@ -52,6 +53,10 @@ class JitterConfig:
             Significance threshold.
         use_acceleration : bool
             Use CuPy GPU acceleration where available.
+        ccg_batch_bytes : int
+            Soft memory budget (bytes) used to choose how many jitter trials
+            to compute per call to ``spike_correlations``. Larger values run
+            more jitter trials in parallel but use more memory.
         """
         self.ccg = ccg
         self.njitter = njitter
@@ -59,6 +64,7 @@ class JitterConfig:
         self.jscale = jscale
         self.alpha = alpha
         self.use_acceleration = use_acceleration
+        self.ccg_batch_bytes = int(ccg_batch_bytes) if ccg_batch_bytes is not None else 256_000_000
 
     def __str__(self):
         return (
@@ -186,7 +192,7 @@ class Jitter:
 
             # 2. Compute CCG: refs × jittered-targets
             #    j_ccg shape: [n_ref, njitter, n_bins]
-            j_ccg = self._compute_jitter_ccg(refs, j_trains)
+            j_ccg = self._compute_jitter_ccg(refs, tgt, j_trains)
 
             ref_list = list(refs)
 
@@ -225,55 +231,92 @@ class Jitter:
                 self.JBSI[pair_idx] = self._jbsi(
                     ref, tgt, real_ccg, j_ccg_avg)
 
-    def _compute_jitter_ccg(self, refs, j_trains):
+    def _compute_jitter_ccg(self, refs, tgt_ind, j_trains):
         """
         Compute CCG between ref neurons and njitter jittered target spike trains.
 
         Returns j_ccg of shape [n_ref, njitter, n_bins].
 
-        Each jitter trial is computed individually to avoid merging all
-        jittered spike trains into one massive array (which causes O(n²)
-        scaling in the shift-based CCG loop).
+        Jitter trials are computed in batches so each call to
+        ``correlations.spike_correlations`` can process many targets at once
+        (maximally parallel), while respecting a soft memory budget.
         """
-        njitter = self.conf.njitter
+        njitter = int(self.conf.njitter)
         ccg_conf = self.conf.ccg
         n_ref = len(refs)
 
-        results = []
-        for ji in range(njitter):
-            # Slice ref neurons fresh each time (merge mutates the object)
+        # Normalize j_trains to a list for easy slicing
+        if isinstance(j_trains, np.ndarray):
+            j_list = [j_trains[i] for i in range(j_trains.shape[0])]
+        else:
+            j_list = list(j_trains)
+        njitter = min(njitter, len(j_list))
+
+        # Choose batch size from a soft memory budget.
+        # We don't trust ccg_conf.nbins (can be stale when bin_size is overridden),
+        # so estimate from duration/bin_size and then allocate based on the first
+        # computed batch's output shape.
+        try:
+            n_bins_est = int(round(float(ccg_conf.duration) / float(ccg_conf.bin_size))) + 1
+        except Exception:
+            n_bins_est = 0
+        bytes_per_est = max(1, n_ref) * max(1, n_bins_est) * 8
+        budget = int(getattr(self.conf, 'ccg_batch_bytes', 256_000_000) or 256_000_000)
+        batch = max(1, min(njitter, budget // max(1, bytes_per_est)))
+        out = None
+        n_bins = None
+
+        # Slice ref neurons once per batch (merge mutates the object)
+        ref_neurons_base = self.neurons.neuron_slice(neuron_inds=refs)
+        tgt_id_base = int(self.neurons.neuron_ids[tgt_ind])
+        tgt_type = (self.neurons.neuron_type[tgt_ind][0]
+                    if getattr(self.neurons, 'neuron_type', None) is not None else None)
+
+        done = 0
+        while done < njitter:
+            b = min(batch, njitter - done)
             ref_neurons = self.neurons.neuron_slice(neuron_inds=refs)
 
-            # Single jittered target neuron
-            tgt_id = self.neurons.neuron_ids[refs[0]]
+            # Batch of jittered target neurons appended after refs
+            batch_trains = j_list[done:done + b]
             j_neurons = Neurons(
-                spiketrains=[j_trains[ji]],
+                spiketrains=batch_trains,
                 t_start=self.neurons.t_start,
                 t_stop=self.neurons.t_stop,
-                neuron_ids=[tgt_id * 100000 + ji],
-                neuron_type=[self.neurons.neuron_type[refs[0]][0]],
+                neuron_ids=[tgt_id_base * 100000 + (done + i) for i in range(b)],
+                neuron_type=([tgt_type] * b) if tgt_type is not None else None,
             )
             combined = ref_neurons
             combined.merge(j_neurons)
 
-            # 2groups: refs = 0..n_ref-1, single jittered target = n_ref
-            # Returns shape [n_ref, 1, n_bins]
+            # refs = 0..n_ref-1, targets = n_ref..n_ref+b-1
             ccg_j = correlations.spike_correlations(
                 neurons=combined,
                 ref_neuron_inds=np.arange(n_ref),
-                neuron_inds=np.array([n_ref]),
+                neuron_inds=np.arange(n_ref, n_ref + b),
                 bin_size=ccg_conf.bin_size,
                 window_size=ccg_conf.duration,
                 use_acceleration=ccg_conf.use_acceleration,
                 symmetrize=ccg_conf.symmetrize_ccg,
+                one_to_many=(n_ref == 1),
             )
-            results.append(ccg_j[:, 0, :])  # [n_ref, n_bins]
-            if (ji + 1) % max(1, njitter // 5) == 0:
-                print(f"[Jitter] trial {ji+1}/{njitter} done")
+            # ccg_j: [n_ref, b, n_bins_actual]
+            if out is None:
+                try:
+                    n_bins = int(ccg_j.shape[-1])
+                except Exception:
+                    n_bins = None
+                if not n_bins:
+                    raise ValueError("spike_correlations returned empty CCG")
+                out = np.empty((n_ref, njitter, n_bins), dtype=float)
+            elif n_bins is not None and int(ccg_j.shape[-1]) != int(n_bins):
+                raise ValueError(f"jitter CCG bin mismatch: expected {n_bins}, got {ccg_j.shape[-1]}")
+            out[:, done:done + b, :] = ccg_j
+            done += b
+            if done % max(1, njitter // 5) == 0 or done == njitter:
+                print(f"[Jitter] trial {done}/{njitter} done (batch={b})")
 
-        # Stack: [n_ref, njitter, n_bins]
-        j_ccg = np.stack(results, axis=1)
-        return j_ccg
+        return out
 
     def _jbsi(self, ref, tgt, real_ccg, j_ccg_avg):
         """
@@ -282,15 +325,16 @@ class Jitter:
         real_ccg : [n_bins]   — real CCG for this pair/segment
         j_ccg_avg: [n_bins]   — mean jitter CCG across njitter
         """
-        ccg_conf = self.conf.ccg
         fr_ref = self.neurons.firing_rate[ref]
         fr_tgt = self.neurons.firing_rate[tgt]
-        n1 = np.minimum(fr_ref, fr_tgt)
-
-        ts = ccg_conf.bin_size
-        tj = self.conf.jscale
-        b = tj / (tj - ts) if tj / ts > 2 else 2.0
-        return b / (n1 + 1e-12) * (real_ccg - j_ccg_avg)
+        return compute_jbsi(
+            real_ccg=real_ccg,
+            j_ccg_avg=j_ccg_avg,
+            fr_ref=fr_ref,
+            fr_tgt=fr_tgt,
+            bin_size=self.conf.ccg.bin_size,
+            jscale=self.conf.jscale,
+        )
 
     # ------------------------------------------------------------------
     # Jitter generation
@@ -305,31 +349,16 @@ class Jitter:
         uniformly at random within the window it originally fell in.
         ``jscale`` is the full interval width (not a half-width).
 
-        Caveat: interval jitter can introduce spurious correlations when the
-        window width is comparable to the timescale of interest.  See:
-        Platkiewicz J, Stark E, Bhatt D & Bhatt D, Bhatt D & Amarasingham A.
-        Spike-Centered Jitter Can Mistake Temporal Structure.
-        Neural Comput 2017; 29(3): 783–803.
-        doi: https://doi.org/10.1162/NECO_a_00927
-
         SPIKE_TIMING: each spike is shifted by a uniform draw over
         [-jscale, +jscale].
         """
         spiketrain = np.asarray(self.neurons.spiketrains[tgt_ind])
         n_spikes = len(spiketrain)
         sr = self.neurons.sampling_rate
-        njitter = self.conf.njitter
+        njitter = int(self.conf.njitter)
         jscale_samples = int(self.conf.jscale * sr)
 
         if self.conf.jitter_type == JitterType.INTERVAL:
-            # Interval jitter procedure (Agmon 2012; see Platkiewicz et al. 2017
-            # for caveats on spike-centered vs interval jitter):
-            #   1. Convert spike times to integer samples
-            #   2. Assign each spike to its jscale-wide window:
-            #      window_idx = floor(sample / jscale_samples)
-            #   3. Place uniformly within that window:
-            #      new_sample = floor((window_idx + U[0,1)) * jscale_samples)
-            #   4. Convert back to seconds and sort to maintain ordering
             if self.conf.use_acceleration and cp is not None:
                 trains = (
                     cp.sort(cp.floor(
@@ -355,7 +384,34 @@ class Jitter:
                 ) / sr
             )
 
-        return list(trains)
+        # Keep as a numpy array (njitter, n_spikes); callers can slice without
+        # materializing Python lists.
+        return trains
+
+
+def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale: float):
+    """Compute Jitter-Based Synchrony Index (Agmon 2012) trace.
+
+    Parameters
+    ----------
+    real_ccg : array-like, shape (n_bins,)
+        Real CCG counts for the pair.
+    j_ccg_avg : array-like, shape (n_bins,)
+        Mean jitter CCG across jitter trials.
+    fr_ref, fr_tgt : float
+        Reference/target firing rates (Hz) used in the normalization factor.
+    bin_size : float
+        CCG bin size (seconds).
+    jscale : float
+        Full jitter interval width (seconds).
+    """
+    real_ccg = np.asarray(real_ccg, dtype=float)
+    j_ccg_avg = np.asarray(j_ccg_avg, dtype=float)
+    n1 = np.minimum(float(fr_ref), float(fr_tgt))
+    ts = float(bin_size)
+    tj = float(jscale)
+    b = tj / (tj - ts) if tj / ts > 2 else 2.0
+    return b / (n1 + 1e-12) * (real_ccg - j_ccg_avg)
 
     # ------------------------------------------------------------------
     # Results

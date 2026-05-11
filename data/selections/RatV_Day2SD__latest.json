@@ -1,796 +1,470 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-02T23:57:23.703912",
+  "saved_at": "2026-05-10T18:04:18.142568",
   "session": "RatV_Day2SD",
   "selections": {
     "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
-    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [
-      [
-        4,
-        10
-      ],
-      [
-        4,
-        14
-      ],
-      [
-        4,
-        51
-      ],
-      [
-        5,
-        14
-      ],
-      [
-        5,
-        51
-      ],
-      [
-        7,
-        53
-      ],
-      [
-        7,
-        56
-      ],
-      [
-        11,
-        0
-      ],
-      [
-        11,
-        36
-      ],
-      [
-        11,
-        51
-      ],
-      [
-        12,
-        6
-      ],
-      [
-        12,
-        36
-      ],
-      [
-        12,
-        51
-      ],
-      [
-        13,
-        14
-      ],
-      [
-        13,
-        36
-      ],
-      [
-        13,
-        51
-      ],
-      [
-        15,
-        6
-      ],
-      [
-        15,
-        14
-      ],
-      [
-        17,
-        55
-      ],
-      [
-        17,
-        56
-      ],
-      [
-        18,
-        10
-      ],
-      [
-        18,
-        14
-      ],
-      [
-        18,
-        50
-      ],
-      [
-        18,
-        51
-      ],
-      [
-        20,
-        0
-      ],
-      [
-        20,
-        6
-      ],
-      [
-        20,
-        10
-      ],
-      [
-        20,
-        14
-      ],
-      [
-        20,
-        19
-      ],
-      [
-        20,
-        36
-      ],
-      [
-        20,
-        50
-      ],
-      [
-        20,
-        51
-      ],
-      [
-        21,
-        55
-      ],
-      [
-        21,
-        56
-      ],
-      [
-        22,
-        55
-      ],
-      [
-        22,
-        56
-      ],
-      [
-        26,
-        56
-      ],
-      [
-        28,
-        34
-      ],
-      [
-        29,
-        14
-      ],
-      [
-        30,
-        56
-      ],
-      [
-        32,
-        10
-      ],
-      [
-        33,
-        6
-      ],
-      [
-        33,
-        10
-      ],
-      [
-        33,
-        50
-      ],
-      [
-        33,
-        51
-      ],
-      [
-        35,
-        0
-      ],
-      [
-        35,
-        6
-      ],
-      [
-        35,
-        10
-      ],
-      [
-        35,
-        14
-      ],
-      [
-        35,
-        19
-      ],
-      [
-        35,
-        36
-      ],
-      [
-        35,
-        51
-      ],
-      [
-        37,
-        14
-      ],
-      [
-        38,
-        0
-      ],
-      [
-        38,
-        14
-      ],
-      [
-        38,
-        36
-      ],
-      [
-        38,
-        51
-      ],
-      [
-        39,
-        0
-      ],
-      [
-        39,
-        14
-      ],
-      [
-        39,
-        36
-      ],
-      [
-        39,
-        51
-      ],
-      [
-        40,
-        51
-      ],
-      [
-        42,
-        53
-      ],
-      [
-        42,
-        56
-      ],
-      [
-        43,
-        56
-      ],
-      [
-        46,
-        36
-      ],
-      [
-        46,
-        53
-      ],
-      [
-        46,
-        56
-      ],
-      [
-        47,
-        53
-      ],
-      [
-        48,
-        53
-      ],
-      [
-        48,
-        56
-      ],
-      [
-        49,
-        53
-      ],
-      [
-        49,
-        56
-      ],
-      [
-        52,
-        53
-      ],
-      [
-        54,
-        53
-      ],
-      [
-        57,
-        14
-      ],
-      [
-        57,
-        51
-      ]
-    ],
+    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [],
     "sess_RatV_Day2SD.ex_I.type_inter-inter": [],
     "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
   },
   "pair_tags": {
     "4,10": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "4,14": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "4,51": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "5,14": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "5,51": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "7,53": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "7,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "11,0": {
       "groups": [
-        8,
-        10,
-        12
+        "2peakms",
+        "leak",
+        "ok"
       ]
     },
     "11,36": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "11,51": {
       "groups": [
-        7
+        "burst"
       ]
     },
     "12,6": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "12,36": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "12,51": {
       "groups": [
-        3
+        "?"
       ]
     },
     "13,14": {
       "groups": [
-        20,
-        32
+        "rift",
+        "triple"
       ]
     },
     "13,36": {
       "groups": [
-        4,
-        8,
-        20
+        "msconn",
+        "ok",
+        "rift"
       ]
     },
     "13,51": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "15,6": {
       "groups": [
-        4,
-        8,
-        12
-      ]
+        "leak",
+        "msconn",
+        "ok"
+      ],
+      "notes": "good 2peakms"
     },
     "15,14": {
       "groups": [
-        4,
-        12
+        "leak",
+        "msconn"
       ]
     },
     "17,55": {
       "groups": [
-        8,
-        20
+        "ok",
+        "rift"
       ]
     },
     "17,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "18,10": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "18,14": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "18,50": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "18,51": {
       "groups": [
-        4,
-        6
+        "msconn",
+        "rhythm"
       ]
     },
     "20,0": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "20,6": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "20,10": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "20,14": {
       "groups": [
-        6,
-        9
+        "best",
+        "rhythm"
       ]
     },
     "20,19": {
       "groups": [
-        8,
-        10,
-        20
+        "2peakms",
+        "ok",
+        "rift"
       ]
     },
     "20,36": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "20,50": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "20,51": {
       "groups": [
-        2,
-        6
+        "good",
+        "rhythm"
       ]
     },
     "21,55": {
       "groups": [
-        2,
-        10,
-        20
+        "2peakms",
+        "good",
+        "rift"
       ]
     },
     "21,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "22,55": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "22,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "26,56": {
       "groups": [
-        2
+        "good"
       ]
+    },
+    "27,119": {
+      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "28,34": {
       "groups": [
-        3
+        "?"
       ]
     },
     "29,14": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "30,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "32,10": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "33,6": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "33,10": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "33,50": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "33,51": {
       "groups": [
-        4,
-        6
+        "msconn",
+        "rhythm"
       ]
     },
     "35,0": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "35,6": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "35,10": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "35,14": {
       "groups": [
-        2,
-        6,
-        10
+        "2peakms",
+        "good",
+        "rhythm"
       ]
     },
     "35,19": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "35,36": {
       "groups": [
-        3,
-        4
+        "?",
+        "msconn"
       ]
     },
     "35,51": {
       "groups": [
-        6,
-        8,
-        18
+        "Disinhib",
+        "ok",
+        "rhythm"
       ]
     },
     "37,14": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "38,0": {
       "groups": [
-        4,
-        6
+        "msconn",
+        "rhythm"
       ]
     },
     "38,14": {
       "groups": [
-        18,
-        31
+        "Disinhib",
+        "refractory"
       ]
     },
     "38,36": {
       "groups": [
-        18,
-        31
+        "Disinhib",
+        "refractory"
       ]
     },
     "38,51": {
       "groups": [
-        3,
-        6
+        "?",
+        "rhythm"
       ]
     },
     "39,0": {
       "groups": [
-        7,
-        10
+        "2peakms",
+        "burst"
       ]
     },
     "39,14": {
       "groups": [
-        6,
-        20
+        "rhythm",
+        "rift"
       ]
     },
     "39,36": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "39,51": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "40,51": {
       "groups": [
-        4,
-        8
+        "msconn",
+        "ok"
       ]
+    },
+    "41,98": {
+      "notes": "2peak ms pattern is heavy during ripple-only intervals"
     },
     "42,53": {
       "groups": [
-        3
+        "?"
       ]
     },
     "42,56": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "43,56": {
       "groups": [
-        2
+        "good"
       ]
     },
     "46,36": {
       "groups": [
-        3
-      ],
-      "notes": "nonripple"
+        "?"
+      ]
     },
     "46,53": {
       "groups": [
-        4,
-        8,
-        18
-      ],
-      "notes": "nonripple, ripple"
+        "Disinhib",
+        "msconn",
+        "ok"
+      ]
     },
     "46,56": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "47,53": {
       "groups": [
-        8,
-        18,
-        28
+        "Disinhib",
+        "ok",
+        "wideMs"
       ]
     },
     "48,53": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "48,56": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "49,53": {
       "groups": [
-        4,
-        18
+        "Disinhib",
+        "msconn"
       ]
     },
     "49,56": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "52,53": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "54,53": {
       "groups": [
-        3,
-        18
+        "?",
+        "Disinhib"
       ]
     },
     "57,14": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "57,51": {
       "groups": [
-        2,
-        4,
-        6
+        "good",
+        "msconn",
+        "rhythm"
       ]
+    },
+    "59,170": {
+      "notes": "active during pre and remaze"
+    },
+    "173,129": {
+      "notes": "is rift just sharp inhibition, if a peak follows?"
+    },
+    "177,6": {
+      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
-  "deleted": [
-    [
-      41,
-      6
-    ],
-    [
-      42,
-      14
-    ],
-    [
-      42,
-      34
-    ],
-    [
-      45,
-      10
-    ],
-    [
-      46,
-      10
-    ],
-    [
-      47,
-      14
-    ],
-    [
-      47,
-      51
-    ],
-    [
-      52,
-      56
-    ],
-    [
-      57,
-      6
-    ]
-  ]
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
+  }
 }

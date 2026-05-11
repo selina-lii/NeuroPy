@@ -1,14 +1,32 @@
 {
   "panels": {
-    "Pair Selection": false,
+    "Pair Selection": true,
     "CCG": true,
-    "Probe Network": true,
+    "Probe Network": false,
     "Waveforms": false,
     "Time Slider": false,
     "Group Hotkeys": true
   },
   "settings": {
-    "max_show_together": 5
+    "max_show_together": 5,
+    "export_defaults": {
+      "ccg_color": "black",
+      "baseline_color": "red",
+      "min_text_size": 16.0,
+      "ccg_alpha": 1.0,
+      "baseline_alpha": 0.8,
+      "show_legend": false,
+      "mirror_xticks": true,
+      "xticks_raw": "0,3,5,10",
+      "export_segments": [
+        "All"
+      ],
+      "subfolder_by": [
+        "excitatory/inhibitory",
+        "conn type"
+      ]
+    },
+    "min_font_size": 12
   },
   "cache_config": {
     "_sig_conv_baseline_var": true,
@@ -34,7 +52,7 @@
   },
   "auto_pregen_enabled": false,
   "last_key": {
-    "session": "RatN_Day2",
+    "session": "RatV_Day3NSD",
     "epoch": null,
     "ref_ind": null,
     "target_ind": null,
@@ -47,16 +65,48 @@
   },
   "active_norms": [],
   "conn_str_method": "conv",
+  "conn_str_metric": "STG",
+  "jitter_run_lo": true,
+  "jitter_run_hi": true,
   "current_segment": 4,
-  "sort_selected": true,
-  "sort_by_tag": false,
+  "sort_selected": false,
+  "sort_by_tag": true,
   "sort_by_mean": false,
   "sort_by_min_p": false,
-  "pair_scale": false,
+  "pair_scale": true,
   "sess_scale": false,
-  "sash_pos": 134,
-  "loaded_custom_ccgs": [
-    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatN_Day2__pyr-inter__ripple__260504-00-11.npz",
-    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatN_Day2__pyr-inter__nonripple__260504-00-11.npz"
-  ]
+  "sash_pos": 175,
+  "display_vars": {
+    "_sig_conv_p_var": false,
+    "_sig_conv_pc_var": false,
+    "_sig_test_window_var": true,
+    "_sig_jitter_pc_var": true,
+    "_conn_str_method_var": "conv",
+    "_conn_str_show_var": false,
+    "_adaptive_tw_var": false,
+    "_acg_ref_var": false,
+    "_acg_tgt_var": false,
+    "_acg_deconv_ref_var": false,
+    "_acg_deconv_tgt_var": false,
+    "_extend_enable_var": false,
+    "_extend_ms_var": 500,
+    "_extend_bin_ms_var": 1,
+    "_peak_wf_var": false,
+    "_acg_yscale_ref_var": 1.0,
+    "_acg_yscale_tgt_var": 1.0,
+    "_acg_match_ccg_var": false,
+    "_ccg_show_var": true,
+    "_baseline_show_var": true,
+    "_line_ccg_var": false,
+    "_line_baseline_var": true,
+    "_line_ref_var": false,
+    "_line_tgt_var": false,
+    "_line_peak_wf_var": false,
+    "_line_jitter_var": false,
+    "active_norms": [],
+    "active_alpha": 0.05
+  },
+  "highres_mode": true,
+  "sbs_mode": false,
+  "loaded_custom_ccgs": []
 }

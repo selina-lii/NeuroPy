@@ -74,9 +74,19 @@ def plot_probe(
     return ax
 
 
-def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_shank=None,
-                             color="orange",amplitude_limit=False,
-                             footnote="",ax=None):
+def plot_waveform_on_channel(
+    ref_waveform,
+    ref_shank,
+    target_waveform=None,
+    target_shank=None,
+    color="orange",
+    amplitude_limit=False,
+    footnote="",
+    ax=None,
+    ch_per_shank=16,
+    discarded_channels=None,
+    peak_channel_global=None,
+):
     # units are um (micron)
     # For Cambridge Neurotech F-8. Specs are from their brochure
     # and adjusted based on plotting effects.
@@ -115,6 +125,15 @@ def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_
 
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 6))
+
+    ch_per_shank = int(ch_per_shank)
+    ref_shank = int(ref_shank)
+    disc_set = (
+        set(int(x) for x in np.ravel(discarded_channels))
+        if discarded_channels is not None and len(discarded_channels)
+        else set()
+    )
+    peak_g = int(peak_channel_global) if peak_channel_global is not None else None
 
     # Draw shank (gray)
     shank = patches.Rectangle(
@@ -185,12 +204,25 @@ def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_
             amp=wf1.max()-wf1.min()
             if amp>waveform_amp_limit: wf1=wf1/amp*waveform_amp_limit
 
+        global_ch = ch_per_shank * ref_shank + ch
+        is_peak = peak_g is not None and peak_g == global_ch
+        wcol = "#C62828" if is_peak else "black"
+        wlw = 2.8 if is_peak else 1.2
+        wz = 5 if is_peak else 2
+
         # Left or right of shank
         if ch < n_channels_per_side:
             x_center = -x_offset-shank_width
         else:
             x_center = x_offset-5
-        ax.plot(x_center + np.zeros_like(wf1)+np.arange(window)/x_scale, y_center + wf1,  color="black", lw=1.2)
+        ax.plot(
+            x_center + np.zeros_like(wf1) + np.arange(window) / x_scale,
+            y_center + wf1,
+            color=wcol,
+            lw=wlw,
+            zorder=wz,
+            solid_capstyle="round",
+        )
 
         if target_waveform is not None:
             # Scale waveform for display
@@ -207,10 +239,31 @@ def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_
 
     wavewidth = window/x_scale*2
 
-    # Channel numbers
-    for ch in range(n_channels_per_side*2):
-        y_center = tip_length + (n_channels_per_side*2 - ch-2) * interchannel_y + eletrode_size_y / 2
-        ax.text(-shank_width-wavewidth-15, y_center, str(ch + 1), ha="center", va="center", fontsize=14)
+    # Channel numbers — hardware / linear contact index (respects discarded)
+    # IMPORTANT: use the SAME y-centers as waveform plotting so labels align.
+    for ch in range(n_channels_per_side * 2):
+        if ch < n_channels_per_side:
+            y_center = 50 + ch * (eletrode_size_y + interchannel_y) + eletrode_size_y / 2
+        else:
+            i = ch - n_channels_per_side
+            y_center = 50 + i * (eletrode_size_y + interchannel_y) + eletrode_size_y / 2 - (eletrode_size_y + interchannel_y) / 2
+        gch = ch_per_shank * ref_shank + ch
+        if gch in disc_set:
+            lbl = "—"
+            fgc = "#999999"
+        else:
+            lbl = str(gch)
+            fgc = "#C62828" if peak_g is not None and peak_g == gch else "black"
+        ax.text(
+            -shank_width - wavewidth - 15,
+            y_center,
+            lbl,
+            ha="center",
+            va="center",
+            fontsize=14,
+            color=fgc,
+            fontweight="bold" if peak_g is not None and peak_g == gch else "normal",
+        )
     ax.text(-shank_width-wavewidth-15, vertical_eletrode_span+10, f"shank#\nch#", ha="center", va="center", fontsize=10)
     ax.text(0, vertical_eletrode_span-5, f"{str(f'{ref_shank:02d}'):{wavewidth/4}s}ref", ha="center", va="center", fontsize=12)
     if target_shank is not None: 
@@ -220,7 +273,9 @@ def plot_waveform_on_channel(ref_waveform,ref_shank,target_waveform=None,target_
     # Set limits and aspect
     ax.set_xlim(-shank_width-wavewidth, shank_width+wavewidth)
     ax.set_ylim(-10, vertical_eletrode_span + 10)
-    ax.set_aspect("equal")
+    # In embedded UI panels, equal-aspect can shrink the drawing drastically.
+    # Use auto aspect so the waveform/probe fills available space.
+    ax.set_aspect("auto")
     ax.axis("off")
 
     return ax

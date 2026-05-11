@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-03T16:10:43.057603",
+  "saved_at": "2026-05-10T17:32:20.038521",
   "session": "RatR_Day1NSD",
   "selections": {
     "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
@@ -249,367 +249,373 @@
   "pair_tags": {
     "2,11": {
       "groups": [
-        8,
-        12,
-        18,
-        31
+        "Disinhib",
+        "leak",
+        "ok",
+        "refractory"
       ]
     },
     "5,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "5,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "6,9": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "6,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "6,43": {
       "groups": [
-        3,
-        4,
-        31
+        "?",
+        "msconn",
+        "refractory"
       ]
     },
     "7,9": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "7,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "7,43": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "13,9": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "13,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "15,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "15,9": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "15,11": {
       "groups": [
-        9,
-        31
+        "best",
+        "refractory"
       ]
     },
     "15,12": {
       "groups": [
-        2,
-        10,
-        12,
-        18,
-        31
+        "2peakms",
+        "Disinhib",
+        "good",
+        "leak",
+        "refractory"
       ]
     },
     "16,11": {
       "groups": [
-        6,
-        20
+        "rhythm",
+        "rift"
       ]
     },
     "18,11": {
       "groups": [
-        9,
-        18,
-        31
+        "Disinhib",
+        "best",
+        "refractory"
       ]
     },
     "18,12": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "19,11": {
       "groups": [
-        2,
-        18
+        "Disinhib",
+        "good"
       ]
     },
     "20,11": {
       "groups": [
-        9,
-        12,
-        31
+        "best",
+        "leak",
+        "refractory"
       ]
     },
     "21,9": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "21,11": {
       "groups": [
-        2,
-        18,
-        31
+        "Disinhib",
+        "good",
+        "refractory"
       ]
     },
     "22,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "24,11": {
       "groups": [
-        7
+        "burst"
       ]
     },
     "25,11": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "26,11": {
       "groups": [
-        8,
-        31
+        "ok",
+        "refractory"
       ]
     },
     "28,11": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "29,9": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "29,11": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "30,9": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "30,11": {
       "groups": [
-        8,
-        12,
-        31
+        "leak",
+        "ok",
+        "refractory"
       ]
     },
     "31,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "32,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "32,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "34,9": {
       "groups": [
-        8
+        "ok"
       ],
       "notes": "maze"
     },
     "36,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "36,11": {
       "groups": [
-        9,
-        12,
-        31
+        "best",
+        "leak",
+        "refractory"
       ]
     },
     "36,12": {
       "groups": [
-        4,
-        8
+        "msconn",
+        "ok"
       ]
     },
     "37,11": {
       "groups": [
-        7,
-        31
+        "burst",
+        "refractory"
       ]
     },
     "37,12": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "38,11": {
       "groups": [
-        2,
-        17
+        "2side_dips",
+        "good"
       ]
     },
     "39,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "40,0": {
       "groups": [
-        6,
-        8,
-        10
+        "2peakms",
+        "ok",
+        "rhythm"
       ]
     },
     "42,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "42,43": {
       "groups": [
-        18,
-        20
+        "Disinhib",
+        "rift"
       ]
     },
     "45,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "45,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "46,0": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "46,9": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "46,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "46,12": {
       "groups": [
-        3,
-        6
+        "?",
+        "rhythm"
       ]
     },
     "46,43": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "47,9": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "47,12": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "48,9": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "50,9": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "51,9": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "51,11": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "52,11": {
       "groups": [
-        2,
-        18,
-        20
+        "Disinhib",
+        "good",
+        "rift"
       ]
     }
   },
-  "deleted": [
-    [
-      2,
-      9
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [
+      [
+        2,
+        9
+      ],
+      [
+        23,
+        11
+      ],
+      [
+        24,
+        43
+      ],
+      [
+        27,
+        12
+      ],
+      [
+        34,
+        11
+      ],
+      [
+        37,
+        9
+      ]
     ],
-    [
-      23,
-      11
-    ],
-    [
-      24,
-      43
-    ],
-    [
-      27,
-      12
-    ],
-    [
-      34,
-      11
-    ],
-    [
-      37,
-      9
-    ]
-  ]
+    "sess_RatR_Day1NSD.ex_I.type_inter-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-pyr": []
+  }
 }

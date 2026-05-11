@@ -1,7 +1,7 @@
 {
-  "version": "3.2",
+  "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-03-20T12:58:57.325073",
+  "saved_at": "2026-05-10T20:56:24.776300",
   "session": "RatU_Day4SD",
   "selections": {
     "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
@@ -9,36 +9,1362 @@
     "sess_RatU_Day4SD.ex_I.type_inter-inter": [],
     "sess_RatU_Day4SD.ex_I.type_inter-pyr": []
   },
-  "groups": {},
-  "hotkeys": {
-    "good": "2",
-    "best": "1",
-    "msconn": "4",
-    "ok": "3",
-    "?": "0",
-    "rhythm": "9",
-    "0rhythm": "8",
-    "2peakms": "7",
-    "leak": "6",
-    "I-I-flip": "5"
+  "pair_tags": {
+    "1,0": {
+      "groups": [
+        "good"
+      ]
+    },
+    "1,11": {
+      "groups": [
+        "best"
+      ]
+    },
+    "1,21": {
+      "groups": [
+        "?"
+      ]
+    },
+    "1,26": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "1,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "1,47": {
+      "groups": [
+        "good"
+      ]
+    },
+    "1,52": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "1,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "1,98": {
+      "groups": [
+        "good"
+      ]
+    },
+    "1,138": {
+      "groups": [
+        "?",
+        "good"
+      ]
+    },
+    "3,26": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "3,69": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "3,98": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "4,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "4,52": {
+      "groups": [
+        "wideMs"
+      ]
+    },
+    "4,70": {
+      "groups": [
+        "good"
+      ]
+    },
+    "4,98": {
+      "groups": [
+        "good"
+      ]
+    },
+    "4,138": {
+      "groups": [
+        "wideMs"
+      ]
+    },
+    "9,98": {
+      "groups": [
+        "best"
+      ]
+    },
+    "9,138": {
+      "groups": [
+        "best"
+      ]
+    },
+    "10,26": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "10,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "13,26": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "13,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "13,69": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "15,6": {
+      "notes": "good 2peakms"
+    },
+    "16,85": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "17,11": {
+      "groups": [
+        "ok",
+        "rift"
+      ]
+    },
+    "17,39": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "17,47": {
+      "groups": [
+        "Disinhib",
+        "ok"
+      ]
+    },
+    "17,52": {
+      "groups": [
+        "wideMs"
+      ]
+    },
+    "17,85": {
+      "groups": [
+        "good"
+      ]
+    },
+    "17,90": {
+      "groups": [
+        "?"
+      ]
+    },
+    "17,98": {
+      "groups": [
+        "Disinhib",
+        "wideMs"
+      ]
+    },
+    "17,138": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "18,32": {
+      "groups": [
+        "leak"
+      ]
+    },
+    "18,44": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "18,47": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "19,39": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "19,44": {
+      "groups": [
+        "2peakms",
+        "msconn"
+      ]
+    },
+    "19,47": {
+      "groups": [
+        "2peakms",
+        "ok",
+        "rift"
+      ]
+    },
+    "20,47": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "22,138": {
+      "groups": [
+        "good"
+      ]
+    },
+    "25,21": {
+      "groups": [
+        "good",
+        "leak"
+      ]
+    },
+    "27,119": {
+      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
+    },
+    "29,21": {
+      "groups": [
+        "2peakms",
+        "leak",
+        "rift"
+      ]
+    },
+    "29,52": {
+      "groups": [
+        "?"
+      ]
+    },
+    "30,26": {
+      "groups": [
+        "best"
+      ]
+    },
+    "30,70": {
+      "groups": [
+        "?"
+      ]
+    },
+    "31,11": {
+      "groups": [
+        "best"
+      ]
+    },
+    "33,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "35,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "35,70": {
+      "groups": [
+        "good"
+      ]
+    },
+    "36,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "36,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "38,44": {
+      "groups": [
+        "good"
+      ]
+    },
+    "40,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "40,39": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "40,44": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "40,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "40,85": {
+      "groups": [
+        "?"
+      ]
+    },
+    "40,138": {
+      "groups": [
+        "0rhythm",
+        "wideMs"
+      ]
+    },
+    "41,26": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "41,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "41,69": {
+      "groups": [
+        "best",
+        "good"
+      ]
+    },
+    "41,98": {
+      "notes": "2peak ms pattern is heavy during ripple-only intervals"
+    },
+    "42,0": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "42,11": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "42,32": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "42,52": {
+      "groups": [
+        "good",
+        "leak",
+        "triple"
+      ]
+    },
+    "42,70": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "42,98": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "42,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "43,69": {
+      "groups": [
+        "good"
+      ]
+    },
+    "46,32": {
+      "groups": [
+        "rhythm",
+        "rift"
+      ]
+    },
+    "46,44": {
+      "groups": [
+        "good",
+        "msconn"
+      ]
+    },
+    "46,47": {
+      "groups": [
+        "triple"
+      ]
+    },
+    "46,98": {
+      "groups": [
+        "wideMs"
+      ]
+    },
+    "46,138": {
+      "groups": [
+        "good",
+        "wideMs"
+      ]
+    },
+    "48,21": {
+      "groups": [
+        "2peakms",
+        "ok",
+        "triple"
+      ]
+    },
+    "49,11": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "49,85": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "49,138": {
+      "groups": [
+        "2peakms",
+        "?",
+        "good"
+      ]
+    },
+    "50,138": {
+      "groups": [
+        "good",
+        "msconn"
+      ]
+    },
+    "51,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "51,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "51,85": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "53,39": {
+      "groups": [
+        "2side_dips",
+        "?",
+        "msconn",
+        "triple"
+      ]
+    },
+    "53,85": {
+      "groups": [
+        "?"
+      ]
+    },
+    "54,44": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "56,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "56,44": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "56,47": {
+      "groups": [
+        "2side_dips",
+        "msconn"
+      ]
+    },
+    "58,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "58,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "59,26": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "59,64": {
+      "groups": [
+        "msconn",
+        "ok"
+      ]
+    },
+    "59,69": {
+      "groups": [
+        "pos_skew",
+        "rift"
+      ]
+    },
+    "59,170": {
+      "notes": "active during pre and remaze"
+    },
+    "61,0": {
+      "groups": [
+        "good"
+      ]
+    },
+    "61,11": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "61,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "61,52": {
+      "groups": [
+        "best"
+      ]
+    },
+    "61,70": {
+      "groups": [
+        "?"
+      ]
+    },
+    "61,98": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "61,138": {
+      "groups": [
+        "best",
+        "good"
+      ]
+    },
+    "62,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "62,44": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "62,119": {
+      "groups": [
+        "?"
+      ]
+    },
+    "62,138": {
+      "groups": [
+        "good"
+      ]
+    },
+    "63,69": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "65,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "65,44": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "65,47": {
+      "groups": [
+        "2peakms",
+        "rift"
+      ]
+    },
+    "65,70": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "65,98": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "65,138": {
+      "groups": [
+        "ok",
+        "rift"
+      ]
+    },
+    "66,0": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "66,26": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "66,64": {
+      "groups": [
+        "0rhythm",
+        "Disinhib"
+      ]
+    },
+    "67,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "67,98": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "68,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "68,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "71,21": {
+      "groups": [
+        "best",
+        "msconn",
+        "rift"
+      ]
+    },
+    "72,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "72,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "75,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "76,70": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "77,44": {
+      "groups": [
+        "msconn",
+        "ok"
+      ]
+    },
+    "79,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "79,39": {
+      "groups": [
+        "msconn",
+        "rift"
+      ]
+    },
+    "79,44": {
+      "groups": [
+        "2peakms",
+        "2side_dips",
+        "?"
+      ]
+    },
+    "79,47": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "79,70": {
+      "groups": [
+        "good"
+      ]
+    },
+    "80,98": {
+      "groups": [
+        "good",
+        "rift"
+      ]
+    },
+    "82,85": {
+      "groups": [
+        "good"
+      ]
+    },
+    "82,90": {
+      "groups": [
+        "?"
+      ]
+    },
+    "83,0": {
+      "groups": [
+        "?"
+      ]
+    },
+    "83,26": {
+      "groups": [
+        "?",
+        "rhythm"
+      ]
+    },
+    "83,64": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "83,69": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "83,98": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "86,85": {
+      "groups": [
+        "good"
+      ]
+    },
+    "87,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "87,44": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "87,47": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "87,70": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "87,85": {
+      "groups": [
+        "good"
+      ]
+    },
+    "87,98": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "87,138": {
+      "groups": [
+        "best"
+      ]
+    },
+    "88,11": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "88,47": {
+      "groups": [
+        "?"
+      ]
+    },
+    "92,0": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "92,44": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "92,52": {
+      "groups": [
+        "?"
+      ]
+    },
+    "92,70": {
+      "groups": [
+        "triple"
+      ]
+    },
+    "92,98": {
+      "groups": [
+        "best"
+      ]
+    },
+    "92,138": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "93,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "93,39": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "93,44": {
+      "groups": [
+        "2side_dips"
+      ]
+    },
+    "93,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "93,138": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "94,0": {
+      "groups": [
+        "best"
+      ]
+    },
+    "94,44": {
+      "groups": [
+        "good"
+      ]
+    },
+    "94,52": {
+      "groups": [
+        "best"
+      ]
+    },
+    "94,70": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "94,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "95,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "95,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "95,39": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "95,52": {
+      "groups": [
+        "2side_dips",
+        "best"
+      ]
+    },
+    "95,70": {
+      "groups": [
+        "good",
+        "msconn"
+      ]
+    },
+    "95,85": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "95,98": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "95,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "96,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "96,47": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "96,70": {
+      "groups": [
+        "best"
+      ]
+    },
+    "99,44": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "99,47": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "99,98": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "99,138": {
+      "groups": [
+        "good",
+        "rift"
+      ]
+    },
+    "103,138": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "105,21": {
+      "groups": [
+        "wideMs"
+      ]
+    },
+    "105,69": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "106,44": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "106,70": {
+      "groups": [
+        "good"
+      ]
+    },
+    "106,98": {
+      "groups": [
+        "?",
+        "rift"
+      ]
+    },
+    "106,138": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "107,32": {
+      "groups": [
+        "good"
+      ]
+    },
+    "107,44": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "107,70": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "107,85": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "107,138": {
+      "groups": [
+        "msconn",
+        "ok"
+      ]
+    },
+    "108,39": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "108,52": {
+      "groups": [
+        "best",
+        "good"
+      ]
+    },
+    "108,98": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "108,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "109,64": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "111,39": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "111,85": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "111,138": {
+      "groups": [
+        "Disinhib",
+        "wideMs"
+      ]
+    },
+    "112,70": {
+      "groups": [
+        "burst",
+        "good"
+      ]
+    },
+    "113,11": {
+      "groups": [
+        "?",
+        "rhythm"
+      ]
+    },
+    "113,32": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "113,52": {
+      "groups": [
+        "2peakms",
+        "best"
+      ]
+    },
+    "113,98": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "113,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "114,39": {
+      "groups": [
+        "?"
+      ]
+    },
+    "114,52": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "114,70": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "115,39": {
+      "groups": [
+        "good",
+        "rift"
+      ]
+    },
+    "115,47": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "115,52": {
+      "groups": [
+        "best"
+      ]
+    },
+    "115,98": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "115,119": {
+      "groups": [
+        "?",
+        "msconn"
+      ]
+    },
+    "115,138": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "117,26": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "117,64": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "120,44": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "121,32": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "121,44": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "121,47": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "121,98": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "123,138": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "125,44": {
+      "groups": [
+        "Disinhib",
+        "rift",
+        "triple"
+      ]
+    },
+    "125,70": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "125,98": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "125,138": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "126,69": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "127,47": {
+      "groups": [
+        "2peakms",
+        "rift"
+      ]
+    },
+    "127,98": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "127,138": {
+      "groups": [
+        "best"
+      ]
+    },
+    "129,70": {
+      "groups": [
+        "good"
+      ]
+    },
+    "129,98": {
+      "groups": [
+        "best"
+      ]
+    },
+    "129,138": {
+      "groups": [
+        "?",
+        "rift"
+      ]
+    },
+    "130,47": {
+      "groups": [
+        "Disinhib",
+        "rift"
+      ]
+    },
+    "130,98": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "130,138": {
+      "groups": [
+        "good"
+      ]
+    },
+    "131,21": {
+      "groups": [
+        "best"
+      ]
+    },
+    "134,26": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "134,47": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "134,64": {
+      "groups": [
+        "0rhythm"
+      ]
+    },
+    "134,69": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "136,21": {
+      "groups": [
+        "0rhythm",
+        "rift"
+      ]
+    },
+    "136,64": {
+      "groups": [
+        "good"
+      ]
+    },
+    "137,21": {
+      "groups": [
+        "Disinhib",
+        "wideMs"
+      ]
+    },
+    "139,0": {
+      "groups": [
+        "good"
+      ]
+    },
+    "139,11": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "139,32": {
+      "groups": [
+        "best"
+      ]
+    },
+    "139,39": {
+      "groups": [
+        "Disinhib",
+        "best"
+      ]
+    },
+    "139,98": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "139,138": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "173,129": {
+      "notes": "is rift just sharp inhibition, if a peak follows?"
+    },
+    "177,6": {
+      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
+    }
   },
-  "notes": {
-    "best": "",
-    "msconn": "Millisecond connectivity (sharp peak within \u00b11ms)",
-    "0rhythm": "pyr-pyr\n---\nbroad peak (>1ms wide) symmetric to time 0",
-    "2peakms": "pyr-pyr\n---\ntwo sharp peaks (<.5ms wide) separated by sharp dip around 0",
-    "?": "unsure pattern",
-    "burst": "pyr-pyr\n---\ntarget neuron is later spikes in source neuron burst, not an individual unit. Characterized by very broad double peaks on the positive time axis around 5-10 ms and very low co-firing on the negative time axis.",
-    "good": "pyr-pyr\n---\nidentifiable peak corrupted by low firing",
-    "inhib_rebounce": "pyr-int\n---\npairs that appear as a rebounce of int-pyr inhibition",
-    "leak": "pyr-pyr\n---\nsuspected to be the same neuron, at least partially",
-    "ok": "pyr-pyr\n---\nsuspicious peak that has a chance of being real, hindered by extremely low SNR",
-    "pos_skew": "pyr-pyr\n---\npreferentially high co-activity on the positive end of the time axis",
-    "ppinhib": "pyr-pyr\n---\ndip both sides",
-    "rhythm": "pyr-pyr\n---\nset of multiple, evenly spaced peaks likely entrained to an oscillation",
-    "EBroad": "pyr-int\n---\nbroad peak at ~2ms timing",
-    "E_rdip": "pyr-int\n---\ninhibitory dip on right side of the peak"
-  },
-  "pair_tags": {},
-  "deleted": []
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
+    "sess_RatU_Day4SD.ex_E.type_pyr-inter": [],
+    "sess_RatU_Day4SD.ex_I.type_inter-inter": [],
+    "sess_RatU_Day4SD.ex_I.type_inter-pyr": []
+  }
 }

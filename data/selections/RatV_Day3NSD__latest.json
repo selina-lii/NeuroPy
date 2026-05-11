@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-02T23:54:03.256298",
+  "saved_at": "2026-05-10T21:15:22.406651",
   "session": "RatV_Day3NSD",
   "selections": {
     "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [],
@@ -298,433 +298,404 @@
   "pair_tags": {
     "1,18": {
       "groups": [
-        7
+        "burst"
       ]
     },
     "2,10": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "4,10": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "5,15": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "5,18": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "6,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "7,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "8,37": {
       "groups": [
-        2,
-        6
+        "good",
+        "rhythm"
       ]
     },
     "13,37": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "14,22": {
       "groups": [
-        20
+        "rift"
       ]
+    },
+    "15,6": {
+      "notes": "good 2peakms"
     },
     "17,15": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "19,18": {
       "groups": [
-        2,
-        10
+        "2peakms",
+        "good"
       ]
     },
     "21,18": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "23,22": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "23,37": {
       "groups": [
-        2,
-        4
+        "good",
+        "msconn"
       ]
     },
     "24,15": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "24,18": {
       "groups": [
-        8,
-        10
+        "2peakms",
+        "ok"
       ]
     },
     "25,18": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "27,10": {
       "groups": [
-        20
+        "rift"
       ]
+    },
+    "27,119": {
+      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "28,10": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "29,10": {
       "groups": [
-        4,
-        17,
-        20
+        "2side_dips",
+        "msconn",
+        "rift"
       ]
     },
     "30,18": {
       "groups": [
-        9,
-        10
+        "2peakms",
+        "best"
       ]
     },
     "31,18": {
       "groups": [
-        10
+        "2peakms"
       ]
     },
     "33,37": {
       "groups": [
-        2
+        "good"
       ]
     },
     "35,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "38,37": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "39,22": {
       "groups": [
-        3,
-        10,
-        31
+        "2peakms",
+        "?",
+        "refractory"
       ]
     },
     "39,37": {
       "groups": [
-        2
+        "good"
       ]
     },
     "40,37": {
       "groups": [
-        2
+        "good"
       ]
     },
     "41,22": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "41,37": {
       "groups": [
-        6
+        "rhythm"
       ]
+    },
+    "41,98": {
+      "notes": "2peak ms pattern is heavy during ripple-only intervals"
     },
     "43,18": {
       "groups": [
-        4,
-        8,
-        18
+        "Disinhib",
+        "msconn",
+        "ok"
       ]
     },
     "44,18": {
       "groups": [
-        8,
-        10,
-        18
+        "2peakms",
+        "Disinhib",
+        "ok"
       ]
     },
     "45,18": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "49,15": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "50,15": {
       "groups": [
-        3,
-        31
+        "?",
+        "refractory"
       ]
     },
     "50,18": {
       "groups": [
-        3,
-        8
+        "?",
+        "ok"
       ]
     },
     "53,15": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "54,22": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "54,37": {
       "groups": [
-        2,
-        20
+        "good",
+        "rift"
       ]
     },
     "56,22": {
       "groups": [
-        31
+        "refractory"
       ]
     },
     "56,37": {
       "groups": [
-        8,
-        25
+        "neg_skew",
+        "ok"
       ]
     },
     "57,22": {
       "groups": [
-        2,
-        12
+        "good",
+        "leak"
       ]
     },
     "57,37": {
       "groups": [
-        4,
-        8
+        "msconn",
+        "ok"
       ]
     },
     "58,22": {
       "groups": [
-        8,
-        32
+        "ok",
+        "triple"
       ]
     },
     "58,37": {
       "groups": [
-        4,
-        8
+        "msconn",
+        "ok"
       ]
     },
     "59,22": {
       "groups": [
-        3,
-        31
+        "?",
+        "refractory"
       ]
     },
     "59,37": {
       "groups": [
-        8,
-        31
+        "ok",
+        "refractory"
       ]
+    },
+    "59,170": {
+      "notes": "active during pre and remaze"
     },
     "60,22": {
       "groups": [
-        3,
-        31
+        "?",
+        "refractory"
       ]
     },
     "60,37": {
       "groups": [
-        2,
-        4,
-        17
+        "2side_dips",
+        "good",
+        "msconn"
       ]
     },
     "61,22": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "64,15": {
       "groups": [
-        6
+        "rhythm"
       ]
     },
     "65,37": {
       "groups": [
-        6,
-        8
+        "ok",
+        "rhythm"
       ]
     },
     "66,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "67,37": {
       "groups": [
-        2,
-        6
+        "good",
+        "rhythm"
       ]
     },
     "69,37": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "70,0": {
       "groups": [
-        20
+        "rift"
       ]
     },
     "70,10": {
       "groups": [
-        9
+        "best"
       ]
     },
     "70,18": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "73,15": {
       "groups": [
-        8
+        "ok"
       ]
     },
     "74,18": {
       "groups": [
-        4
+        "msconn"
       ]
     },
     "75,10": {
       "groups": [
-        4,
-        8
+        "msconn",
+        "ok"
       ]
     },
     "76,15": {
       "groups": [
-        3
+        "?"
       ]
     },
     "78,0": {
       "groups": [
-        12
+        "leak"
       ]
     },
     "78,10": {
       "groups": [
-        8,
-        20
+        "ok",
+        "rift"
       ]
     },
     "79,10": {
       "groups": [
-        4,
-        8,
-        12,
-        20
+        "leak",
+        "msconn",
+        "ok",
+        "rift"
       ]
     },
     "79,18": {
       "groups": [
-        5,
-        20
+        "0rhythm",
+        "rift"
       ]
     },
     "82,15": {
       "groups": [
-        6
+        "rhythm"
       ]
+    },
+    "173,129": {
+      "notes": "is rift just sharp inhibition, if a peak follows?"
+    },
+    "177,6": {
+      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
-  "deleted": [
-    [
-      21,
-      0
-    ],
-    [
-      21,
-      10
-    ],
-    [
-      30,
-      0
-    ],
-    [
-      31,
-      22
-    ],
-    [
-      32,
-      22
-    ],
-    [
-      33,
-      22
-    ],
-    [
-      35,
-      15
-    ],
-    [
-      46,
-      37
-    ],
-    [
-      49,
-      22
-    ],
-    [
-      57,
-      18
-    ],
-    [
-      62,
-      37
-    ],
-    [
-      78,
-      18
-    ],
-    [
-      82,
-      0
-    ]
-  ]
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day3NSD.ex_E.type_pyr-inter": [],
+    "sess_RatV_Day3NSD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day3NSD.ex_I.type_inter-pyr": []
+  }
 }

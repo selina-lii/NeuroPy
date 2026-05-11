@@ -202,8 +202,10 @@ class CCGRenderer:
 
         fig = Figure(figsize=(7, 5))
         ax  = fig.add_subplot(111)
+        nt = (self.neurons.neuron_type[ref], self.neurons.neuron_type[tgt])
         plot_ccg.plot_ccg_panel(
             ax=ax, ccg=ccg, ids=ids, inds=(ref, tgt),
+            neuron_type=nt,
             window_size=conf.duration, bin_size=bin_size_eff,
             pval=show_pval, pval_corrected=show_pval_c,
             alpha=alpha, ccg_null=show_null,

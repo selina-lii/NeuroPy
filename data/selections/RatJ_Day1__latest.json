@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-02T16:11:47.531432",
+  "saved_at": "2026-05-10T18:04:17.927393",
   "session": "RatJ_Day1",
   "selections": {
     "sess_RatJ_Day1.ex_E.type_pyr-pyr": [],
@@ -9,6 +9,101 @@
     "sess_RatJ_Day1.ex_I.type_inter-inter": [],
     "sess_RatJ_Day1.ex_I.type_inter-pyr": []
   },
-  "pair_tags": {},
-  "deleted": []
+  "pair_tags": {
+    "1,0": {
+      "groups": [
+        "good",
+        "leak"
+      ]
+    },
+    "2,0": {
+      "groups": [
+        "2side_dips",
+        "best",
+        "msconn",
+        "rhythm"
+      ]
+    },
+    "3,0": {
+      "groups": [
+        "2side_dips",
+        "good",
+        "msconn"
+      ]
+    },
+    "4,0": {
+      "groups": [
+        "2side_dips",
+        "best",
+        "rhythm"
+      ]
+    },
+    "5,0": {
+      "groups": [
+        "2side_dips",
+        "best",
+        "leak"
+      ]
+    },
+    "6,0": {
+      "groups": [
+        "2side_dips",
+        "good",
+        "rhythm"
+      ]
+    },
+    "7,0": {
+      "groups": [
+        "0rhythm",
+        "ok"
+      ]
+    },
+    "10,0": {
+      "groups": [
+        "leak"
+      ]
+    },
+    "12,0": {
+      "groups": [
+        "0rhythm",
+        "rhythm"
+      ]
+    },
+    "15,0": {
+      "groups": [
+        "2peakms",
+        "leak"
+      ]
+    },
+    "15,6": {
+      "notes": "good 2peakms"
+    },
+    "18,0": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "27,119": {
+      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
+    },
+    "41,98": {
+      "notes": "2peak ms pattern is heavy during ripple-only intervals"
+    },
+    "59,170": {
+      "notes": "active during pre and remaze"
+    },
+    "173,129": {
+      "notes": "is rift just sharp inhibition, if a peak follows?"
+    },
+    "177,6": {
+      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
+    }
+  },
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatJ_Day1.ex_E.type_pyr-pyr": [],
+    "sess_RatJ_Day1.ex_E.type_pyr-inter": [],
+    "sess_RatJ_Day1.ex_I.type_inter-inter": [],
+    "sess_RatJ_Day1.ex_I.type_inter-pyr": []
+  }
 }

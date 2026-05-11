@@ -889,6 +889,154 @@ def cp_spike_correlations_2groups(
     return correlograms
 
 
+def np_spike_correlations_1toN(
+    neurons,
+    ref_ind,
+    target_inds,
+    bin_size=None,
+    window_size=None,
+    symmetrize=True,
+):
+    """Compute cross-correlograms for ONE ref neuron vs many targets.
+
+    This is a specialization of the 2-groups algorithm with N0=1 intended to
+    reduce overhead while reusing the same shift/increment logic.
+
+    Returns
+    -------
+    correlograms : np.ndarray
+        Shape (1, n_targets, winsize_bins) where winsize_bins depends on
+        window_size/bin_size (matches 2-groups output for N0=1).
+    """
+    assert bin_size >= 1 / neurons.sampling_rate, (
+        f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. "
+        "Bins must be longer than one sampling interval"
+    )
+
+    target_inds = _san(target_inds)
+    all_inds = np.concatenate([np.array([ref_ind]), np.array(target_inds)])
+    N0, N1 = 1, len(target_inds)
+
+    # Reindex neurons: ref=0, targets=1..N1
+    neurons = neurons.neuron_slice(neuron_inds=all_inds)
+    neurons.neuron_ids = np.arange(neurons.n_neurons)
+
+    _, spike_clusters, spike_samples = _np_assemble_spike_arrays(neurons)
+
+    bin_size = np.clip(bin_size, 1e-5, 1e5)
+    binsize = int(neurons.sampling_rate * bin_size)
+    window_size = np.clip(window_size, 1e-5, 1e5)
+    winsize_bins = 2 * int(0.5 * window_size / bin_size)
+
+    clusters = _np_unique(spike_clusters)
+    spike_clusters_i = _np_index_of(spike_clusters, clusters)
+
+    shift = 1
+    mask = np.ones_like(spike_samples, dtype=np.bool_)
+    correlograms = _np_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize)
+    max_d = winsize_bins // 2 + 1
+    center = winsize_bins // 2
+
+    while mask[:-shift].any():
+        spike_diff = _np_diff_shifted(spike_samples, shift)
+        spike_diff_b = (spike_diff + binsize // 2) // binsize
+        mask[:-shift][spike_diff_b >= max_d] = False
+
+        m = mask[:-shift].copy()
+        d = spike_diff_b[m]
+        ref = spike_clusters_i[:-shift][m]
+        target = spike_clusters_i[+shift:][m]
+
+        # With N0=1, forward direction is ref==0 and target>=1
+        gm = (ref == 0) & (target >= 1)
+        indices = np.ravel_multi_index(
+            (ref[gm], target[gm] - 1, d[gm] + (center if symmetrize else 0)),
+            correlograms.shape,
+        )
+
+        if symmetrize:
+            gm_sym = (ref >= 1) & (target == 0)
+            indices_sym = np.ravel_multi_index(
+                (target[gm_sym], ref[gm_sym] - 1, center - d[gm_sym]),
+                correlograms.shape,
+            )
+            indices = np.concatenate([indices, indices_sym])
+
+        _np_increment(correlograms.ravel(), indices)
+        shift += 1
+
+    return correlograms
+
+
+def cp_spike_correlations_1toN(
+    neurons,
+    ref_ind,
+    target_inds,
+    bin_size=None,
+    window_size=None,
+    symmetrize=True,
+):
+    """CuPy implementation of np_spike_correlations_1toN."""
+    assert bin_size >= 1 / neurons.sampling_rate, (
+        f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. "
+        "Bins must be longer than one sampling interval"
+    )
+
+    target_inds = _san(target_inds)
+    all_inds = np.concatenate([np.array([ref_ind]), np.array(target_inds)])
+    N0, N1 = 1, len(target_inds)
+
+    neurons = neurons.neuron_slice(neuron_inds=all_inds)
+    neurons.neuron_ids = np.arange(neurons.n_neurons)
+
+    _, spike_clusters, spike_samples = _cp_assemble_spike_arrays(neurons)
+
+    bin_size = np.clip(bin_size, 1e-5, 1e5)
+    binsize = int(neurons.sampling_rate * bin_size)
+    window_size = np.clip(window_size, 1e-5, 1e5)
+    winsize_bins = 2 * int(0.5 * window_size / bin_size)
+
+    clusters = _cp_unique(spike_clusters)
+    spike_clusters_i = _cp_index_of(spike_clusters, clusters)
+
+    shift = 1
+    mask = cp.ones_like(spike_samples, dtype=cp.bool_)
+    correlograms = _cp_create_correlograms_array_2groups(N0, N1, winsize_bins, symmetrize)
+    max_d = winsize_bins // 2 + 1
+    center = winsize_bins // 2
+
+    while mask[:-shift].any():
+        spike_diff = _cp_diff_shifted(spike_samples, shift)
+        spike_diff_b = (spike_diff + binsize // 2) // binsize
+        mask[:-shift][spike_diff_b >= max_d] = False
+
+        m = mask[:-shift].copy()
+        d = spike_diff_b[m]
+        ref = spike_clusters_i[:-shift][m]
+        target = spike_clusters_i[+shift:][m]
+
+        gm = (ref == 0) & (target >= 1)
+        indices = cp.ravel_multi_index(
+            (ref[gm], target[gm] - 1, d[gm] + (center if symmetrize else 0)),
+            correlograms.shape,
+        )
+
+        if symmetrize:
+            gm_sym = (ref >= 1) & (target == 0)
+            indices_sym = cp.ravel_multi_index(
+                (target[gm_sym], ref[gm_sym] - 1, center - d[gm_sym]),
+                correlograms.shape,
+            )
+            indices = cp.concatenate([indices, indices_sym])
+
+        _cp_increment(correlograms.ravel(), indices)
+        shift += 1
+
+    correlograms = correlograms.get()
+    __cp_clean()
+    return correlograms
+
+
 def np_spike_correlations_snapshots(
     neurons,
     neuron_inds,
@@ -1156,12 +1304,14 @@ def spike_correlations(
     use_acceleration=False,
     edge_times=None,
     ref_neuron_inds=None,
+    one_to_many=False,
 ):
     """
     Switch between spike correlation cases.
     """
     n_total_spikes = sum(len(st) for st in neurons.spiketrains)
     mode = ('snapshots' if edge_times is not None
+            else '1toN' if (ref_neuron_inds is not None and one_to_many)
             else '2groups' if ref_neuron_inds is not None
             else 'all')
     print(f"[spike_correlations] mode={mode}  n_neurons={neurons.n_neurons}  "
@@ -1178,16 +1328,29 @@ def spike_correlations(
                                                     window_size=window_size,
                                                     symmetrize=symmetrize)
     elif ref_neuron_inds is not None:
-
-        spike_correlations_2groups = cp_spike_correlations_2groups \
-        if use_acceleration else np_spike_correlations_2groups
-
-        correlograms = spike_correlations_2groups(neurons,
-                                                  ref_inds=ref_neuron_inds,
-                                                  target_inds=neuron_inds,
-                                                  bin_size=bin_size,
-                                                  window_size=window_size,
-                                                  symmetrize=symmetrize)
+        if one_to_many:
+            ref_neuron_inds = _san(ref_neuron_inds)
+            if ref_neuron_inds is None or len(ref_neuron_inds) != 1:
+                raise ValueError("one_to_many=True requires exactly one ref_neuron_inds entry")
+            spike_correlations_1toN = cp_spike_correlations_1toN \
+            if use_acceleration else np_spike_correlations_1toN
+            correlograms = spike_correlations_1toN(
+                neurons,
+                ref_ind=ref_neuron_inds[0],
+                target_inds=neuron_inds,
+                bin_size=bin_size,
+                window_size=window_size,
+                symmetrize=symmetrize,
+            )
+        else:
+            spike_correlations_2groups = cp_spike_correlations_2groups \
+            if use_acceleration else np_spike_correlations_2groups
+            correlograms = spike_correlations_2groups(neurons,
+                                                      ref_inds=ref_neuron_inds,
+                                                      target_inds=neuron_inds,
+                                                      bin_size=bin_size,
+                                                      window_size=window_size,
+                                                      symmetrize=symmetrize)
     else:
 
         spike_correlations = cp_spike_correlations \
