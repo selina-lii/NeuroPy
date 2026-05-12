@@ -1,11 +1,24 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T17:04:23.292921",
+  "saved_at": "2026-05-12T13:52:27.871986",
   "session": "RatJ_Day1",
   "selections": {
     "sess_RatJ_Day1.ex_E.type_pyr-pyr": [],
-    "sess_RatJ_Day1.ex_E.type_pyr-inter": [],
+    "sess_RatJ_Day1.ex_E.type_pyr-inter": [
+      [
+        2,
+        0
+      ],
+      [
+        4,
+        0
+      ],
+      [
+        5,
+        0
+      ]
+    ],
     "sess_RatJ_Day1.ex_I.type_inter-inter": [],
     "sess_RatJ_Day1.ex_I.type_inter-pyr": []
   },
@@ -75,28 +88,13 @@
         "leak"
       ]
     },
-    "15,6": {
-      "notes": "good 2peakms"
-    },
     "18,0": {
       "groups": [
         "ok"
       ]
     },
-    "27,119": {
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
-    },
-    "41,98": {
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
-    },
-    "59,170": {
-      "notes": "active during pre and remaze"
-    },
-    "173,129": {
-      "notes": "is rift just sharp inhibition, if a peak follows?"
-    },
-    "177,6": {
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     }
   },
   "deleted": [],

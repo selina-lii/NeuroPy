@@ -1,11 +1,16 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T17:04:23.228194",
+  "saved_at": "2026-05-12T13:52:27.845311",
   "session": "RatV_Day1NSD",
   "selections": {
     "sess_RatV_Day1NSD.ex_E.type_pyr-pyr": [],
-    "sess_RatV_Day1NSD.ex_E.type_pyr-inter": [],
+    "sess_RatV_Day1NSD.ex_E.type_pyr-inter": [
+      [
+        63,
+        25
+      ]
+    ],
     "sess_RatV_Day1NSD.ex_I.type_inter-inter": [],
     "sess_RatV_Day1NSD.ex_I.type_inter-pyr": []
   },
@@ -102,9 +107,6 @@
         "rift"
       ]
     },
-    "15,6": {
-      "notes": "good 2peakms"
-    },
     "16,25": {
       "groups": [
         "Disinhib",
@@ -148,6 +150,9 @@
         "good"
       ]
     },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
     "25,32": {
       "groups": [
         "ok"
@@ -168,9 +173,6 @@
       "groups": [
         "rhythm"
       ]
-    },
-    "27,119": {
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "28,25": {
       "groups": [
@@ -265,9 +267,6 @@
         "msconn"
       ]
     },
-    "41,98": {
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
-    },
     "42,25": {
       "groups": [
         "rhythm"
@@ -333,9 +332,6 @@
         "Disinhib",
         "good"
       ]
-    },
-    "59,170": {
-      "notes": "active during pre and remaze"
     },
     "62,25": {
       "groups": [
@@ -473,12 +469,6 @@
       "groups": [
         "rift"
       ]
-    },
-    "173,129": {
-      "notes": "is rift just sharp inhibition, if a peak follows?"
-    },
-    "177,6": {
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
   "deleted": [],

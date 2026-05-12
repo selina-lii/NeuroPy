@@ -1,11 +1,192 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T17:04:23.185019",
+  "saved_at": "2026-05-12T13:52:27.813715",
   "session": "RatU_Day2NSD",
   "selections": {
     "sess_RatU_Day2NSD.ex_E.type_pyr-pyr": [],
-    "sess_RatU_Day2NSD.ex_E.type_pyr-inter": [],
+    "sess_RatU_Day2NSD.ex_E.type_pyr-inter": [
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        119
+      ],
+      [
+        2,
+        21
+      ],
+      [
+        5,
+        156
+      ],
+      [
+        9,
+        42
+      ],
+      [
+        13,
+        102
+      ],
+      [
+        18,
+        102
+      ],
+      [
+        18,
+        170
+      ],
+      [
+        26,
+        170
+      ],
+      [
+        27,
+        119
+      ],
+      [
+        28,
+        21
+      ],
+      [
+        32,
+        129
+      ],
+      [
+        35,
+        170
+      ],
+      [
+        36,
+        170
+      ],
+      [
+        38,
+        42
+      ],
+      [
+        44,
+        21
+      ],
+      [
+        45,
+        21
+      ],
+      [
+        45,
+        119
+      ],
+      [
+        47,
+        129
+      ],
+      [
+        47,
+        170
+      ],
+      [
+        52,
+        42
+      ],
+      [
+        57,
+        125
+      ],
+      [
+        58,
+        170
+      ],
+      [
+        71,
+        21
+      ],
+      [
+        83,
+        129
+      ],
+      [
+        85,
+        129
+      ],
+      [
+        86,
+        70
+      ],
+      [
+        86,
+        119
+      ],
+      [
+        86,
+        125
+      ],
+      [
+        86,
+        129
+      ],
+      [
+        89,
+        70
+      ],
+      [
+        97,
+        42
+      ],
+      [
+        110,
+        42
+      ],
+      [
+        130,
+        125
+      ],
+      [
+        146,
+        129
+      ],
+      [
+        149,
+        6
+      ],
+      [
+        154,
+        119
+      ],
+      [
+        155,
+        129
+      ],
+      [
+        160,
+        21
+      ],
+      [
+        161,
+        129
+      ],
+      [
+        162,
+        21
+      ],
+      [
+        163,
+        119
+      ],
+      [
+        164,
+        0
+      ],
+      [
+        177,
+        119
+      ],
+      [
+        185,
+        125
+      ]
+    ],
     "sess_RatU_Day2NSD.ex_I.type_inter-inter": [],
     "sess_RatU_Day2NSD.ex_I.type_inter-pyr": []
   },
@@ -402,8 +583,7 @@
     "11,139": {
       "groups": [
         "2peakms",
-        "Disinhib",
-        "good"
+        "Disinhib"
       ]
     },
     "11,140": {
@@ -418,7 +598,8 @@
     },
     "12,0": {
       "groups": [
-        "good"
+        "good",
+        "ok"
       ]
     },
     "13,21": {
@@ -455,8 +636,7 @@
       "groups": [
         "2peakms",
         "Disinhib"
-      ],
-      "notes": "good 2peakms"
+      ]
     },
     "15,125": {
       "groups": [
@@ -656,6 +836,9 @@
         "good"
       ]
     },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
     "25,42": {
       "groups": [
         "0rhythm"
@@ -730,8 +913,7 @@
       "groups": [
         "best",
         "inhib2sides"
-      ],
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
+      ]
     },
     "27,129": {
       "groups": [
@@ -945,8 +1127,7 @@
     "41,98": {
       "groups": [
         "2peakms"
-      ],
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
+      ]
     },
     "41,99": {
       "groups": [
@@ -1378,8 +1559,7 @@
     "59,170": {
       "groups": [
         "ok"
-      ],
-      "notes": "active during pre and remaze"
+      ]
     },
     "60,1": {
       "groups": [
@@ -2397,7 +2577,6 @@
     "112,42": {
       "groups": [
         "Disinhib",
-        "good",
         "msconn"
       ]
     },
@@ -2432,7 +2611,8 @@
       "groups": [
         "Disinhib",
         "good",
-        "msconn"
+        "msconn",
+        "ok"
       ]
     },
     "114,76": {
@@ -3900,8 +4080,7 @@
         "Disinhib",
         "good",
         "rift"
-      ],
-      "notes": "is rift just sharp inhibition, if a peak follows?"
+      ]
     },
     "175,32": {
       "groups": [
@@ -3926,8 +4105,7 @@
         "Disinhib",
         "msconn",
         "ok"
-      ],
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
+      ]
     },
     "177,70": {
       "groups": [

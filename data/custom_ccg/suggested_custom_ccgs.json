@@ -2,6 +2,374 @@
   "version": 1,
   "items": [
     {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 56092.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 54600.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 47043.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 52055.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 49832.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 48283.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 49024.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "active_wake",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": true,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
       "name": "nonripple",
       "t0": 0.0,
       "t1": 33146.0,
@@ -453,6 +821,1110 @@
       "created_from_session": "RatU_Day2NSD",
       "sessions": [
         "RatU_Day2NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 56092.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 54600.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 47043.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 52055.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 49832.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 48283.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 49024.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "nrem",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": true,
+          "QW": false,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 56092.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 54600.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 47043.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 52055.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 49832.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 48283.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 49024.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "quiet_wake",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": true,
+          "REM": false,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 56092.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day1",
+      "created_from_session": "RatJ_Day1",
+      "sessions": [
+        "RatJ_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 57738.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatJ_Day2",
+      "created_from_session": "RatJ_Day2",
+      "sessions": [
+        "RatJ_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 51619.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day1",
+      "created_from_session": "RatK_Day1",
+      "sessions": [
+        "RatK_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 51972.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatK_Day2",
+      "created_from_session": "RatK_Day2",
+      "sessions": [
+        "RatK_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 54600.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day1",
+      "created_from_session": "RatN_Day1",
+      "sessions": [
+        "RatN_Day1"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 53581.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatN_Day2",
+      "created_from_session": "RatN_Day2",
+      "sessions": [
+        "RatN_Day2"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 46598.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day1NSD",
+      "created_from_session": "RatR_Day1NSD",
+      "sessions": [
+        "RatR_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 47043.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatR_Day2SD",
+      "created_from_session": "RatR_Day2SD",
+      "sessions": [
+        "RatR_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 40233.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "created_from_session": "RatS-Day2NSD-2020-11-27_10-22-29",
+      "sessions": [
+        "RatS-Day2NSD-2020-11-27_10-22-29"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 52055.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatS_Day3SD",
+      "created_from_session": "RatS_Day3SD",
+      "sessions": [
+        "RatS_Day3SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 49832.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day1SD",
+      "created_from_session": "RatU_Day1SD",
+      "sessions": [
+        "RatU_Day1SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 48496.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day2NSD",
+      "created_from_session": "RatU_Day2NSD",
+      "sessions": [
+        "RatU_Day2NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 48283.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatU_Day4SD",
+      "created_from_session": "RatU_Day4SD",
+      "sessions": [
+        "RatU_Day4SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 48886.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day1NSD",
+      "created_from_session": "RatV_Day1NSD",
+      "sessions": [
+        "RatV_Day1NSD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 49024.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day2SD",
+      "created_from_session": "RatV_Day2SD",
+      "sessions": [
+        "RatV_Day2SD"
+      ],
+      "n_splits": 1,
+      "overlap_sec": 0.0
+    },
+    {
+      "name": "rem",
+      "t0": 0.0,
+      "t1": 47948.0,
+      "filter_state": {
+        "theme": "brainstates",
+        "labels": {
+          "AW": false,
+          "NOISE": false,
+          "NREM": false,
+          "QW": false,
+          "REM": true,
+          "NONE": false
+        }
+      },
+      "scope": "RatV_Day3NSD",
+      "created_from_session": "RatV_Day3NSD",
+      "sessions": [
+        "RatV_Day3NSD"
       ],
       "n_splits": 1,
       "overlap_sec": 0.0
@@ -935,191 +2407,6 @@
         "RatU_Day2NSD"
       ],
       "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 33146.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatJ_Day1",
-      "created_from_session": "RatJ_Day1",
-      "sessions": [
-        "RatJ_Day1"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 33120.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatN_Day1",
-      "created_from_session": "RatN_Day1",
-      "sessions": [
-        "RatN_Day1"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 43156.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatR_Day2SD",
-      "created_from_session": "RatR_Day2SD",
-      "sessions": [
-        "RatR_Day2SD"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 32818.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatS_Day3SD",
-      "created_from_session": "RatS_Day3SD",
-      "sessions": [
-        "RatS_Day3SD"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 46093.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatU_Day1SD",
-      "created_from_session": "RatU_Day1SD",
-      "sessions": [
-        "RatU_Day1SD"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 45160.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatU_Day4SD",
-      "created_from_session": "RatU_Day4SD",
-      "sessions": [
-        "RatU_Day4SD"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "sd",
-      "t0": 21819.0,
-      "t1": 45845.0,
-      "filter_state": {
-        "theme": "segments",
-        "labels": {
-          "maze0": false,
-          "post0": false,
-          "pre0": false,
-          "sd0": true,
-          "NONE": false
-        }
-      },
-      "scope": "RatV_Day2SD",
-      "created_from_session": "RatV_Day2SD",
-      "sessions": [
-        "RatV_Day2SD"
-      ],
-      "n_splits": 1,
-      "overlap_sec": 0.0
-    },
-    {
-      "name": "post",
-      "t0": "start",
-      "t1": "end",
-      "filter_state": {
-        "theme": "paradigm",
-        "labels": {
-          "maze": false,
-          "post": true,
-          "pre": false,
-          "re-maze": false,
-          "rs": false,
-          "sd": false,
-          "NONE": false
-        }
-      },
-      "scope": "RatJ_Day2, RatK_Day2\u2026",
-      "created_from_session": "RatJ_Day1",
-      "sessions": [
-        "RatJ_Day2",
-        "RatK_Day2",
-        "RatN_Day2",
-        "RatR_Day1NSD",
-        "RatS-Day2NSD-2020-11-27_10-22-29",
-        "RatU_Day2NSD",
-        "RatV_Day1NSD",
-        "RatV_Day3NSD"
-      ],
-      "n_splits": 2,
       "overlap_sec": 0.0
     }
   ]

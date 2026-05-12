@@ -2,7 +2,7 @@
 
 import traceback
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
@@ -112,9 +112,9 @@ class NetworkPanel:
         self._focus_var = tk.StringVar()
         focus_entry = ttk.Entry(_fn_inner, textvariable=self._focus_var, width=6)
         focus_entry.pack(side=tk.LEFT, padx=2)
-        focus_entry.bind('<Return>', lambda e: ui._on_neuron_focus())
+        focus_entry.bind('<Return>', lambda e: self._on_neuron_focus())
         ttk.Button(_fn_inner, text="Clear",
-                   command=ui._on_neuron_focus_clear).pack(side=tk.LEFT, padx=2)
+                   command=self._on_neuron_focus_clear).pack(side=tk.LEFT, padx=2)
         self._focus_info_var = tk.StringVar(value="")
         ttk.Label(_fn_inner, textvariable=self._focus_info_var,
                   font=('Arial', 8), foreground='#555').pack(side=tk.LEFT, padx=4)
@@ -136,9 +136,9 @@ class NetworkPanel:
         pair_focus_entry = ttk.Entry(_fp_inner,
                                      textvariable=self._focus_pair_var, width=8)
         pair_focus_entry.pack(side=tk.LEFT, padx=2)
-        pair_focus_entry.bind('<Return>', lambda e: ui._on_pair_focus())
+        pair_focus_entry.bind('<Return>', lambda e: self._on_pair_focus())
         ttk.Button(_fp_inner, text="Clear",
-                   command=ui._on_pair_focus_clear).pack(side=tk.LEFT, padx=2)
+                   command=self._on_pair_focus_clear).pack(side=tk.LEFT, padx=2)
         self._focus_pair_info_var = tk.StringVar(value="")
         ttk.Label(_fp_inner, textvariable=self._focus_pair_info_var,
                   font=('Arial', 8), foreground='#555').pack(side=tk.LEFT, padx=4)
@@ -312,6 +312,8 @@ class NetworkPanel:
 
     def draw(self):
         """Redraw the network (safe wrapper — prints traceback on error)."""
+        if not self.ui._panel_vars.get('Probe Network', tk.BooleanVar(value=True)).get():
+            return
         try:
             self._draw_impl()
         except Exception as ex:
@@ -331,7 +333,7 @@ class NetworkPanel:
         h_scale = self._net_hzoom_var.get()
         v_scale = self._net_vzoom_var.get()
 
-        pos = ui._get_neuron_positions(x_scale=h_scale, y_scale=v_scale)
+        pos = self._get_neuron_positions(x_scale=h_scale, y_scale=v_scale)
         if pos is None:
             ax.text(0.5, 0.5, "No probe\nposition data",
                     ha='center', va='center', transform=ax.transAxes,
@@ -373,7 +375,7 @@ class NetworkPanel:
         # ── Gather pairs: all types available, filtered by ct checkboxes ─
         type_keys_show = ui._available_type_keys(ui.key.nd())
 
-        visible_pairs_current = ui._pairs_for_segment_filter()
+        visible_pairs_current = self._pairs_for_segment_filter()
         current_pair = (tuple(ui.all_inds[ui.current_pair_idx])
                         if ui.current_pair_idx < len(ui.all_inds) else None)
 
@@ -825,7 +827,7 @@ class NetworkPanel:
     def _on_save_selections_to_group(self):
         """Save currently visible pairs (Lines view) to a new group."""
         ui = self.ui
-        pairs = ui._pairs_for_segment_filter()
+        pairs = self._pairs_for_segment_filter()
         if not pairs:
             import tkinter.messagebox as _mb
             _mb.showinfo("Save selections", "No pairs visible to save.")
@@ -840,7 +842,7 @@ class NetworkPanel:
         if not name:
             return
         import tkinter.messagebox as _mb
-        if name in ui._groups:
+        if name in ui._sel_data._groups:
             if not _mb.askyesno(
                     "Save selections",
                     f"Group '{name}' already exists. Replace its pairs for this session?",
@@ -848,9 +850,9 @@ class NetworkPanel:
                 return
             # Clear existing session pairs before overwriting
             sess = ui._current_session_str()
-            ui._groups[name][sess] = set()
+            ui._sel_data._groups[name][sess] = set()
         else:
-            ui._groups[name] = {}
+            ui._sel_data._groups[name] = {}
         for pair in pairs:
             ui._group_add_pair(name, pair)
         ui._rebuild_groups_menu()
@@ -876,12 +878,12 @@ class NetworkPanel:
             w.destroy()
         ui._net_grp_items = []
 
-        regular = sorted(k for k in ui._groups
+        regular = sorted(k for k in ui._sel_data._groups
                          if not k.startswith('__'))
-        special = sorted(k for k in ui._groups
+        special = sorted(k for k in ui._sel_data._groups
                          if k.startswith(_SPECIAL_PREFIX))
         # Remove vars for groups that no longer exist
-        gone = set(ui._net_group_filter_vars) - set(ui._groups)
+        gone = set(ui._net_group_filter_vars) - set(ui._sel_data._groups)
         for g in gone:
             del ui._net_group_filter_vars[g]
 
@@ -1028,3 +1030,188 @@ class NetworkPanel:
                                  command=self.draw)
             cb.pack(side=tk.LEFT, padx=2)
         self._net_shank_vars = new_vars
+
+    # ------------------------------------------------------------------
+    # Shank / pair labels
+    # ------------------------------------------------------------------
+
+    def _shank_label(self, idx: int) -> str:
+        """Return the shank number for neuron at position idx, or str(idx) as fallback."""
+        shank_ids = getattr(self.ui.neurons, 'shank_ids', None)
+        if shank_ids is not None:
+            try:
+                return str(int(shank_ids[idx]))
+            except Exception:
+                pass
+        return str(idx)
+
+    def _pair_label(self, inds) -> str:
+        """Short display label for a (ref, tgt) pair using shank numbers."""
+        return f"{self._shank_label(inds[0])}→{self._shank_label(inds[1])}"
+
+    # ------------------------------------------------------------------
+    # Neuron / pair focus
+    # ------------------------------------------------------------------
+
+    def _on_neuron_focus(self):
+        val = self._focus_var.get().strip()
+        if not val:
+            self._on_neuron_focus_clear()
+            return
+        try:
+            nid = int(val)
+        except ValueError:
+            messagebox.showerror("Neuron focus", f"Invalid neuron id: {val!r}")
+            return
+        if self.ui.neurons is not None:
+            if nid < 0 or nid >= self.ui.neurons.n_neurons:
+                messagebox.showerror("Neuron focus",
+                                     f"Neuron {nid} out of range "
+                                     f"[0, {self.ui.neurons.n_neurons-1}]")
+                return
+        self.ui._focused_neuron = nid
+        self.ui._focused_pair = None
+        self._focus_pair_var.set("")
+        self._focus_pair_info_var.set("")
+        self._update_focus_info(nid)
+        self.ui.refresh_lists()
+        self.draw()
+
+    def _update_focus_info(self, nid):
+        """Update focus info label with current-type and total connection counts."""
+        ui = self.ui
+        cur_out = sum(1 for r, t in map(tuple, ui.all_inds) if r == nid)
+        cur_in  = sum(1 for r, t in map(tuple, ui.all_inds) if t == nid)
+        tot_out, tot_in = 0, 0
+        for tk_ in ui._available_type_keys(ui.key.nd()):
+            pt = ui.cd.data.get(tk_)
+            if pt is None or pt.inds is None:
+                continue
+            arr = pt.inds[:, -2:]
+            tot_out += sum(1 for r, t in set(map(tuple, arr)) if r == nid)
+            tot_in  += sum(1 for r, t in set(map(tuple, arr)) if t == nid)
+        ct_label = ui._type_label(ui.key)
+        self._focus_info_var.set(
+            f"{ct_label}: in={cur_in} out={cur_out}  |  all: in={tot_in} out={tot_out}")
+
+    def _on_neuron_focus_clear(self):
+        self.ui._focused_neuron = None
+        self._focus_var.set("")
+        self._focus_info_var.set("")
+        self.ui.refresh_lists()
+        self.draw()
+
+    def _on_pair_focus(self):
+        """Set focus to a specific (ref, tgt) pair. Clears neuron focus."""
+        ui = self.ui
+        val = self._focus_pair_var.get().strip()
+        if not val:
+            self._on_pair_focus_clear()
+            return
+        try:
+            parts = val.replace(' ', '').split(',')
+            ref, tgt = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            messagebox.showerror("Pair focus",
+                                 f"Invalid pair format: {val!r}\nUse ref,tgt (e.g. 1,170)")
+            return
+        if ui.neurons is not None:
+            n = ui.neurons.n_neurons
+            if ref < 0 or ref >= n or tgt < 0 or tgt >= n:
+                messagebox.showerror("Pair focus",
+                                     f"Neuron index out of range [0, {n-1}]")
+                return
+        pair = (ref, tgt)
+        pair_exists = False
+        for tk_ in ui._available_type_keys(ui.key.nd()):
+            pt = ui.cd.data.get(tk_)
+            if pt is None or pt.inds is None:
+                continue
+            if pair in set(map(tuple, pt.inds2)):
+                pair_exists = True
+                break
+        if not pair_exists:
+            ui._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
+        ui._focused_pair = pair
+        ui._focused_neuron = None
+        self._focus_var.set("")
+        self._focus_info_var.set("")
+        self._update_pair_focus_info(pair, pair_exists)
+        ui.refresh_lists()
+        self.draw()
+        ui.update_plot()
+
+    def _update_pair_focus_info(self, pair, exists):
+        """Update the pair focus info label and 'Add to available' button."""
+        ui = self.ui
+        ref, tgt = pair
+        if ui.neurons is not None:
+            nt = ui.neurons.neuron_type
+            ref_type = nt[ref] if nt is not None and ref < len(nt) else '?'
+            tgt_type = nt[tgt] if nt is not None and tgt < len(nt) else '?'
+            in_available = pair in set(map(tuple, ui.all_inds))
+            status = "sig" if exists else ("admitted" if in_available else "not sig")
+            self._focus_pair_info_var.set(
+                f"{ref}({ref_type})→{tgt}({tgt_type}) [{status}]")
+        else:
+            in_available = pair in set(map(tuple, ui.all_inds))
+            self._focus_pair_info_var.set(f"{ref}→{tgt}")
+        self._add_pair_btn.config(
+            state=tk.NORMAL if not in_available else tk.DISABLED)
+
+    def _on_pair_focus_clear(self):
+        self.ui._focused_pair = None
+        self._focus_pair_var.set("")
+        self._focus_pair_info_var.set("")
+        self._add_pair_btn.config(state=tk.DISABLED)
+        self.ui.refresh_lists()
+        self.draw()
+        self.ui.update_plot()
+
+    # ------------------------------------------------------------------
+    # Helpers (formerly on CCGReviewUI)
+    # ------------------------------------------------------------------
+
+    def _get_neuron_positions(self, x_scale=1.0, y_scale=1.0):
+        ui = self.ui
+        neurons = ui.neurons
+        if neurons is None or neurons.peak_channels is None:
+            return None
+        pgs = getattr(getattr(ui.cd, 'nd', None), 'probegroups', {})
+        nd_key = ui.key.nd()
+        pg = pgs.get(nd_key)
+        if pg is None:
+            print(f"[ProbeNetwork] No ProbeGroup for key={nd_key}. "
+                  f"Available keys: {list(pgs.keys())}")
+            return None
+        peak_ch = np.asarray(neurons.peak_channels)
+        pg_df = pg.to_dataframe()
+        ch_to_xy = {int(row['channel_id']): (float(row['x']), float(row['y']))
+                    for _, row in pg_df.iterrows()}
+        x = np.zeros(len(peak_ch))
+        y = np.zeros(len(peak_ch))
+        n_miss = 0
+        for i, ch in enumerate(peak_ch):
+            xy = ch_to_xy.get(int(ch))
+            if xy is not None:
+                x[i] = xy[0] * x_scale
+                y[i] = xy[1] * y_scale
+            else:
+                n_miss += 1
+        if n_miss:
+            print(f"[ProbeNetwork] WARNING: {n_miss}/{len(peak_ch)} neurons "
+                  f"have peak_channels not found in ProbeGroup.channel_id. "
+                  f"peak_ch sample={peak_ch[:5]}, "
+                  f"pg_ch sample={list(ch_to_xy.keys())[:5]}")
+        return x, y, peak_ch
+
+    def _pairs_for_segment_filter(self):
+        ui = self.ui
+        if ui.active_segment_filter is None:
+            return set(map(tuple, ui.all_inds))
+        pt = ui.ccg_pointer
+        if pt.stored_by_segment:
+            seg_i = ui.active_segment_filter
+            mask = pt.inds[:, 0] == seg_i
+            return set(map(tuple, pt.inds[mask, -2:]))
+        return set(map(tuple, ui.all_inds))

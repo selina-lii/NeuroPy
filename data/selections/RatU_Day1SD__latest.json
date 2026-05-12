@@ -1,11 +1,32 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T17:04:23.414125",
+  "saved_at": "2026-05-12T13:52:28.004652",
   "session": "RatU_Day1SD",
   "selections": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
-    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
+    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [
+      [
+        5,
+        47
+      ],
+      [
+        6,
+        10
+      ],
+      [
+        16,
+        47
+      ],
+      [
+        25,
+        47
+      ],
+      [
+        68,
+        47
+      ]
+    ],
     "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
   },
@@ -152,9 +173,6 @@
         "triple"
       ]
     },
-    "15,6": {
-      "notes": "good 2peakms"
-    },
     "15,40": {
       "groups": [
         "msconn"
@@ -210,6 +228,9 @@
       "groups": [
         "rift"
       ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,35": {
       "groups": [
@@ -282,9 +303,6 @@
       "groups": [
         "rift"
       ]
-    },
-    "27,119": {
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "31,76": {
       "groups": [
@@ -484,9 +502,6 @@
         "?",
         "ok"
       ]
-    },
-    "41,98": {
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
     },
     "42,61": {
       "groups": [
@@ -746,9 +761,6 @@
       "groups": [
         "good"
       ]
-    },
-    "59,170": {
-      "notes": "active during pre and remaze"
     },
     "60,14": {
       "groups": [
@@ -1121,12 +1133,6 @@
         "2peakms",
         "Disinhib"
       ]
-    },
-    "173,129": {
-      "notes": "is rift just sharp inhibition, if a peak follows?"
-    },
-    "177,6": {
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
   "deleted": [],

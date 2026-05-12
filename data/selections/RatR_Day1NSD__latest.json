@@ -1,11 +1,28 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T17:04:23.161979",
+  "saved_at": "2026-05-12T13:52:27.785416",
   "session": "RatR_Day1NSD",
   "selections": {
     "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
-    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [],
+    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [
+      [
+        15,
+        11
+      ],
+      [
+        18,
+        11
+      ],
+      [
+        20,
+        11
+      ],
+      [
+        36,
+        11
+      ]
+    ],
     "sess_RatR_Day1NSD.ex_I.type_inter-inter": [],
     "sess_RatR_Day1NSD.ex_I.type_inter-pyr": []
   },
@@ -79,9 +96,6 @@
         "rhythm"
       ]
     },
-    "15,6": {
-      "notes": "good 2peakms"
-    },
     "15,9": {
       "groups": [
         "rhythm"
@@ -97,7 +111,6 @@
       "groups": [
         "2peakms",
         "Disinhib",
-        "good",
         "leak",
         "refractory"
       ]
@@ -123,7 +136,8 @@
     "19,11": {
       "groups": [
         "Disinhib",
-        "good"
+        "good",
+        "ok"
       ]
     },
     "20,11": {
@@ -160,14 +174,14 @@
         "refractory"
       ]
     },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
     "26,11": {
       "groups": [
         "ok",
         "refractory"
       ]
-    },
-    "27,119": {
-      "notes": "why is there inhibition during -3, -1 and 2,5 not -1,1?"
     },
     "28,11": {
       "groups": [
@@ -264,9 +278,6 @@
         "rhythm"
       ]
     },
-    "41,98": {
-      "notes": "2peak ms pattern is heavy during ripple-only intervals"
-    },
     "42,11": {
       "groups": [
         "rhythm"
@@ -355,15 +366,6 @@
         "good",
         "rift"
       ]
-    },
-    "59,170": {
-      "notes": "active during pre and remaze"
-    },
-    "173,129": {
-      "notes": "is rift just sharp inhibition, if a peak follows?"
-    },
-    "177,6": {
-      "notes": "are these two peaks with very sharp precision\nare some synapses more precise in timing?"
     }
   },
   "deleted": [],

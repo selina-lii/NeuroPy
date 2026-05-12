@@ -597,7 +597,7 @@ class LeftPanel:
             pairs_to_show = sorted(data.unselected_inds)
             for inds in pairs_to_show:
                 pred_group = spec_groups.get(tuple(inds))
-                lbl_prefix = ui._bookmark_label_prefix(inds) if hasattr(ui, '_bookmark_label_prefix') else ''
+                lbl_prefix = self._bookmark_label_prefix(inds)
                 label = f"{lbl_prefix}[{inds[0]}, {inds[1]}]"
                 grp = self._pair_group_label(inds)
                 if grp:
@@ -646,10 +646,10 @@ class LeftPanel:
             if getattr(ui, '_session_any_mode', False):
                 sess_lbl = (str(inds[0].session)
                             if hasattr(inds[0], 'session') else str(inds[0]))
-                label = (f"{ui._bookmark_label_prefix(inds) if hasattr(ui, '_bookmark_label_prefix') else ''}"
+                label = (f"{self._bookmark_label_prefix(inds)}"
                          f"{sess_lbl} [{inds[1]}, {inds[2]}]")
             else:
-                label = (f"{ui._bookmark_label_prefix(inds) if hasattr(ui, '_bookmark_label_prefix') else ''}"
+                label = (f"{self._bookmark_label_prefix(inds)}"
                          f"[{inds[0]}, {inds[1]}]")
             grp = self._pair_group_label(inds)
             if grp:
@@ -871,7 +871,7 @@ class LeftPanel:
         ui._highlight_changed_pairs({inds})
         ui.current_pair_idx = ui.get_pair_index(inds)
         ui.update_plot()
-        ui._draw_network()
+        ui.network_panel.draw()
 
     def move_to_unselected(self, event=None):
         ui = self._ui
@@ -927,7 +927,7 @@ class LeftPanel:
         ui._highlight_changed_pairs({inds})
         ui.current_pair_idx = ui.get_pair_index(inds)
         ui.update_plot()
-        ui._draw_network()
+        ui.network_panel.draw()
 
     def _move_current_pair(self):
         """Hotkey 'm': toggle current pair between Available and Selected."""
@@ -949,9 +949,9 @@ class LeftPanel:
         next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
         ui.current_pair_idx = next_idx
         self.refresh_lists()
-        self._select_pair_in_list(ui._pair_at_all_inds_idx(next_idx))
+        self._select_pair_in_list(self._pair_at_all_inds_idx(next_idx))
         ui.update_plot()
-        ui._draw_network()
+        ui.network_panel.draw()
 
     def _select_pair_in_list(self, inds):
         """Set listbox cursor to inds and scroll it into view."""
@@ -1101,7 +1101,7 @@ class LeftPanel:
             pass
         try:
             self._ui.update_plot()
-            self._ui._draw_network()
+            self._ui.network_panel.draw()
         except Exception:
             pass
         return 'break'
@@ -1109,7 +1109,10 @@ class LeftPanel:
     def _do_pair_select_update(self):
         ui = self._ui
         ui._select_after = None
-        ui._exit_spike_attribution_view()
+        try:
+            ui._exit_spike_attribution_view()
+        except Exception:
+            pass
         ui._mark_jitter_viewed()
         ui._focused_pair = None
         if hasattr(ui, 'network_panel'):
@@ -1119,7 +1122,7 @@ class LeftPanel:
             except Exception:
                 pass
         ui.update_plot()
-        ui._draw_network()
+        ui.network_panel.draw()
 
     def _on_arrow_key(self, event):
         self.on_pair_select(event)
@@ -1191,6 +1194,218 @@ class LeftPanel:
                     pass
 
     # ------------------------------------------------------------------
+    # Bookmark helpers
+    # ------------------------------------------------------------------
+
+    def _bookmark_label_prefix(self, inds) -> str:
+        bm = getattr(self._ui, '_bookmarked_pairs', None) or set()
+        if getattr(self._ui, '_session_any_mode', False):
+            sess = (str(inds[0].session) if hasattr(inds[0], 'session')
+                    else str(inds[0]))
+            t = (sess, int(inds[1]), int(inds[2]))
+            return '\U0001F4CC ' if t in bm else ''
+        t = tuple(int(x) for x in inds[:2])
+        return '\U0001F4CC ' if t in bm else ''
+
+    def _bookmark_toggle_current(self, event=None):
+        ui = self._ui
+        inds = self._selected_pair_from_lists()
+        if inds is None:
+            if ui.current_pair_idx >= len(ui.all_inds):
+                return
+            row = ui.all_inds[ui.current_pair_idx]
+            if getattr(ui, '_session_any_mode', False):
+                hl = getattr(ui, '_any_pair_handle_list', None) or []
+                ci = ui.current_pair_idx
+                if 0 <= ci < len(hl):
+                    ck, r, t = hl[ci]
+                    inds = (str(ck.session), int(r), int(t))
+                else:
+                    return
+            else:
+                inds = tuple(int(x) for x in row[:2])
+        bm = ui._bookmarked_pairs
+        if inds in bm:
+            bm.discard(inds)
+        else:
+            bm.add(inds)
+        self.refresh_lists()
+
+    def _clear_bookmarks(self):
+        bm = getattr(self._ui, '_bookmarked_pairs', None)
+        if not bm:
+            return
+        bm.clear()
+        self.refresh_lists()
+
+    # ------------------------------------------------------------------
+    # List helpers
+    # ------------------------------------------------------------------
+
+    def _selected_pair_from_lists(self):
+        """Return (ref,tgt) or (sess,ref,tgt) in any-mode; else None."""
+        ui = self._ui
+        for lb, mp in [
+            (getattr(self, 'unselected_list', None), getattr(self, '_avail_list_pairs', None)),
+            (getattr(self, 'selected_list', None), getattr(self, '_sel_list_pairs', None)),
+        ]:
+            if lb is None:
+                continue
+            try:
+                sel = list(lb.curselection())
+            except Exception:
+                sel = []
+            if not sel:
+                continue
+            i = sel[-1]
+            if mp is None:
+                continue
+            try:
+                entry = mp[i]
+            except Exception:
+                continue
+            if entry is None:
+                continue
+            if isinstance(entry, tuple) and entry and entry[0] == _AVAIL_GROUP_HDR:
+                continue
+            if (isinstance(entry, tuple) and len(entry) == 2
+                    and isinstance(entry[0], (tuple, list, np.ndarray))):
+                inds = entry[0]
+            else:
+                inds = entry
+            try:
+                if getattr(ui, '_session_any_mode', False):
+                    sess = (str(inds[0].session) if hasattr(inds[0], 'session')
+                            else str(inds[0]))
+                    return (sess, int(inds[1]), int(inds[2]))
+                return (int(inds[0]), int(inds[1]))
+            except Exception:
+                continue
+        return None
+
+    def _selected_pairs_from_lists(self) -> list:
+        """Return all selected (ref,tgt) pairs across both lists (deduped)."""
+        ui = self._ui
+        out: list = []
+        seen: set = set()
+        for lb, mp in [
+            (getattr(self, 'unselected_list', None), getattr(self, '_avail_list_pairs', None)),
+            (getattr(self, 'selected_list', None), getattr(self, '_sel_list_pairs', None)),
+        ]:
+            if lb is None or mp is None:
+                continue
+            try:
+                sel = list(lb.curselection())
+            except Exception:
+                sel = []
+            for i in sel:
+                try:
+                    entry = mp[i]
+                except Exception:
+                    continue
+                if entry is None:
+                    continue
+                if isinstance(entry, tuple) and entry and entry[0] == _AVAIL_GROUP_HDR:
+                    continue
+                if (isinstance(entry, tuple) and len(entry) == 2
+                        and isinstance(entry[0], (tuple, list, np.ndarray))):
+                    inds = entry[0]
+                else:
+                    inds = entry
+                try:
+                    if getattr(ui, '_session_any_mode', False):
+                        sess = (str(inds[0].session) if hasattr(inds[0], 'session')
+                                else str(inds[0]))
+                        pair = (sess, int(inds[1]), int(inds[2]))
+                    else:
+                        pair = (int(inds[0]), int(inds[1]))
+                except Exception:
+                    continue
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                out.append(pair)
+        out.sort(key=lambda x: (str(x[0]), x[1], x[2]) if len(x) == 3
+                               else ('', x[0], x[1]))
+        return out
+
+    def _select_all(self):
+        """Toggle between Select All and Deselect All."""
+        ui = self._ui
+        if getattr(ui, '_session_any_mode', False):
+            return
+        if self.data.unselected_inds:
+            for inds in list(self.data.unselected_inds):
+                self.data.selected_inds.add(inds)
+            self.data.unselected_inds.clear()
+        else:
+            for inds in list(self.data.selected_inds):
+                self.data.unselected_inds.add(inds)
+            self.data.selected_inds.clear()
+        self.refresh_lists()
+        ui.network_panel.draw()
+
+    def _pair_at_all_inds_idx(self, idx: int):
+        """Canonical pair key matching list rows / selection sets."""
+        ui = self._ui
+        if getattr(ui, '_session_any_mode', False):
+            hl = getattr(ui, '_any_pair_handle_list', None) or []
+            if idx < 0 or idx >= len(hl):
+                return None
+            ck, r, t = hl[idx]
+            return (str(ck.session), int(r), int(t))
+        row = ui.all_inds[idx]
+        return tuple(int(x) for x in row)
+
+    # ------------------------------------------------------------------
+    # Context menu helpers
+    # ------------------------------------------------------------------
+
+    def _ctx_restore_from_deleted(self, pairs):
+        """Context-menu: restore pairs from deleted back to Available."""
+        ui = self._ui
+        if not pairs:
+            return
+        scroll_top = self.unselected_list.yview()[0]
+        ui._push_undo()
+        for p in pairs:
+            ui.deleted_inds.discard(p)
+            ui.unselected_inds.add(p)
+        self.refresh_lists()
+        self.unselected_list.yview_moveto(scroll_top)
+        ui._highlight_changed_pairs(set(pairs))
+        ui._flush_deleted_to_store()
+
+    def _ctx_delete_pairs(self, pairs):
+        """Context-menu: move pairs from Available to deleted."""
+        ui = self._ui
+        if not pairs:
+            return
+        scroll_top = self.unselected_list.yview()[0]
+        ui._push_undo()
+        for p in pairs:
+            ui.unselected_inds.discard(p)
+            ui.deleted_inds.add(p)
+        self.refresh_lists()
+        self.unselected_list.yview_moveto(scroll_top)
+        ui._flush_deleted_to_store()
+
+    def _ctx_delete_from_selected(self, pairs):
+        """Context-menu: move pairs from Selected to deleted."""
+        ui = self._ui
+        if not pairs:
+            return
+        scroll_top = self.selected_list.yview()[0]
+        ui._push_undo()
+        for p in pairs:
+            trip = ui._pair_row_selected_trip(p)
+            ui.selected_inds.discard(trip)
+            ui.deleted_inds.add(trip)
+        self.refresh_lists()
+        self.selected_list.yview_moveto(scroll_top)
+        ui._flush_deleted_to_store()
+
+    # ------------------------------------------------------------------
     # Context menu
     # ------------------------------------------------------------------
 
@@ -1244,14 +1459,14 @@ class LeftPanel:
                 if pairs:
                     menu.add_command(
                         label=f"Move to Selected ({n})" if n > 1 else "Move to Selected",
-                        command=lambda pp=pairs: ui._ctx_move_multi_to_selected(pp))
+                        command=lambda pp=pairs: self._ctx_move_multi_to_selected(pp))
                     menu.add_command(
                         label=f"Move to Deleted ({n})" if n > 1 else "Move to Deleted",
-                        command=lambda pp=pairs: ui._ctx_delete_pairs(pp))
+                        command=lambda pp=pairs: self._ctx_delete_pairs(pp))
                 if deleted_pairs:
                     menu.add_command(
                         label=f"Restore to Available ({nd})" if nd > 1 else "Restore to Available",
-                        command=lambda pp=deleted_pairs: ui._ctx_restore_from_deleted(pp))
+                        command=lambda pp=deleted_pairs: self._ctx_restore_from_deleted(pp))
                 if not pairs and not deleted_pairs:
                     menu.add_command(label="(nothing selected)", state='disabled')
             elif not pairs and not deleted_pairs:
@@ -1260,14 +1475,14 @@ class LeftPanel:
             if not _any:
                 menu.add_command(
                     label=f"Move to Available ({n})" if n > 1 else "Move to Available",
-                    command=lambda pp=pairs: ui._ctx_move_multi_to_unselected(pp))
+                    command=lambda pp=pairs: self._ctx_move_multi_to_unselected(pp))
                 menu.add_command(
                     label=f"Move to Deleted ({n})" if n > 1 else "Move to Deleted",
-                    command=lambda pp=pairs: ui._ctx_delete_from_selected(pp))
+                    command=lambda pp=pairs: self._ctx_delete_from_selected(pp))
             elif pairs:
                 menu.add_command(
                     label=f"Move to Deleted ({n})" if n > 1 else "Move to Deleted",
-                    command=lambda pp=pairs: ui._ctx_delete_from_selected(pp))
+                    command=lambda pp=pairs: self._ctx_delete_from_selected(pp))
 
         # Group tag submenu
         menu.add_separator()
@@ -1333,6 +1548,160 @@ class LeftPanel:
         menu.add_command(label="Export view as PDF…",
                          command=lambda: ui._export_current_view('pdf'))
         menu.tk_popup(event.x_root, event.y_root)
+
+    # ------------------------------------------------------------------
+    # Pair list move / delete actions
+    # ------------------------------------------------------------------
+
+    def _ctx_move_to_selected(self, pair):
+        if pair is None: return
+        self._ctx_move_multi_to_selected([pair])
+        self._ui.current_pair_idx = self._ui.get_pair_index(pair)
+        self._ui.update_plot()
+
+    def _ctx_move_multi_to_selected(self, pairs):
+        if getattr(self._ui, '_session_any_mode', False):
+            return
+        if not pairs: return
+        scroll_top = self.unselected_list.yview()[0]
+        self._ui._push_undo()
+        for p in pairs:
+            self._ui.unselected_inds.discard(p)
+            self._ui.selected_inds.add(p)
+        self.refresh_lists()
+        self.unselected_list.yview_moveto(scroll_top)
+        self._ui._highlight_changed_pairs(set(pairs))
+        self._ui._draw_network()
+
+    def _ctx_move_to_unselected(self, pair):
+        if pair is None: return
+        self._ctx_move_multi_to_unselected([pair])
+        self._ui.current_pair_idx = self._ui.get_pair_index(pair)
+        self._ui.update_plot()
+
+    def _ctx_move_multi_to_unselected(self, pairs):
+        if getattr(self._ui, '_session_any_mode', False):
+            return
+        if not pairs: return
+        scroll_top = self.selected_list.yview()[0]
+        self._ui._push_undo()
+        for p in pairs:
+            self._ui.selected_inds.discard(p)
+            self._ui.unselected_inds.add(p)
+        self.refresh_lists()
+        self.selected_list.yview_moveto(scroll_top)
+        self._ui._highlight_changed_pairs(set(pairs))
+        self._ui._draw_network()
+
+    def _on_delete_pair(self, event=None):
+        """Delete key: toggle current pair in/out of the Deleted section."""
+        ui = self._ui
+        if ui.current_pair_idx >= len(ui.all_inds):
+            return
+        if getattr(ui, '_session_any_mode', False):
+            trip = self._pair_at_all_inds_idx(ui.current_pair_idx)
+            if trip is None:
+                return
+            if trip not in ui.selected_inds:
+                return
+            scroll_top = self.selected_list.yview()[0]
+            ui._push_undo()
+            ui.selected_inds.discard(trip)
+            ui.deleted_inds.add(trip)
+            hl_old = list(getattr(ui, '_any_pair_handle_list', ()) or ())
+            next_trip = None
+            for i in range(ui.current_pair_idx + 1, len(hl_old)):
+                ck, r, t = hl_old[i]
+                tr = (str(ck.session), int(r), int(t))
+                if tr in ui.selected_inds:
+                    next_trip = tr
+                    break
+            if next_trip is None:
+                for i in range(ui.current_pair_idx):
+                    ck, r, t = hl_old[i]
+                    tr = (str(ck.session), int(r), int(t))
+                    if tr in ui.selected_inds:
+                        next_trip = tr
+                        break
+            self.refresh_lists()
+            if next_trip is not None:
+                ui.current_pair_idx = ui.get_pair_index(next_trip)
+            elif len(ui.all_inds):
+                ui.current_pair_idx = min(
+                    ui.current_pair_idx, len(ui.all_inds) - 1)
+            else:
+                ui.current_pair_idx = 0
+            self.selected_list.yview_moveto(scroll_top)
+            if len(ui.all_inds):
+                self._select_pair_in_list(
+                    self._pair_at_all_inds_idx(ui.current_pair_idx))
+            ui._flush_deleted_to_store()
+            ui.network_panel.draw()
+            ui.update_plot()
+            return
+
+        inds = tuple(int(x) for x in ui.all_inds[ui.current_pair_idx])
+
+        if inds in ui.selected_inds:
+            scroll_top = self.selected_list.yview()[0]
+            ui._push_undo()
+            ui.selected_inds.discard(inds)
+            ui.deleted_inds.add(inds)
+            n = len(ui.all_inds)
+            next_idx = None
+            for i in range(ui.current_pair_idx + 1, n):
+                if tuple(ui.all_inds[i]) in ui.selected_inds:
+                    next_idx = i; break
+            if next_idx is None:
+                for i in range(ui.current_pair_idx):
+                    if tuple(ui.all_inds[i]) in ui.selected_inds:
+                        next_idx = i; break
+            if next_idx is None:
+                for i in range(ui.current_pair_idx + 1, n):
+                    if tuple(ui.all_inds[i]) in ui.unselected_inds:
+                        next_idx = i; break
+            if next_idx is not None:
+                ui.current_pair_idx = next_idx
+            self.refresh_lists()
+            self.selected_list.yview_moveto(scroll_top)
+            if next_idx is not None:
+                self._select_pair_in_list(tuple(ui.all_inds[next_idx]))
+            ui._flush_deleted_to_store()
+            ui.network_panel.draw()
+            ui.update_plot()
+            return
+
+        scroll_top = self.unselected_list.yview()[0]
+        ui._push_undo()
+        if inds in ui.deleted_inds:
+            ui.deleted_inds.discard(inds)
+            ui.unselected_inds.add(inds)
+            self.refresh_lists()
+            self.unselected_list.yview_moveto(scroll_top)
+            self._select_pair_in_list(inds)
+        else:
+            ui.unselected_inds.discard(inds)
+            ui.deleted_inds.add(inds)
+            n = len(ui.all_inds)
+            next_idx = None
+            for i in range(ui.current_pair_idx + 1, n):
+                if tuple(ui.all_inds[i]) in ui.unselected_inds:
+                    next_idx = i
+                    break
+            if next_idx is None:
+                for i in range(ui.current_pair_idx):
+                    if tuple(ui.all_inds[i]) in ui.unselected_inds:
+                        next_idx = i
+                        break
+            if next_idx is not None:
+                ui.current_pair_idx = next_idx
+            self.refresh_lists()
+            self.unselected_list.yview_moveto(scroll_top)
+            if next_idx is not None:
+                self._select_pair_in_list(tuple(ui.all_inds[next_idx]))
+        ui._flush_deleted_to_store()
+        ui.network_panel.draw()
+        ui.update_plot()
 
     # ------------------------------------------------------------------
     # Group helpers
@@ -1782,7 +2151,8 @@ class LeftPanel:
                     label=f"{display} ({n})",
                     command=lambda g=gname: self._select_group(g))
             ui._groups_menu.add_cascade(label="Special", menu=special_menu)
-        ui._refresh_net_group_buttons()
+        if hasattr(ui, 'network_panel'):
+            ui.network_panel.refresh_group_buttons()
         if (hasattr(ui, '_hotkeys_bar')
                 and ui._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get()):
             ui._refresh_hotkeys_bar()
@@ -1801,12 +2171,12 @@ class LeftPanel:
         # TODO: GroupsManager
         """Toggle the current pair in/out of the group assigned to key_str."""
         ui = self._ui
-        current_pair = ui._selected_pair_from_lists() if hasattr(ui, '_selected_pair_from_lists') else None
+        current_pair = self._selected_pair_from_lists()
         if current_pair is None:
             if ui.current_pair_idx >= len(ui.all_inds):
                 return
             if getattr(ui, '_session_any_mode', False):
-                trip = ui._pair_at_all_inds_idx(ui.current_pair_idx)
+                trip = self._pair_at_all_inds_idx(ui.current_pair_idx)
                 if trip is None:
                     return
                 current_pair = trip
@@ -1878,11 +2248,11 @@ class LeftPanel:
             if advance:
                 next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
                 ui.current_pair_idx = next_idx
-                self._select_pair_in_list(ui._pair_at_all_inds_idx(next_idx))
+                self._select_pair_in_list(self._pair_at_all_inds_idx(next_idx))
             else:
                 self._select_pair_in_list(current_pair)
             ui.update_plot()
-            ui._draw_network()
+            ui.network_panel.draw()
             return
         ui._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
 
@@ -2068,7 +2438,7 @@ class SpikePairsPanel:
         if idx >= len(self._spike_pairs):
             return
         self._selected_idx = idx
-        self._ui._draw_spike_pairs_raster(idx, self._spike_pairs)
+        self._ui.center_container.spike_attribution_panel._draw_spike_pairs_raster(idx, self._spike_pairs)
 
 
 # ---------------------------------------------------------------------------
