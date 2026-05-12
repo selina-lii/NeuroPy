@@ -76,6 +76,7 @@ from neuropy.analyses.neurons_dataset import Key
 from neuropy.core.neurons import Neurons
 import imageio
 from neuropy.ui.ccg_network_panel import NetworkPanel
+from neuropy.ui.pair_selection_panel import LeftPanelContainer, SelectionData
 
 try:
     from neuropy.core.epoch import Epoch as _Epoch
@@ -123,19 +124,16 @@ class CCGReviewUI:
                            and self.ccg_pointer is not None
                         else None)
 
-        # Group state  {group_name -> {session_str -> set((ref,tgt))}}
-        # Initialized early because all_inds @property reads _groups
-        self._groups: dict = {}
-        self._groups.setdefault(_ADMITTED_GROUP, {})
-        self._group_hotkeys: dict = {}       # group_name -> hotkey str e.g. 'Control-1'
-        self._group_notes: dict = {}         # group_name -> notes string
-        # Group registry: stable integer IDs → {name, hotkey, notes}
-        # Used in v4.0 schema to avoid string-name fragility.
-        self._group_registry: dict = {}      # int_id (int) → dict
-        self._next_group_id: int = 1
-        # Pair tags  {(ref, tgt): {"notes": str, "tags": [str,...], "groups": [int_id,...]}}
-        # "groups" is synced from self._groups at save time; loaded back on file load.
-        self._pair_tags: dict = {}
+        # SelectionData owns all group/tag state; CCGReviewUI keeps same-object aliases
+        # so existing code (undo, load, classify, etc.) that writes self._groups etc.
+        # continues to work. Call _sync_sel_data() after any bulk reassignment.
+        self._sel_data = SelectionData()
+        self._groups         = self._sel_data._groups         # same dict object
+        self._group_hotkeys  = self._sel_data._group_hotkeys  # same dict object
+        self._group_notes    = self._sel_data._group_notes    # same dict object
+        self._group_registry = self._sel_data._group_registry # same dict object
+        self._next_group_id  = self._sel_data._next_group_id  # int — re-synced by _sync_sel_data
+        self._pair_tags      = self._sel_data._pair_tags      # same dict object
 
         # Pair / segment state  (all_inds is a @property — see below)
         # These are set to empty defaults when data is not yet loaded; they are
@@ -158,6 +156,8 @@ class CCGReviewUI:
         else:
             self.selected_inds = set()
         self.unselected_inds = set(map(tuple, self.all_inds)) - self.selected_inds
+        self._sel_data.selected_inds   = self.selected_inds
+        self._sel_data.unselected_inds = self.unselected_inds
 
         # Undo/redo stack for pair selection changes
         self._undo_stack: list = []  # list of (selected_inds_copy, unselected_inds_copy, deleted_inds_copy)
@@ -203,6 +203,10 @@ class CCGReviewUI:
         self._custom_ccg_thread: threading.Thread = None
         self._custom_ccg_thread_result: list = []
         self._custom_ccg_poll_id = None
+        # Multi-chunk time-slider splits: track batches so we can prompt to save all
+        self._split_batch_next_id: int = 1
+        self._split_batch_counts: dict[int, int] = {}
+        self._split_batch_chunk_names: dict[int, list[str]] = {}
 
         # Extend-window CCG (tentative feature): cache per (pair, seg, res, ms)
         self._extend_cache: dict = {}
@@ -285,7 +289,10 @@ class CCGReviewUI:
         #   {'name':str, 't0':float, 't1':float,
         #    'ccg': [1,N,N,bins], 'ccg_null', 'pval', 'pval_corrected',
         #    (optional hi-res): 'ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'}
+        # Per-session buckets (All-session mode); ``_custom_segments`` aliases the active one.
+        self._custom_segments_by_session: dict[str, list] = {}
         self._custom_segments: list = []
+        self._bind_custom_segments_to_session(str(self.key.session))
         # Multi-select segment chips for stacked display
         self._stacked_segments: set[int] = set()
         self._stats_panel = None          # StatsTestPanel singleton
@@ -656,7 +663,7 @@ class CCGReviewUI:
         for _key in ('<Control-s>', '<Command-s>'):
             self.root.bind(_key, lambda e: self._quick_save())
         for _key in ('<Control-f>', '<Command-f>'):
-            self.root.bind(_key, lambda e: self._search_show())
+            self.root.bind(_key, lambda e: self.left_container.left_panel._search_toggle())
         for _key in ('<Control-b>', '<Command-b>'):
             self.root.bind(_key, lambda e: self._bookmark_toggle_current())
         for _key in ('<Control-z>', '<Command-z>'):
@@ -845,21 +852,16 @@ class CCGReviewUI:
         if not paths:
             return
 
-        # Only load files that belong to the current session
         session = str(self.key.session)
-        prefix = f"{session}__"
 
-        existing = {(cs.get('name'), cs.get('t0'), cs.get('t1'))
-                    for cs in getattr(self, '_custom_segments', [])
-                    if isinstance(cs, dict)}
         added = []
+        added_active_view = False
         for p in paths:
             if not isinstance(p, str) or not p:
                 continue
             try:
                 base = os.path.basename(p)
-                if not base.startswith(prefix):
-                    continue
+                file_sess = base.split("__", 1)[0] if "__" in base else session
                 if not os.path.exists(p):
                     continue
                 npz = np.load(p, allow_pickle=False)
@@ -888,15 +890,15 @@ class CCGReviewUI:
                 for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
                     if k in npz:
                         cs[k] = npz[k]
-                key = (cs['name'], cs['t0'], cs['t1'])
-                if key not in existing:
-                    self._custom_segments.append(cs)
-                    existing.add(key)
-                    added.append(cs['name'])
+                lst = self._custom_segments_by_session.setdefault(file_sess, [])
+                self._upsert_custom_segment_by_name(lst, cs)
+                if lst is self._custom_segments:
+                    added_active_view = True
+                added.append(cs['name'])
             except Exception as ex:
                 print(f"[CCGReviewUI] restore custom CCG failed: {p}: {ex}")
 
-        if added:
+        if added and added_active_view:
             try:
                 self._build_sig_chips()
                 self._update_segment_label()
@@ -976,7 +978,9 @@ class CCGReviewUI:
                 'sbs_mode':            bool(getattr(self, '_sbs_mode', False)),
                 # Loaded custom CCGs (saved .npz paths) for this session/conn_type
                 'loaded_custom_ccgs':  [
-                    cs.get('src_path') for cs in getattr(self, '_custom_segments', [])
+                    cs.get('src_path')
+                    for lst in getattr(self, '_custom_segments_by_session', {}).values()
+                    for cs in lst
                     if isinstance(cs, dict) and cs.get('src_path')
                 ],
             }
@@ -1114,6 +1118,10 @@ class CCGReviewUI:
             self._stats_panel = StatsTestPanel(self)
         else:
             self._stats_panel.root.lift()
+            try:
+                self._stats_panel.refresh_session_dropdowns()
+            except Exception:
+                pass
 
     def _on_modules_menu_hover(self, event):
         """Show tooltip for hovered Modules menu item."""
@@ -1499,7 +1507,7 @@ class CCGReviewUI:
                 status = "▶ RUNNING" if i == 0 and self._is_task_running() else "  queued"
                 lb.insert(tk.END, f"{status}  jitter [{ref},{tgt}] n={n} {res}{seg_s}")
             for i, task in enumerate(self._custom_ccg_pending):
-                name = task[3]
+                name = (task.get('name') if isinstance(task, dict) else task[3])
                 status = "▶ RUNNING" if i == 0 and self._custom_ccg_is_running() else "  queued"
                 lb.insert(tk.END, f"{status}  custom CCG '{name}'")
             if lb.size() == 0:
@@ -1535,7 +1543,8 @@ class CCGReviewUI:
             if ccg_to_remove:
                 pending = list(self._custom_ccg_pending)
                 for idx in sorted(ccg_to_remove, reverse=True):
-                    pending.pop(idx)
+                    removed = pending.pop(idx)
+                    self._on_split_batch_task_done(removed)
                 self._custom_ccg_pending.clear()
                 self._custom_ccg_pending.extend(pending)
             _refresh()
@@ -1561,10 +1570,14 @@ class CCGReviewUI:
             self._jitter_pending.clear()
         if self._custom_ccg_is_running() and self._custom_ccg_pending:
             first = self._custom_ccg_pending[0]
+            for task in list(self._custom_ccg_pending)[1:]:
+                self._on_split_batch_task_done(task)
             n_removed += len(self._custom_ccg_pending) - 1
             self._custom_ccg_pending.clear()
             self._custom_ccg_pending.append(first)
         else:
+            for task in list(self._custom_ccg_pending):
+                self._on_split_batch_task_done(task)
             n_removed += len(self._custom_ccg_pending)
             self._custom_ccg_pending.clear()
         self._update_jitter_btn_text()
@@ -2215,160 +2228,41 @@ class CCGReviewUI:
     # ── Left panel ─────────────────────────────────────────────────────
 
     def setup_left_panel(self, parent):
-        # Tabbed notebook: Pair Selection | Spike Pairs
-        self._left_notebook = ttk.Notebook(parent)
-        self._left_notebook.pack(fill=tk.BOTH, expand=True)
+        # Delegate to LeftPanelContainer (pair_selection_panel.py)
+        self.left_container = LeftPanelContainer(
+            parent, self._sel_data, self, self._ui_state_cache)
+        self.left_container.widget.pack(fill=tk.BOTH, expand=True)
 
-        # ── Tab 1: Pair Selection ─────────────────────────────────────
-        pair_tab = ttk.Frame(self._left_notebook)
-        self._left_notebook.add(pair_tab, text="Pair Selection")
+        # ── Backward-compat aliases so existing CCGReviewUI code keeps working ──
+        lp = self.left_container.left_panel
+        sp = self.left_container.spike_pairs
 
-        columns_pane = ttk.PanedWindow(pair_tab, orient=tk.HORIZONTAL)
-        columns_pane.pack(fill=tk.BOTH, expand=True, pady=6)
-        self._pair_list_pane = columns_pane
+        self._left_notebook    = self.left_container.widget
+        self.unselected_list   = lp.unselected_list
+        self.selected_list     = lp.selected_list
+        self._avail_label_var  = lp._avail_label    # LeftPanel uses _avail_label (no _var suffix)
+        self._sel_label_var    = lp._sel_label
+        self._clear_spec_btn   = lp._clear_spec_btn
+        self._pair_list_pane   = lp._pair_list_pane
 
-        # Unselected list
-        unsel_frame = ttk.Frame(columns_pane)
-        columns_pane.add(unsel_frame, weight=1)
-        self._avail_label_var = tk.StringVar(
-            value=f"Available ({len(self.unselected_inds)})")
-        _avail_hdr = ttk.Frame(unsel_frame)
-        _avail_hdr.pack(fill=tk.X)
-        ttk.Label(_avail_hdr, textvariable=self._avail_label_var,
-                  font=('Arial', 10)).pack(side=tk.LEFT)
-        self._clear_spec_btn = ttk.Button(
-            _avail_hdr, text="✕ predictions",
-            command=self._clear_speculated, width=12)
-        # shown only when speculated is active — packed lazily in refresh_lists
-        unsel_scroll = ttk.Scrollbar(unsel_frame)
-        unsel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.unselected_list = tk.Listbox(
-            unsel_frame, yscrollcommand=unsel_scroll.set,
-            selectmode=tk.EXTENDED, font=('Courier', 9), activestyle='none',
-            exportselection=False,
-            width=1)
-        self.unselected_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        unsel_scroll.config(command=self.unselected_list.yview)
-        # Single click → navigate (debounced); double-click → move
-        self.unselected_list.bind('<ButtonRelease-1>', self.on_pair_select)
-        # Finder-style multi-select toggle on macOS/Windows: Cmd/Ctrl+click toggles row selection
-        for _seq in ('<Command-Button-1>', '<Control-Button-1>'):
-            self.unselected_list.bind(
-                _seq, lambda e, lb=self.unselected_list, kind='avail': self._pair_list_toggle_select(e, lb, kind))
-        self.unselected_list.bind('<Double-Button-1>', self.move_to_selected)
-        self.unselected_list.bind('<Return>',          self.move_to_selected)
-        # Bind right-click (Button-3) and macOS two-finger/ctrl-click (Button-2)
-        self.unselected_list.bind('<Button-3>',
-            lambda e: self._ctx_menu(e, self.unselected_list, 'add'))
-        self.unselected_list.bind('<Button-2>',
-            lambda e: self._ctx_menu(e, self.unselected_list, 'add'))
-        self.unselected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
-        self.unselected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
-        # Freeze horizontal scrolling — pass Left/Right to segment navigation
-        self.unselected_list.bind('<Left>',  lambda e: (self.change_segment(-1), 'break')[1])
-        self.unselected_list.bind('<Right>', lambda e: (self.change_segment(1),  'break')[1])
+        # Sort vars — LeftPanel drops the _var suffix; alias under old names
+        self._sort_selected_var = lp._sort_selected
+        self._sort_by_tag_var   = lp._sort_by_tag
+        self._sort_by_mean_var  = lp._sort_by_mean
+        self._sort_by_min_p_var = lp._sort_by_min_p
 
-        # Selected list
-        sel_frame = ttk.Frame(columns_pane)
-        columns_pane.add(sel_frame, weight=1)
-        self._sel_label_var = tk.StringVar(
-            value=f"Selected ({len(self.selected_inds)})")
-        ttk.Label(sel_frame, textvariable=self._sel_label_var,
-                  font=('Arial', 10)).pack()
-        sel_scroll = ttk.Scrollbar(sel_frame)
-        sel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.selected_list = tk.Listbox(
-            sel_frame, yscrollcommand=sel_scroll.set,
-            selectmode=tk.EXTENDED, font=('Courier', 9), activestyle='none',
-            exportselection=False)
-        self.selected_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sel_scroll.config(command=self.selected_list.yview)
-        self.selected_list.bind('<ButtonRelease-1>', self.on_pair_select)
-        for _seq in ('<Command-Button-1>', '<Control-Button-1>'):
-            self.selected_list.bind(
-                _seq, lambda e, lb=self.selected_list, kind='sel': self._pair_list_toggle_select(e, lb, kind))
-        self.selected_list.bind('<Double-Button-1>', self.move_to_unselected)
-        self.selected_list.bind('<Return>',          self.move_to_unselected)
-        self.selected_list.bind('<Button-3>',
-            lambda e: self._ctx_menu(e, self.selected_list, 'remove'))
-        self.selected_list.bind('<Button-2>',
-            lambda e: self._ctx_menu(e, self.selected_list, 'remove'))
-        self.selected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
-        self.selected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
-        # Freeze horizontal scrolling — pass Left/Right to segment navigation
-        self.selected_list.bind('<Left>',  lambda e: (self.change_segment(-1), 'break')[1])
-        self.selected_list.bind('<Right>', lambda e: (self.change_segment(1),  'break')[1])
+        # Search — old methods (_search_show/_hide/_go/_update) are dead code;
+        # Ctrl+F is rebound below.  Keep minimal aliases for any residual refs.
+        self._search_frame   = lp.search_bar._frame
+        self._search_entry   = lp.search_bar._entry
+        self._search_var     = lp.search_bar._var
+        self._search_matches = lp.search_bar._matches
 
-        self.refresh_lists()
-
-        # Buttons row: Select All/Deselect All / resolution toggle
-        btn_frame = ttk.Frame(pair_tab)
-        btn_frame.pack(fill=tk.X, pady=(4, 0))
-        self._select_all_btn = ttk.Button(btn_frame, text="Select All",
-                                          command=self._select_all)
-        self._select_all_btn.pack(side=tk.LEFT, padx=(0, 4))
-
-        # Sort selected list by group combo / individual tag / mean CCG — restore from state
-        _saved_sort = self._ui_state_cache
-        self._sort_selected_var = tk.BooleanVar(value=_saved_sort.get('sort_selected', False))
-        self._sort_by_tag_var   = tk.BooleanVar(value=_saved_sort.get('sort_by_tag',   False))
-        self._sort_by_mean_var  = tk.BooleanVar(value=_saved_sort.get('sort_by_mean',  False))
-        self._sort_by_min_p_var = tk.BooleanVar(value=_saved_sort.get('sort_by_min_p', False))
-        ttk.Checkbutton(btn_frame, text="Sort by group",
-                        variable=self._sort_selected_var,
-                        command=self._on_sort_by_group_toggle).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(btn_frame, text="Sort by tag",
-                        variable=self._sort_by_tag_var,
-                        command=self._on_sort_by_tag_toggle).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(btn_frame, text="Sort by mean",
-                        variable=self._sort_by_mean_var,
-                        command=self._on_sort_by_mean_toggle).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(btn_frame, text="Sort by min p-val",
-                        variable=self._sort_by_min_p_var,
-                        command=self._on_sort_by_min_p_toggle).pack(side=tk.LEFT, padx=2)
-
-        # ── Search bar (hidden; shown via Ctrl+F) ─────────────────────
-        search_frame = ttk.Frame(pair_tab)
-        # not packed — shown on demand
-        ttk.Label(search_frame, text="🔍").pack(side=tk.LEFT, padx=(0, 2))
-        self._search_var = tk.StringVar()
-        self._search_entry = ttk.Entry(search_frame, textvariable=self._search_var)
-        self._search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self._search_count_var = tk.StringVar(value="")
-        ttk.Label(search_frame, textvariable=self._search_count_var,
-                  width=6, anchor='e').pack(side=tk.LEFT, padx=(3, 0))
-        ttk.Button(search_frame, text="▲", width=2,
-                   command=lambda: self._search_go(-1)).pack(side=tk.LEFT, padx=1)
-        ttk.Button(search_frame, text="▼", width=2,
-                   command=lambda: self._search_go(1)).pack(side=tk.LEFT, padx=1)
-        ttk.Button(search_frame, text="✕", width=2,
-                   command=self._search_hide).pack(side=tk.LEFT, padx=(1, 0))
-        self._search_var.trace_add('write', lambda *_: self._search_update())
-        self._search_entry.bind('<Return>',        lambda e: self._search_go(1))
-        self._search_entry.bind('<Shift-Return>',  lambda e: self._search_go(-1))
-        self._search_entry.bind('<Escape>',        lambda e: self._search_hide())
-        self._search_frame = search_frame
-        self._search_matches: list = []   # [(listbox, idx), ...]
-        self._search_cur: int = -1
-
-        # ── Tab 2: Spike Pairs (spike attribution) ────────────────────
-        sa_tab = ttk.Frame(self._left_notebook)
-        self._left_notebook.add(sa_tab, text="Spike Pairs", state='disabled')
-        self._sa_tab = sa_tab
-        self._sa_tab_index = 1
-
-        self._sa_count_var = tk.StringVar(value="")
-        ttk.Label(sa_tab, textvariable=self._sa_count_var,
-                  font=('Courier', 9)).pack(side=tk.TOP, anchor='w', padx=4, pady=2)
-
-        sa_scroll = ttk.Scrollbar(sa_tab)
-        sa_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._sa_listbox = tk.Listbox(
-            sa_tab, yscrollcommand=sa_scroll.set,
-            selectmode=tk.BROWSE, font=('Courier', 9), activestyle='none')
-        self._sa_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sa_scroll.config(command=self._sa_listbox.yview)
-        self._sa_listbox.bind('<<ListboxSelect>>', self._on_sa_pair_click)
+        # Spike pairs panel aliases (old code used self._sa_*)
+        self._sa_tab       = sp._tab
+        self._sa_listbox   = sp._spike_pairs_listbox
+        self._sa_count_var = sp._spike_pairs_count
+        self._sa_tab_index = sp._spike_pairs_tab_index
 
     # ── Center panel ───────────────────────────────────────────────────
 
@@ -3032,12 +2926,10 @@ class CCGReviewUI:
         self._sa_bin_entry.config(state=state)
         self._sa_set_btn.config(state=state)
         if not enabled:
-            # Disable tab, clear spike pairs, restore CCG
-            self._left_notebook.tab(self._sa_tab_index, state='disabled')
-            self._left_notebook.select(0)  # back to Pair Selection
             self._sa_spike_pairs = []
             self._sa_selected_idx = -1
-            self._sa_count_var.set("")
+            if hasattr(self, 'left_container'):
+                self.left_container.spike_pairs.clear()
             self.update_plot()
 
     def _on_sa_set(self):
@@ -3049,14 +2941,14 @@ class CCGReviewUI:
         try:
             self._sa_bin_ms = float(self._sa_bin_var.get())
         except ValueError:
-            self._sa_count_var.set("Invalid bin")
+            if hasattr(self, 'left_container'):
+                self.left_container.spike_pairs._spike_pairs_count.set("Invalid bin")
             return
         inds = self.all_inds[self.current_pair_idx]
         ref, tgt = int(inds[0]), int(inds[1])
         self._compute_spike_pairs(ref, tgt, self._sa_bin_ms)
-        # Enable and switch to Spike Pairs tab
-        self._left_notebook.tab(self._sa_tab_index, state='normal')
-        self._left_notebook.select(self._sa_tab_index)
+        if hasattr(self, 'left_container'):
+            self.left_container.spike_pairs.activate()
 
     def _exit_spike_attribution_view(self):
         """Exit spike attribution raster and restore normal CCG view."""
@@ -3113,14 +3005,17 @@ class CCGReviewUI:
         self._sa_spike_pairs = pairs
         self._sa_selected_idx = -1
 
-        # Populate listbox
-        self._sa_listbox.delete(0, tk.END)
-        for i, (rt, tt) in enumerate(pairs):
-            lag_ms = (tt - rt) * 1000.0
-            self._sa_listbox.insert(
-                tk.END,
-                f"{i+1:>5}  ref {rt:10.4f}  tgt {tt:10.4f}  lag {lag_ms:+6.2f}ms")
-        self._sa_count_var.set(f"{len(pairs)} spike pairs")
+        if hasattr(self, 'left_container'):
+            self.left_container.spike_pairs.populate(pairs)
+        else:
+            # Pre-container fallback
+            self._sa_listbox.delete(0, tk.END)
+            for i, (rt, tt) in enumerate(pairs):
+                lag_ms = (tt - rt) * 1000.0
+                self._sa_listbox.insert(
+                    tk.END,
+                    f"{i+1:>5}  ref {rt:10.4f}  tgt {tt:10.4f}  lag {lag_ms:+6.2f}ms")
+            self._sa_count_var.set(f"{len(pairs)} spike pairs")
 
     def _on_sa_pair_click(self, _event=None):
         """Handle click on a spike pair — show raster in center panel."""
@@ -3184,6 +3079,16 @@ class CCGReviewUI:
 
         self.fig.tight_layout()
         self.canvas.draw()
+
+    def _draw_spike_pairs_raster(self, idx: int, spike_pairs: list):
+        """Called from SpikePairsPanel when a spike pair is clicked.
+
+        Stores the pairs list on self for _draw_sa_raster to index into,
+        then delegates to the existing drawing logic.
+        """
+        self._sa_spike_pairs = spike_pairs
+        self._sa_selected_idx = idx
+        self._draw_sa_raster(idx)
 
     def setup_waveforms_panel(self, parent):
         """Waveform pane inside the CCG horizontal split — hidden by default."""
@@ -3947,10 +3852,13 @@ class CCGReviewUI:
         """Return (tk_, ptr, ref, tgt) for every selected pair in every session/type."""
         # Flush live selection into the current pointer before iterating.
         if self.ccg_pointer is not None:
-            self.ccg_pointer.manually_selected_inds = (
-                np.array(sorted(self.selected_inds), dtype=int)
-                if getattr(self, 'selected_inds', None) else None
-            )
+            if getattr(self, '_session_any_mode', False):
+                self._flush_any_selections_to_pointers()
+            else:
+                self.ccg_pointer.manually_selected_inds = (
+                    np.array(sorted(self.selected_inds), dtype=int)
+                    if getattr(self, 'selected_inds', None) else None
+                )
         items = []
         for tk_, ptr in self.cd.data.items():
             sel = getattr(ptr, 'manually_selected_inds', None)
@@ -5187,7 +5095,8 @@ class CCGReviewUI:
             except Exception as ex:
                 messagebox.showerror("Custom CCG", f"Session load failed for {key_for_task.session}:\n{ex}")
                 try:
-                    self._custom_ccg_pending.popleft()
+                    failed = self._custom_ccg_pending.popleft()
+                    self._on_split_batch_task_done(failed)
                 except Exception:
                     pass
                 self._custom_ccg_start_next()
@@ -5198,7 +5107,8 @@ class CCGReviewUI:
             if ccg_data_obj is None or neurons_obj is None:
                 print(f"[CustomCCG] missing session data after load: {key_for_task.session}")
                 try:
-                    self._custom_ccg_pending.popleft()
+                    failed = self._custom_ccg_pending.popleft()
+                    self._on_split_batch_task_done(failed)
                 except Exception:
                     pass
                 self._custom_ccg_start_next()
@@ -5319,6 +5229,8 @@ class CCGReviewUI:
         if result is not None and not result.get('error'):
             if isinstance(completed_task, dict) and completed_task.get('auto_save'):
                 key_for_save = completed_task.get('key', self.key)
+                _sess_save = str(key_for_save.session)
+                self._purge_timestamped_custom_ccg_npz(_sess_save, str(result['name']))
                 fname = self._ccg_cache_filename_for_key(result['name'], key_for_save)
                 path = os.path.join(self._ccg_cache_dir, fname)
                 arrays = dict(
@@ -5343,11 +5255,17 @@ class CCGReviewUI:
                 np.savez_compressed(path, **arrays)
                 result['src_path'] = path
                 self._emit_custom_ccg_inventory_event()
-            should_load = not isinstance(completed_task, dict) or bool(completed_task.get('load_into_ui', True))
-            if should_load and str(result.get('_task_session', self.key.session)) == str(self.key.session):
-                self._custom_segments.append(result)
+            should_load = (not isinstance(completed_task, dict)
+                            or bool(completed_task.get('load_into_ui', True)))
+            _tk_done = (completed_task.get('key', self.key)
+                        if isinstance(completed_task, dict) else self.key)
+            _lsess = str(result.get('_task_session', getattr(_tk_done, 'session', '')))
+            _lst = self._custom_segments_by_session.setdefault(_lsess, [])
+            idx, _did_append = self._upsert_custom_segment_by_name(_lst, result)
+            if should_load and self._custom_segments is _lst:
                 self._build_sig_chips()
-                self.current_segment = self.n_segments + len(self._custom_segments)
+                self.current_segment = self.n_segments + 1 + idx
+                self._clamp_current_segment_for_session()
                 self._update_segment_label()
                 self.update_plot()
             if hasattr(self, '_ts_status_var'):
@@ -5355,6 +5273,9 @@ class CCGReviewUI:
             self.root.bell()
         elif result is not None and result.get('error'):
             messagebox.showerror("Custom CCG", f"Computation failed:\n{result['error']}")
+
+        if completed_task is not None:
+            self._on_split_batch_task_done(completed_task)
 
         self._custom_ccg_start_next()
 
@@ -5473,6 +5394,9 @@ class CCGReviewUI:
             except tk.TclError:
                 return False
             return True
+
+        if not hasattr(self, 'unselected_list'):
+            return  # called during LeftPanel construction before bridge aliases exist
 
         if getattr(self, '_session_any_mode', False):
             # Selected rows are ``_sel_list_pairs`` (headers = None); indices are
@@ -6192,6 +6116,7 @@ class CCGReviewUI:
         self.current_segment = self.n_segments
         self.segment_combo['values'] = self.segment_names + [_ALL_SEGS]
         self.segment_var.set(_ALL_SEGS)
+        self._bind_custom_segments_to_session(str(self.key.session))
 
     def _enter_any_session_mode(self):
         """Backward-compat wrapper for older call sites."""
@@ -6205,6 +6130,24 @@ class CCGReviewUI:
         self._any_expanded_group_tags = set()
         self._any_pair_handle_list = []
         self._png_sess_slug = ''
+        # ``selected_inds`` was (session, ref, tgt) triples; single-session code expects
+        # (ref, tgt) only — reload from the bound pointer before _switch_key / autosave.
+        try:
+            ptr = self.cd.data.get(self.key) if getattr(self, 'key', None) is not None else None
+            if ptr is not None and getattr(ptr, 'manually_selected_inds', None) is not None:
+                self.selected_inds = set(map(tuple, ptr.manually_selected_inds))
+            else:
+                self.selected_inds = set()
+            _avail = set(map(tuple, self.all_inds))
+            self.deleted_inds = (
+                set(self._pair_deleted_store.get(str(self.key), set())) & _avail)
+            self.unselected_inds = _avail - self.selected_inds - self.deleted_inds
+        except Exception:
+            pass
+        try:
+            self._bind_custom_segments_to_session(str(self.key.session))
+        except Exception:
+            pass
 
     def _exit_any_session_mode(self):
         """Backward-compat wrapper for older call sites."""
@@ -6289,6 +6232,7 @@ class CCGReviewUI:
         prev_sess = str(getattr(self.key, 'session', '') or '')
         if (self.key == ckey and self.ccg_data is not None
                 and getattr(self.ccg_pointer, 'inds2', None) is not None):
+            self._bind_custom_segments_to_session(sess)
             self._clamp_current_segment_for_session()
             try:
                 self._update_segment_label()
@@ -6296,9 +6240,8 @@ class CCGReviewUI:
                 pass
             return
         if prev_sess != sess:
-            # Custom segments / segment ids are session-local; keep UI consistent
-            # with ``_refresh_after_key_switch`` when hopping in Any mode.
-            self._custom_segments.clear()
+            # Custom CCG data are session-specific: show that session's segment chips.
+            self._bind_custom_segments_to_session(sess)
         self._bind_context_to_type_key(ckey)
         self._clamp_current_segment_for_session()
         try:
@@ -6433,6 +6376,7 @@ class CCGReviewUI:
             str(prev_session or '') != str(new_session or ''))
         if self._switch_key_session_changed:
             self._custom_segments.clear()
+            self._bind_custom_segments_to_session(str(new_session))
         # Update probe network ct checkboxes to match new key
         new_ct = getattr(new_key, 'conn_type', None)
         for ct, var in getattr(self, '_net_ct_vars', {}).items():
@@ -6458,6 +6402,7 @@ class CCGReviewUI:
             self._ts_refresh_epochs_for_current_key()
         else:
             self._ts_reinit_times_for_current_key()
+            self._ts_refresh_union_if_all_sessions_mode()
         self._switch_key_session_changed = False
 
     def _ts_reinit_times_for_current_key(self):
@@ -6469,12 +6414,15 @@ class CCGReviewUI:
 
     def _custom_ccg_has_unsaved(self) -> bool:
         """True if any in-memory custom segment has no on-disk .npz (or file missing)."""
-        for cs in getattr(self, '_custom_segments', []):
-            if not isinstance(cs, dict):
-                continue
-            p = cs.get('src_path')
-            if not p or not os.path.isfile(str(p)):
-                return True
+        buckets = getattr(self, '_custom_segments_by_session', None) or {}
+        seq = buckets.values() if buckets else [getattr(self, '_custom_segments', [])]
+        for lst in seq:
+            for cs in lst:
+                if not isinstance(cs, dict):
+                    continue
+                p = cs.get('src_path')
+                if not p or not os.path.isfile(str(p)):
+                    return True
         return False
 
     def _maybe_prompt_save_custom_ccgs_before_session_switch(self) -> bool:
@@ -6739,6 +6687,23 @@ class CCGReviewUI:
     # Highlight color for undo/redo indicators (matches CCG baseline orange)
     _UNDO_HIGHLIGHT = '#ff7f0e'
 
+    def _sync_sel_data(self):
+        """Re-sync _sel_data from CCGReviewUI attrs after any bulk reassignment.
+
+        Called at the top of refresh_lists (which runs after every state change)
+        and explicitly after undo/redo and load operations that create new objects.
+        """
+        if not hasattr(self, '_sel_data'):
+            return
+        self._sel_data.selected_inds   = self.selected_inds
+        self._sel_data.unselected_inds = self.unselected_inds
+        self._sel_data._groups         = self._groups
+        self._sel_data._pair_tags      = self._pair_tags
+        self._sel_data._group_hotkeys  = self._group_hotkeys
+        self._sel_data._group_notes    = self._group_notes
+        self._sel_data._group_registry = self._group_registry
+        self._sel_data._next_group_id  = self._next_group_id
+
     def _undo(self, event=None):
         if not self._undo_stack:
             return
@@ -6751,6 +6716,7 @@ class CCGReviewUI:
         self.deleted_inds = state[2] if len(state) > 2 else set()
         if len(state) > 3:
             self._groups = state[3]
+            self._sync_sel_data()  # re-sync before _rebuild reads _sel_data._groups
             self._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         self.refresh_lists()
@@ -6772,6 +6738,7 @@ class CCGReviewUI:
         self.deleted_inds = state[2] if len(state) > 2 else set()
         if len(state) > 3:
             self._groups = state[3]
+            self._sync_sel_data()
             self._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         self.refresh_lists()
@@ -6882,7 +6849,14 @@ class CCGReviewUI:
             return 1.0
 
     def refresh_lists(self):
-        # Preserve scroll position so list rebuild doesn't jump
+        # Sync SelectionData from CCGReviewUI attrs, then delegate to LeftPanel.
+        # All list-rebuild logic lives in LeftPanel.refresh_lists(); keeping this
+        # method on CCGReviewUI so the 20+ call-sites here don't need to change.
+        self._sync_sel_data()
+        if hasattr(self, 'left_container'):
+            self.left_container.left_panel.refresh_lists()
+            return
+        # ── Pre-container fallback (should not be reached after setup_ui) ──
         try:
             _unsel_scroll_top = self.unselected_list.yview()[0]
         except Exception:
@@ -9603,6 +9577,7 @@ class CCGReviewUI:
                 self._groups[gname][sess] = set(
                     tuple(int(v) for v in p) for p in pairs)
         self._groups.setdefault(_ADMITTED_GROUP, {})
+        self._sync_sel_data()
 
     def _merge_groups_from_session_files(self, export_path: str):
         """Merge group definitions from all per-session __latest.json files.
@@ -10153,22 +10128,9 @@ class CCGReviewUI:
             if self.ccg_data is None or self.ccg_pointer is None:
                 return
 
-            if (getattr(self, '_session_any_mode', False)
-                    and self._panel_vars.get('Time Slider', tk.BooleanVar(value=False)).get()):
-                self.fig.clear()
-                ax = self.fig.add_subplot(111)
-                ax.axis('off')
-                ax.text(
-                    0.5, 0.5,
-                    "Time Slider is active in All session view.\n"
-                    "A single behavioral-epoch timeline cannot be shown\n"
-                    "for multiple sessions at once.",
-                    ha='center', va='center', fontsize=11, color='#444',
-                    transform=ax.transAxes,
-                )
-                self.canvas.draw()
-                self.plot_title_var.set("All sessions | Time Slider")
-                return
+            # In All/Any mode, Time Slider can be enabled even though a single
+            # behavioral timeline can't represent multiple sessions at once.
+            # Keep rendering the CCG plot (the time slider UI is separate).
 
             # If spike attribution raster is active, keep showing it
             if self._sa_selected_idx >= 0 and self._sa_spike_pairs:
@@ -10376,6 +10338,7 @@ class CCGReviewUI:
     def _ts_discover_themes(self):
         """Discover available Epoch objects from the session for theme switching."""
         self._ts_themes = {}
+        self._ts_theme_label_union_all_sessions = {}
         # Known Epoch attribute names on session objects (ProcessData)
         _EPOCH_ATTRS = [
             'paradigm', 'brainstates', 'theta', 'theta_epochs',
@@ -10412,6 +10375,87 @@ class CCGReviewUI:
         n_themes = len(self._ts_themes)
         self._ts_theme_info_var.set(
             f"{n_themes} theme{'s' if n_themes != 1 else ''} available")
+        self._ts_rebuild_theme_label_union_for_all_sessions()
+
+    def _ts_all_process_data_sessions(self):
+        """ProcessData objects for every loaded session (for cross-session label union)."""
+        nd = getattr(self.cd, 'nd', None)
+        if nd is None:
+            return []
+        raw = getattr(nd, '_sessions', None)
+        if raw is None:
+            raw = []
+        elif not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        objs = [s for s in raw if s is not None]
+        if objs:
+            return objs
+        out = []
+        seen = set()
+        for nk in self._real_nd_keys_ordered():
+            s = self._session_obj_for_nd_key(nk)
+            if s is None:
+                continue
+            sid = id(s)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            out.append(s)
+        return out
+
+    def _ts_refresh_union_if_all_sessions_mode(self):
+        """Recompute All-session label union without resetting the time-slider theme/handles."""
+        if not getattr(self, '_session_any_mode', False):
+            return
+        if getattr(self, '_ts_theme_combo', None) is None:
+            return
+        self._ts_rebuild_theme_label_union_for_all_sessions()
+        self._ts_label_colors = None
+        self._ts_update_overlap_ui()
+        self._ts_redraw()
+
+    def _ts_rebuild_theme_label_union_for_all_sessions(self):
+        """When Session=All, map each theme to sorted unique labels seen on any session."""
+        self._ts_theme_label_union_all_sessions = {}
+        if not getattr(self, '_session_any_mode', False):
+            return
+        session_objs = self._ts_all_process_data_sessions()
+        if not session_objs:
+            return
+        for attr in self._ts_themes.keys():
+            acc = set()
+            for s in session_objs:
+                obj = getattr(s, attr, None)
+                if obj is None or _Epoch is None or not isinstance(obj, _Epoch):
+                    continue
+                if obj.n_epochs <= 0:
+                    continue
+                for lbl in obj.labels:
+                    s = str(lbl).strip()
+                    if s:
+                        acc.add(s)
+            if acc:
+                self._ts_theme_label_union_all_sessions[attr] = sorted(acc)
+        # segments: union of segment labels across every loaded CCG pointer
+        seg = set()
+        data = getattr(self.cd, 'data', None)
+        if data:
+            for ptr in data.values():
+                if ptr is None:
+                    continue
+                try:
+                    et = ptr.edge_times
+                except Exception:
+                    continue
+                cols = getattr(et, 'columns', None)
+                if cols is None or 'label' not in cols:
+                    continue
+                for v in et['label'].values:
+                    s = str(v).strip()
+                    if s:
+                        seg.add(s)
+        if seg:
+            self._ts_theme_label_union_all_sessions['segments'] = sorted(seg)
 
     def _on_ts_theme_change(self, _event=None):
         """Handle theme combobox selection — repopulate epoch bounds."""
@@ -10435,14 +10479,27 @@ class CCGReviewUI:
         self._ts_init_times()
         self._ts_redraw()
 
+    def _ts_collect_theme_ui_labels(self) -> list[str]:
+        """Non-blank labels for overlap + legend; Session=All includes union (also stripped)."""
+        theme = getattr(self, '_ts_current_theme', 'segments')
+        acc = {str(lb).strip() for _, _, lb in self._ts_epoch_bounds if str(lb).strip()}
+        if getattr(self, '_session_any_mode', False):
+            extra = (getattr(self, '_ts_theme_label_union_all_sessions', None)
+                     or {}).get(theme, ())
+            acc |= {str(x).strip() for x in (extra or ()) if str(x).strip()}
+        out = sorted(acc)
+        if not out and theme != 'segments' and theme in getattr(self, '_ts_themes', {}):
+            return [theme]
+        return out
+
     def _ts_update_overlap_ui(self):
         """Update the label-filter dropdown for the current theme."""
         combo = getattr(self, '_ts_label_combo', None)
         row = getattr(self, '_ts_overlap_row', None)
         if combo is None or row is None:
             return
-        all_labels = sorted(set(lbl for _, _, lbl in self._ts_epoch_bounds))
         theme = getattr(self, '_ts_current_theme', 'segments')
+        all_labels = self._ts_collect_theme_ui_labels()
         if len(all_labels) > 1:
             sorted_labels = ['All'] + all_labels + ['NONE']
             combo['values'] = sorted_labels
@@ -10465,12 +10522,16 @@ class CCGReviewUI:
         if theme != 'segments' and theme in self._ts_themes:
             # Use Epoch object directly
             epoch = self._ts_themes[theme]
-            self._ts_epoch_bounds = []
-            for start, stop, label in zip(epoch.starts, epoch.stops, epoch.labels):
-                self._ts_epoch_bounds.append((float(start), float(stop), str(label)))
-            # For binary/single-label themes, use the theme name as the label
-            unique_labels = set(lbl for _, _, lbl in self._ts_epoch_bounds)
-            if len(unique_labels) <= 1:
+            labs = [str(x).strip() for x in epoch.labels]
+            self._ts_epoch_bounds = [
+                (float(s), float(e), lb)
+                for s, e, lb in zip(epoch.starts, epoch.stops, labs)]
+            unique_nonblank = {lb for lb in labs if lb}
+            # No usable labels (e.g. ripple): collapse to theme name for UI/chips
+            if len(unique_nonblank) == 0:
+                self._ts_epoch_bounds = [
+                    (s, e, theme) for s, e, _ in self._ts_epoch_bounds]
+            elif len(unique_nonblank) <= 1:
                 self._ts_epoch_bounds = [
                     (s, e, theme) for s, e, _ in self._ts_epoch_bounds]
             self._ts_total_sec = (float(epoch.stops.max())
@@ -10498,8 +10559,9 @@ class CCGReviewUI:
                 t0 = float(row[start_col])
                 t1 = float(row[stop_col])
                 self._ts_epoch_bounds.append((t0, t1, str(row['label'])))
-            self._ts_total_sec = (self._ts_epoch_bounds[-1][1]
-                                  if self._ts_epoch_bounds else 1.0)
+            self._ts_total_sec = (
+                max((b[1] for b in self._ts_epoch_bounds), default=1.0)
+                if self._ts_epoch_bounds else 1.0)
         else:
             # Fall back: reconstruct from cumulative effective_time_hours
             t = 0.0
@@ -10548,7 +10610,7 @@ class CCGReviewUI:
         if not hasattr(self, '_ts_label_colors') or self._ts_label_colors is None:
             self._ts_label_colors = {}
         # Rebuild if labels changed
-        all_labels = sorted(set(lbl for _, _, lbl in self._ts_epoch_bounds))
+        all_labels = self._ts_collect_theme_ui_labels()
         expected = set(all_labels) | {'NONE'}
         if expected != set(self._ts_label_colors.keys()):
             self._ts_label_colors = {
@@ -10673,7 +10735,7 @@ class CCGReviewUI:
             self._ts_active_label = self._TS_NONE
         else:
             # Could be a real label or the theme display name (single-label themes)
-            all_labels = sorted(set(lbl for _, _, lbl in self._ts_epoch_bounds))
+            all_labels = self._ts_collect_theme_ui_labels()
             if val in all_labels:
                 self._ts_active_label = val
             else:
@@ -11010,7 +11072,7 @@ class CCGReviewUI:
         for i in range(n_splits):
             cs = t0 + i * stride
             ce = min(cs + chunk_len, t1)
-            suffix = f"_part{i + 1}"
+            suffix = f"{i + 1}"
             chunks.append((cs, ce, base_name + suffix))
         return chunks
 
@@ -11018,18 +11080,29 @@ class CCGReviewUI:
         spec = self._build_custom_spec(for_all=False)
         if spec is None:
             return
-        # Resolve sentinels for current session
+        filter_state = spec.get('filter_state', {})
+        # Resolve sentinels for current session (use min/max times, not first/last table row)
         seg_bounds = self._segment_bounds_for_key(self.key)
-        t_sess_start = seg_bounds[0][0] if seg_bounds else 0.0
-        t_sess_end = seg_bounds[-1][1] if seg_bounds else float(getattr(self, '_ts_total_sec', 0.0))
+        t_sess_start, t_sess_end = self._segment_bounds_time_extent(seg_bounds)
+        if not seg_bounds:
+            t_sess_end = float(getattr(self, '_ts_total_sec', 0.0))
         t0 = self._resolve_ts_time(spec['t0'], t_sess_start, t_sess_end)
         t1 = self._resolve_ts_time(spec['t1'], t_sess_start, t_sess_end)
+        lone = self._single_exclusive_segment_filter_label(filter_state)
+        if lone is not None:
+            span = self._union_span_for_segment_label(self.key, lone)
+            if span is not None:
+                t0, t1 = span[0], span[1]
         self._slider_t_start = t0
         self._slider_t_end = t1
         n_splits = max(1, int(spec.get('n_splits') or 1))
         overlap_sec = max(0.0, float(spec.get('overlap_sec') or 0.0))
         chunks = self._split_time_range(t0, t1, n_splits, overlap_sec, spec['name'])
-        filter_state = spec.get('filter_state', {})
+        split_bid = None
+        if n_splits > 1:
+            split_bid = self._split_batch_next_id
+            self._split_batch_next_id += 1
+        split_names: list[str] = []
         queued = 0
         for chunk_t0, chunk_t1, chunk_name in chunks:
             bs_result = self._ts_brain_state_intervals(chunk_t0, chunk_t1)
@@ -11055,9 +11128,15 @@ class CCGReviewUI:
                 metadata=metadata,
                 auto_save=False,
                 load_into_ui=True,
+                split_batch_id=split_bid,
             )
             if ok:
                 queued += 1
+                if split_bid is not None:
+                    split_names.append(chunk_name)
+        if split_bid is not None and split_names:
+            self._split_batch_counts[split_bid] = len(split_names)
+            self._split_batch_chunk_names[split_bid] = split_names
         if queued:
             self._record_custom_ccg_suggestion(spec)
             label = spec['name'] if n_splits == 1 else f"{spec['name']} ({queued} chunks)"
@@ -11270,6 +11349,43 @@ class CCGReviewUI:
                 t += dur
         return out
 
+    @staticmethod
+    def _segment_bounds_time_extent(seg_bounds: list) -> tuple[float, float]:
+        """Min start / max end over segment rows (table order may differ from wall-clock order)."""
+        if not seg_bounds:
+            return (0.0, 0.0)
+        return (min(b[0] for b in seg_bounds), max(b[1] for b in seg_bounds))
+
+    def _union_span_for_segment_label(self, key, label: str) -> tuple[float, float] | None:
+        """Absolute [t0, t1] covering all edge_times rows whose label matches *label*."""
+        bounds = self._segment_bounds_for_key(key)
+        if not bounds:
+            return None
+        want = str(label)
+        spans = [(s, e) for s, e, lbl in bounds if str(lbl) == want]
+        if not spans:
+            return None
+        return (min(s for s, _ in spans), max(e for _, e in spans))
+
+    def _single_exclusive_segment_filter_label(self, filter_state: dict) -> str | None:
+        """If theme is ``segments`` and exactly one behavioral label is ON, return that label."""
+        fs = filter_state or {}
+        if str(fs.get('theme', 'segments')) != 'segments':
+            return None
+        labels = fs.get('labels') or {}
+        if not labels or all(bool(v) for v in labels.values()):
+            return None
+        active = [str(k) for k, v in labels.items() if v and str(k).upper() != 'NONE']
+        if len(active) != 1:
+            return None
+        return active[0]
+
+    @staticmethod
+    def _suppress_legacy_post_split_suggestion_name(name: str) -> bool:
+        """Strip legacy auto-generated post-window suggestion names from lists/UI."""
+        n = re.sub(r'[\s_]+', '', str(name).strip().lower())
+        return n in ('post1', 'post2', 'post1st', 'post2nd', 'postfirst', 'postsecond')
+
     def _theme_bounds_for_key(self, key):
         theme = str(getattr(self, '_ts_current_theme', 'segments'))
         if theme == 'segments':
@@ -11303,10 +11419,13 @@ class CCGReviewUI:
         if _Epoch is None or epoch is None or not isinstance(epoch, _Epoch) or epoch.n_epochs <= 0:
             return None
         out = []
-        for s, e, lbl in zip(epoch.starts, epoch.stops, epoch.labels):
-            out.append((float(s), float(e), str(lbl)))
-        uniq = {lbl for _, _, lbl in out}
-        if len(uniq) <= 1:
+        labs = [str(x).strip() for x in epoch.labels]
+        for s, e, lb in zip(epoch.starts, epoch.stops, labs):
+            out.append((float(s), float(e), lb))
+        unique_nonblank = {lb for lb in labs if lb}
+        if len(unique_nonblank) == 0:
+            out = [(s, e, theme) for s, e, _ in out]
+        elif len(unique_nonblank) <= 1:
             out = [(s, e, theme) for s, e, _ in out]
         return out
 
@@ -11317,10 +11436,16 @@ class CCGReviewUI:
             return None
         # Resolve sentinels per-session: 'start' → bounds start, 'end' → bounds end
         seg_bounds = self._segment_bounds_for_key(key)
-        t_sess_start = seg_bounds[0][0] if seg_bounds else 0.0
-        t_sess_end = seg_bounds[-1][1] if seg_bounds else float(getattr(self, '_ts_total_sec', 0.0))
+        t_sess_start, t_sess_end = self._segment_bounds_time_extent(seg_bounds)
+        if not seg_bounds:
+            t_sess_end = float(getattr(self, '_ts_total_sec', 0.0))
         t0 = self._resolve_ts_time(spec.get('t0', 0.0), t_sess_start, t_sess_end)
         t1 = self._resolve_ts_time(spec.get('t1', t_sess_end), t_sess_start, t_sess_end)
+        lone = self._single_exclusive_segment_filter_label(spec.get('filter_state', {}))
+        if lone is not None:
+            span = self._union_span_for_segment_label(key, lone)
+            if span is not None:
+                t0, t1 = span[0], span[1]
         labels = ((spec.get('filter_state') or {}).get('labels') or {})
         if not labels or all(bool(v) for v in labels.values()):
             return (None, t1 - t0)
@@ -11329,12 +11454,14 @@ class CCGReviewUI:
             print(f"[CustomCCG] no active labels: {key.session}")
             return False
         available_labels = {str(lbl) for _, _, lbl in bounds}
-        required_real = active_labels - {'NONE'}
-        if not required_real.issubset(available_labels):
-            print(f"[CustomCCG] missing behavioral tags: {key.session}")
-            return None
         none_active = 'NONE' in active_labels
-        real_labels = active_labels - {'NONE'}
+        # Only labels that are both toggled ON and present on this session contribute
+        # intervals. Selected labels absent here are ignored (narrower coverage).
+        required_real = (active_labels - {'NONE'}) & available_labels
+        if not required_real and not none_active:
+            print(f"[CustomCCG] no active labels: {key.session}")
+            return False
+        real_labels = required_real
         intervals = []
         for s, e, lbl in bounds:
             if lbl in real_labels:
@@ -11369,22 +11496,57 @@ class CCGReviewUI:
         except Exception:
             return None
 
-    def _custom_file_exists_for_spec(self, key, spec: dict) -> bool:
-        session = str(key.session)
-        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(spec['name']).replace(' ', '_'))
-        patt = os.path.join(self._ccg_cache_dir, f"{session}__{safe}__*.npz")
-        target = self._custom_spec_key(spec)
-        for p in _glob.glob(patt):
-            ps = self._custom_npz_spec(p)
-            if ps is None:
+    def _custom_ccg_name_session_coverage(self) -> tuple[dict[str, set[str]], int]:
+        """Logical custom CCG name -> sessions that have an npz with that name (full cache scan)."""
+        pattern = os.path.join(self._ccg_cache_dir, "*.npz")
+        by_name: dict[str, set[str]] = {}
+        for p in sorted(_glob.glob(pattern)):
+            base = os.path.basename(p)
+            sess = base.split("__", 1)[0] if "__" in base else ""
+            if not sess:
                 continue
-            if self._custom_spec_key(ps) == target:
-                return True
-        return False
+            spec = self._custom_npz_spec(p)
+            if not spec:
+                continue
+            nm = str(spec.get('name', '')).strip()
+            if not nm or self._suppress_legacy_post_split_suggestion_name(nm):
+                continue
+            by_name.setdefault(nm, set()).add(sess)
+        n_tot = len(self._real_nd_keys_ordered())
+        return by_name, n_tot
+
+    def _custom_segment_disk_session(self, cs: dict) -> str:
+        """Session string for a loaded/saved custom segment (metadata or npz filename)."""
+        md = cs.get('metadata') or {}
+        if md.get('session') is not None:
+            return str(md['session'])
+        sp = cs.get('src_path')
+        if sp:
+            bn = os.path.basename(sp)
+            if "__" in bn:
+                return bn.split("__", 1)[0]
+        return str(self.key.session)
+
+    def _bind_custom_segments_to_session(self, sess: str):
+        """Point ``_custom_segments`` at the in-memory list for session *sess*."""
+        self._custom_segments = self._custom_segments_by_session.setdefault(str(sess), [])
+
+    def _key_for_custom_segment_save(self, cs: dict):
+        """``Key`` for npz filenames: segment's session + same connection-type label as UI."""
+        want_sess = self._custom_segment_disk_session(cs)
+        cur_lbl = self._type_label(self.key)
+        for k in self.cd.data.keys():
+            if str(k.session) == want_sess and self._type_label(k) == cur_lbl:
+                return k
+        for k in self.cd.data.keys():
+            if str(k.session) == want_sess:
+                return k
+        return self.key
 
     def _enqueue_custom_ccg_task(self, *, key, t0, t1, name, intervals,
                                  active_duration, filter_state, metadata,
-                                 auto_save: bool, load_into_ui: bool) -> bool:
+                                 auto_save: bool, load_into_ui: bool,
+                                 split_batch_id: int | None = None) -> bool:
         running = 1 if self._custom_ccg_is_running() else 0
         total = running + len(self._custom_ccg_pending)
         if total >= _MAX_JITTER_QUEUE:
@@ -11405,6 +11567,7 @@ class CCGReviewUI:
             'metadata': metadata or {},
             'auto_save': bool(auto_save),
             'load_into_ui': bool(load_into_ui),
+            'split_batch_id': split_batch_id,
         })
         return True
 
@@ -11452,15 +11615,24 @@ class CCGReviewUI:
         for tk_ in targets:
             # Resolve sentinels per-session
             seg_bounds = self._segment_bounds_for_key(tk_)
-            t_sess_start = seg_bounds[0][0] if seg_bounds else 0.0
-            t_sess_end = seg_bounds[-1][1] if seg_bounds else 0.0
+            t_sess_start, t_sess_end = self._segment_bounds_time_extent(seg_bounds)
+            if not seg_bounds:
+                t_sess_end = 0.0
             t0_r = self._resolve_ts_time(spec.get('t0', 0.0), t_sess_start, t_sess_end)
             t1_r = self._resolve_ts_time(spec.get('t1', t_sess_end), t_sess_start, t_sess_end)
+            lone = self._single_exclusive_segment_filter_label(spec.get('filter_state', {}))
+            if lone is not None:
+                span = self._union_span_for_segment_label(tk_, lone)
+                if span is not None:
+                    t0_r, t1_r = span[0], span[1]
             chunks = self._split_time_range(t0_r, t1_r, n_splits, overlap_sec, str(spec['name']))
+            split_bid = None
+            if len(chunks) > 1 and str(tk_.session) == str(self.key.session):
+                split_bid = self._split_batch_next_id
+                self._split_batch_next_id += 1
+            split_names: list[str] = []
             for chunk_t0, chunk_t1, chunk_name in chunks:
                 chunk_spec = dict(spec, name=chunk_name, t0=chunk_t0, t1=chunk_t1)
-                if self._custom_file_exists_for_spec(tk_, chunk_spec):
-                    continue
                 iv = self._intervals_for_spec_on_key(chunk_spec, tk_)
                 if iv is None or iv is False:
                     continue
@@ -11484,9 +11656,15 @@ class CCGReviewUI:
                     metadata=metadata,
                     auto_save=auto_save,
                     load_into_ui=(str(tk_.session) == str(self.key.session)),
+                    split_batch_id=split_bid,
                 )
                 if ok:
                     queued += 1
+                    if split_bid is not None:
+                        split_names.append(chunk_name)
+            if split_bid is not None and split_names:
+                self._split_batch_counts[split_bid] = len(split_names)
+                self._split_batch_chunk_names[split_bid] = split_names
         return queued
 
     # ------------------------------------------------------------------
@@ -11512,8 +11690,10 @@ class CCGReviewUI:
             return False
         if self.neurons is None:
             return (None, t1 - t0)
+        available_labels = {lbl for _, _, lbl in self._ts_epoch_bounds}
         none_active = 'NONE' in active_labels
-        real_labels = active_labels - {'NONE'}
+        real_active = active_labels - {'NONE'}
+        real_labels = real_active & available_labels
         intervals = []
         for s, e, lbl in self._ts_epoch_bounds:
             if lbl in real_labels:
@@ -13450,11 +13630,12 @@ class CCGReviewUI:
 
     def _rebuild_groups_menu(self):
         """Refresh the dynamic part of the Groups menu."""
+        if hasattr(self, 'left_container'):
+            self.left_container.left_panel._rebuild_groups_menu()
+            return
+        # Pre-container fallback (during early setup before left_container exists)
         if not hasattr(self, '_groups_menu'):
             return
-        # Remove dynamic entries (index 8+); preserve static items 0–7:
-        # 0=Create, 1=Create special, 2=Manage, 3=Merge, 4=Export, 5=Import,
-        # 6=sep, 7=Pair tags
         try:
             while self._groups_menu.index('end') >= 8:
                 self._groups_menu.delete(8)
@@ -13468,13 +13649,12 @@ class CCGReviewUI:
                 special_groups.append(gname)
                 continue
             if gname.startswith('__'):
-                continue  # hide internal groups like __admitted__
+                continue
             hk = self._group_hotkeys.get(gname, '')
             label = gname + (f" [{hk}]" if hk else "")
             self._groups_menu.add_command(
                 label=label,
                 command=lambda g=gname: self._select_group(g))
-        # Special groups submenu
         if special_groups:
             special_menu = tk.Menu(self._groups_menu, tearoff=0)
             for gname in special_groups:
@@ -13484,7 +13664,6 @@ class CCGReviewUI:
                     label=f"{display} ({n})",
                     command=lambda g=gname: self._select_group(g))
             self._groups_menu.add_cascade(label="Special", menu=special_menu)
-        # Also refresh the probe-network group toggle buttons and hotkeys bar
         self._refresh_net_group_buttons()
         if (hasattr(self, '_hotkeys_bar') and
                 self._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get()):
@@ -14044,6 +14223,7 @@ class CCGReviewUI:
                             cur_sess, set()).add(pair)
             # v3.x: also handle old 'tags' key as plain string list (keep as-is)
         self._enforce_label_selection_integrity_live()
+        self._sync_sel_data()
         if not _skip_redraw:
             self._post_load_refresh()
 
@@ -14426,12 +14606,34 @@ class CCGReviewUI:
     # ------------------------------------------------------------------ #
 
     def _ccg_cache_filename_for_key(self, seg_name: str, key=None) -> str:
-        """Build a cache filename for a custom segment belonging to key."""
+        """Stable cache filename per (session, segment name); recomputes overwrite the same file."""
         key = key or self.key
         session = str(key.session)
-        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', seg_name.replace(' ', '_'))
-        ts = datetime.datetime.now().strftime('%y%m%d-%H-%M')
-        return f"{session}__{safe}__{ts}.npz"
+        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(seg_name).replace(' ', '_'))
+        return f"{session}__{safe}.npz"
+
+    def _purge_timestamped_custom_ccg_npz(self, session: str, seg_name: str):
+        """Remove legacy ``session__name__timestamp.npz`` files for this logical segment name."""
+        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(seg_name).replace(' ', '_'))
+        patt = os.path.join(self._ccg_cache_dir, f"{session}__{safe}__*.npz")
+        for p in _glob.glob(patt):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def _upsert_custom_segment_by_name(self, lst: list, result: dict) -> tuple[int, bool]:
+        """Replace an existing in-memory custom segment with the same name, else append.
+
+        Returns (index_in_lst, did_append).
+        """
+        nm = str(result.get('name', ''))
+        for i, existing in enumerate(lst):
+            if str(existing.get('name', '')) == nm:
+                lst[i] = result
+                return i, False
+        lst.append(result)
+        return len(lst) - 1, True
 
     def _ccg_cache_filename(self, seg_name: str) -> str:
         return self._ccg_cache_filename_for_key(seg_name, key=self.key)
@@ -14549,7 +14751,10 @@ class CCGReviewUI:
         try:
             with open(path, encoding='utf-8') as f:
                 raw = json.load(f)
-            return [self._normalize_custom_spec(x) for x in (raw.get('items', []) or []) if isinstance(x, dict)]
+            out = [self._normalize_custom_spec(x) for x in (raw.get('items', []) or [])
+                   if isinstance(x, dict)]
+            return [x for x in out
+                    if not self._suppress_legacy_post_split_suggestion_name(x.get('name', ''))]
         except Exception as ex:
             print(f"[CustomCCG] suggestion list load failed: {ex}")
             return []
@@ -14563,6 +14768,8 @@ class CCGReviewUI:
 
     def _record_custom_ccg_suggestion(self, spec: dict):
         norm = self._normalize_custom_spec(spec)
+        if self._suppress_legacy_post_split_suggestion_name(norm.get('name', '')):
+            return
         key = (self._custom_spec_key(norm), norm.get('scope', ''))
         specs = self._load_custom_ccg_suggestions()
         existing = {(self._custom_spec_key(s), s.get('scope', '')) for s in specs}
@@ -14579,8 +14786,11 @@ class CCGReviewUI:
                 npz = np.load(p, allow_pickle=False)
                 base = os.path.basename(p)
                 session = str(base.split("__", 1)[0]) if "__" in base else ""
+                nm = str(npz['name_'])
+                if self._suppress_legacy_post_split_suggestion_name(nm):
+                    continue
                 spec = {
-                    'name': str(npz['name_']),
+                    'name': nm,
                     't0': float(npz['t0_']),
                     't1': float(npz['t1_']),
                     'filter_state': (json.loads(str(npz['filter_state_']))
@@ -14629,21 +14839,165 @@ class CCGReviewUI:
             self._available_custom_ccg_specs().values(),
             key=lambda x: (x['name'], x['t0'], x['scope'])
         )
+        specs = [s for s in specs
+                 if not self._suppress_legacy_post_split_suggestion_name(s.get('name', ''))]
         self._save_custom_ccg_suggestions(specs)
         if not silent:
             messagebox.showinfo("Custom CCG suggestions",
                                 f"Updated suggestion list with {len(specs)} item(s).")
 
+    def _on_split_batch_task_done(self, task):
+        """Decrement split-batch counter (compute finished, load failed, or queue removed)."""
+        if not isinstance(task, dict):
+            return
+        bid = task.get('split_batch_id')
+        if bid is None:
+            return
+        counts = getattr(self, '_split_batch_counts', None) or {}
+        if bid not in counts:
+            return
+        counts[bid] -= 1
+        if counts[bid] > 0:
+            return
+        del counts[bid]
+        names = list((getattr(self, '_split_batch_chunk_names', None) or {}).pop(bid, []))
+        self.root.after(100, lambda n=names: self._prompt_save_split_batch_custom_ccgs(n))
+
+    def _prompt_save_split_batch_custom_ccgs(self, names: list[str]):
+        """After all tasks in a time-slider split batch finish, offer to save unsaved chunks."""
+        name_set = set(names)
+        if not name_set:
+            return
+        cs_list = getattr(self, '_custom_segments', []) or []
+        indices = [i for i, cs in enumerate(cs_list)
+                   if cs.get('name') in name_set and not cs.get('src_path')]
+        if not indices:
+            return
+        n = len(indices)
+        if messagebox.askyesno(
+                "Save split windows",
+                f"{n} split window(s) finished computing but are not saved to disk yet.\n\n"
+                "Save them as .npz files now? (You can reload them later from the cache.)"):
+            self._save_custom_segments_at_indices(indices)
+
+    def _save_custom_segment_objects(self, segments: list) -> list[str]:
+        """Write custom segment dicts to npz (correct session prefix per segment)."""
+        saved: list[str] = []
+        for cs in segments:
+            if not isinstance(cs, dict):
+                continue
+            save_key = self._key_for_custom_segment_save(cs)
+            _sess_w = str(save_key.session)
+            self._purge_timestamped_custom_ccg_npz(_sess_w, str(cs['name']))
+            fname = self._ccg_cache_filename_for_key(cs['name'], key=save_key)
+            path = os.path.join(self._ccg_cache_dir, fname)
+            arrays = dict(
+                name_=np.array(cs['name']),
+                t0_=np.array(cs['t0']),
+                t1_=np.array(cs['t1']),
+                ccg=cs['ccg'],
+                ccg_null=cs['ccg_null'],
+                pval=cs['pval'],
+                pval_corrected=cs['pval_corrected'],
+                compute_sec_=np.array(cs.get('compute_sec', float('nan'))),
+                active_duration_=np.array(cs.get('active_duration', float('nan'))),
+                total_time_hours_=np.array(cs.get('total_time_hours', float('nan'))),
+                filter_state_=np.array(json.dumps(cs.get('filter_state', {}))),
+                metadata_=np.array(json.dumps(cs.get('metadata', {}))),
+                **({'firing_rates': cs['firing_rates']}
+                   if 'firing_rates' in cs else {}),
+            )
+            for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
+                if k in cs:
+                    arrays[k] = cs[k]
+            np.savez_compressed(path, **arrays)
+            cs['src_path'] = path
+            saved.append(str(cs['name']))
+        if saved:
+            messagebox.showinfo(
+                "Saved",
+                "Saved custom CCG segment(s):\n" + "\n".join(f"  • {n}" for n in saved))
+            if hasattr(self, '_ts_status_var'):
+                self._ts_status_var.set(f"Saved: {', '.join(saved)}")
+            self._emit_custom_ccg_inventory_event()
+            self._save_ui_state()
+        return saved
+
+    def _save_custom_segments_at_indices(self, indices: list[int]) -> list[str]:
+        """Write selected custom segments (indices into active ``_custom_segments``) to npz."""
+        objs = []
+        for ci in sorted(set(indices)):
+            if 0 <= ci < len(self._custom_segments):
+                objs.append(self._custom_segments[ci])
+        return self._save_custom_segment_objects(objs)
+
     def _ts_save_custom_ccg(self):
         """Save one or more current custom segments to disk."""
-        if not self._custom_segments:
+        buckets = getattr(self, '_custom_segments_by_session', None) or {}
+        if not any(lst for lst in buckets.values()):
             messagebox.showinfo("Save custom CCG", "No custom segments to save.")
+            return
+
+        any_mode = getattr(self, '_session_any_mode', False)
+        total_sess = max(1, len(self._real_nd_keys_ordered()))
+
+        if any_mode:
+            name_to_unsaved: dict[str, list] = collections.defaultdict(list)
+            for lst in buckets.values():
+                for cs in lst:
+                    if not isinstance(cs, dict) or cs.get('src_path'):
+                        continue
+                    nm = str(cs.get('name', '')).strip() or '(unnamed)'
+                    name_to_unsaved[nm].append(cs)
+            if not name_to_unsaved:
+                messagebox.showinfo(
+                    "Save custom CCG",
+                    "No unsaved custom segments. "
+                    "(Everything in memory already has a .npz on disk.)")
+                return
+            win = tk.Toplevel(self.root)
+            win.title("Save custom CCG — All sessions")
+            win.geometry("440x300")
+            win.transient(self.root)
+            win.grab_set()
+            ttk.Label(
+                win,
+                text="Unsaved segments (grouped by name). Select rows to save:",
+            ).pack(anchor='w', padx=8, pady=(8, 2))
+            lb = tk.Listbox(win, selectmode=tk.MULTIPLE, height=10)
+            lb.pack(fill=tk.BOTH, expand=True, padx=8)
+            row_cs: list[list] = []
+            for nm in sorted(name_to_unsaved.keys(), key=lambda s: s.lower()):
+                cs_list = name_to_unsaved[nm]
+                sess_set = {self._custom_segment_disk_session(c) for c in cs_list}
+                n_u = len(sess_set)
+                lb.insert(tk.END, f"{nm} ({n_u}/{total_sess} sessions unsaved)")
+                row_cs.append(cs_list)
+            lb.select_set(0, tk.END)
+            chosen: list[int] = []
+
+            def _ok():
+                chosen.extend(lb.curselection())
+                win.destroy()
+
+            btn_f = ttk.Frame(win)
+            btn_f.pack(fill=tk.X, padx=8, pady=6)
+            ttk.Button(btn_f, text="Save selected", command=_ok).pack(
+                side=tk.RIGHT, padx=4)
+            ttk.Button(btn_f, text="Cancel",
+                       command=win.destroy).pack(side=tk.RIGHT)
+            win.wait_window(win)
+            if not chosen:
+                return
+            to_save_cs: list = []
+            for r in chosen:
+                to_save_cs.extend(row_cs[int(r)])
+            self._save_custom_segment_objects(to_save_cs)
             return
 
         if len(self._custom_segments) == 1:
             to_save = [0]
         else:
-            # Let user pick which segments to save
             win = tk.Toplevel(self.root)
             win.title("Save custom CCG")
             win.geometry("340x260")
@@ -14657,7 +15011,6 @@ class CCGReviewUI:
                 lb.insert(tk.END,
                           f"{cs['name']}  ({self._ts_sec_to_hms(cs['t0'])}–"
                           f"{self._ts_sec_to_hms(cs['t1'])})")
-            # Default: select all
             lb.select_set(0, tk.END)
             chosen = []
 
@@ -14676,43 +15029,7 @@ class CCGReviewUI:
                 return
             to_save = list(chosen)
 
-        saved = []
-        for ci in to_save:
-            cs = self._custom_segments[ci]
-            fname = self._ccg_cache_filename(cs['name'])
-            path = os.path.join(self._ccg_cache_dir, fname)
-            arrays = dict(
-                name_=np.array(cs['name']),
-                t0_=np.array(cs['t0']),
-                t1_=np.array(cs['t1']),
-                ccg=cs['ccg'],
-                ccg_null=cs['ccg_null'],
-                pval=cs['pval'],
-                pval_corrected=cs['pval_corrected'],
-                compute_sec_=np.array(cs.get('compute_sec', float('nan'))),
-                active_duration_=np.array(cs.get('active_duration', float('nan'))),
-                total_time_hours_=np.array(cs.get('total_time_hours', float('nan'))),
-                filter_state_=np.array(
-                    __import__('json').dumps(cs.get('filter_state', {}))),
-                metadata_=np.array(
-                    __import__('json').dumps(cs.get('metadata', {}))),
-                **({'firing_rates': cs['firing_rates']}
-                   if 'firing_rates' in cs else {}),
-            )
-            for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-                if k in cs:
-                    arrays[k] = cs[k]
-            np.savez_compressed(path, **arrays)
-            cs['src_path'] = path
-            saved.append(cs['name'])
-        if saved:
-            messagebox.showinfo(
-                "Saved",
-                "Saved custom CCG segment(s):\n" + "\n".join(f"  • {n}" for n in saved))
-            if hasattr(self, '_ts_status_var'):
-                self._ts_status_var.set(f"Saved: {', '.join(saved)}")
-            self._emit_custom_ccg_inventory_event()
-            self._save_ui_state()
+        self._save_custom_segments_at_indices(to_save)
 
     def _archive_stale_custom_ccgs(self):
         """Move saved custom CCG files that pre-date the total_time_hours field to _trash/.
@@ -14776,37 +15093,25 @@ class CCGReviewUI:
         # tag: detail rows are not selectable, shown in grey
         tv.tag_configure('detail', foreground='#666')
         tv.tag_configure('file',   foreground='#000')
+        tv.tag_configure('group',  foreground='#333', font=('TkDefaultFont', 9, 'bold'))
 
-        is_all_mode = getattr(self, '_session_all_mode', False)
-        _n_total_sessions = len(self._real_nd_keys_ordered())
-
-        # In All-sessions mode, pre-compute how many sessions have each spec
-        _spec_session_counts: dict[tuple, list[str]] = {}
-        if is_all_mode:
-            for _p in paths:
-                _spec = self._custom_npz_spec(_p) or {}
-                if not _spec:
-                    continue
-                _k = self._custom_spec_key(_spec)
-                _base = os.path.basename(_p)
-                _sess = _base.split("__", 1)[0] if "__" in _base else ""
-                if _sess:
-                    _spec_session_counts.setdefault(_k, [])
-                    if _sess not in _spec_session_counts[_k]:
-                        _spec_session_counts[_k].append(_sess)
+        name_cov, _n_total_sessions = self._custom_ccg_name_session_coverage()
+        _n_sess_denom = max(1, _n_total_sessions)
 
         def _dur_str(dur):
             if dur != dur:  return ""          # nan
             if dur >= 60:   return f"  ⏱ {dur/60:.1f}min"
             return f"  ⏱ {dur:.0f}s"
 
-        def _parse_meta(p):
-            """Return (summary_line, [bullet_strings], path) from npz metadata."""
+        def _parse_meta(p, *, child_session_line: bool = False):
+            """Return (summary_line, [bullet_strings]) from npz metadata."""
             base = os.path.basename(p)
+            file_sess = base.split("__", 1)[0] if "__" in base else ""
             parts = base.replace('.npz', '').rsplit('__', 1)
-            safe_name = parts[0].replace('_', ' ') if parts else base
             date_str = parts[1] if len(parts) > 1 else ''
+            safe_name = parts[0].replace('_', ' ') if parts else base
             bullets = []
+            t0, t1 = None, None
             try:
                 m = np.load(p, allow_pickle=False)
                 if 'name_' in m:
@@ -14849,14 +15154,11 @@ class CCGReviewUI:
                     bullets.append(f"Contains: {', '.join(flags)}")
             except Exception:
                 pass
-            if is_all_mode and _spec_session_counts:
-                try:
-                    _pspec = self._custom_npz_spec(p) or {}
-                    _pk = self._custom_spec_key(_pspec) if _pspec else None
-                    _n_have = len(_spec_session_counts.get(_pk, [])) if _pk is not None else 0
-                    summary = f"{safe_name}  [{_n_have}/{_n_total_sessions} sessions]"
-                except Exception:
-                    summary = f"{safe_name}  [{date_str}]"
+            if child_session_line:
+                tr = ""
+                if t0 is not None and t1 is not None:
+                    tr = (f"{self._ts_sec_to_hms(t0)}–{self._ts_sec_to_hms(t1)}  ·  ")
+                summary = f"{file_sess or '?'}  ·  {tr}[{date_str}]"
             else:
                 summary = f"{safe_name}  [{date_str}]"
             return summary, bullets
@@ -14864,38 +15166,36 @@ class CCGReviewUI:
         # file_meta maps iid → path
         file_meta = {}
 
-        def _dedupe_paths(path_list):
-            grouped: dict[tuple, list[str]] = {}
+        def _populate(path_list):
+            for top in tv.get_children():
+                tv.delete(top)
+            file_meta.clear()
+            _groups: dict[str, list[str]] = collections.defaultdict(list)
             for p in path_list:
                 spec = self._custom_npz_spec(p) or {}
-                if not spec:
+                nm = str(spec.get('name', '')).strip()
+                if not nm:
+                    nm = os.path.basename(p).replace('.npz', '')
+                if self._suppress_legacy_post_split_suggestion_name(nm):
                     continue
-                key = self._custom_spec_key(spec)
-                grouped.setdefault(key, []).append(p)
-            out = []
-            cur_sess = str(self.key.session)
-            for plist in grouped.values():
-                preferred = None
+                _groups[nm].append(p)
+            for gname in sorted(_groups.keys(), key=lambda s: s.lower()):
+                plist = sorted(
+                    _groups[gname],
+                    key=lambda pp: (os.path.basename(pp).split('__', 1)[0], pp),
+                )
+                n_have = len(name_cov.get(gname, set()))
+                parent_text = (
+                    f"▶ {gname}  ({n_have}/{_n_sess_denom} sessions)")
+                pid = tv.insert('', tk.END, text=parent_text,
+                                tags=('group',), open=True)
                 for p in plist:
-                    if os.path.basename(p).startswith(f"{cur_sess}__"):
-                        preferred = p
-                        break
-                out.append(preferred or sorted(plist)[0])
-            return sorted(out)
-
-        def _populate(path_list):
-            for iid in list(file_meta.keys()):
-                if tv.exists(iid):
-                    tv.delete(iid)
-            file_meta.clear()
-            deduped = _dedupe_paths(path_list) if is_all_mode else path_list
-            for p in deduped:
-                summary, bullets = _parse_meta(p)
-                iid = tv.insert('', tk.END, text=f"☐  {summary}",
-                                tags=('file',), open=False)
-                file_meta[iid] = p
-                for b in bullets:
-                    tv.insert(iid, tk.END, text=f"    • {b}", tags=('detail',))
+                    summary, bullets = _parse_meta(p, child_session_line=True)
+                    iid = tv.insert(pid, tk.END, text=f"☐  {summary}",
+                                    tags=('file',), open=False)
+                    file_meta[iid] = p
+                    for b in bullets:
+                        tv.insert(iid, tk.END, text=f"    • {b}", tags=('detail',))
 
         _populate(paths)
 
@@ -14903,9 +15203,10 @@ class CCGReviewUI:
         # Prevent detail rows from being selected
         def _on_click(event):
             iid = tv.identify_row(event.y)
-            if iid and 'detail' in tv.item(iid, 'tags'):
-                # Don't select detail rows
-                tv.selection_remove(iid)
+            if iid:
+                tags = tv.item(iid, 'tags')
+                if 'detail' in tags or 'group' in tags:
+                    tv.selection_remove(iid)
 
         tv.bind('<ButtonRelease-1>', _on_click)
 
@@ -14942,9 +15243,9 @@ class CCGReviewUI:
             if not sel:
                 win.destroy()
                 return
-            existing = {(cs['name'], cs['t0'], cs['t1'])
-                        for cs in self._custom_segments}
             added = []
+            touched_view = False
+            last_idx = 0
             for iid in sel:
                 p = file_meta[iid]
                 try:
@@ -14974,22 +15275,30 @@ class CCGReviewUI:
                     for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
                         if k in npz:
                             cs[k] = npz[k]
-                    key = (cs['name'], cs['t0'], cs['t1'])
-                    if key not in existing:
-                        self._custom_segments.append(cs)
-                        existing.add(key)
-                        added.append(cs['name'])
+                    bn = os.path.basename(p)
+                    file_sess = bn.split("__", 1)[0] if "__" in bn else str(self.key.session)
+                    lst = self._custom_segments_by_session.setdefault(file_sess, [])
+                    last_idx, _ = self._upsert_custom_segment_by_name(lst, cs)
+                    if lst is self._custom_segments:
+                        touched_view = True
+                    added.append(cs['name'])
                 except Exception as ex:
                     print(f"[LoadCustomCCG] failed to load {p}: {ex}")
             win.destroy()
-            if added:
+            if added and touched_view:
                 self._build_sig_chips()
-                self.current_segment = (self.n_segments
-                                        + len(self._custom_segments))
+                self.current_segment = self.n_segments + 1 + last_idx
+                self._clamp_current_segment_for_session()
                 self._update_segment_label()
                 self.update_plot()
                 if hasattr(self, '_ts_status_var'):
                     self._ts_status_var.set(f"Loaded: {', '.join(added)}")
+                self._save_ui_state()
+            elif added:
+                if hasattr(self, '_ts_status_var'):
+                    self._ts_status_var.set(
+                        f"Loaded {len(added)} segment(s) for other session(s); "
+                        "switch pairs to that session to view chips.")
                 self._save_ui_state()
 
         btn_f = ttk.Frame(win)

@@ -4,6 +4,7 @@ Provides a Toplevel dialog for running statistical comparisons
 (t-tests) on connection strengths, firing rates, CCG baselines, etc.
 """
 
+import contextlib
 import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -14,6 +15,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 _ALL_SEGS = "All segments"
+_ADMITTED_GROUP = "__admitted__"
 
 _DATA_TYPES = [
     "Conn Strength",
@@ -65,11 +67,35 @@ class StatsTestPanel:
         try:
             if not self.root.winfo_exists():
                 return
+            self.refresh_session_dropdowns()
             if self._result_data and self._result_data.get('dtype') == "Conn Strength":
                 # Re-run so the text + plot reflect the new clamp mode.
                 self.root.after_idle(self._run)
         except Exception:
             pass
+
+    def refresh_session_dropdowns(self):
+        """Update Session / Segment combobox values on every row (e.g. add ``All`` without reopening)."""
+        sessions = self._available_sessions()
+        segments = self._available_segments()
+        for r in list(self._row_frames):
+            try:
+                if not r['frame'].winfo_exists():
+                    continue
+            except Exception:
+                continue
+            combo = r.get('sess_combo')
+            if combo is not None:
+                cur = r['sess'].get()
+                combo.config(values=sessions)
+                if cur not in sessions:
+                    r['sess'].set(sessions[0] if sessions else '')
+            seg_cb = r.get('seg_combo')
+            if seg_cb is not None:
+                cur_s = r['seg'].get()
+                seg_cb.config(values=segments)
+                if cur_s not in segments:
+                    r['seg'].set(segments[0] if segments else '')
 
     # ------------------------------------------------------------------
     # UI setup
@@ -176,6 +202,7 @@ class StatsTestPanel:
 
         self._add_row()
         self._add_row()
+        self.refresh_session_dropdowns()
 
     def _toggle_direction(self):
         self._dir_var.set("A < B" if self._dir_var.get().strip() == "A > B" else "A > B")
@@ -190,7 +217,10 @@ class StatsTestPanel:
             s = getattr(k, 'session', None)
             if s and s not in seen:
                 seen.append(s)
-        return seen or [self.ui._current_session_str()]
+        sessions = seen or [self.ui._current_session_str()]
+        if 'All' not in sessions:
+            sessions = ['All'] + sessions
+        return sessions
 
     def _available_conn_types(self, data_type: str = "Conn Strength") -> list[str]:
         if data_type == "Firing Rate":
@@ -207,12 +237,96 @@ class StatsTestPanel:
         return sorted(options) or ['pyr-pyr']
 
     def _available_segments(self) -> list[str]:
+        """Builtin segment names plus unique custom CCG names across all sessions."""
         ui = self.ui
-        segs = list(ui.segment_names)
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def add(nm: str):
+            if nm and nm not in seen:
+                seen.add(nm)
+                ordered.append(nm)
+
+        for nk in ui._real_nd_keys_ordered():
+            tk = ui._type_key_for_nd(nk)
+            if tk is None:
+                continue
+            ptr = ui.cd.data.get(tk)
+            if ptr is None or getattr(ptr, 'edge_times', None) is None:
+                continue
+            for nm in list(ptr.edge_times['label'].values):
+                add(str(nm))
+        buckets = getattr(ui, '_custom_segments_by_session', None) or {}
+        for lst in buckets.values():
+            for cs in lst:
+                if isinstance(cs, dict) and cs.get('name'):
+                    add(str(cs['name']))
         for cs in getattr(ui, '_custom_segments', []):
-            segs.append(cs['name'])
-        segs.append(_ALL_SEGS)
-        return segs
+            if isinstance(cs, dict) and cs.get('name'):
+                add(str(cs['name']))
+        add(_ALL_SEGS)
+        return ordered
+
+    @contextlib.contextmanager
+    def _stats_session_context(self, session_str: str):
+        """Bind main UI CCG context to *session_str* for stats reads; restore on exit."""
+        ui = self.ui
+        saved = (
+            ui.key,
+            ui.ccg_pointer,
+            ui.ccg_data,
+            ui.neurons,
+            ui.n_segments,
+            tuple(ui.segment_names),
+        )
+        nd_key = ui._nd_key_for_session_str(session_str)
+        tk = ui._type_key_for_nd(nd_key) if nd_key is not None else None
+        bound = tk is not None
+        if bound:
+            ui._bind_context_to_type_key(tk)
+            ui._bind_custom_segments_to_session(str(session_str))
+        try:
+            yield bound
+        finally:
+            if bound:
+                k, ptr, cd, neu, ns, sn = saved
+                ui.key = k
+                ui.ccg_pointer = ptr
+                ui.ccg_data = cd
+                ui.neurons = neu
+                ui.n_segments = ns
+                ui.segment_names = list(sn)
+                if getattr(ui, '_session_any_mode', False):
+                    try:
+                        ui._sync_any_plot_context(int(ui.current_pair_idx))
+                    except Exception:
+                        ui._bind_custom_segments_to_session(str(k.session))
+                else:
+                    ui._bind_custom_segments_to_session(str(k.session))
+
+    def _sessions_with_segment(self, seg_name: str) -> list[str]:
+        """Sessions that have builtin *seg_name* or a loaded custom CCG with that name."""
+        ui = self.ui
+        if seg_name == _ALL_SEGS:
+            return [str(nk.session) for nk in ui._real_nd_keys_ordered()]
+        out: list[str] = []
+        buckets = getattr(ui, '_custom_segments_by_session', None) or {}
+        for nk in ui._real_nd_keys_ordered():
+            sess = str(nk.session)
+            tk = ui._type_key_for_nd(nk)
+            if tk is None:
+                continue
+            ptr = ui.cd.data.get(tk)
+            if ptr is not None and getattr(ptr, 'edge_times', None) is not None:
+                snames = [str(x) for x in ptr.edge_times['label'].values]
+                if seg_name in snames:
+                    out.append(sess)
+                    continue
+            for cs in buckets.get(sess, []):
+                if isinstance(cs, dict) and cs.get('name') == seg_name:
+                    out.append(sess)
+                    break
+        return sorted(set(out))
 
     def _available_groups(self) -> list[str]:
         non_internal = [g for g in self.ui._groups if not g.startswith('__')]
@@ -285,17 +399,21 @@ class StatsTestPanel:
         data_combo.bind('<<ComboboxSelected>>', _on_data_change)
 
         ttk.Entry(frame, textvariable=name_var, width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Combobox(frame, textvariable=sess_var, values=sessions,
-                     state='readonly', width=22).pack(side=tk.LEFT, padx=2)
+        sess_combo = ttk.Combobox(
+            frame, textvariable=sess_var, values=sessions,
+            state='readonly', width=22)
+        sess_combo.pack(side=tk.LEFT, padx=2)
         ct_combo.pack(side=tk.LEFT, padx=2)
-        ttk.Combobox(frame, textvariable=seg_var,  values=segments,
-                     state='readonly', width=14).pack(side=tk.LEFT, padx=2)
+        seg_combo = ttk.Combobox(frame, textvariable=seg_var, values=segments,
+                                 state='readonly', width=14)
+        seg_combo.pack(side=tk.LEFT, padx=2)
         ttk.Combobox(frame, textvariable=grp_var,  values=groups,
                      state='readonly', width=14).pack(side=tk.LEFT, padx=2)
         data_combo.pack(side=tk.LEFT, padx=2)
 
         row = dict(frame=frame, name=name_var, sess=sess_var, ct=ct_var,
-                   seg=seg_var, grp=grp_var, data=data_var)
+                   seg=seg_var, grp=grp_var, data=data_var, sess_combo=sess_combo,
+                   seg_combo=seg_combo)
 
         def _del(r=row):
             # Defer destroy to let ttk combobox popdown close cleanly
@@ -320,13 +438,14 @@ class StatsTestPanel:
     # ------------------------------------------------------------------
 
     def _seg_name_to_idx(self, name: str) -> int | None:
+        """Resolve segment index for the **currently bound** UI session."""
         ui = self.ui
         if name == _ALL_SEGS:
             return ui.n_segments
         if name in ui.segment_names:
             return ui.segment_names.index(name)
         for ci, cs in enumerate(getattr(ui, '_custom_segments', [])):
-            if cs['name'] == name:
+            if isinstance(cs, dict) and cs.get('name') == name:
                 return ui.n_segments + 1 + ci
         return None
 
@@ -336,8 +455,18 @@ class StatsTestPanel:
 
     def _get_pairs_for_group(self, group_name: str, session_str: str, ct_str: str | None = None):
         ui = self.ui
+        if session_str == 'All':
+            return set()
         if group_name == '(all pairs)':
-            pairs = set(map(tuple, ui.all_inds))
+            ptr = ui.ccg_pointer
+            if ptr is None or getattr(ptr, 'inds2', None) is None:
+                base_pairs: set = set()
+            else:
+                base = ptr.inds2
+                base = base[base[:, 0] != base[:, 1]]
+                base_pairs = set(map(tuple, base))
+            admitted = ui._group_pairs(_ADMITTED_GROUP, session=session_str)
+            pairs = base_pairs | {tuple(p) for p in admitted if len(p) >= 2 and p[0] != p[1]}
         else:
             pairs = ui._group_pairs(group_name, session=session_str)
 
@@ -353,14 +482,59 @@ class StatsTestPanel:
 
     def _get_cs_values(self, session_str, ct_str, seg_name, group_name,
                        highres: bool = False):
-        """Return (pairs, cs_vals) for Conn Strength data."""
+        """Return (pairs, cs_vals) for Conn Strength data.
+
+        When *session_str* is ``'All'``, pools sessions that have *seg_name* (builtin or
+        custom), using each session's own CCG / custom segment; pair keys are
+        ``(session, ref, tgt)`` for pairwise alignment across groups.
+        """
+        if session_str == 'All':
+            return self._get_cs_values_all_sessions(ct_str, seg_name, group_name, highres)
+        with self._stats_session_context(session_str) as ok:
+            if not ok:
+                return [], []
+            return self._get_cs_values_bound(ct_str, seg_name, group_name, highres)
+
+    def _get_cs_values_all_sessions(self, ct_str, seg_name, group_name, highres: bool):
         ui = self.ui
+        method = ui._conn_str_method_var.get()
+        cs_vals: list[float] = []
+        valid_pairs: list[tuple] = []
+        for sess in self._sessions_with_segment(seg_name):
+            with self._stats_session_context(sess) as ok:
+                if not ok:
+                    continue
+                seg_idx = self._seg_name_to_idx(seg_name)
+                if seg_idx is None:
+                    continue
+                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
+                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
+                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
+                pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
+                for ref, tgt in pairs:
+                    try:
+                        ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                                                       highres=highres)
+                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                                               highres, eff_min_lag, eff_max_lag)
+                        entry = ui._conn_strength_cache.get(key)
+                        if entry is not None and entry[0] is not None:
+                            cs_vals.append(float(entry[0]))
+                            valid_pairs.append((sess, int(ref), int(tgt)))
+                    except Exception as exc:
+                        print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
+        return valid_pairs, cs_vals
+
+    def _get_cs_values_bound(self, ct_str, seg_name, group_name, highres: bool):
+        """Conn strength for the session already bound on *ui*."""
+        ui = self.ui
+        sess = str(ui.key.session)
         method = ui._conn_str_method_var.get()
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:
             return [], []
 
-        pairs = sorted(self._get_pairs_for_group(group_name, session_str, ct_str))
+        pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
         if not pairs:
             return [], []
 
@@ -391,6 +565,28 @@ class StatsTestPanel:
         For 'pyr'/'int', returns rates for neurons matching that type.
         For 'all', returns all neurons.
         """
+        if session_str == 'All':
+            return self._get_firing_rate_values_all(neuron_type_str, seg_name, group_name)
+        with self._stats_session_context(session_str) as ok:
+            if not ok:
+                return [], []
+            return self._get_firing_rate_values_bound(neuron_type_str)
+
+    def _get_firing_rate_values_all(self, neuron_type_str, seg_name, group_name):
+        ui = self.ui
+        ids: list[tuple] = []
+        vals: list[float] = []
+        for sess in [str(nk.session) for nk in ui._real_nd_keys_ordered()]:
+            with self._stats_session_context(sess) as ok:
+                if not ok:
+                    continue
+                id2, v2 = self._get_firing_rate_values_bound(neuron_type_str)
+                for i, v in zip(id2, v2):
+                    ids.append((sess, i))
+                    vals.append(v)
+        return ids, vals
+
+    def _get_firing_rate_values_bound(self, neuron_type_str: str):
         ui = self.ui
         neurons = getattr(ui, 'neurons', None)
         if neurons is None:
@@ -416,13 +612,37 @@ class StatsTestPanel:
 
     def _get_baseline_values(self, session_str, ct_str, seg_name, group_name):
         """Return (pairs, baseline_vals) — avg CCG outside ±5 ms."""
+        if session_str == 'All':
+            return self._get_baseline_values_all_sessions(ct_str, seg_name, group_name)
+        with self._stats_session_context(session_str) as ok:
+            if not ok:
+                return [], []
+            return self._get_baseline_values_bound(ct_str, seg_name, group_name)
+
+    def _get_baseline_values_all_sessions(self, ct_str, seg_name, group_name):
+        from neuropy.analyses.ms_connectivity import apply_norms_to_ccg  # noqa: PLC0415
+        ui = self.ui
+        bl_vals: list[float] = []
+        valid_pairs: list[tuple] = []
+        for sess in self._sessions_with_segment(seg_name):
+            with self._stats_session_context(sess) as ok:
+                if not ok:
+                    continue
+                p2, v2 = self._get_baseline_values_bound(ct_str, seg_name, group_name)
+                for (ref, tgt), v in zip(p2, v2):
+                    valid_pairs.append((sess, ref, tgt))
+                    bl_vals.append(v)
+        return valid_pairs, bl_vals
+
+    def _get_baseline_values_bound(self, ct_str, seg_name, group_name):
         from neuropy.analyses.ms_connectivity import apply_norms_to_ccg  # noqa: PLC0415
         ui = self.ui
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:
             return [], []
 
-        pairs = sorted(self._get_pairs_for_group(group_name, session_str, ct_str))
+        sess = str(ui.key.session)
+        pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
         if not pairs:
             return [], []
 

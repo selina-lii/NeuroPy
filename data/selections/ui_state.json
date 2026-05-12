@@ -4,7 +4,7 @@
     "CCG": true,
     "Probe Network": false,
     "Waveforms": false,
-    "Time Slider": false,
+    "Time Slider": true,
     "Group Hotkeys": true
   },
   "settings": {
@@ -52,7 +52,7 @@
   },
   "auto_pregen_enabled": false,
   "last_key": {
-    "session": "RatV_Day2SD",
+    "session": "RatJ_Day2",
     "epoch": null,
     "ref_ind": null,
     "target_ind": null,
@@ -68,21 +68,21 @@
   "conn_str_metric": "STG",
   "jitter_run_lo": true,
   "jitter_run_hi": true,
-  "current_segment": 6,
+  "current_segment": 3,
   "sort_selected": false,
   "sort_by_tag": false,
   "sort_by_mean": false,
   "sort_by_min_p": false,
   "pair_scale": false,
   "sess_scale": false,
-  "sash_pos": 103,
+  "sash_pos": 89,
   "display_vars": {
     "_sig_conv_p_var": false,
     "_sig_conv_pc_var": false,
     "_sig_test_window_var": true,
     "_sig_jitter_pc_var": true,
     "_conn_str_method_var": "conv",
-    "_conn_str_show_var": false,
+    "_conn_str_show_var": true,
     "_adaptive_tw_var": false,
     "_acg_ref_var": false,
     "_acg_tgt_var": false,
@@ -109,7 +109,17 @@
   "highres_mode": true,
   "sbs_mode": true,
   "loaded_custom_ccgs": [
-    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day2SD__nonripple__260511-03-08.npz",
-    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day2SD__ripple__260511-03-07.npz"
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatS-Day2NSD-2020-11-27_10-22-29__pyr-inter__nonripple__260506-13-30.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatK_Day1__pyr-inter__nonripple__260506-22-09.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatN_Day1__pyr-inter__nonripple__260506-22-39.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatR_Day1NSD__nonripple__260511-02-35.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatR_Day2SD__pyr-inter__nonripple__260503-14-09.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatS_Day3SD__pyr-inter__nonripple__260506-21-03.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatU_Day1SD__nonripple__260511-02-57.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatU_Day2NSD__pyr-pyr__nonripple__260427-12-56.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatU_Day4SD__nonripple__260511-03-06.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day1NSD__pyr-inter__nonripple__260502-18-04.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day2SD__pyr-inter__nonripple__260502-17-21.npz",
+    "/Users/selinl/Documents/ms_synchrony/NeuroPy/data/custom_ccg/RatV_Day3NSD__nonripple__260511-02-47.npz"
   ]
 }

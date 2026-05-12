@@ -1,10 +1,35 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-11T12:41:51.120458",
+  "saved_at": "2026-05-11T17:27:50.680422",
   "session": "RatJ_Day2",
   "selections": {
-    "sess_RatJ_Day2.ex_E.type_pyr-pyr": [],
+    "sess_RatJ_Day2.ex_E.type_pyr-pyr": [
+      [
+        15,
+        6
+      ],
+      [
+        27,
+        119
+      ],
+      [
+        41,
+        98
+      ],
+      [
+        59,
+        170
+      ],
+      [
+        173,
+        129
+      ],
+      [
+        177,
+        6
+      ]
+    ],
     "sess_RatJ_Day2.ex_E.type_pyr-inter": [],
     "sess_RatJ_Day2.ex_I.type_inter-inter": [],
     "sess_RatJ_Day2.ex_I.type_inter-pyr": []
