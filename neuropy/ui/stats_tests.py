@@ -20,12 +20,16 @@ _ADMITTED_GROUP = "__admitted__"
 
 _DATA_TYPES = [
     "Conn Strength",
-    "Firing Rate",
+    "CS norm (% change)",
+    "CS norm (geometric)",
+    "Ref Firing Rate",
+    "Tgt Firing Rate",
     "Baseline",
     "Peak Width",    # grayed — not yet implemented
     "Peak Center",   # grayed — not yet implemented
 ]
 _DATA_DISABLED = {"Peak Width", "Peak Center"}
+_CS_NORM_TYPES = {"CS norm (% change)", "CS norm (geometric)"}
 
 _FIRING_RATE_TYPES = ["pyr", "int", "all"]
 
@@ -202,6 +206,11 @@ class StatsTestPanel:
 
         # Bottom: plot
         plot_frame = ttk.Frame(res_pane)
+        plot_ctrl_row = ttk.Frame(plot_frame)
+        plot_ctrl_row.pack(fill=tk.X, side=tk.TOP, padx=2)
+        self._violin_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(plot_ctrl_row, text="Violin", variable=self._violin_var,
+                        command=self._on_plot_type_toggle).pack(side=tk.LEFT)
         self._plot_fig = Figure(figsize=(7.5, 2.6), dpi=100)
         self._plot_canvas = FigureCanvasTkAgg(self._plot_fig, master=plot_frame)
         self._plot_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -355,8 +364,6 @@ class StatsTestPanel:
         return result[0]
 
     def _available_conn_types(self, data_type: str = "Conn Strength") -> list[str]:
-        if data_type == "Firing Rate":
-            return list(_FIRING_RATE_TYPES)
         ui = self.ui
         options: set[str] = set()
         ct = getattr(ui.key, 'conn_type', None)
@@ -619,11 +626,12 @@ class StatsTestPanel:
         else:
             pairs = ui._group_pairs(group_name, session=session_str)
 
-        if ct_str and ct_str not in _FIRING_RATE_TYPES:
+        if ct_str:
             # Filter by conn type for consistent counts across panels
             try:
                 parts = ct_str.split('-', 1)
-                ct_lbl = f"{parts[0]}→{parts[1]}" if len(parts) == 2 else ct_str
+                ct_lbl = (ui._conn_type_label(tuple(parts))
+                          if len(parts) == 2 else ct_str)
                 pairs = set(ui._filter_pairs_to_conn_types(session_str, pairs, {ct_lbl}))
             except Exception:
                 pass
@@ -645,8 +653,8 @@ class StatsTestPanel:
             return self._get_cs_values_bound(ct_str, seg_name, group_name, highres)
 
     def _get_cs_values_all_sessions(self, ct_str, seg_name, group_name, highres: bool):
+        print("here")
         ui = self.ui
-        method = ui.center_container.baseline_panel._conn_str_method_var.get()
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for sess in self._sessions_with_segment(seg_name):
@@ -656,19 +664,13 @@ class StatsTestPanel:
                 seg_idx = self._seg_name_to_idx(seg_name)
                 if seg_idx is None:
                     continue
-                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
-                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
-                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
                 pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
                 for ref, tgt in pairs:
                     try:
-                        ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
-                                                       highres=highres)
-                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
-                                               highres, eff_min_lag, eff_max_lag)
-                        entry = ui._conn_strength_cache.get(key)
-                        if entry is not None and entry[0] is not None:
-                            cs_vals.append(float(entry[0]))
+                        val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx,
+                                                    highres=highres)
+                        if val is not None:
+                            cs_vals.append(val)
                             valid_pairs.append((sess, int(ref), int(tgt)))
                     except Exception as exc:
                         print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
@@ -679,7 +681,6 @@ class StatsTestPanel:
         """Pool Conn Strength like ``All``, but only over *sessions* (order preserved)."""
         have = set(self._sessions_with_segment(seg_name))
         ui = self.ui
-        method = ui.center_container.baseline_panel._conn_str_method_var.get()
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for sess in sessions:
@@ -691,19 +692,13 @@ class StatsTestPanel:
                 seg_idx = self._seg_name_to_idx(seg_name)
                 if seg_idx is None:
                     continue
-                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
-                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
-                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
                 pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
                 for ref, tgt in pairs:
                     try:
-                        ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
-                                                       highres=highres)
-                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
-                                               highres, eff_min_lag, eff_max_lag)
-                        entry = ui._conn_strength_cache.get(key)
-                        if entry is not None and entry[0] is not None:
-                            cs_vals.append(float(entry[0]))
+                        val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx,
+                                                    highres=highres)
+                        if val is not None:
+                            cs_vals.append(val)
                             valid_pairs.append((sess, int(ref), int(tgt)))
                     except Exception as exc:
                         print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
@@ -713,7 +708,6 @@ class StatsTestPanel:
         """Conn strength for the session already bound on *ui*."""
         ui = self.ui
         sess = str(ui.key.session)
-        method = ui.center_container.baseline_panel._conn_str_method_var.get()
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:
             return [], []
@@ -722,20 +716,13 @@ class StatsTestPanel:
         if not pairs:
             return [], []
 
-        conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
-        eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
-        eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
-
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for ref, tgt in pairs:
             try:
-                ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx, highres=highres)
-                key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
-                                       highres, eff_min_lag, eff_max_lag)
-                entry = ui._conn_strength_cache.get(key)
-                if entry is not None and entry[0] is not None:
-                    cs_vals.append(float(entry[0]))
+                val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx, highres=highres)
+                if val is not None:
+                    cs_vals.append(val)
                     valid_pairs.append((int(ref), int(tgt)))
             except Exception as exc:
                 print(f"[StatsPanel] CS error ({ref},{tgt}): {exc}")
@@ -800,6 +787,68 @@ class StatsTestPanel:
                     continue
                 if ntype == 'int' and ('int' not in cell_t and 'in' not in cell_t):
                     continue
+            try:
+                ids.append(i)
+                vals.append(float(neurons.firing_rate[i]))
+            except Exception:
+                pass
+        return ids, vals
+
+    def _get_role_firing_rate_values(self, session_str, ct_str, group_name, role: int):
+        """Return (ids, fr_vals) for ref (role=0) or tgt (role=1) neurons in the pair selection."""
+        if session_str == 'All':
+            return self._get_role_fr_values_all(ct_str, group_name, role)
+        with self._stats_session_context(session_str) as ok:
+            if not ok:
+                return [], []
+            return self._get_role_fr_values_bound(ct_str, group_name, role)
+
+    def _get_role_fr_values_all(self, ct_str: str, group_name: str, role: int):
+        ids: list[tuple] = []
+        vals: list[float] = []
+        for sess in [str(nk.session) for nk in self.ui._real_nd_keys_ordered()]:
+            with self._stats_session_context(sess) as ok:
+                if not ok:
+                    continue
+                id2, v2 = self._get_role_fr_values_bound(ct_str, group_name, role)
+                for i, v in zip(id2, v2):
+                    ids.append((sess, i))
+                    vals.append(v)
+        return ids, vals
+
+    def _get_role_fr_session_subset(self, sessions: list[str], ct_str: str,
+                                    group_name: str, role: int):
+        ids: list[tuple] = []
+        vals: list[float] = []
+        for sess in sessions:
+            with self._stats_session_context(sess) as ok:
+                if not ok:
+                    continue
+                id2, v2 = self._get_role_fr_values_bound(ct_str, group_name, role)
+                for i, v in zip(id2, v2):
+                    ids.append((sess, i))
+                    vals.append(v)
+        return ids, vals
+
+    def _get_role_fr_values_bound(self, ct_str: str, group_name: str, role: int):
+        """Firing rates for unique ref (role=0) or tgt (role=1) neurons in the pair selection."""
+        ui = self.ui
+        neurons = getattr(ui, 'neurons', None)
+        if neurons is None:
+            return [], []
+        sess = str(ui.key.session)
+        pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
+        if not pairs:
+            return [], []
+        seen: set[int] = set()
+        unique_neurons: list[int] = []
+        for p in pairs:
+            idx = int(p[role])
+            if idx not in seen:
+                seen.add(idx)
+                unique_neurons.append(idx)
+        ids, vals = [], []
+        for i in unique_neurons:
             try:
                 ids.append(i)
                 vals.append(float(neurons.firing_rate[i]))
@@ -925,7 +974,7 @@ class StatsTestPanel:
         dtype = row['data'].get()
         row['sess'].set(disp)
 
-        if dtype == "Conn Strength":
+        if dtype in {"Conn Strength"} | _CS_NORM_TYPES:
             if mode == 'all':
                 pairs, vals = self._get_cs_values('All', ct, seg, grp, highres=highres)
             elif mode == 'one':
@@ -938,13 +987,14 @@ class StatsTestPanel:
                     vals = [max(float(v), 0.0) for v in (vals or [])]
             except Exception:
                 pass
-        elif dtype == "Firing Rate":
+        elif dtype in ("Ref Firing Rate", "Tgt Firing Rate"):
+            role = 0 if dtype == "Ref Firing Rate" else 1
             if mode == 'all':
-                pairs, vals = self._get_firing_rate_values('All', ct, seg, grp)
+                pairs, vals = self._get_role_firing_rate_values('All', ct, grp, role)
             elif mode == 'one':
-                pairs, vals = self._get_firing_rate_values(arg, ct, seg, grp)
+                pairs, vals = self._get_role_firing_rate_values(arg, ct, grp, role)
             else:
-                pairs, vals = self._get_firing_rate_session_subset(arg, ct)
+                pairs, vals = self._get_role_fr_session_subset(arg, ct, grp, role)
         elif dtype == "Baseline":
             if mode == 'all':
                 pairs, vals = self._get_baseline_values('All', ct, seg, grp)
@@ -1062,6 +1112,55 @@ class StatsTestPanel:
             result['error'] = f"Error: {exc}"
         return result
 
+    def _run_cs_norm(self, g_a: dict, g_b: dict, dtype: str) -> dict:
+        """Compute per-pair normalised CS differences for matched pairs.
+
+        Returns a result dict with ``norm_vals`` / ``norm_pairs`` plus
+        a one-sample t-test result vs 0.
+        """
+        from scipy import stats as _stats  # noqa: PLC0415
+        a_pairs = [tuple(p) for p in (g_a.get('pairs') or [])]
+        b_pairs = [tuple(p) for p in (g_b.get('pairs') or [])]
+        map_a   = {p: float(v) for p, v in zip(a_pairs, g_a.get('vals') or [])}
+        map_b   = {p: float(v) for p, v in zip(b_pairs, g_b.get('vals') or [])}
+        common  = [p for p in a_pairs if p in map_b]
+
+        norm_vals:  list[float] = []
+        norm_pairs: list       = []
+        for p in common:
+            va, vb = map_a[p], map_b[p]
+            try:
+                if dtype == "CS norm (% change)":
+                    if va == 0.0:
+                        continue
+                    norm_vals.append((va - vb) / va)
+                else:                                   # geometric
+                    denom = va + vb
+                    if denom == 0.0:
+                        continue
+                    norm_vals.append((va - vb) / denom)
+                norm_pairs.append(p)
+            except (ZeroDivisionError, TypeError, ValueError):
+                pass
+
+        n = len(norm_vals)
+        if n < 2:
+            return {'error': f"Need ≥2 matched pairs (found {n}).",
+                    'norm_vals': norm_vals, 'norm_pairs': norm_pairs}
+
+        arr    = np.array(norm_vals, dtype=float)
+        mean_v = float(np.mean(arr))
+        se_v   = float(np.std(arr, ddof=1) / np.sqrt(n))
+        try:
+            t_stat, p_val = _stats.ttest_1samp(arr, 0.0)
+            return dict(test='One-sample t-test (vs 0)',
+                        t_stat=float(t_stat), p_val=float(p_val),
+                        n_used=n, mean=mean_v, se=se_v,
+                        norm_vals=norm_vals, norm_pairs=norm_pairs)
+        except Exception as exc:
+            return {'error': f"Error: {exc}",
+                    'norm_vals': norm_vals, 'norm_pairs': norm_pairs}
+
     def _run(self):
         active = [r for r in self._row_frames if r['frame'].winfo_exists()]
         if len(active) < 2:
@@ -1072,9 +1171,12 @@ class StatsTestPanel:
         if dtype in _DATA_DISABLED:
             self._show_result(f"Data type '{dtype}' is not yet implemented.")
             return
+        if dtype in _CS_NORM_TYPES and len(active) != 2:
+            self._show_result(f"'{dtype}' requires exactly 2 groups (A and B).")
+            return
 
         test_type = self._test_type_var.get()
-        run_hilo = (dtype == "Conn Strength")
+        run_hilo = (dtype in {"Conn Strength"} | _CS_NORM_TYPES)
 
         # Alternative hypothesis (relative to A)
         if self._sides_var.get() == "Two-sided":
@@ -1093,6 +1195,12 @@ class StatsTestPanel:
             if run_hilo:
                 groups_hi = [self._collect_group_data(r, highres=True) for r in active]
                 result_hi = self._run_anova(groups_hi)
+        elif dtype in _CS_NORM_TYPES:
+            a_lo, b_lo = groups_lo[0], groups_lo[1]
+            res_lo = self._run_cs_norm(a_lo, b_lo, dtype)
+            if run_hilo:
+                groups_hi = [self._collect_group_data(r, highres=True) for r in active]
+                result_hi = self._run_cs_norm(groups_hi[0], groups_hi[1], dtype)
         else:
             a_lo, b_lo = groups_lo[0], groups_lo[1]
             res_lo = self._run_test(a_lo['vals'], b_lo['vals'],
@@ -1114,22 +1222,54 @@ class StatsTestPanel:
         lines = self._build_result_lines(groups_lo, res_lo, test_type,
                                           groups_hi=groups_hi, res_hi=result_hi)
         self._show_result('\n'.join(lines))
-        # Plot uses the same transformation as the statistical test
-        def _tx(groups):
-            out = []
-            for g in groups:
-                gg = dict(g)
-                gg['vals'] = list(self._maybe_log_transform(np.asarray(g.get('vals', []) or [], dtype=float)))
-                out.append(gg)
-            return out
-        self._update_result_plot(_tx(groups_lo), _tx(groups_hi) if groups_hi is not None else None)
+
+        # For CS norm types, show A and B side-by-side with pairwise lines
+        # (only matched pairs), so the plot mirrors a paired comparison.
+        if dtype in _CS_NORM_TYPES:
+            def _norm_plot_pairwise(base_groups, result):
+                """Return (plot_groups, is_paired) with both groups trimmed to matched pairs."""
+                if not result or 'norm_pairs' not in result:
+                    return base_groups, False
+                matched = [tuple(p) for p in result['norm_pairs']]
+                def _trim(g):
+                    pairs = [tuple(p) for p in (g.get('pairs') or [])]
+                    vals  = g.get('vals') or []
+                    pmap  = {p: v for p, v in zip(pairs, vals)}
+                    mv    = [pmap[p] for p in matched if p in pmap]
+                    return dict(g, vals=mv, pairs=list(matched), data_type=dtype)
+                return [_trim(base_groups[0]), _trim(base_groups[1])], True
+            plot_lo, _paired_flag = _norm_plot_pairwise(groups_lo, res_lo)
+            plot_hi = None
+            if groups_hi is not None and result_hi is not None:
+                plot_hi, _ = _norm_plot_pairwise(groups_hi, result_hi)
+            self._result_data['is_paired_override'] = True
+            self._update_result_plot(plot_lo, plot_hi)
+        else:
+            def _tx(groups):
+                out = []
+                for g in groups:
+                    gg = dict(g)
+                    gg['vals'] = list(self._maybe_log_transform(
+                        np.asarray(g.get('vals', []) or [], dtype=float)))
+                    out.append(gg)
+                return out
+            self._update_result_plot(_tx(groups_lo),
+                                     _tx(groups_hi) if groups_hi is not None else None)
         if self._export_btn:
             self._export_btn.config(state=tk.NORMAL)
+
+    def _on_plot_type_toggle(self):
+        """Redraw the current plot when the violin/bar toggle changes."""
+        if not hasattr(self, '_last_plot_args'):
+            return
+        lo, hi = self._last_plot_args
+        self._update_result_plot(lo, hi)
 
     def _update_result_plot(self, groups_lo, groups_hi=None):
         """Draw bar-with-whiskers + scatter for all groups; annotate +3 SD outliers."""
         if not hasattr(self, '_plot_fig') or self._plot_fig is None:
             return
+        self._last_plot_args = (groups_lo, groups_hi)
         fig = self._plot_fig
         fig.clf()
 
@@ -1147,6 +1287,8 @@ class StatsTestPanel:
                 return f"{p[1]}-{p[2]}" if len(p) == 3 else f"{p[0]}-{p[1]}"
             return str(p)
 
+        use_violin = getattr(self, '_violin_var', None) and self._violin_var.get()
+
         def _one_axis(ax, groups, title: str, paired: bool = False):
             if not groups or len(groups) < 1:
                 ax.axis('off')
@@ -1162,10 +1304,27 @@ class StatsTestPanel:
             ax.tick_params(axis='x', labelsize=9)
             ax.tick_params(axis='y', labelsize=8)
 
-            means = np.array([_mean_sem(arr)[0] for arr in arrays])
-            errs  = np.array([_mean_sem(arr)[1] for arr in arrays])
-            ax.bar(xs, means, yerr=errs, capsize=4,
-                   color=_BAR_COLORS[:n_g], edgecolor='#333', linewidth=0.8)
+            if use_violin:
+                nonempty = [arr for arr in arrays if arr.size >= 2]
+                if nonempty:
+                    vp = ax.violinplot(
+                        [arr for arr in arrays if arr.size >= 2],
+                        positions=[xs[i] for i, arr in enumerate(arrays) if arr.size >= 2],
+                        showmedians=True, showextrema=True, widths=0.5,
+                    )
+                    for i, pc in enumerate(vp.get('bodies', [])):
+                        pc.set_facecolor(_BAR_COLORS[i % len(_BAR_COLORS)])
+                        pc.set_edgecolor('#333')
+                        pc.set_alpha(0.7)
+                    for part in ('cmedians', 'cmins', 'cmaxes', 'cbars'):
+                        if part in vp:
+                            vp[part].set_color('#333')
+                            vp[part].set_linewidth(1.0)
+            else:
+                means = np.array([_mean_sem(arr)[0] for arr in arrays])
+                errs  = np.array([_mean_sem(arr)[1] for arr in arrays])
+                ax.bar(xs, means, yerr=errs, capsize=4,
+                       color=_BAR_COLORS[:n_g], edgecolor='#333', linewidth=0.8)
 
             # Pre-compute jitter so lines and dots share the same x positions
             rng = np.random.default_rng(0)
@@ -1204,7 +1363,9 @@ class StatsTestPanel:
             ax.grid(axis='y', alpha=0.25, linewidth=0.7)
 
         dtype = (groups_lo[0].get('data_type') if groups_lo else '') or ''
-        is_paired = (self._result_data or {}).get('test_type') == "Pairwise t-test"
+        rd = self._result_data or {}
+        is_paired = (rd.get('test_type') == "Pairwise t-test"
+                     or rd.get('is_paired_override', False))
         if groups_hi is not None:
             ax1 = fig.add_subplot(1, 2, 1)
             ax2 = fig.add_subplot(1, 2, 2, sharey=ax1)
@@ -1223,11 +1384,18 @@ class StatsTestPanel:
 
     def _build_result_lines(self, groups, res, test_type,
                              groups_hi=None, res_hi=None) -> list[str]:
-        is_anova = (len(groups) > 2 or test_type == "One-way ANOVA + Tukey")
+        dtype = (self._result_data or {}).get('dtype', '')
+        is_cs_norm = dtype in _CS_NORM_TYPES
+        is_anova = (not is_cs_norm and
+                    (len(groups) > 2 or test_type == "One-way ANOVA + Tukey"))
         a = groups[0].get('name', 'A') if groups else 'A'
         b = groups[1].get('name', 'B') if len(groups) > 1 else 'B'
         alt = (self._result_data or {}).get('alternative', 'two-sided')
-        if is_anova:
+        if is_cs_norm:
+            sym = f"({a}−{b})/{a}" if '% change' in dtype else f"({a}−{b})/({a}+{b})"
+            h0 = f"H0: mean {sym} = 0"
+            h1 = f"H1: mean {sym} ≠ 0"
+        elif is_anova:
             h0 = "H0: all group means equal"
             h1 = "H1: at least one group mean differs"
         else:
@@ -1257,7 +1425,10 @@ class StatsTestPanel:
             if 'f_stat' in r:
                 return f"F={r['f_stat']:.4f}  p={r['p_val']:.4f}  n={r.get('n_used', '?')}"
             if 't_stat' in r:
-                return f"t={r['t_stat']:.4f}  p={r['p_val']:.4f}  n={r.get('n_used', '?')}"
+                base = f"t={r['t_stat']:.4f}  p={r['p_val']:.4f}  n={r.get('n_used', '?')}"
+                if 'mean' in r and 'se' in r:
+                    base = f"mean={r['mean']:+.4f} ± {r['se']:.4f} SE  |  {base}"
+                return base
             if 'stat' in r:
                 return f"stat={r['stat']:.4f}  p={r['p_val']:.4f}  n={r.get('n_used', '?')}"
             return "stat=?"
@@ -1395,8 +1566,12 @@ class StatsTestPanel:
             else:
                 cs_def = f"CCG strength is defined as CCG minus the {method_desc} baseline."
             data_desc = cs_def
-        elif dtype == "Firing Rate":
-            data_desc = "Firing rate is the mean spike rate in spikes/s over the full session."
+        elif dtype == "Ref Firing Rate":
+            data_desc = ("Ref firing rate is the mean spike rate (spikes/s) for the unique "
+                         "reference neurons involved in the selected pair group.")
+        elif dtype == "Tgt Firing Rate":
+            data_desc = ("Tgt firing rate is the mean spike rate (spikes/s) for the unique "
+                         "target neurons involved in the selected pair group.")
         elif dtype == "Baseline":
             data_desc = ("Baseline is the mean CCG bin value for bins with |lag| > 5 ms, "
                          "reflecting the spontaneous co-firing rate.")
@@ -1484,6 +1659,20 @@ class StatsTestPanel:
             except Exception:
                 pass
 
+        # Raw per-group data (pairs + vals) — one entry per group row
+        raw_data = []
+        for g in (d.get('groups') or []):
+            raw_data.append({
+                'name':      g.get('name', ''),
+                'session':   g.get('session', ''),
+                'conn_type': g.get('conn_type', ''),
+                'segment':   g.get('segment', ''),
+                'group':     g.get('group', ''),
+                'data_type': g.get('data_type', ''),
+                'pairs':     self._json_safe(g.get('pairs') or []),
+                'vals':      self._json_safe(g.get('vals') or []),
+            })
+
         return {
             'version': 1,
             'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1497,6 +1686,7 @@ class StatsTestPanel:
             'rows': rows_snap,
             'custom_segments': custom_segs_used,
             'result': self._json_safe(d) if d else None,
+            'raw_data': raw_data,
             'methods': self._build_methods_string(),
             'ccg_conf': ccg_conf,
             'text_output': text_out,

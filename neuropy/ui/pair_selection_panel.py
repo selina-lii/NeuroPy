@@ -214,9 +214,17 @@ class SearchBar:
         self._count_var.set(f'{self._cur + 1}/{n}')
 
     def _update(self):
-        """Rebuild match list and highlight all matches."""
+        """Rebuild on query change — resets position to first match."""
+        self._rebuild(preserve_cur=False)
+
+    def _refresh(self):
+        """Rebuild after list refresh — preserves current nth position."""
+        self._rebuild(preserve_cur=True)
+
+    def _rebuild(self, preserve_cur: bool = False):
         q = self._var.get().lower()
         self._clear_highlights()
+        old_cur = self._cur
         self._matches = []
         self._cur = -1
         if not q:
@@ -231,11 +239,16 @@ class SearchBar:
         if n == 0:
             self._count_var.set('0/0')
             return
-        self._cur = 0
+        if preserve_cur and old_cur >= 0:
+            # Keep the same nth position (clamped); don't scroll
+            self._cur = max(0, min(old_cur, n - 1))
+        else:
+            # New query: go to first match and scroll to it
+            self._cur = 0
+            lb, i = self._matches[0]
+            lb.see(i)
         self._apply_highlights()
-        lb, i = self._matches[0]
-        lb.see(i)
-        self._count_var.set(f'1/{n}')
+        self._count_var.set(f'{self._cur + 1}/{n}')
 
     def _apply_highlights(self):
         for lb, i in self._matches:
@@ -552,33 +565,55 @@ class LeftPanel:
                              and ui.network_panel._net_hide_same_channel_var.get())
         hide_same_shank   = (hasattr(ui, 'network_panel')
                              and ui.network_panel._net_hide_same_shank_var.get())
-        peak_channels = (getattr(getattr(ui, 'neurons', None), 'peak_channels', None)
-                         if getattr(ui, 'neurons', None) is not None else None)
-        shank_of = {}
-        if peak_channels is not None:
-            try:
-                from neuropy.core.neurons import Neurons as _N
-                shank_of = getattr(getattr(ui, 'neurons', None), '_shank_map', {})
-                if not shank_of and hasattr(ui.neurons, 'peak_channels'):
-                    pc = ui.neurons.peak_channels
-                    if hasattr(ui.neurons, 'get_shank'):
-                        shank_of = {i: ui.neurons.get_shank(i)
-                                    for i in range(len(pc))}
-            except Exception:
-                pass
+
+        # Reuse shank_ids computed by probe_network (already derived from ProbeGroup,
+        # position-indexed to match ref/tgt pair indices).
+        _net_panel = getattr(ui, 'network_panel', None)
+        _sids = getattr(_net_panel, '_last_shank_ids', None) if _net_panel is not None else None
+
+        _neurons_obj = getattr(ui, 'neurons', None)
+        peak_channels = (getattr(_neurons_obj, 'peak_channels', None)
+                         if _neurons_obj is not None else None)
+
+        # Per-session channel lookups for any-mode gray-out
+        _pchan_by_sess: dict = {}
+        _nd_obj = getattr(getattr(ui, 'cd', None), 'nd', None)
+        if _nd_obj is not None:
+            for _nk, _nobj in getattr(_nd_obj, 'data', {}).items():
+                _sk = str(getattr(_nk, 'session', _nk))
+                _pc = getattr(_nobj, 'peak_channels', None)
+                if _pc is not None:
+                    _pchan_by_sess[_sk] = _pc
 
         def _should_gray(inds):
             if gray_out is not None and gray_out(inds):
                 return True
             if getattr(ui, '_session_any_mode', False):
-                return False
-            ref2, tgt2 = int(inds[0]), int(inds[1])
-            if hide_same_shank and shank_of:
-                if shank_of.get(ref2) == shank_of.get(tgt2):
-                    return True
-            elif hide_same_channel and peak_channels is not None:
                 try:
-                    if peak_channels[ref2] == peak_channels[tgt2]:
+                    ref2      = int(inds[1])
+                    tgt2      = int(inds[2])
+                    pchan_use = _pchan_by_sess.get(
+                        str(getattr(inds[0], 'session', inds[0])), peak_channels)
+                except (IndexError, TypeError, ValueError, AttributeError):
+                    return False
+                sids_use = _sids  # any-mode uses same session's shank_ids
+            else:
+                try:
+                    ref2 = int(inds[0])
+                    tgt2 = int(inds[1])
+                except (IndexError, TypeError, ValueError):
+                    return False
+                sids_use  = _sids
+                pchan_use = peak_channels
+            if hide_same_shank and sids_use is not None:
+                try:
+                    if int(sids_use[ref2]) == int(sids_use[tgt2]):
+                        return True
+                except (IndexError, TypeError, ValueError):
+                    pass
+            elif hide_same_channel and pchan_use is not None:
+                try:
+                    if pchan_use[ref2] == pchan_use[tgt2]:
                         return True
                 except (IndexError, TypeError):
                     pass
@@ -677,22 +712,28 @@ class LeftPanel:
             self._sel_list_header_keys.append(text)
             return is_collapsed
 
-        sort_group = (self._sort_selected.get()
-                      and not getattr(ui, '_session_any_mode', False))
-        sort_tag   = (self._sort_by_tag.get()
-                      and not getattr(ui, '_session_any_mode', False))
-        sort_mean  = (self._sort_by_mean.get()
-                      and not getattr(ui, '_session_any_mode', False))
-        sort_minp  = (self._sort_by_min_p.get()
-                      and not getattr(ui, '_session_any_mode', False))
+        _any = getattr(ui, '_session_any_mode', False)
+        sort_group = self._sort_selected.get()
+        sort_tag   = self._sort_by_tag.get()
+        # sort by mean / min-p require per-session CCG data, skip in All mode
+        sort_mean  = self._sort_by_mean.get() and not _any
+        sort_minp  = self._sort_by_min_p.get() and not _any
 
-        if getattr(ui, '_session_any_mode', False):
-            for gname in ui._any_group_header_names():
-                trips_g = ui._any_triples_in_group(gname)
-                n_tag = len(trips_g - getattr(ui, 'deleted_inds', set()))
-                exp = gname in getattr(ui, '_any_expanded_group_tags', set())
-                hdr = (f"── {gname} ({n_tag}) ──"
-                       + (" >>" if not exp else ""))
+        _total_any_count = 0
+        if _any:
+            dead      = getattr(ui, 'deleted_inds', set())
+            _expanded = getattr(ui, '_any_expanded_group_tags', set())
+            all_gnames = ui._any_group_header_names()
+
+            # Count unique pairs across all groups for the tally
+            _all_trips: set = set()
+            for _gn in all_gnames:
+                _all_trips |= (ui._any_triples_in_group(_gn) - dead)
+            _total_any_count = len(_all_trips)
+
+            def _any_insert_hdr(hdr_text, n, key=None):
+                exp_hdr = hdr_text in _expanded
+                hdr = f"── {hdr_text} ({n}) ──" + ("" if exp_hdr else " >>")
                 hdr_idx = self.selected_list.size()
                 self.selected_list.insert(tk.END, hdr)
                 self.selected_list.itemconfig(
@@ -701,10 +742,45 @@ class LeftPanel:
                     background='#CCCCCC', selectbackground='#BBBBBB',
                 )
                 self._sel_list_pairs.append(None)
-                self._sel_list_header_keys.append(gname)
-                if exp:
-                    for row in ui._any_iter_pairs_for_group(gname):
-                        _insert_sel_pair(row)
+                self._sel_list_header_keys.append(key or hdr_text)
+                return exp_hdr
+
+            if sort_group:
+                # Build pair → tag-combo buckets (combo = sorted tuple of all tags)
+                pair_tags: dict = {}
+                for gname in all_gnames:
+                    for trip in ui._any_triples_in_group(gname):
+                        if trip not in dead:
+                            pair_tags.setdefault(trip, set()).add(gname)
+                combo_buckets: dict = _defaultdict(list)
+                for trip, tags in sorted(pair_tags.items()):
+                    combo_buckets[tuple(sorted(tags))].append(trip)
+
+                def _combo_sort_key(combo):
+                    return (1, []) if not combo else (0, list(combo))
+
+                for combo in sorted(combo_buckets.keys(), key=_combo_sort_key):
+                    hdr_text = ', '.join(combo) if combo else '(untagged)'
+                    trips_combo = combo_buckets[combo]
+                    exp_hdr = _any_insert_hdr(hdr_text, len(trips_combo))
+                    if exp_hdr:
+                        for sess, r, t in trips_combo:
+                            nd_key = ui._nd_key_for_session_str(sess)
+                            if nd_key is None:
+                                continue
+                            ckey = ui._type_key_for_nd(nd_key)
+                            if ckey is None:
+                                continue
+                            _insert_sel_pair((ckey, r, t))
+            else:
+                # Per-tag headers (sort_tag or no sort)
+                for gname in all_gnames:
+                    trips_g = ui._any_triples_in_group(gname)
+                    n_tag = len(trips_g - dead)
+                    exp_hdr = _any_insert_hdr(gname, n_tag)
+                    if exp_hdr:
+                        for row in ui._any_iter_pairs_for_group(gname):
+                            _insert_sel_pair(row)
 
         elif sort_mean:
             for inds in sorted(data.selected_inds,
@@ -789,7 +865,7 @@ class LeftPanel:
 
         try:
             if getattr(ui, '_session_any_mode', False):
-                self._sel_label.set(f"Selected ({len(data.selected_inds)})")
+                self._sel_label.set(f"Selected ({_total_any_count})")
             else:
                 sess = ui._current_session_str()
                 ct_lbl = ui._conn_type_label(getattr(ui.key, 'conn_type', None))
@@ -803,7 +879,7 @@ class LeftPanel:
         ui._refresh_stats()
 
         if self.search_bar.active:
-            self.search_bar._update()
+            self.search_bar._refresh()
         else:
             self._reapply_bookmark_list_styles()
 
@@ -1152,9 +1228,7 @@ class LeftPanel:
                 if raw == _AVAIL_GROUP_HDR:
                     continue
                 if getattr(self._ui, '_session_any_mode', False):
-                    sess = (str(raw[0].session) if hasattr(raw[0], 'session')
-                            else str(raw[0]))
-                    ti = (sess, int(raw[1]), int(raw[2]))
+                    ti = (int(raw[1]), int(raw[2]))  # (ref, tgt) — session-agnostic
                 else:
                     ti = tuple(int(x) for x in raw[:2])
                 if ti not in bm:
@@ -1175,9 +1249,7 @@ class LeftPanel:
                 if entry is None:
                     continue
                 if getattr(self._ui, '_session_any_mode', False):
-                    sess = (str(entry[0].session) if hasattr(entry[0], 'session')
-                            else str(entry[0]))
-                    ti = (sess, int(entry[1]), int(entry[2]))
+                    ti = (int(entry[1]), int(entry[2]))  # (ref, tgt) — session-agnostic
                 else:
                     ti = tuple(int(x) for x in entry[:2])
                 if ti not in bm:
@@ -1200,11 +1272,9 @@ class LeftPanel:
     def _bookmark_label_prefix(self, inds) -> str:
         bm = getattr(self._ui, '_bookmarked_pairs', None) or set()
         if getattr(self._ui, '_session_any_mode', False):
-            sess = (str(inds[0].session) if hasattr(inds[0], 'session')
-                    else str(inds[0]))
-            t = (sess, int(inds[1]), int(inds[2]))
-            return '\U0001F4CC ' if t in bm else ''
-        t = tuple(int(x) for x in inds[:2])
+            t = (int(inds[1]), int(inds[2]))  # (ref, tgt) — session-agnostic
+        else:
+            t = tuple(int(x) for x in inds[:2])
         return '\U0001F4CC ' if t in bm else ''
 
     def _bookmark_toggle_current(self, event=None):
@@ -1219,11 +1289,15 @@ class LeftPanel:
                 ci = ui.current_pair_idx
                 if 0 <= ci < len(hl):
                     ck, r, t = hl[ci]
-                    inds = (str(ck.session), int(r), int(t))
+                    inds = (int(r), int(t))  # (ref, tgt) — session-agnostic
                 else:
                     return
             else:
                 inds = tuple(int(x) for x in row[:2])
+        else:
+            # Normalize: in All mode _selected_pair_from_lists returns (sess, ref, tgt)
+            if getattr(ui, '_session_any_mode', False) and len(inds) == 3:
+                inds = (int(inds[1]), int(inds[2]))
         bm = ui._bookmarked_pairs
         if inds in bm:
             bm.discard(inds)

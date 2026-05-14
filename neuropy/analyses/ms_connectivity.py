@@ -212,7 +212,7 @@ def compute_pair_conn_strength_1d(ccg, ccg_null, conf, method,
     eff_min_lag = min_lag_override if min_lag_override is not None else conf.min_lag
     eff_max_lag = max_lag_override if max_lag_override is not None else conf.max_lag
     lo = max(0, center + int(eff_min_lag / bin_size_eff))
-    hi_bin = min(n_bins, center + int(eff_max_lag / bin_size_eff) + 1)
+    hi_bin = min(n_bins, center + int(eff_max_lag / bin_size_eff))
 
     if method == 'conv':
         if ccg_null is not None:
@@ -224,9 +224,6 @@ def compute_pair_conn_strength_1d(ccg, ccg_null, conf, method,
         return cs, baseline
 
     if method == 'tailed':
-        # Tailed baseline: mean of far-lag "tail" bins of the CURRENT CCG.
-        # No ACG deconvolution is performed here; deconvolution (if desired) is a
-        # separate upstream display transform.
         try:
             hw = max(1, int(11e-3 / bin_size_eff))
             l_idx = center - hw
@@ -244,9 +241,6 @@ def compute_pair_conn_strength_1d(ccg, ccg_null, conf, method,
             return None, None
 
     if method == 'global':
-        # Global baseline: flat baseline at the maximum of the ACTIVE baseline.
-        # - If convolution null exists, use its maximum.
-        # - Otherwise fall back to the maximum outside the test window of the current CCG.
         try:
             if ccg_null is not None:
                 baseline_val = float(np.max(ccg_null))
@@ -1680,6 +1674,13 @@ class CCGDataset(AnalysisDataset):
             import copy as _copy
             conf_highres = _copy.copy(self.conf)
             conf_highres.bin_size = _CCG_RESOLUTION['highres']
+            # Recompute all bin-index attributes that depend on bin_size
+            bs = conf_highres.bin_size
+            conf_highres.center_bin   = int(conf_highres.duration / bs // 2)
+            conf_highres.nbins        = int(conf_highres.duration / bs) + 1
+            conf_highres.spkcnt_bins  = int(conf_highres.spkcnt_scope / bs)
+            conf_highres.min_lag_bin  = conf_highres.center_bin + int(conf_highres.min_lag / bs)
+            conf_highres.max_lag_bin  = conf_highres.center_bin + int(conf_highres.max_lag / bs) + 1
 
         if self.nd is None:
             raise RuntimeError(

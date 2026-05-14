@@ -42,6 +42,10 @@ class NetworkPanel:
 
     def __init__(self, parent: tk.Widget, ui: 'CCGReviewUI'):
         self.ui = ui
+        self._net_any_idx: int = 0
+        self._net_focused: bool = False
+        self._net_any_sessions_cache: list = []
+        self._last_shank_ids = None  # cached after each draw; used by pair_selection gray-out
         self._setup(parent)
 
     def _highlighted_ct_labels(self) -> set[str]:
@@ -49,7 +53,7 @@ class NetworkPanel:
         labels = set()
         for (a, b), var in getattr(self, '_net_ct_vars', {}).items():
             if var.get():
-                labels.add(f"{a}→{b}")
+                labels.add(self.ui._conn_type_label((a, b)))
         return labels
 
     # ------------------------------------------------------------------
@@ -96,17 +100,14 @@ class NetworkPanel:
         ttk.Label(ctrl, text="Probe Network",
                   font=('Arial', 10, 'bold')).pack(pady=(0, 2))
 
-        # ── Neuron-focus (foldable) ─────────────────────────────────────
+        # ── Neuron-focus (foldable) — packed after Probes ──────────────
         _fn_outer = ttk.Frame(ctrl)
-        _fn_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
         _fn_hdr = ttk.Frame(_fn_outer)
         _fn_hdr.pack(fill=tk.X)
         self._fn_fold_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(_fn_hdr, text="Focus neuron", variable=self._fn_fold_var,
-                        command=lambda: ui._toggle_fold(
-                            self._fn_fold_var, _fn_inner,
-                            'Focus neuron', '▸ Focus neuron', _fn_hdr)
-                        ).pack(side=tk.LEFT)
+        _fn_cb = ttk.Checkbutton(_fn_hdr, text="Focus neuron",
+                                  variable=self._fn_fold_var)
+        _fn_cb.pack(side=tk.LEFT)
         _fn_inner = ttk.Frame(_fn_outer)
         _fn_inner.pack(fill=tk.X)
         self._focus_var = tk.StringVar()
@@ -119,17 +120,23 @@ class NetworkPanel:
         ttk.Label(_fn_inner, textvariable=self._focus_info_var,
                   font=('Arial', 8), foreground='#555').pack(side=tk.LEFT, padx=4)
 
-        # ── Pair-focus (foldable) ───────────────────────────────────────
+        def _toggle_fn(_cb=_fn_cb, _inner=_fn_inner, _var=self._fn_fold_var):
+            if _var.get():
+                _inner.pack(fill=tk.X)
+                _cb.config(text="Focus neuron")
+            else:
+                _inner.pack_forget()
+                _cb.config(text="▸ Focus neuron")
+        _fn_cb.config(command=_toggle_fn)
+
+        # ── Pair-focus (foldable) — packed after Probes ────────────────
         _fp_outer = ttk.Frame(ctrl)
-        _fp_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
         _fp_hdr = ttk.Frame(_fp_outer)
         _fp_hdr.pack(fill=tk.X)
         self._fp_fold_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(_fp_hdr, text="Focus pair", variable=self._fp_fold_var,
-                        command=lambda: ui._toggle_fold(
-                            self._fp_fold_var, _fp_inner,
-                            'Focus pair', '▸ Focus pair', _fp_hdr)
-                        ).pack(side=tk.LEFT)
+        _fp_cb = ttk.Checkbutton(_fp_hdr, text="Focus pair",
+                                  variable=self._fp_fold_var)
+        _fp_cb.pack(side=tk.LEFT)
         _fp_inner = ttk.Frame(_fp_outer)
         _fp_inner.pack(fill=tk.X)
         self._focus_pair_var = tk.StringVar()
@@ -147,15 +154,18 @@ class NetworkPanel:
                                          state=tk.DISABLED)
         self._add_pair_btn.pack(side=tk.LEFT, padx=4)
 
+        def _toggle_fp(_cb=_fp_cb, _inner=_fp_inner, _var=self._fp_fold_var):
+            if _var.get():
+                _inner.pack(fill=tk.X)
+                _cb.config(text="Focus pair")
+            else:
+                _inner.pack_forget()
+                _cb.config(text="▸ Focus pair")
+        _fp_cb.config(command=_toggle_fp)
+
         # ── Connection type toggles ──────────────────────────────────────
         ct_frame = ttk.Frame(ctrl)
         ct_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
-        # "Current pair" toggle — highlights only the current pair
-        self._net_cur_pair_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ct_frame, text="Current pair",
-                        variable=self._net_cur_pair_var,
-                        command=self.draw).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Label(ct_frame, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
         ttk.Label(ct_frame, text="Conn type:").pack(side=tk.LEFT, padx=(0, 2))
         _ct_labels = {
             ('pyr', 'pyr'):     'P→P',
@@ -200,6 +210,7 @@ class NetworkPanel:
                         variable=self._net_show_chid_var,
                         command=self.draw
                         ).pack(side=tk.LEFT, padx=(6, 0))
+        # "Current pair" is always-on — no toggle button needed
 
         # ── Group filter — wrapping toggle checkbuttons (multi-select / merge) ──
         group_lf = ttk.Frame(ctrl, relief='groove', borderwidth=1)
@@ -280,6 +291,10 @@ class NetworkPanel:
 
         self._net_probe_arrow.bind('<Button-1>', lambda e: _toggle_probe_body())
 
+        # Focus neuron / Focus pair appear below the Probes section
+        _fn_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
+        _fp_outer.pack(fill=tk.X, padx=4, pady=(0, 2))
+
         # ── Zoom sliders ─────────────────────────────────────────────────
         zoom_frame = ttk.Frame(ctrl)
         zoom_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
@@ -296,6 +311,15 @@ class NetworkPanel:
             variable=self._net_vzoom_var, command=self._on_zoom)
         self._net_vzoom.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
+        alpha_frame = ttk.Frame(ctrl)
+        alpha_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(alpha_frame, text="α:", font=('Arial', 7)).pack(side=tk.LEFT)
+        self._net_line_alpha_var = tk.DoubleVar(value=1.0)
+        self._net_line_alpha = ttk.Scale(
+            alpha_frame, from_=0.05, to=1.0, orient=tk.HORIZONTAL,
+            variable=self._net_line_alpha_var, command=self._on_zoom)
+        self._net_line_alpha.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
         self.net_fig = Figure(figsize=(2.8, 6.5))
         self.net_ax = self.net_fig.add_subplot(111)
         self.net_canvas = FigureCanvasTkAgg(self.net_fig, master=parent)
@@ -305,6 +329,63 @@ class NetworkPanel:
         self._net_scroll_cid = self.net_canvas.mpl_connect(
             'scroll_event', self._on_net_scroll)
         ui.root.after(200, self.draw)
+        _cw = self.net_canvas.get_tk_widget()
+        _cw.bind('<Button-1>', self._on_canvas_click, add='+')
+        _cw.bind('<Left>',  self._on_net_arrow_left)
+        _cw.bind('<Right>', self._on_net_arrow_right)
+
+    # ------------------------------------------------------------------
+    # Any-mode session navigation
+    # ------------------------------------------------------------------
+
+    def _net_any_sessions(self) -> list:
+        """Session nd_keys to display in any-mode probe navigation.
+
+        If a group is toggled on in the network filter, only sessions with
+        ≥1 pair in that group are returned; otherwise all real sessions.
+        """
+        ui = self.ui
+        sessions = ui._real_nd_keys_ordered()
+        active_groups = {g for g, var in ui._net_group_filter_vars.items()
+                         if var.get()}
+        if not active_groups:
+            return sessions
+        filtered = []
+        for nk in sessions:
+            ckey = ui._type_key_for_nd(nk)
+            if ckey is None:
+                continue
+            sess = str(ckey.session)
+            ptr = ui.cd.data.get(ckey)
+            valid = ui._all_inds_set_for_ptr(ptr)
+            for g in active_groups:
+                if any((int(a), int(b)) in valid
+                       for a, b in ui._group_pairs(g, session=sess)):
+                    filtered.append(nk)
+                    break
+        return filtered
+
+    def _on_canvas_click(self, event):
+        """Give the canvas keyboard focus so arrow keys work."""
+        self.net_canvas.get_tk_widget().focus_set()
+        self._net_focused = True
+
+    def _on_net_arrow_left(self, event):
+        if not getattr(self.ui, '_session_any_mode', False):
+            return
+        if self._net_any_idx > 0:
+            self._net_any_idx -= 1
+            self.draw()
+            self.refresh_group_buttons()
+
+    def _on_net_arrow_right(self, event):
+        if not getattr(self.ui, '_session_any_mode', False):
+            return
+        sessions = self._net_any_sessions_cache or self._net_any_sessions()
+        if self._net_any_idx < len(sessions) - 1:
+            self._net_any_idx += 1
+            self.draw()
+            self.refresh_group_buttons()
 
     # ------------------------------------------------------------------
     # Public draw entry point
@@ -329,11 +410,42 @@ class NetworkPanel:
         ax = self.net_ax
         ax.clear()
 
+        # ── Any-mode: resolve per-session overrides ──────────────────────
+        any_mode = getattr(ui, '_session_any_mode', False)
+        if any_mode:
+            _sessions = self._net_any_sessions()
+            if not _sessions:
+                ax.text(0.5, 0.5, "No sessions\n(active group filter)",
+                        ha='center', va='center', transform=ax.transAxes,
+                        fontsize=9, color='gray')
+                ax.axis('off')
+                self.net_canvas.draw()
+                return
+            self._net_any_idx = max(0, min(self._net_any_idx, len(_sessions) - 1))
+            self._net_any_sessions_cache = _sessions
+            _sess_nk = _sessions[self._net_any_idx]
+            _nd_key = _sess_nk
+            _neurons = ui.cd.nd.data.get(_sess_nk) if ui.cd.nd is not None else None
+            _type_key = ui._type_key_for_nd(_sess_nk)
+            _ptr = ui.cd.data.get(_type_key) if _type_key is not None else None
+            _deleted_inds = (ui._pair_deleted_store.get(str(_type_key), set())
+                             if _type_key is not None else set())
+        else:
+            _nd_key = ui.key.nd()
+            _neurons = ui.neurons
+            _type_key = ui.key
+            _ptr = ui.ccg_pointer
+            _deleted_inds = ui.deleted_inds
+            _sess_nk = None
+            _sessions = None
+
         # Read zoom sliders (H = shank spacing, V = channel spacing)
         h_scale = self._net_hzoom_var.get()
         v_scale = self._net_vzoom_var.get()
+        line_alpha = max(0.05, min(1.0, self._net_line_alpha_var.get()))
 
-        pos = self._get_neuron_positions(x_scale=h_scale, y_scale=v_scale)
+        pos = self._get_neuron_positions(x_scale=h_scale, y_scale=v_scale,
+                                         nd_key=_nd_key, neurons=_neurons)
         if pos is None:
             ax.text(0.5, 0.5, "No probe\nposition data",
                     ha='center', va='center', transform=ax.transAxes,
@@ -345,39 +457,65 @@ class NetworkPanel:
         x_pos, y_pos, peak_ch = pos
         n_neurons = len(x_pos)
 
-        shank_ids = (getattr(ui.neurons, 'shank_ids', None)
-                     if ui.neurons is not None else None)
-        peak_channels = (getattr(ui.neurons, 'peak_channels', None)
-                         if ui.neurons is not None else None)
-        hidden_shanks = {s for s, v in self._net_shank_vars.items() if not v.get()}
+        shank_ids = (getattr(_neurons, 'shank_ids', None)
+                     if _neurons is not None else None)
+        peak_channels = (getattr(_neurons, 'peak_channels', None)
+                         if _neurons is not None else None)
 
         # ── Draw probe background via plot_probe ──────────────────────────
         from neuropy.plotting.probe import plot_probe
-        pg = getattr(getattr(ui.cd, 'nd', None), 'probegroups', {}).get(ui.key.nd())
+        pg = getattr(getattr(ui.cd, 'nd', None), 'probegroups', {}).get(_nd_key)
+
+        # Always derive shank_ids from ProbeGroup via peak_channels (position-indexed)
+        # so indices align with ref/tgt pair indices. Fall back to neurons.shank_ids
+        # only if ProbeGroup derivation fails.
+        if peak_channels is not None and pg is not None:
+            try:
+                _pg_df = pg.to_dataframe()
+                _ch2s = {int(r['channel_id']): int(r['shank_id'])
+                         for _, r in _pg_df.iterrows()}
+                shank_ids = np.array([_ch2s.get(int(c), -1) for c in peak_channels],
+                                     dtype=int)
+            except Exception as _e:
+                print(f"[ProbeNetwork] ProbeGroup shank derivation failed: {_e}")
+
+        self._last_shank_ids = shank_ids  # cached for pair_selection_panel gray-out
+
+        hidden_shanks = {s for s, v in self._net_shank_vars.items() if not v.get()}
         if pg is not None:
             show_chid = self._net_show_chid_var.get()
             plot_probe(pg, channel_id=show_chid, disconnected=True,
                        x_scale=h_scale, y_scale=v_scale,
                        hidden_shanks=hidden_shanks or None, ax=ax)
-            ax.set_title('')
+            if not any_mode:
+                ax.set_title('')
 
         fn = ui._focused_neuron
         fp = ui._focused_pair
         # Multi-group filter: union of all toggled groups' pairs
         active_groups = {g for g, var in ui._net_group_filter_vars.items()
                          if var.get()}
+        _gp_sess = (str(getattr(_sess_nk, 'session', _sess_nk))
+                    if any_mode and _sess_nk is not None
+                    else ui._current_session_str())
         group_pairs = set()
         for g in active_groups:
-            group_pairs |= ui._group_pairs(g)
+            group_pairs |= ui._group_pairs(g, session=_gp_sess)
         gf_active = bool(active_groups)
         fp_neurons = {fp[0], fp[1]} if fp is not None else set()
 
         # ── Gather pairs: all types available, filtered by ct checkboxes ─
-        type_keys_show = ui._available_type_keys(ui.key.nd())
+        type_keys_show = ui._available_type_keys(_nd_key)
 
-        visible_pairs_current = self._pairs_for_segment_filter()
-        current_pair = (tuple(ui.all_inds[ui.current_pair_idx])
-                        if ui.current_pair_idx < len(ui.all_inds) else None)
+        if any_mode:
+            visible_pairs_current = (set(map(tuple, _ptr.inds[:, -2:]))
+                                     if _ptr is not None and _ptr.inds is not None
+                                     else set())
+            current_pair = None
+        else:
+            visible_pairs_current = self._pairs_for_segment_filter()
+            current_pair = (tuple(ui.all_inds[ui.current_pair_idx])
+                            if ui.current_pair_idx < len(ui.all_inds) else None)
 
         pair_entries: dict = {}
         for tk_ in type_keys_show:
@@ -386,11 +524,11 @@ class NetworkPanel:
                 continue
             ct = getattr(tk_, 'conn_type', None)
             ei = getattr(tk_, 'excitability', 'E')
-            is_cur = (tk_ == ui.key)
+            is_cur = (tk_ == _type_key)
             arr = pt.inds[:, -2:]
             # Build selected-pair set for this type key
             _ptr_sel = set()
-            if is_cur:
+            if is_cur and not any_mode:
                 _ptr_sel = ui.selected_inds
             else:
                 _other_ptr = ui.cd.data.get(tk_)
@@ -432,7 +570,7 @@ class NetworkPanel:
         # Deleted pairs that are not already in pair_entries get their own slot
         # so they can be drawn as flat light-gray lines.
         deleted_pair_entries: dict = {}  # (ref, tgt) -> True
-        for (ref, tgt) in ui.deleted_inds:
+        for (ref, tgt) in _deleted_inds:
             if (ref, tgt) in pair_entries:
                 continue  # already shown via normal path
             if fn is not None and ref != fn and tgt != fn:
@@ -447,16 +585,17 @@ class NetworkPanel:
 
 
         # ── Neuron sets ──────────────────────────────────────────────────
-        cur_arr = ui.ccg_pointer.inds[:, -2:]
+        cur_arr = (_ptr.inds[:, -2:] if _ptr is not None and _ptr.inds is not None
+                   else np.empty((0, 2), dtype=int))
         cluster_neurons = set(int(v) for v in np.unique(cur_arr))
         all_involved = set()
         for ref, tgt in pair_entries:
             all_involved.add(ref)
             all_involved.add(tgt)
 
-        nt = (ui.neurons.neuron_type
-              if ui.neurons is not None and
-              ui.neurons.neuron_type is not None else None)
+        nt = (_neurons.neuron_type
+              if _neurons is not None and
+              _neurons.neuron_type is not None else None)
 
         # ── Build per-neuron connection-type color map (focus mode) ──────
         neuron_ct_color: dict = {}
@@ -472,6 +611,23 @@ class NetworkPanel:
                         else self._NET_DEFAULT_I)
                     neuron_ct_color[partner] = c  # last wins; usually one type
 
+        # ── Identify neurons that share a peak channel (Bug 5) ───────────
+        # For channels with 2+ visible neurons: draw them side-by-side with
+        # a horizontal offset and gradient grayscale (100% → 80% → 60% …).
+        _CH_OFFSET = 6  # data-unit horizontal step between co-channel neurons
+        _same_ch_groups: dict = {}  # channel → [neuron_idx, ...]
+        if peak_channels is not None:
+            from collections import defaultdict as _dd
+            _ch_map = _dd(list)
+            for _i in range(n_neurons):
+                if hidden_shanks and shank_ids is not None and _i < len(shank_ids):
+                    if int(shank_ids[_i]) in hidden_shanks:
+                        continue
+                _ch_map[int(peak_channels[_i])].append(_i)
+            _same_ch_groups = {ch: idxs for ch, idxs in _ch_map.items()
+                               if len(idxs) > 1}
+        _same_ch_neuron_set: set = {i for idxs in _same_ch_groups.values() for i in idxs}
+
         # ── Draw neurons ──────────────────────────────────────────────────
         unconnected_o, unconnected_s = [], []  # pyr / inter with no connections
         connected_by_color: dict = {}  # color → (list_o, list_s)
@@ -484,6 +640,8 @@ class NetworkPanel:
                 continue    # focused neuron drawn individually below
             if idx in fp_neurons:
                 continue    # focused pair neurons drawn individually below
+            if idx in _same_ch_neuron_set:
+                continue    # same-channel group neurons drawn separately below
             # Shank visibility filter
             if hidden_shanks and shank_ids is not None and idx < len(shank_ids):
                 if int(shank_ids[idx]) in hidden_shanks:
@@ -495,11 +653,7 @@ class NetworkPanel:
             else:
                 in_any = idx in all_involved or idx in cluster_neurons
             if in_any:
-                # Color by neuron type: inter=blue, pyr=green (arrows convey conn type)
-                c = '#1565C0' if is_inter else '#2E7D32'
-                if fp is not None:
-                    # Dim all other neurons when pair is focused
-                    c = '#9E9E9E'
+                c = '#9E9E9E' if fp is not None else 'black'
                 if c not in connected_by_color:
                     connected_by_color[c] = ([], [])
                 (connected_by_color[c][1] if is_inter
@@ -516,17 +670,41 @@ class NetworkPanel:
 
         # Unconnected neurons: transparent gray (hidden when toggle is on)
         if not ui._net_hide_unconnected:
-            _scatter(unconnected_o, 'o', '#9E9E9E', 14, 1, alpha=0.25)
-            _scatter(unconnected_s, 's', '#9E9E9E', 14, 1, alpha=0.25)
+            _scatter(unconnected_o, '^', '#9E9E9E', 14, 1, alpha=0.25)
+            _scatter(unconnected_s, 'o', '#9E9E9E', 14, 1, alpha=0.25)
         # Connected neurons: colored by connection type (focus) or neuron type
         for color, (o_list, s_list) in connected_by_color.items():
             a = 0.3 if fp is not None else 1.0
-            _scatter(o_list, 'o', color, 50 if fp is None else 20, 4, alpha=a)
-            _scatter(s_list, 's', color, 50 if fp is None else 20, 4, alpha=a)
+            _scatter(o_list, '^', color, 50 if fp is None else 20, 4, alpha=a)
+            _scatter(s_list, 'o', color, 50 if fp is None else 20, 4, alpha=a)
+
+        # ── Same-channel groups: side-by-side with gradient grayscale ────
+        for ch_idxs in _same_ch_groups.values():
+            n_ch = len(ch_idxs)
+            # Center the group: offsets are -(n-1)/2 … +(n-1)/2 steps
+            for rank, idx in enumerate(ch_idxs):
+                if fn is not None and idx == fn:
+                    continue
+                if idx in fp_neurons:
+                    continue
+                if ui._net_hide_unconnected and idx not in all_involved and idx not in cluster_neurons:
+                    continue
+                # 100% black → 80% black → 60% black … (each step +0.2 gray)
+                gray = min(0.0 + rank * 0.2, 0.85)
+                col = (gray, gray, gray)
+                x_off = (rank - (n_ch - 1) / 2.0) * _CH_OFFSET
+                ntype = nt[idx] if nt is not None else None
+                m = 'o' if ntype == 'inter' else '^'
+                sz = 50 if fp is None else 20
+                a = 0.3 if fp is not None else 1.0
+                ax.scatter([x_pos[idx] + x_off], [y_pos[idx]],
+                           s=sz, marker=m, color=col,
+                           zorder=4, linewidths=0, edgecolors='none', alpha=a)
+
         # Focused neuron (single neuron mode)
         if fn is not None and 0 <= fn < n_neurons:
             fn_ntype = nt[fn] if nt is not None else None
-            fn_marker = 's' if fn_ntype == 'inter' else 'o'
+            fn_marker = 'o' if fn_ntype == 'inter' else '^'
             ax.scatter([x_pos[fn]], [y_pos[fn]], s=140, marker=fn_marker,
                        color='#FF6F00', zorder=6, linewidths=2.0,
                        edgecolors='black')
@@ -535,7 +713,7 @@ class NetworkPanel:
             for i, (nid, clr) in enumerate([(fp[0], '#FF6F00'), (fp[1], '#1E88E5')]):
                 if 0 <= nid < n_neurons:
                     ntype = nt[nid] if nt is not None else None
-                    m = 's' if ntype == 'inter' else 'o'
+                    m = 'o' if ntype == 'inter' else '^'
                     ax.scatter([x_pos[nid]], [y_pos[nid]], s=140, marker=m,
                                color=clr, zorder=6, linewidths=2.0,
                                edgecolors='black')
@@ -602,6 +780,7 @@ class NetworkPanel:
                     alpha, lw, zo = 0.90, 1.8, 4
                 else:
                     alpha, lw, zo = 0.55, 0.9, 3
+                alpha *= line_alpha
 
                 mutation = 10 if is_cpair else 7
                 # All visible, non-heavily-dimmed arrows are pickable so that
@@ -632,7 +811,7 @@ class NetworkPanel:
                     (x_pos[ref], y_pos[ref]),
                     (x_pos[tgt], y_pos[tgt]),
                     arrowstyle='->', color='#333333',
-                    linewidth=0.5, alpha=0.20,
+                    linewidth=0.5, alpha=0.20 * line_alpha,
                     mutation_scale=5,
                     connectionstyle=f'arc3,rad={rad}',
                     shrinkA=5, shrinkB=5,
@@ -649,7 +828,7 @@ class NetworkPanel:
                 (x_pos[fp[0]], y_pos[fp[0]]),
                 (x_pos[fp[1]], y_pos[fp[1]]),
                 arrowstyle='->', color='#888888',
-                linewidth=1.5, alpha=0.7,
+                linewidth=1.5, alpha=0.7 * line_alpha,
                 linestyle='--',
                 mutation_scale=8,
                 connectionstyle='arc3,rad=0',
@@ -659,8 +838,7 @@ class NetworkPanel:
             ax.add_patch(dashed)
 
         # ── Current pair arrow (additive, drawn on top) ──────────────────
-        cur_pair_on = self._net_cur_pair_var.get()
-        if (cur_pair_on and current_pair is not None
+        if (current_pair is not None
                 and ui._net_show_arrows
                 and 0 <= current_pair[0] < n_neurons
                 and 0 <= current_pair[1] < n_neurons):
@@ -668,13 +846,84 @@ class NetworkPanel:
                 (x_pos[current_pair[0]], y_pos[current_pair[0]]),
                 (x_pos[current_pair[1]], y_pos[current_pair[1]]),
                 arrowstyle='->', color='black',
-                linewidth=3.0, alpha=1.0,
+                linewidth=3.0, alpha=1.0 * line_alpha,
                 mutation_scale=10,
                 connectionstyle='arc3,rad=0',
                 shrinkA=5, shrinkB=5,
                 zorder=8,
             )
             ax.add_patch(cp_arrow)
+
+        # ── Same-channel circle loops ─────────────────────────────────────
+        # Pairs where ref and tgt share the same peak_channel are drawn as
+        # concentric arc-circles at the channel's probe position.  All entries
+        # for that channel (across all pairs and all conn types) are stacked as
+        # concentric rings growing outward, each colored by connection type.
+        if peak_channels is not None and ui._net_show_arrows:
+            from matplotlib.patches import Arc as _Arc
+            import math as _math
+
+            BASE_R = 7    # innermost ring radius (data units)
+            R_STEP = 4    # radius increment per additional ring
+            GAP    = BASE_R + 4  # offset from channel x so circles don't cover neuron dot
+
+            hide_ch = self._net_hide_same_channel_var.get()
+
+            # Collect all same-channel entries grouped by channel value
+            _chan_entries: dict = {}  # ch → [(ref, tgt, entry)]
+            for (ref, tgt), entries in pair_entries.items():
+                if ref >= n_neurons or tgt >= n_neurons:
+                    continue
+                try:
+                    if peak_channels[ref] != peak_channels[tgt]:
+                        continue
+                except (IndexError, TypeError):
+                    continue
+                ch = int(peak_channels[ref])
+                for entry in entries:
+                    _chan_entries.setdefault(ch, []).append((ref, tgt, entry))
+
+            for ch, ch_ents in _chan_entries.items():
+                ref0 = ch_ents[0][0]
+                cx = x_pos[ref0] + GAP
+                cy = y_pos[ref0]
+                k = 0  # ring index counts only visible (non-hidden) entries
+                for (ref, tgt, entry) in ch_ents:
+                    is_cpair = (current_pair is not None
+                                and (ref, tgt) == current_pair)
+                    # Bug 2: hide when toggle is on, but always show current pair
+                    if hide_ch and not is_cpair:
+                        continue
+
+                    ct  = entry.get('conn_type')
+                    col = self._NET_TYPE_COLOR.get(ct, '#888888')
+                    r   = BASE_R + k * R_STEP
+                    arc = _Arc((cx, cy), 2 * r, 2 * r,
+                               angle=0, theta1=20, theta2=340,
+                               color=col, linewidth=1.4,
+                               alpha=0.85 * line_alpha, zorder=4)
+                    arc.set_gid(f"{ref}_{tgt}_{entry.get('key', '')}")
+                    arc.set_picker(6)
+                    ax.add_patch(arc)
+                    # Clockwise arrowhead at theta=20
+                    t_r = _math.radians(20)
+                    px = cx + r * _math.cos(t_r)
+                    py = cy + r * _math.sin(t_r)
+                    eps = r * 0.22
+                    ax.annotate('', xy=(px + _math.sin(t_r) * eps,
+                                        py - _math.cos(t_r) * eps),
+                                xytext=(px, py),
+                                arrowprops=dict(arrowstyle='->', color=col,
+                                                lw=1.0, mutation_scale=6),
+                                zorder=5)
+                    # Bug 1: draw bold black arc on top for the current pair
+                    if is_cpair:
+                        bold_arc = _Arc((cx, cy), 2 * r, 2 * r,
+                                        angle=0, theta1=20, theta2=340,
+                                        color='black', linewidth=3.0,
+                                        alpha=1.0 * line_alpha, zorder=6)
+                        ax.add_patch(bold_arc)
+                    k += 1
 
         # ── Legend ───────────────────────────────────────────────────────
         shown_types = set()
@@ -736,6 +985,15 @@ class NetworkPanel:
 
         ax.axis('off')
         ax.set_aspect('equal')
+
+        # Any-mode: session title + navigation hint
+        if any_mode and _sess_nk is not None:
+            n_sess = len(_sessions)
+            nav = " [← →]" if self._net_focused else " (click+arrows)"
+            ax.set_title(
+                f"{ui._session_label(_sess_nk)}  {self._net_any_idx + 1}/{n_sess}{nav}",
+                fontsize=8, pad=3, color='#222')
+
         self.net_fig.tight_layout(pad=0.5)
         self.net_canvas.draw()
 
@@ -757,7 +1015,58 @@ class NetworkPanel:
         ui = self.ui
         pair = (ref, tgt)
 
-        # If the arrow belongs to a different type key, switch to it first
+        # ── Any-mode: dispatch to the displayed session first ─────────────
+        if getattr(ui, '_session_any_mode', False):
+            sessions = self._net_any_sessions_cache or self._net_any_sessions()
+            idx_s = max(0, min(self._net_any_idx, len(sessions) - 1))
+            target_nk = sessions[idx_s] if sessions else None
+            if target_nk is not None:
+                target_key = ui._type_key_for_nd(target_nk)
+                # Prefer the key that matches key_str (clicked arrow's type)
+                if key_str is not None and target_key is not None:
+                    match = next(
+                        (k for k in ui._available_type_keys(target_nk)
+                         if str(k) == key_str),
+                        None)
+                    if match is not None:
+                        target_key = match
+                if target_key is not None:
+                    try:
+                        ui._autosave_all_sessions_for_current_type()
+                    except Exception:
+                        pass
+                    try:
+                        if ui._sel_data._groups:
+                            ui._save_groups_export()
+                    except Exception:
+                        pass
+                    ui._exit_all_session_mode()
+                    nd_key = target_key.nd()
+                    # Update session combo
+                    if hasattr(ui, '_nd_keys_list') and hasattr(ui, '_session_var'):
+                        for i, k in enumerate(ui._nd_keys_list):
+                            if k == nd_key:
+                                try:
+                                    ui._session_var.set(ui._session_combo['values'][i])
+                                except Exception:
+                                    pass
+                                break
+                    def _do_dispatch(tk_=target_key, p=pair):
+                        if ui._switch_key(tk_):
+                            type_labels = [ui._type_label(k) for k in ui._type_keys_list]
+                            ui._type_var.set(ui._type_label(tk_))
+                            ui._refresh_after_key_switch()
+                            ui._autoload_session_latest()
+                            pidx = ui.get_pair_index(p)
+                            if pidx < len(ui.all_inds):
+                                ui.current_pair_idx = pidx
+                                ui._select_pair_in_list(p)
+                            self.draw()
+                            ui.update_plot()
+                    ui._ensure_session_loaded(nd_key, on_loaded=_do_dispatch)
+            return
+
+        # ── Normal mode: optionally switch type key, then select pair ─────
         if key_str is not None:
             clicked_key = next(
                 (k for k in ui._available_type_keys(ui.key.nd())
@@ -765,7 +1074,6 @@ class NetworkPanel:
                 None)
             if clicked_key is not None and clicked_key != ui.key:
                 if ui._switch_key(clicked_key):
-                    # Update the type combo to reflect the switch
                     type_labels = [ui._type_label(k)
                                    for k in ui._type_keys_list]
                     new_label = ui._type_label(clicked_key)
@@ -800,19 +1108,12 @@ class NetworkPanel:
         self.draw()
 
     def _on_toggle_hide_same_channel(self):
-        # Same shank subsumes same channel — auto-enable same channel when
-        # same shank is on, and keep it checked while same shank is active.
-        if self._net_hide_same_shank_var.get():
-            self._net_hide_same_channel_var.set(True)
+        self.draw()           # refreshes _last_shank_ids before list gray-out
         self.ui.refresh_lists()
-        self.draw()
 
     def _on_toggle_hide_same_shank(self):
-        # Same shank subsumes same channel — keep same channel in sync
-        if self._net_hide_same_shank_var.get():
-            self._net_hide_same_channel_var.set(True)
+        self.draw()           # refreshes _last_shank_ids before list gray-out
         self.ui.refresh_lists()
-        self.draw()
 
     def _on_group_toggle(self, group_name):
         """Called when a group toggle checkbutton changes state."""
@@ -894,12 +1195,21 @@ class NetworkPanel:
             self.rewrap_group_buttons()
             return
 
+        # Resolve which session to use for per-session counts.
+        # In any-mode the browsed session is the right context; elsewhere use current.
+        if getattr(ui, '_session_any_mode', False) and self._net_any_sessions_cache:
+            _idx = max(0, min(self._net_any_idx, len(self._net_any_sessions_cache) - 1))
+            _nk  = self._net_any_sessions_cache[_idx]
+            _count_sess = str(getattr(_nk, 'session', _nk))
+        else:
+            _count_sess = ui._current_session_str()
+
         for gname in regular:
             if gname not in ui._net_group_filter_vars:
                 ui._net_group_filter_vars[gname] = tk.BooleanVar(
                     master=ui.root, value=False)
-            sess = ui._current_session_str()
-            pairs_sess = ui._group_pairs(gname)
+            sess = _count_sess
+            pairs_sess = ui._group_pairs(gname, session=sess)
             n_sess = len(pairs_sess)
             n_all  = len(ui._group_pairs_all_sessions(gname))
             n_hl = len(ui._filter_pairs_to_conn_types(
@@ -934,8 +1244,8 @@ class NetworkPanel:
                 if gname not in ui._net_group_filter_vars:
                     ui._net_group_filter_vars[gname] = tk.BooleanVar(
                         master=ui.root, value=False)
-                sess = ui._current_session_str()
-                pairs_sess = ui._group_pairs(gname)
+                sess = _count_sess
+                pairs_sess = ui._group_pairs(gname, session=sess)
                 n_sess = len(pairs_sess)
                 n_all  = len(ui._group_pairs_all_sessions(gname))
                 n_hl = len(ui._filter_pairs_to_conn_types(
@@ -1172,13 +1482,15 @@ class NetworkPanel:
     # Helpers (formerly on CCGReviewUI)
     # ------------------------------------------------------------------
 
-    def _get_neuron_positions(self, x_scale=1.0, y_scale=1.0):
+    def _get_neuron_positions(self, x_scale=1.0, y_scale=1.0, nd_key=None, neurons=None):
         ui = self.ui
-        neurons = ui.neurons
+        if neurons is None:
+            neurons = ui.neurons
         if neurons is None or neurons.peak_channels is None:
             return None
         pgs = getattr(getattr(ui.cd, 'nd', None), 'probegroups', {})
-        nd_key = ui.key.nd()
+        if nd_key is None:
+            nd_key = ui.key.nd()
         pg = pgs.get(nd_key)
         if pg is None:
             print(f"[ProbeNetwork] No ProbeGroup for key={nd_key}. "

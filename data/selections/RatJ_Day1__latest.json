@@ -1,24 +1,11 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-12T13:52:27.871986",
+  "saved_at": "2026-05-13T20:13:48.883163",
   "session": "RatJ_Day1",
   "selections": {
     "sess_RatJ_Day1.ex_E.type_pyr-pyr": [],
-    "sess_RatJ_Day1.ex_E.type_pyr-inter": [
-      [
-        2,
-        0
-      ],
-      [
-        4,
-        0
-      ],
-      [
-        5,
-        0
-      ]
-    ],
+    "sess_RatJ_Day1.ex_E.type_pyr-inter": [],
     "sess_RatJ_Day1.ex_I.type_inter-inter": [],
     "sess_RatJ_Day1.ex_I.type_inter-pyr": []
   },

@@ -1,32 +1,11 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-12T13:52:28.004652",
+  "saved_at": "2026-05-13T20:13:49.066786",
   "session": "RatU_Day1SD",
   "selections": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
-    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [
-      [
-        5,
-        47
-      ],
-      [
-        6,
-        10
-      ],
-      [
-        16,
-        47
-      ],
-      [
-        25,
-        47
-      ],
-      [
-        68,
-        47
-      ]
-    ],
+    "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
   },
@@ -220,6 +199,7 @@
     },
     "25,14": {
       "groups": [
+        "5-13",
         "good",
         "msconn"
       ]

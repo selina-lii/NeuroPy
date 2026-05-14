@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 class ExtendConfig:
     """Parameters for the extended-window CCG view."""
     duration_ms: int
-    bin_ms: int
+    bin_ms: float
 
 
 @dataclass(frozen=True)
@@ -280,7 +280,7 @@ class CorrelogramPanel:
         # Extend window
         self._extend_enable_var  = tk.BooleanVar(value=False)
         self._extend_ms_var      = tk.IntVar(value=50)
-        self._extend_bin_ms_var  = tk.IntVar(value=1)
+        self._extend_bin_ms_var  = tk.DoubleVar(value=1.0)
         self._build(parent)
 
     def _get_style_vars(self, item: str):
@@ -423,7 +423,8 @@ class CorrelogramPanel:
         self._extend_ms_spin.bind('<FocusOut>', lambda e: self._on_extend_ms_commit())
         ttk.Label(extend_row, text="resolution (ms):").pack(side=tk.LEFT, padx=(8, 2))
         self._extend_bin_spin = ttk.Spinbox(
-            extend_row, from_=1, to=50, increment=1, width=4,
+            extend_row, from_=0.0, to=100.0, increment=0.1, width=6,
+            format='%.3f',
             textvariable=self._extend_bin_ms_var,
             command=self._on_extend_ms_commit,
         )
@@ -558,8 +559,18 @@ class CorrelogramPanel:
         except Exception:
             pass
         try:
-            bms = max(1, min(50, int(self._extend_bin_ms_var.get())))
-            self._extend_bin_ms_var.set(bms)
+            raw_bms = float(str(self._extend_bin_ms_var.get()))
+            # Minimum = 1 sample = 1000/fs ms
+            try:
+                neurons = getattr(self._ui, 'neurons', None)
+                fs = float(getattr(neurons, 'sampling_rate', None) or 30000.0)
+                if not (fs > 0):
+                    fs = 30000.0
+            except Exception:
+                fs = 30000.0
+            min_bms = 1000.0 / fs
+            bms = max(min_bms, min(100.0, raw_bms))
+            self._extend_bin_ms_var.set(round(bms, 4))
         except Exception:
             pass
         if bool(self._extend_enable_var.get()):
@@ -575,7 +586,7 @@ class CorrelogramPanel:
         if self._extend_enable_var.get():
             ext = ExtendConfig(
                 duration_ms=int(self._extend_ms_var.get()),
-                bin_ms=int(self._extend_bin_ms_var.get()),
+                bin_ms=float(self._extend_bin_ms_var.get()),
             )
         return CorrelogramStyle(
             ccg=style_from_bools(self._ccg_show_var.get(), self._line_ccg_var.get()),

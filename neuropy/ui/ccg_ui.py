@@ -43,17 +43,38 @@ from matplotlib.figure import Figure
 from matplotlib.patches import FancyArrowPatch
 from matplotlib.lines import Line2D
 
+# Remove any stale scroll_event_windows patch left on FigureCanvasTkAgg by an older
+# version of this module.  After a module reload the old patch's __globals__ no
+# longer contain _orig_scroll, causing NameError on Ctrl+E waveform view.
+try:
+    import matplotlib.backends.backend_tkagg as _mpl_bk_cleanup
+    import matplotlib.backends._backend_tk as _mpl_bk2_cleanup
+    for _cls_cleanup in (
+        _mpl_bk_cleanup.FigureCanvasTkAgg,
+        _mpl_bk2_cleanup.FigureCanvasTk,
+    ):
+        if 'scroll_event_windows' in _cls_cleanup.__dict__:
+            del _cls_cleanup.scroll_event_windows
+    del _mpl_bk_cleanup, _mpl_bk2_cleanup, _cls_cleanup
+except Exception:
+    pass
+
 # Patch: winfo_containing raises KeyError('popdown') when a ttk Combobox
 # popdown is visible and a scroll event fires over a matplotlib canvas.
+# Patching scroll_event_windows on the class creates infinite recursion because
+# matplotlib's own scroll_event_windows calls self.scroll_event_windows internally.
+# Instead, patch the root of the problem: tkinter.Misc.winfo_containing.
 try:
-    import matplotlib.backends._backend_tk as _mpl_tk
-    _orig_scroll = _mpl_tk.FigureCanvasTk.scroll_event_windows
-    def _scroll_event_windows_safe(self, event):
-        try:
-            return _orig_scroll(self, event)
-        except KeyError:
-            pass
-    _mpl_tk.FigureCanvasTk.scroll_event_windows = _scroll_event_windows_safe
+    import tkinter as _tk_patch
+    _orig_winfo_containing = _tk_patch.Misc.winfo_containing
+    if not getattr(_orig_winfo_containing, '_ccg_safe_patch', False):
+        def _winfo_containing_safe(self, rootX, rootY, displayof=0):
+            try:
+                return _orig_winfo_containing(self, rootX, rootY, displayof)
+            except KeyError:
+                return None
+        _winfo_containing_safe._ccg_safe_patch = True
+        _tk_patch.Misc.winfo_containing = _winfo_containing_safe
 except Exception:
     pass
 import os
@@ -627,7 +648,7 @@ class CCGReviewUI:
         for _key in ('<Control-r>', '<Command-r>'):
             self.root.bind(_key, lambda e: self._toggle_resolution())
         for _key in ('<Control-e>', '<Command-e>'):
-            self.root.bind(_key, lambda e: self._on_ctrl_e())
+            self.root.bind_all(_key, lambda e: self._on_ctrl_e())
         for _key in ('<Control-l>', '<Command-l>'):
             self.root.bind(_key, lambda e: self._toggle_plot_style())
         for _key in ('<Control-s>', '<Command-s>'):
@@ -1127,7 +1148,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("CCG Simulation")
         win.geometry("620x780")
-        win.transient(self.root)
 
         # Vertical PanedWindow: top = params, bottom = CCG result
         pw = tk.PanedWindow(win, orient=tk.VERTICAL,
@@ -1450,7 +1470,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Jitter Queue")
         win.geometry("460x340")
-        win.transient(self.root)
 
         frame = ttk.Frame(win, padding=8)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -1571,7 +1590,6 @@ class CCGReviewUI:
         win.title("Settings")
         win.geometry("620x420")
         win.resizable(True, True)
-        win.transient(self.root)
         win.protocol("WM_DELETE_WINDOW", win.destroy)
         win.bind('<Escape>', lambda e: win.destroy())
 
@@ -2887,12 +2905,23 @@ class CCGReviewUI:
         old = getattr(self, '_export_overrides', None)
         self._export_overrides = opt
         try:
-            self.update_plot()
-            self.canvas.draw()
-            self.fig.savefig(path, bbox_inches='tight', dpi=300 if fmt == 'png' else None)
+            if (not getattr(self, '_stacked_segments', None) and
+                    not getattr(self, '_together_pairs', None) and
+                    not getattr(self, '_sbs_mode', False)):
+                # Single-pair view: render directly to path, bypassing the viewer cache
+                inds = self.all_inds[self.current_pair_idx]
+                seg  = int(self.current_segment)
+                hr   = bool(getattr(self, '_highres_mode', False))
+                ctx  = self._render_engine.build_context(inds, seg, hr, None, None)
+                dpi  = 300 if fmt == 'png' else None
+                self._render_engine.write_png(ctx, path, dpi=dpi)
+            else:
+                # Multi-view (stacked/SBS): save composite figure as-is
+                self.update_plot()
+                self.canvas.draw()
+                self.fig.savefig(path, bbox_inches='tight', dpi=300 if fmt == 'png' else None)
         finally:
             self._export_overrides = old
-            self.update_plot()
 
     def _export_pairs_with_handles(self, fmt: str, opt: dict,
                                      items: list[tuple], folder: str) -> None:
@@ -3039,7 +3068,7 @@ class CCGReviewUI:
                 except Exception:
                     base_dir = folder
 
-                # Export one file per selected segment
+                # Export one file per selected segment (render directly; bypass viewer cache)
                 for seg_idx in seg_indices:
                     self.current_segment = int(seg_idx)
                     seg = int(self.current_segment)
@@ -3051,12 +3080,21 @@ class CCGReviewUI:
                         seg_tag = f"seg{seg}"
                     fname = f"{sess}_{type_str}{sh}_ccg_{ref}_{tgt}_{seg_tag}.{fmt}"
                     out_path = os.path.join(base_dir, fname)
+                    old_eo = getattr(self, '_export_overrides', None)
+                    self._export_overrides = opt
                     try:
-                        self._export_one_view_to_path(path=out_path, fmt=fmt, opt=opt)
+                        ctx = self._render_engine.build_context(
+                            np.array([ref, tgt]), seg,
+                            bool(getattr(self, '_highres_mode', False)),
+                            None, None)
+                        dpi = 300 if fmt == 'png' else None
+                        self._render_engine.write_png(ctx, out_path, dpi=dpi)
                         n_ok += 1
                     except Exception as ex:
                         n_fail += 1
                         fail_msgs.append(f"({ref},{tgt}) seg={seg_tag}: {ex}")
+                    finally:
+                        self._export_overrides = old_eo
         finally:
             self.key = old_state['key']
             self.ccg_pointer = old_state['ccg_pointer']
@@ -3286,8 +3324,6 @@ class CCGReviewUI:
         """
         win = tk.Toplevel(self.root)
         win.title("Export options")
-        win.transient(self.root)
-        win.grab_set()
         win.resizable(True, True)
 
         # ------------------------------
@@ -3303,8 +3339,13 @@ class CCGReviewUI:
 
         # Export defaults persisted in ui_state.json via self._settings
         _exp_def = (self._settings.get('export_defaults', {}) if isinstance(getattr(self, '_settings', None), dict) else {}) or {}
-        ccg_var = tk.StringVar(value=str(_exp_def.get('ccg_color', "steelblue")))
-        base_var = tk.StringVar(value=str(_exp_def.get('baseline_color', "orange")))
+        ccg_var = tk.StringVar(value=str(_exp_def.get('ccg_color') or ""))
+        base_var = tk.StringVar(value=str(_exp_def.get('baseline_color') or ""))
+        cs_shade_var      = tk.StringVar(value=str(_exp_def.get('cs_shade_color') or ""))
+        tw_color_var          = tk.StringVar(value=str(_exp_def.get('test_window_color') or ""))
+        tw_alpha_var          = tk.StringVar(value=str(_exp_def.get('test_window_alpha', "0.12")))
+        pval_line_color_var   = tk.StringVar(value=str(_exp_def.get('pval_line_color') or ""))
+        alpha_line_color_var  = tk.StringVar(value=str(_exp_def.get('alpha_line_color') or ""))
         minfs_var = tk.StringVar(value=str(_exp_def.get('min_text_size', "8")))
         show_prev_var = tk.BooleanVar(value=False)
         ccg_a_var = tk.StringVar(value=str(_exp_def.get('ccg_alpha', "0.5")))
@@ -3457,26 +3498,41 @@ class CCGReviewUI:
         ttk.Label(frm, text="Baseline color (name or #hex):").grid(row=row0 + 1, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=base_var, width=22).grid(row=row0 + 1, column=1, sticky="ew", padx=(8, 0), pady=4)
 
-        ttk.Label(frm, text="Min text size (pt):").grid(row=row0 + 2, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=minfs_var, width=10).grid(row=row0 + 2, column=1, sticky="w", padx=(8, 0), pady=4)
+        ttk.Label(frm, text="CS shade color (name or #hex):").grid(row=row0 + 2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=cs_shade_var, width=22).grid(row=row0 + 2, column=1, sticky="ew", padx=(8, 0), pady=4)
 
-        ttk.Label(frm, text="CCG alpha (0–1):").grid(row=row0 + 3, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=ccg_a_var, width=10).grid(row=row0 + 3, column=1, sticky="w", padx=(8, 0), pady=4)
+        ttk.Label(frm, text="Test window color (name or #hex):").grid(row=row0 + 3, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=tw_color_var, width=22).grid(row=row0 + 3, column=1, sticky="ew", padx=(8, 0), pady=4)
 
-        ttk.Label(frm, text="Baseline alpha (0–1):").grid(row=row0 + 4, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=base_a_var, width=10).grid(row=row0 + 4, column=1, sticky="w", padx=(8, 0), pady=4)
+        ttk.Label(frm, text="Test window alpha (0–1):").grid(row=row0 + 4, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=tw_alpha_var, width=10).grid(row=row0 + 4, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="P-value line color (name or #hex):").grid(row=row0 + 5, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=pval_line_color_var, width=22).grid(row=row0 + 5, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Alpha threshold color (name or #hex):").grid(row=row0 + 6, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=alpha_line_color_var, width=22).grid(row=row0 + 6, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Min text size (pt):").grid(row=row0 + 7, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=minfs_var, width=10).grid(row=row0 + 7, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="CCG alpha (0–1):").grid(row=row0 + 8, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=ccg_a_var, width=10).grid(row=row0 + 8, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Baseline alpha (0–1):").grid(row=row0 + 9, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=base_a_var, width=10).grid(row=row0 + 9, column=1, sticky="w", padx=(8, 0), pady=4)
 
         ttk.Checkbutton(frm, text="Show legend", variable=show_legend_var).grid(
-            row=row0 + 5, column=0, sticky="w", pady=(6, 0))
+            row=row0 + 10, column=0, sticky="w", pady=(6, 0))
 
-        ttk.Label(frm, text="X ticks (ms, comma-separated):").grid(row=row0 + 6, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=xticks_var, width=28).grid(row=row0 + 6, column=1, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Label(frm, text="X ticks (ms, comma-separated):").grid(row=row0 + 11, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=xticks_var, width=28).grid(row=row0 + 11, column=1, sticky="ew", padx=(8, 0), pady=4)
         ttk.Checkbutton(frm, text="Mirror to negative ticks", variable=mirror_ticks_var).grid(
-            row=row0 + 7, column=0, sticky="w", pady=(0, 4))
+            row=row0 + 12, column=0, sticky="w", pady=(0, 4))
 
         # Segments selection UI (same pattern as Groups)
         seg_frame = ttk.LabelFrame(frm, text="Segments to export")
-        seg_frame.grid(row=row0 + 8, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+        seg_frame.grid(row=row0 + 13, column=0, columnspan=2, sticky="ew", pady=(10, 6))
         seg_frame.columnconfigure(0, weight=1)
         seg_frame.columnconfigure(2, weight=1)
         ttk.Label(seg_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
@@ -3545,7 +3601,7 @@ class CCGReviewUI:
 
         # Subfolder hierarchy UI (dual list; selected list is reorderable by drag)
         sf_frame = ttk.LabelFrame(frm, text="Subfolder by (optional)")
-        sf_frame.grid(row=row0 + 9, column=0, columnspan=2, sticky="ew", pady=(6, 6))
+        sf_frame.grid(row=row0 + 14, column=0, columnspan=2, sticky="ew", pady=(6, 6))
         sf_frame.columnconfigure(0, weight=1)
         sf_frame.columnconfigure(2, weight=1)
         ttk.Label(sf_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
@@ -3640,8 +3696,17 @@ class CCGReviewUI:
 
         def _collect_opts() -> dict:
             o: dict = {}
-            o['ccg_color'] = (ccg_var.get() or '').strip() or None
-            o['baseline_color'] = (base_var.get() or '').strip() or None
+            o['ccg_color']         = (ccg_var.get() or '').strip() or None
+            o['baseline_color']    = (base_var.get() or '').strip() or None
+            o['cs_shade_color']    = (cs_shade_var.get() or '').strip() or None
+            o['test_window_color'] = (tw_color_var.get() or '').strip() or None
+            o['pval_line_color']   = (pval_line_color_var.get() or '').strip() or None
+            o['alpha_line_color']  = (alpha_line_color_var.get() or '').strip() or None
+            try:
+                v = float(tw_alpha_var.get())
+                o['test_window_alpha'] = v if np.isfinite(v) else None
+            except Exception:
+                o['test_window_alpha'] = None
             try:
                 v = float(minfs_var.get())
                 o['min_text_size'] = v if np.isfinite(v) and v > 0 else None
@@ -3693,8 +3758,13 @@ class CCGReviewUI:
             try:
                 self._settings.setdefault('export_defaults', {})
                 self._settings['export_defaults'] = {
-                    'ccg_color': opts.get('ccg_color') or "steelblue",
-                    'baseline_color': opts.get('baseline_color') or "orange",
+                    'ccg_color':          opts.get('ccg_color') or "",
+                    'baseline_color':     opts.get('baseline_color') or "",
+                    'cs_shade_color':     opts.get('cs_shade_color') or "",
+                    'test_window_color':  opts.get('test_window_color') or "",
+                    'test_window_alpha':  opts.get('test_window_alpha') if opts.get('test_window_alpha') is not None else "0.12",
+                    'pval_line_color':    opts.get('pval_line_color') or "",
+                    'alpha_line_color':   opts.get('alpha_line_color') or "",
                     'min_text_size': opts.get('min_text_size') if opts.get('min_text_size') is not None else "8",
                     'ccg_alpha': opts.get('ccg_alpha') if opts.get('ccg_alpha') is not None else "0.5",
                     'baseline_alpha': opts.get('baseline_alpha') if opts.get('baseline_alpha') is not None else "0.3",
@@ -3711,7 +3781,7 @@ class CCGReviewUI:
 
         # Preview area (optional)
         prev_holder = ttk.Frame(frm)
-        prev_holder.grid(row=row0 + 12, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        prev_holder.grid(row=row0 + 16, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
         prev_holder.columnconfigure(0, weight=1)
         prev_holder.rowconfigure(0, weight=1)
         prev_label = ttk.Label(prev_holder, text="", anchor="center")
@@ -3733,10 +3803,15 @@ class CCGReviewUI:
                 ref, tgt = int(preview_pair[0]), int(preview_pair[1])
                 seg = int(self.current_segment)
                 highres = bool(getattr(self, '_highres_mode', False))
-                # Apply overrides temporarily so preview reflects export styling.
+                # Render preview directly (bypass viewer PNG cache) with export overrides.
                 tmp_over = {
                     'ccg_color': (ccg_var.get() or '').strip() or None,
                     'baseline_color': (base_var.get() or '').strip() or None,
+                    'cs_shade_color': (cs_shade_var.get() or '').strip() or None,
+                    'test_window_color': (tw_color_var.get() or '').strip() or None,
+                    'test_window_alpha': (float(tw_alpha_var.get()) if str(tw_alpha_var.get()).strip() else None),
+                    'pval_line_color':  (pval_line_color_var.get() or '').strip() or None,
+                    'alpha_line_color': (alpha_line_color_var.get() or '').strip() or None,
                     'min_text_size': float(minfs_var.get()) if str(minfs_var.get()).strip() else None,
                     'ccg_alpha': float(ccg_a_var.get()) if str(ccg_a_var.get()).strip() else None,
                     'baseline_alpha': float(base_a_var.get()) if str(base_a_var.get()).strip() else None,
@@ -3748,7 +3823,12 @@ class CCGReviewUI:
                 old = getattr(self, '_export_overrides', None)
                 self._export_overrides = tmp_over
                 try:
-                    png_path = self._render_png((ref, tgt), seg, highres=highres)
+                    import tempfile, os as _os
+                    ctx = self._render_engine.build_context(
+                        (ref, tgt), seg, highres, None, None)
+                    tmp_png = tempfile.mktemp(suffix='.png')
+                    self._render_engine.write_png(ctx, tmp_png)
+                    png_path = tmp_png
                 finally:
                     self._export_overrides = old
 
@@ -3764,15 +3844,21 @@ class CCGReviewUI:
                     tk_im = ImageTk.PhotoImage(im)
                     prev_label.configure(image=tk_im, text="")
                     prev_img['obj'] = tk_im  # keep reference
+                    try:
+                        _os.remove(png_path)
+                    except Exception:
+                        pass
                 except Exception:
                     prev_label.configure(text=f"Preview ready: {os.path.basename(png_path)}")
             except Exception as ex:
                 prev_label.configure(text=f"Preview failed: {ex}")
 
         ttk.Checkbutton(frm, text="Show preview", variable=show_prev_var,
-                        command=_render_preview).grid(row=row0 + 11, column=0, sticky="w", pady=(8, 0))
+                        command=_render_preview).grid(row=row0 + 15, column=0, sticky="w", pady=(8, 0))
         # Re-render preview when override fields change (only if enabled)
-        for _v in (ccg_var, base_var, minfs_var, ccg_a_var, base_a_var, xticks_var):
+        for _v in (ccg_var, base_var, cs_shade_var, tw_color_var, tw_alpha_var,
+                   pval_line_color_var, alpha_line_color_var,
+                   minfs_var, ccg_a_var, base_a_var, xticks_var):
             try:
                 _v.trace_add('write', lambda *a: _render_preview())
             except Exception:
@@ -3787,7 +3873,7 @@ class CCGReviewUI:
             pass
 
         btns = ttk.Frame(frm)
-        btns.grid(row=row0 + 13, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        btns.grid(row=row0 + 17, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(btns, text="Save export settings", command=_save_export_defaults).pack(
             side=tk.RIGHT, padx=(6, 0))
@@ -3821,6 +3907,9 @@ class CCGReviewUI:
 
         win.protocol("WM_DELETE_WINDOW", _cancel)
         win.bind("<Escape>", lambda e: _cancel())
+        win.update_idletasks()
+        win.lift()
+        win.focus_force()
         win.wait_window()
 
         if not out:
@@ -4894,6 +4983,16 @@ class CCGReviewUI:
         self.segment_combo['values'] = self.segment_names + [_ALL_SEGS]
         self.segment_var.set(_ALL_SEGS)
         self._bind_custom_segments_to_session(str(self.key.session))
+        # Default sort: sort-by-tag when entering All mode
+        try:
+            lp = self.left_container.left_panel
+            if not lp._sort_by_tag.get():
+                lp._sort_by_tag.set(True)
+                lp._sort_selected.set(False)
+                lp._sort_by_mean.set(False)
+                lp._sort_by_min_p.set(False)
+        except Exception:
+            pass
 
     def _enter_any_session_mode(self):
         """Backward-compat wrapper for older call sites."""
@@ -5016,11 +5115,34 @@ class CCGReviewUI:
             except Exception:
                 pass
             return
+        # Save current segment name before switching so it can be restored by name
+        _saved_seg_name = None
+        try:
+            seg = int(self.current_segment)
+            if seg == self.n_segments:
+                _saved_seg_name = _ALL_SEGS
+            elif 0 <= seg < len(self.segment_names):
+                _saved_seg_name = self.segment_names[seg]
+        except Exception:
+            pass
+
         if prev_sess != sess:
             # Custom CCG data are session-specific: show that session's segment chips.
             self._bind_custom_segments_to_session(sess)
         self._bind_context_to_type_key(ckey)
         self._clamp_current_segment_for_session()
+
+        # Restore segment by name so switching pairs doesn't reset the segment
+        if _saved_seg_name is not None:
+            try:
+                if _saved_seg_name == _ALL_SEGS:
+                    self.current_segment = self.n_segments
+                elif _saved_seg_name in self.segment_names:
+                    self.current_segment = self.segment_names.index(_saved_seg_name)
+                self._clamp_current_segment_for_session()
+            except Exception:
+                pass
+
         try:
             if getattr(self, 'segment_combo', None) is not None:
                 self.segment_combo['values'] = self.segment_names + [_ALL_SEGS]
@@ -5389,21 +5511,16 @@ class CCGReviewUI:
             except Exception:
                 pass
 
-        s = f"Sig: {n_sig:4d}  Sel: {n_sel:4d}"
-        # Show per-type neuron counts
+        if n_poss is not None and n_poss > 0:
+            s = (f"Significant: {n_sig}/{n_poss}"
+                 f"  Selected: {n_sel}/{n_poss}")
+        else:
+            s = f"Significant: {n_sig}  Selected: {n_sel}"
         if n_ref is not None:
             if ref_t == tgt_t:
                 s += f"  {ref_t}: {n_ref}"
             else:
-                s += f"  {ref_t}: {n_ref}  {tgt_t}: {n_tgt}"
-        if n_poss is not None and n_poss > 0:
-            sel_over_sig  = n_sel / max(n_sig,  1)
-            sel_over_poss = n_sel / n_poss
-            sig_over_poss = n_sig / n_poss
-            s += (f"  Poss: {n_poss:4d}"
-                  f"  Sel/Sig: {sel_over_sig:.0%}"
-                  f"  Sel/Poss: {sel_over_poss:.0%}"
-                  f"  Sig/Poss: {sig_over_poss:.0%}")
+                s += f"  ref({ref_t}): {n_ref}  tgt({tgt_t}): {n_tgt}"
         return s
 
     def _refresh_stats(self):
@@ -6454,7 +6571,7 @@ class CCGReviewUI:
             with open(export_path, encoding='utf-8') as f:
                 data = json.load(f)
             version = data.get('version', '3.x')
-            if version >= '4.0':
+            if 'group_registry' in data or str(version) >= '4.0':
                 self._load_groups_v4(data)
             else:
                 # v3.x → migrate
@@ -6608,7 +6725,6 @@ class CCGReviewUI:
         dlg.title("Loading")
         dlg.geometry("300x80")
         dlg.resizable(False, False)
-        dlg.transient(self.root)
         dlg.grab_set()
         dlg.protocol('WM_DELETE_WINDOW', lambda: None)  # prevent manual close
         ttk.Label(dlg, text="Loading dataset…", anchor='center').pack(
@@ -6785,33 +6901,48 @@ class CCGReviewUI:
                     v, _ = self._conn_strength_cache.get(k, (None, None))
                     return _fmt_cs(v)
 
-                # JBSI: requires jitter mean CCG (low-res only).
-                if hr:
-                    return "n/a"
+                # JBSI: computable at any resolution; j_avg=0 when no jitter data.
                 try:
                     from neuropy.analyses.jitter import compute_jbsi, JitterConfig
                 except Exception:
                     return "n/a"
-                # Jitter cache key uses low-res only
-                _jseg = self._jitter_seg(seg)
-                jk = (ref, tgt, 'lo', _jseg)
-                entry = self._jitter_cache.get(jk)
-                if entry is None and _jseg is not None:
-                    entry = self._jitter_cache.get((ref, tgt, 'lo', None))
-                if entry is None:
+
+                # Select CCGData object for the requested resolution
+                nd_key = self.key.nd() if self.key else None
+                if hr:
+                    cd_res = (self.cd._ccg_highres.get(nd_key)
+                              if hasattr(self.cd, '_ccg_highres') else None)
+                    if cd_res is None:
+                        cd_res = self.cd._ccg.get(nd_key) if hasattr(self.cd, '_ccg') else None
+                else:
+                    cd_res = self.cd._ccg.get(nd_key) if hasattr(self.cd, '_ccg') else None
+                if cd_res is None:
+                    cd_res = self.ccg_data
+                if cd_res is None:
                     return "n/a"
-                j_avg = entry[0]
-                if j_avg is None:
-                    return "n/a"
-                # Real ccg (raw counts) for this segment (low-res)
-                d = self._resolve_segment_data(ref, tgt, seg, highres=False, include_pval=False)
+
+                # Real CCG (raw counts) at the requested resolution
+                d = self._resolve_segment_data(ref, tgt, seg, highres=bool(hr),
+                                               include_pval=False, _cd=cd_res)
                 real_ccg = d.get('ccg_raw')
                 if real_ccg is None:
                     return "n/a"
 
-                # Firing rates: segment FR if available, otherwise whole-session
+                # Jitter mean baseline: lo-res only; zero-fill when not available
+                j_avg = None
+                if not hr:
+                    _jseg = self._jitter_seg(seg)
+                    entry = self._jitter_cache.get((ref, tgt, 'lo', _jseg))
+                    if entry is None and _jseg is not None:
+                        entry = self._jitter_cache.get((ref, tgt, 'lo', None))
+                    if entry is not None:
+                        j_avg = entry[0]
+                if j_avg is None:
+                    j_avg = np.zeros_like(real_ccg, dtype=float)
+
+                # Firing rates: segment-specific if available, else whole-session.
+                # n1 inside compute_jbsi = min(fr_ref, fr_tgt) — the lower-firing neuron.
                 fr_ref = fr_tgt = None
-                nd_key = self.key.nd() if self.key else None
                 if (nd_key is not None and self.cd.nd is not None
                         and seg != self.n_segments and not self._is_custom_segment(seg)):
                     seg_fr = self.cd.nd.segment_firing_rates.get(nd_key)
@@ -6826,27 +6957,27 @@ class CCGReviewUI:
                 if fr_ref is None or fr_tgt is None:
                     return "n/a"
 
-                # Match worker defaults: jscale from default JitterConfig
+                # jscale from default JitterConfig (only matters when j_avg is non-zero)
                 try:
-                    lo_cd = self.cd._ccg.get(self.key.nd()) if hasattr(self.cd, '_ccg') else self.ccg_data
+                    lo_cd = self.cd._ccg.get(nd_key) if hasattr(self.cd, '_ccg') else self.ccg_data
                     jscale = float(JitterConfig(ccg=lo_cd.conf, njitter=1).jscale)
                 except Exception:
                     jscale = 5e-3
 
+                bin_size_res = float(cd_res.conf.bin_size)
                 jbsi = compute_jbsi(
                     real_ccg=real_ccg,
                     j_ccg_avg=j_avg,
                     fr_ref=fr_ref,
                     fr_tgt=fr_tgt,
-                    bin_size=float(self.ccg_data.conf.bin_size),
+                    bin_size=bin_size_res,
                     jscale=jscale,
                 )
-                # Scalar = sum in effective test window
                 n_bins = len(jbsi)
-                bin_size_eff = self.ccg_data.conf.duration / (n_bins - 1) if n_bins > 1 else self.ccg_data.conf.bin_size
+                bin_size_eff = cd_res.conf.duration / (n_bins - 1) if n_bins > 1 else bin_size_res
                 center = n_bins // 2
                 lo = max(0, center + int(eff_min_lag / bin_size_eff))
-                hi_bin = min(n_bins, center + int(eff_max_lag / bin_size_eff) + 1)
+                hi_bin = min(n_bins, center + int(eff_max_lag / bin_size_eff))
                 return _fmt_cs(float(np.sum(jbsi[lo:hi_bin])))
 
             if self._sbs_mode:
@@ -6868,23 +6999,11 @@ class CCGReviewUI:
         jb = rbs.get("JBSI")
         if jb is None:
             return
-        inds = self._current_inds()
-        if inds is None:
-            has_j = False
-        else:
-            ref, tgt = int(inds[0]), int(inds[1])
-            seg = self.current_segment
-            # JBSI depends on low-res jitter mean; accept segment-specific or whole-session
-            k = (ref, tgt, "lo", self._jitter_seg(seg))
-            has_j = (k in self._jitter_cache) or ((ref, tgt, "lo", None) in self._jitter_cache)
+        # JBSI is always computable (uses j_avg=0 when no jitter data available)
         try:
-            jb.state(["!disabled"] if has_j else ["disabled"])
+            jb.state(["!disabled"])
         except Exception:
             pass
-        if not has_j:
-            csp = self.center_container.cs_panel
-            if str(csp._conn_str_metric_var.get()) == "JBSI":
-                csp._conn_str_metric_var.set("STG")
 
     def _current_inds(self):
         """Return current (ref, tgt) inds or None."""
@@ -6973,6 +7092,69 @@ class CCGReviewUI:
             print(f"[CCGReviewUI] Tailed CS failed for ({ref},{tgt}): {e}")
             self._conn_strength_cache[
                 self._cs_cache_key(ref, tgt, seg, 'tailed', highres, eff_min_lag, eff_max_lag)
+            ] = (None, None)
+
+        # ── JBSI ─────────────────────────────────────────────────────────
+        try:
+            from neuropy.analyses.jitter import compute_jbsi, JitterConfig
+            nd_key = self.key.nd() if self.key else None
+            if highres:
+                cd_res = (self.cd._ccg_highres.get(nd_key)
+                          if hasattr(self.cd, '_ccg_highres') else None) or self.ccg_data
+            else:
+                cd_res = (self.cd._ccg.get(nd_key)
+                          if hasattr(self.cd, '_ccg') else None) or self.ccg_data
+            if cd_res is not None:
+                d_jbsi = self._resolve_segment_data(ref, tgt, seg, highres=highres,
+                                                    include_pval=False, _cd=cd_res)
+                real_ccg = d_jbsi.get('ccg_raw')
+                if real_ccg is not None:
+                    fr_ref = fr_tgt = None
+                    if (nd_key is not None and self.cd.nd is not None
+                            and seg != self.n_segments and not self._is_custom_segment(seg)):
+                        seg_fr = self.cd.nd.segment_firing_rates.get(nd_key)
+                        if seg_fr is not None and seg < seg_fr.shape[0]:
+                            fr_ref = float(seg_fr[seg, ref])
+                            fr_tgt = float(seg_fr[seg, tgt])
+                    if fr_ref is None or fr_tgt is None:
+                        fr = getattr(self.neurons, 'firing_rate', None)
+                        if fr is not None:
+                            fr_ref = float(fr[ref])
+                            fr_tgt = float(fr[tgt])
+                    if fr_ref is not None and fr_tgt is not None:
+                        try:
+                            lo_cd = (self.cd._ccg.get(nd_key)
+                                     if hasattr(self.cd, '_ccg') else None) or self.ccg_data
+                            jscale = float(JitterConfig(ccg=lo_cd.conf, njitter=1).jscale)
+                        except Exception:
+                            jscale = 5e-3
+                        j_avg = np.zeros_like(real_ccg, dtype=float)
+                        bin_size_res = float(cd_res.conf.bin_size)
+                        jbsi_arr = compute_jbsi(
+                            real_ccg=real_ccg,
+                            j_ccg_avg=j_avg,
+                            fr_ref=fr_ref,
+                            fr_tgt=fr_tgt,
+                            bin_size=bin_size_res,
+                            jscale=jscale,
+                        )
+                        n_bins = len(jbsi_arr)
+                        bin_size_eff = (cd_res.conf.duration / (n_bins - 1)
+                                        if n_bins > 1 else bin_size_res)
+                        center = n_bins // 2
+                        _lo = (max(0, center + int(eff_min_lag / bin_size_eff))
+                               if eff_min_lag is not None else 0)
+                        _hi = (min(n_bins, center + int(eff_max_lag / bin_size_eff))
+                               if eff_max_lag is not None else n_bins)
+                        jbsi_cs = float(np.sum(jbsi_arr[_lo:_hi]))
+                        self._conn_strength_cache[
+                            self._cs_cache_key(ref, tgt, seg, 'JBSI', highres,
+                                               eff_min_lag, eff_max_lag)
+                        ] = (jbsi_cs, None)
+        except Exception as _jbsi_err:
+            print(f"[CCGReviewUI] JBSI CS failed for ({ref},{tgt}): {_jbsi_err}")
+            self._conn_strength_cache[
+                self._cs_cache_key(ref, tgt, seg, 'JBSI', highres, eff_min_lag, eff_max_lag)
             ] = (None, None)
 
         method = self.center_container.baseline_panel._conn_str_method_var.get()
@@ -8134,7 +8316,6 @@ class CCGReviewUI:
         win.title(title)
         win.geometry("400x340")
         win.resizable(True, True)
-        win.transient(self.root)
         win.grab_set()
 
         ttk.Label(win, text="Select sessions  (Shift / Ctrl+click for multi-select):").pack(
@@ -8176,6 +8357,9 @@ class CCGReviewUI:
 
         win.bind('<Return>', lambda e: _ok())
         win.bind('<Escape>', lambda e: _cancel())
+        win.update_idletasks()
+        win.lift()
+        win.focus_force()
         win.wait_window()
         return result[0]
 
@@ -8189,7 +8373,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Suggested custom CCGs")
         win.geometry("620x360")
-        win.transient(self.root)
         win.grab_set()
         ttk.Label(
             win,
@@ -8960,7 +9143,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title(f"Pair Tags — [{ref}, {tgt}]")
         win.geometry("400x350")
-        win.transient(self.root)
         win.grab_set()
 
         # Tags (comma-separated)
@@ -9008,7 +9190,7 @@ class CCGReviewUI:
             if str(key.session) != session_str and str(key.nd().session) != session_str:
                 continue
             ct = getattr(key, 'conn_type', None)
-            ct_label = (f"{ct[0]}\u2192{ct[1]}" if ct else "unknown")
+            ct_label = self._conn_type_label(ct)
             pt = self.cd.data[key]
             if pt is None or not hasattr(pt, 'inds2') or pt.inds2 is None:
                 continue
@@ -9100,7 +9282,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Manage Groups")
         win.geometry("480x420")
-        win.transient(self.root)
         win.grab_set()
 
         nb = ttk.Notebook(win)
@@ -10300,7 +10481,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Merge Groups")
         win.geometry("340x320")
-        win.transient(self.root)
         win.grab_set()
 
         ttk.Label(win, text="Select groups to merge:",
@@ -10979,7 +11159,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Missing Pairs")
         win.geometry("450x320")
-        win.transient(self.root)
         win.grab_set()
 
         result = {'action': 'cancel'}
@@ -11024,6 +11203,9 @@ class CCGReviewUI:
                    command=cancel).pack(side=tk.RIGHT, padx=4)
 
         win.protocol('WM_DELETE_WINDOW', cancel)
+        win.update_idletasks()
+        win.lift()
+        win.focus_force()
         win.wait_window()
         return result['action']
 
@@ -11037,7 +11219,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Load Selection")
         win.geometry("620x340")
-        win.transient(self.root)
         win.grab_set()
 
         ttk.Label(win, text="Select a version to load:",
@@ -11189,7 +11370,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Save selection")
         win.geometry("360x130")
-        win.transient(self.root)
         win.grab_set()
 
         ttk.Label(win, text="Version name:").pack(pady=(10, 2))
@@ -11755,7 +11935,6 @@ class CCGReviewUI:
             win = tk.Toplevel(self.root)
             win.title("Save custom CCG")
             win.geometry("340x260")
-            win.transient(self.root)
             win.grab_set()
             ttk.Label(win, text="Select segments to save:").pack(
                 anchor='w', padx=8, pady=(8, 2))
@@ -11829,7 +12008,6 @@ class CCGReviewUI:
         win = tk.Toplevel(self.root)
         win.title("Load custom CCG")
         win.geometry("560x380")
-        win.transient(self.root)
         win.grab_set()
         ttk.Label(win, text="Select segments to load (click ▶ to expand details):").pack(
             anchor='w', padx=8, pady=(8, 2))
@@ -12045,7 +12223,10 @@ class CCGReviewUI:
                 self._update_segment_label()
                 self.update_plot()
                 if hasattr(self, '_ts_status_var'):
-                    self._ts_status_var.set(f"Loaded: {', '.join(added)}")
+                    from collections import Counter as _Ctr
+                    _cnts = _Ctr(added)
+                    _parts = [f"{n} ({c})" if c > 1 else n for n, c in _cnts.items()]
+                    self._ts_status_var.set(f"Loaded: {', '.join(_parts)}")
                 self._save_ui_state()
             elif added:
                 if hasattr(self, '_ts_status_var'):

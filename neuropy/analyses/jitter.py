@@ -231,15 +231,49 @@ class Jitter:
                 self.JBSI[pair_idx] = self._jbsi(
                     ref, tgt, real_ccg, j_ccg_avg)
 
+    @staticmethod
+    def _fast_ccg_pair(ref_spikes, tgt_spikes, bin_size: float, window_size: float) -> np.ndarray:
+        """Single-pair CCG via searchsorted — O(n_spikes log n_spikes + n_lags).
+
+        Faster than the shift-based algorithm when there are only 2 spike trains
+        because it avoids scanning the full spike array for every shift step.
+        """
+        half_w = window_size / 2.0
+        n_bins = 2 * int(round(half_w / bin_size))
+        if n_bins < 1:
+            return np.zeros(1, dtype=np.float64)
+        bin_edges = np.linspace(-half_w, half_w, n_bins + 1)
+
+        ref = np.sort(ref_spikes)
+        tgt = np.sort(tgt_spikes)
+
+        lo = np.searchsorted(tgt, ref - half_w, side='left')
+        hi = np.searchsorted(tgt, ref + half_w, side='right')
+        counts = hi - lo
+        total = int(counts.sum())
+        if total == 0:
+            return np.zeros(n_bins, dtype=np.float64)
+
+        # Build all lags fully vectorised: for ref spike i, include tgt[lo[i]+k] - ref[i]
+        # for k in range(counts[i]).  Use cumsum to avoid Python loop.
+        cum = np.empty(len(counts) + 1, dtype=np.intp)
+        cum[0] = 0
+        np.cumsum(counts, out=cum[1:])
+        row_idx = np.repeat(np.arange(len(ref), dtype=np.intp), counts)
+        local_k = np.arange(total, dtype=np.intp) - cum[row_idx]
+        tgt_idx = lo[row_idx] + local_k
+        lags = tgt[tgt_idx] - ref[row_idx]
+        return np.histogram(lags, bins=bin_edges)[0].astype(np.float64)
+
     def _compute_jitter_ccg(self, refs, tgt_ind, j_trains):
         """
         Compute CCG between ref neurons and njitter jittered target spike trains.
 
         Returns j_ccg of shape [n_ref, njitter, n_bins].
 
-        Jitter trials are computed in batches so each call to
-        ``correlations.spike_correlations`` can process many targets at once
-        (maximally parallel), while respecting a soft memory budget.
+        For the common single-ref case (n_ref == 1) uses a fast searchsorted-based
+        pairwise CCG that avoids building a large merged Neurons object.  For
+        multi-ref, falls back to the existing batch spike_correlations path.
         """
         njitter = int(self.conf.njitter)
         ccg_conf = self.conf.ccg
@@ -252,10 +286,27 @@ class Jitter:
             j_list = list(j_trains)
         njitter = min(njitter, len(j_list))
 
+        # ── Fast path: single ref neuron ────────────────────────────────────
+        # Use direct searchsorted-based pairwise CCG, which avoids building a
+        # large merged Neurons object (200 jitter targets × n_tgt_spikes spikes)
+        # and eliminates the expensive shift-scan loop over the full spike array.
+        if n_ref == 1 and not ccg_conf.use_acceleration:
+            ref_spikes = np.asarray(self.neurons.spiketrains[int(refs[0])], dtype=float)
+            trial_ccgs = [
+                self._fast_ccg_pair(
+                    ref_spikes,
+                    np.asarray(j_list[j], dtype=float),
+                    float(ccg_conf.bin_size),
+                    float(ccg_conf.duration),
+                )
+                for j in range(njitter)
+            ]
+            n_bins = trial_ccgs[0].shape[0] if trial_ccgs else 1
+            out_2d = np.stack(trial_ccgs, axis=0)   # (njitter, n_bins)
+            return out_2d[np.newaxis]                 # (1, njitter, n_bins)
+
+        # ── Batch path: multi-ref or GPU acceleration ────────────────────────
         # Choose batch size from a soft memory budget.
-        # We don't trust ccg_conf.nbins (can be stale when bin_size is overridden),
-        # so estimate from duration/bin_size and then allocate based on the first
-        # computed batch's output shape.
         try:
             n_bins_est = int(round(float(ccg_conf.duration) / float(ccg_conf.bin_size))) + 1
         except Exception:
@@ -266,8 +317,6 @@ class Jitter:
         out = None
         n_bins = None
 
-        # Slice ref neurons once per batch (merge mutates the object)
-        ref_neurons_base = self.neurons.neuron_slice(neuron_inds=refs)
         tgt_id_base = int(self.neurons.neuron_ids[tgt_ind])
         tgt_type = (self.neurons.neuron_type[tgt_ind][0]
                     if getattr(self.neurons, 'neuron_type', None) is not None else None)

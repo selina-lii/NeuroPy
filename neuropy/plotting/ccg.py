@@ -40,12 +40,23 @@ def plot_ccg_panel(
     line_tgt=False,
     line_jitter=False,
     conn_strength_baseline=None,
+    ccg_color=None,
+    baseline_color=None,
+    ccg_alpha=None,
+    baseline_alpha=None,
+    cs_shade_color=None,
+    show_legend=True,
+    show_test_window=None,
+    test_window_color=None,
+    test_window_alpha=None,
+    pval_line_color=None,
+    alpha_line_color=None,
 ):
     """Single CCG plot into provided axis.
 
     Per-item line flags (line_ccg, line_baseline, line_ref, line_tgt)
     control whether each histogram renders as a step outline
-    (histtype='step' via ax.stairs) or a filled bar plot.
+    (ax.plot with drawstyle='steps-mid') or a filled bar plot.
     The legacy ``plot_style`` parameter sets the default for all items
     when ``'line'``, but per-item flags take precedence.
     """
@@ -56,15 +67,17 @@ def plot_ccg_panel(
         bins_s = np.arange(-window_size / 2, window_size / 2 + bin_size, bin_size)
         bins = bins_s * 1000  # ms
         bin_w = bin_size * 1000  # ms
-        # Bin edges for ax.stairs (n_bins + 1 edges)
-        edges = np.append(bins - bin_w / 2, bins[-1] + bin_w / 2)
-
         if grayscale:
             dark_gray = (0.2, 0.2, 0.2)
             light_gray = (0.8, 0.8, 0.8)
-            colors = [dark_gray, light_gray]
+            _prop = [dark_gray, light_gray]
         else:
-            colors = plt.rcParams["axes.prop_cycle"].by_key()["color"][:2]
+            _prop = plt.rcParams["axes.prop_cycle"].by_key()["color"][:2]
+        _ccg_color      = ccg_color      if ccg_color      else _prop[0]
+        _base_color     = baseline_color if baseline_color else _prop[1]
+        _ccg_alpha      = ccg_alpha      if ccg_alpha      is not None else 0.5
+        _base_alpha     = baseline_alpha if baseline_alpha is not None else 0.3
+        _cs_shade_color = cs_shade_color if cs_shade_color else '#1a6b2e'
 
         # Resolve per-item line mode (legacy plot_style as fallback)
         _legacy_line = (plot_style == 'line')
@@ -84,17 +97,17 @@ def plot_ccg_panel(
         # set CCG transparency here
         if show_ccg:
             if _ccg_line:
-                ax.stairs(ccg, edges, label="ccg", alpha=0.5,
-                          color=colors[0], linewidth=1.5)
+                ax.plot(bins, ccg, drawstyle='steps-mid', label="CCG", alpha=_ccg_alpha,
+                        color=_ccg_color, linewidth=1.5)
             else:
-                ax.bar(bins, ccg, width=bin_w, alpha=0.5, label="ccg", color=colors[0])
+                ax.bar(bins, ccg, width=bin_w, alpha=_ccg_alpha, label="CCG", color=_ccg_color)
         if ccg_null is not None:
             if _baseline_line:
-                ax.stairs(ccg_null, edges, alpha=0.3, label="ccg-smooth",
-                          color=colors[1], linewidth=1.5, linestyle='--')
+                ax.plot(bins, ccg_null, drawstyle='steps-mid', alpha=_base_alpha,
+                        label="Baseline", color=_base_color, linewidth=1.5, linestyle='--')
             else:
-                ax.bar(bins, ccg_null, width=bin_w, alpha=0.3,
-                       label="ccg-smooth", color=colors[1])
+                ax.bar(bins, ccg_null, width=bin_w, alpha=_base_alpha,
+                       label="Baseline", color=_base_color)
 
         if conn_strength_baseline is not None and min_lag is not None and max_lag is not None:
             min_lag_ms = min_lag * 1000
@@ -107,20 +120,20 @@ def plot_ccg_panel(
                 bottoms = bl[mask]
                 heights = np.maximum(ccg[mask] - bottoms, 0)
                 ax.bar(bins[mask], heights, width=bin_w, bottom=bottoms,
-                       color='#1a6b2e', alpha=1.0, label='excess sync', zorder=3)
+                       color=_cs_shade_color, alpha=1.0, label='Conn strength', zorder=3)
 
         _jitter_line = line_jitter or _legacy_line
         if j_ccg is not None:
             if _jitter_line:
-                ax.stairs(j_ccg, edges, alpha=0.6, label="jitter avg",
-                          color="plum", linewidth=1.2)
+                ax.plot(bins, j_ccg, drawstyle='steps-mid', alpha=0.6, label="jitter avg",
+                        color="plum", linewidth=1.2)
             else:
                 ax.bar(bins, j_ccg, width=bin_w, alpha=0.4,
                        label="jitter avg", color="plum")
 
         # Correlogram overlays — each gets its own right-side y-axis
         # ACGs render as hollow bar outlines by default; per-item line flag
-        # switches to step outline (ax.stairs)
+        # switches to step outline (steps-mid)
         _acg_axis_offset = 0.14  # start past p-value axis (at 1.0)
         for acg_data, acg_color, acg_label, acg_scale, acg_line in [
             (acg_ref, '#007434', 'ACG ref', acg_yscale_ref, line_ref),
@@ -131,8 +144,8 @@ def plot_ccg_panel(
             ax_acg = ax.twinx()
             ax_acg.spines['right'].set_position(('axes', 1.0 + _acg_axis_offset))
             if acg_line:
-                ax_acg.stairs(acg_data, edges, alpha=0.6,
-                              color=acg_color, linewidth=1.2, label=acg_label)
+                ax_acg.plot(bins, acg_data, drawstyle='steps-mid', alpha=0.6,
+                            color=acg_color, linewidth=1.2, label=acg_label)
             else:
                 ax_acg.bar(bins, acg_data, width=bin_w, alpha=0.4,
                            color=acg_color, label=acg_label)
@@ -151,13 +164,18 @@ def plot_ccg_panel(
                 ax_acg.spines[sp].set_visible(False)
             _acg_axis_offset += 0.12
 
-        if min_lag is not None and max_lag is not None:
+        # show_test_window=None means legacy: show whenever lags are provided.
+        _draw_span = (show_test_window if show_test_window is not None
+                      else (min_lag is not None and max_lag is not None))
+        if _draw_span and min_lag is not None and max_lag is not None:
             ml_ms = min_lag * 1000
             xl_ms = max_lag * 1000
             # Span covers all tested bins: centers from min_lag to max_lag,
             # each bar extends ±bin_w/2 around its center
-            ax.axvspan(ml_ms - bin_w/2, xl_ms + bin_w/2, alpha=0.12,
-                       color='green', label=f'test window ({ml_ms:.0f}–{xl_ms:.0f} ms)')
+            _tw_color = test_window_color if test_window_color else 'green'
+            _tw_alpha = test_window_alpha if test_window_alpha is not None else 0.12
+            ax.axvspan(ml_ms - bin_w/2, xl_ms + bin_w/2, alpha=_tw_alpha,
+                       color=_tw_color, label=f'Test window ({ml_ms:.0f}–{xl_ms:.0f} ms)')
 
         ax.set_xlabel("Time (ms)")
         ylabel = "Count"
@@ -175,38 +193,49 @@ def plot_ccg_panel(
         type_str = f', type={neuron_type}' if neuron_type is not None else ''
         ax.set_title(
             f"{segment_id}: shank={ids}, inds={inds}{type_str}{sig_marker}")
-        ax.legend(fontsize=8)
         sns.despine(ax=ax)
 
-        ax2 = ax.twinx()
-        ax2.set_ylim(0, 1)
-        ticks_scaled = np.linspace(0, 1, 21)
-        ticks_original = np.round(ticks_scaled, 2)
-        ax2.set_yticks(ticks_scaled)
-        ax2.set_yticklabels(ticks_original, fontsize=8)
-        ax2.set_ylabel("p-value")
+        _has_pval = any(x is not None for x in (pval, pval_corrected, j_pval, j_sig))
+        if _has_pval:
+            ax2 = ax.twinx()
+            ax2.set_ylim(0, 1)
+            ticks_scaled = np.linspace(0, 1, 21)
+            ticks_original = np.round(ticks_scaled, 2)
+            ax2.set_yticks(ticks_scaled)
+            ax2.set_yticklabels(ticks_original, fontsize=8)
+            ax2.set_ylabel("p-value")
 
-        if pval is not None:
-            ax2.plot(bins, pval, label='p (EranConv)', alpha=0.6, color='orange')
-        if j_sig is not None:
-            ax2.plot(bins, j_sig, label='jitter sig', color='brown')
-        if pval_corrected is not None:
-            ax2.plot(bins, pval_corrected, label='corrected p', alpha=0.4, color='green')
-        if j_pval is not None:
-            j_pval = np.asarray(j_pval)
-            if j_pval.ndim == 0:
-                # Scalar: single empirical p-value (legacy)
-                ax2.axhline(float(j_pval), label=f'jitter p={float(j_pval):.3f}',
-                            color='purple', alpha=0.85, linewidth=1.5, linestyle='--')
-            else:
-                # Per-bin p-values
-                ax2.plot(bins, j_pval, label='jitter p-corrected',
-                         alpha=0.6, color='purple')
-        if alpha is not None and any(x is not None for x in (pval, pval_corrected, j_pval, j_sig)):
-            ax2.axhline(alpha, label=f'α={alpha}', alpha=0.8,
-                        color='red', linestyle='--', linewidth=1.5)
-        ax2.legend(fontsize=8)
-        sns.despine(ax=ax2)
+            if pval is not None:
+                ax2.plot(bins, pval, label='p (EranConv)', alpha=0.6,
+                         color=pval_line_color or 'orange')
+            if j_sig is not None:
+                ax2.plot(bins, j_sig, label='jitter sig',
+                         color=pval_line_color or 'brown')
+            if pval_corrected is not None:
+                ax2.plot(bins, pval_corrected, label='corrected p', alpha=0.4,
+                         color=pval_line_color or 'green')
+            if j_pval is not None:
+                j_pval = np.asarray(j_pval)
+                if j_pval.ndim == 0:
+                    # Scalar: single empirical p-value (legacy)
+                    ax2.axhline(float(j_pval), label=f'jitter p={float(j_pval):.3f}',
+                                color=pval_line_color or 'purple',
+                                alpha=0.85, linewidth=1.5, linestyle='--')
+                else:
+                    # Per-bin p-values
+                    ax2.plot(bins, j_pval, label='jitter p-corrected',
+                             alpha=0.6, color=pval_line_color or 'purple')
+            if alpha is not None:
+                ax2.axhline(alpha, label=f'α={alpha}', alpha=0.8,
+                            color=alpha_line_color or 'red', linestyle='--', linewidth=1.5)
+            if show_legend:
+                # Combine handles from both axes into one legend on ax2
+                h1, l1 = ax.get_legend_handles_labels()
+                h2, l2 = ax2.get_legend_handles_labels()
+                ax2.legend(h1 + h2, l1 + l2, fontsize=8)
+            sns.despine(ax=ax2)
+        elif show_legend:
+            ax.legend(fontsize=8)
 
 
 def plot_ccg_simple(ccg, ccg_null=None, bin_size=1e-3, duration=20e-3,

@@ -125,6 +125,21 @@ class RenderContext:
     acg_match_ccg: bool
     # Y-axis scale (None = auto)
     ylim: Optional[tuple]
+    # Export/preview style overrides (None = use plot_ccg_panel defaults)
+    ccg_color:          Optional[str]
+    baseline_color:     Optional[str]
+    ccg_alpha:          Optional[float]
+    baseline_alpha:     Optional[float]
+    cs_shade_color:     Optional[str]
+    show_legend:        bool
+    xticks_ms:          Optional[list]
+    mirror_xticks:      bool
+    min_text_size:      Optional[float]
+    show_test_window:   Optional[bool]   # None = legacy (show when lags provided)
+    test_window_color:  Optional[str]
+    test_window_alpha:  Optional[float]
+    pval_line_color:    Optional[str]
+    alpha_line_color:   Optional[str]
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +280,7 @@ class CCGRenderEngine:
         _extend_bin_ms = self._racg('_extend_bin_ms_var', render_cfg, None)
         if _extend_on:
             try:
-                bin_ext = (max(1.0, float(_extend_bin_ms)) / 1000.0
+                bin_ext = (float(_extend_bin_ms) / 1000.0
                            if _extend_bin_ms is not None else float(bin_size_eff0))
                 ext = ui._resolve_extended_ccg(
                     ref, tgt, segment, bool(highres), int(_extend_ms), float(bin_ext), cd)
@@ -277,8 +292,10 @@ class CCGRenderEngine:
                     seg_label       = ext.get('seg_label', seg_label)
                     window_size_eff = float(ext['window_size_s'])
                     bin_size_eff0   = float(ext['bin_size_eff'])
-            except Exception:
-                pass
+            except Exception as _ext_exc:
+                import traceback as _tb
+                print(f"[CCGRenderer] extend error: {_ext_exc}")
+                _tb.print_exc()
 
         # ── Norms + alpha ───────────────────────────────────────────
         if render_cfg is not None and NormalizeBy is not None:
@@ -474,6 +491,24 @@ class CCGRenderEngine:
         nt  = ((ui.neurons.neuron_type[ref], ui.neurons.neuron_type[tgt])
                if ui.neurons is not None else ('', ''))
 
+        # Export/preview style overrides — read from ui._export_overrides if set
+        _eo = getattr(ui, '_export_overrides', None) or {}
+        _exp_ccg_color        = _eo.get('ccg_color')
+        _exp_base_color       = _eo.get('baseline_color')
+        _exp_ccg_alpha        = _eo.get('ccg_alpha')
+        _exp_base_alpha       = _eo.get('baseline_alpha')
+        _exp_cs_shade         = _eo.get('cs_shade_color')
+        _exp_show_legend      = bool(_eo.get('show_legend', True))
+        _exp_xticks_ms        = _eo.get('xticks_ms')
+        _exp_mirror_xticks    = bool(_eo.get('mirror_xticks', True))
+        _exp_min_text_size    = _eo.get('min_text_size')
+        # test_window visibility: always driven by _tw_active (not export overrides),
+        # but color/alpha can be customised for export.
+        _exp_test_window_color = _eo.get('test_window_color')
+        _exp_test_window_alpha = _eo.get('test_window_alpha')
+        _exp_pval_line_color   = _eo.get('pval_line_color')
+        _exp_alpha_line_color  = _eo.get('alpha_line_color')
+
         return RenderContext(
             ccg             = ccg_out,
             ccg_null_plot   = ccg_null_plot,
@@ -510,13 +545,27 @@ class CCGRenderEngine:
             acg_yscale_tgt  = float(self._racg('_acg_yscale_tgt_var', render_cfg, 1.0)),
             acg_match_ccg   = bool(self._racg('_acg_match_ccg_var',   render_cfg, False)),
             ylim            = ui._get_current_scale_ylim(ref, tgt),
+            ccg_color          = _exp_ccg_color,
+            baseline_color     = _exp_base_color,
+            ccg_alpha          = _exp_ccg_alpha,
+            baseline_alpha     = _exp_base_alpha,
+            cs_shade_color     = _exp_cs_shade,
+            show_legend        = _exp_show_legend,
+            xticks_ms          = _exp_xticks_ms,
+            mirror_xticks      = _exp_mirror_xticks,
+            min_text_size      = _exp_min_text_size,
+            show_test_window   = bool(_tw_active),
+            test_window_color  = _exp_test_window_color,
+            test_window_alpha  = _exp_test_window_alpha,
+            pval_line_color    = _exp_pval_line_color,
+            alpha_line_color   = _exp_alpha_line_color,
         )
 
     # ----------------------------------------------------------------
     # Rendering
     # ----------------------------------------------------------------
 
-    def write_png(self, ctx: RenderContext, png_path: str) -> None:
+    def write_png(self, ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
         """Create figure, call plot_ccg_panel, apply post-processing, save PNG."""
         fig = Figure(figsize=(7, 5))
         ax  = fig.add_subplot(111)
@@ -552,6 +601,17 @@ class CCGRenderEngine:
             line_tgt         = ctx.line_tgt,
             line_jitter      = ctx.line_jitter,
             conn_strength_baseline = ctx.cs_baseline_arg,
+            ccg_color          = ctx.ccg_color,
+            baseline_color     = ctx.baseline_color,
+            ccg_alpha          = ctx.ccg_alpha,
+            baseline_alpha     = ctx.baseline_alpha,
+            cs_shade_color     = ctx.cs_shade_color,
+            show_legend        = ctx.show_legend,
+            show_test_window   = ctx.show_test_window,
+            test_window_color  = ctx.test_window_color,
+            test_window_alpha  = ctx.test_window_alpha,
+            pval_line_color    = ctx.pval_line_color,
+            alpha_line_color   = ctx.alpha_line_color,
         )
 
         # Extend view: readable x-ticks on long windows
@@ -590,5 +650,29 @@ class CCGRenderEngine:
         if ctx.ylim is not None:
             ax.set_ylim(ctx.ylim)
 
-        fig.savefig(png_path, dpi=100, bbox_inches='tight')
+        # Export xtick override
+        if ctx.xticks_ms:
+            try:
+                ticks = list(ctx.xticks_ms)
+                if ctx.mirror_xticks:
+                    ticks = sorted(set(ticks + [-t for t in ticks]))
+                ax.set_xticks(ticks)
+            except Exception:
+                pass
+
+        # Export min text size
+        if ctx.min_text_size is not None:
+            try:
+                ms = float(ctx.min_text_size)
+                for item in ([ax.title, ax.xaxis.label, ax.yaxis.label]
+                             + ax.get_xticklabels() + ax.get_yticklabels()):
+                    try:
+                        if item.get_fontsize() < ms:
+                            item.set_fontsize(ms)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight')
         matplotlib.pyplot.close(fig)

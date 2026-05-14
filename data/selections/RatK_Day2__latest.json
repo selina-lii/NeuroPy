@@ -1,44 +1,16 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-12T13:52:27.679495",
+  "saved_at": "2026-05-13T20:13:48.639104",
   "session": "RatK_Day2",
   "selections": {
-    "sess_RatK_Day2.ex_E.type_pyr-pyr": [],
-    "sess_RatK_Day2.ex_E.type_pyr-inter": [
-      [
-        24,
-        28
-      ],
-      [
-        26,
-        28
-      ],
-      [
-        29,
-        28
-      ],
+    "sess_RatK_Day2.ex_E.type_pyr-pyr": [
       [
         30,
-        0
-      ],
-      [
-        30,
-        28
-      ],
-      [
-        35,
-        0
-      ],
-      [
-        35,
-        28
-      ],
-      [
-        36,
-        2
+        27
       ]
     ],
+    "sess_RatK_Day2.ex_E.type_pyr-inter": [],
     "sess_RatK_Day2.ex_I.type_inter-inter": [],
     "sess_RatK_Day2.ex_I.type_inter-pyr": []
   },
