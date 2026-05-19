@@ -18,6 +18,9 @@ from matplotlib.figure import Figure
 _ALL_SEGS = "All segments"
 _ADMITTED_GROUP = "__admitted__"
 
+_BAR_COLORS = ['#8FB3FF', '#FFB3B3', '#B3FFB3', '#FFD9B3', '#E0B3FF',
+               '#B3F0FF', '#FFB3E6']
+
 _DATA_TYPES = [
     "Conn Strength",
     "CS norm (% change)",
@@ -60,7 +63,7 @@ class StatsTestPanel:
 
         self.root = tk.Toplevel(ui.root)
         self.root.title("Stats Tests")
-        self.root.geometry("960x580")
+        self.root.geometry("1100x580")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -133,8 +136,9 @@ class StatsTestPanel:
         ttk.Label(top, text="Test type:").pack(side=tk.LEFT, padx=(8, 2))
         self._test_type_var = tk.StringVar(value="Pairwise t-test")
         self._test_type_cb = ttk.Combobox(top, textvariable=self._test_type_var,
-                     values=["Independent t-test", "Pairwise t-test", "One-way ANOVA + Tukey"],
-                     state='readonly', width=24)
+                     values=["Independent t-test", "Pairwise t-test",
+                             "One-way ANOVA + Tukey", "Repeated-measures ANOVA"],
+                     state='readonly', width=26)
         self._test_type_cb.pack(side=tk.LEFT)
 
         ttk.Label(top, text="Sides:").pack(side=tk.LEFT, padx=(10, 2))
@@ -170,8 +174,8 @@ class StatsTestPanel:
         # ── Column headers ──────────────────────────────────────────────
         hdr = ttk.Frame(root)
         hdr.pack(fill=tk.X, padx=8, pady=(2, 0))
-        for col, w in [("Name", 5), ("Session", 22), ("ConnType", 14), ("Segment", 14),
-                       ("Group", 14), ("Data", 15), ("", 3)]:
+        for col, w in [("Name", 5), ("Session", 14), ("ConnType", 11), ("Segment", 11),
+                       ("Group", 17), ("Data", 12), ("", 3)]:
             ttk.Label(hdr, text=col, font=('Arial', 8, 'bold'),
                       width=w, anchor='w').pack(side=tk.LEFT, padx=1)
 
@@ -211,6 +215,18 @@ class StatsTestPanel:
         self._violin_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(plot_ctrl_row, text="Violin", variable=self._violin_var,
                         command=self._on_plot_type_toggle).pack(side=tk.LEFT)
+        self._show_outliers_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(plot_ctrl_row, text="Show outliers", variable=self._show_outliers_var,
+                        command=self._on_plot_type_toggle).pack(side=tk.LEFT, padx=(8, 0))
+        self._show_sig_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(plot_ctrl_row, text="Sig. brackets", variable=self._show_sig_var,
+                        command=self._on_plot_type_toggle).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(plot_ctrl_row, text="W:H").pack(side=tk.LEFT, padx=(12, 2))
+        self._plot_ratio_var = tk.StringVar(value="7.5:2.6")
+        _ratio_entry = ttk.Entry(plot_ctrl_row, textvariable=self._plot_ratio_var, width=7)
+        _ratio_entry.pack(side=tk.LEFT)
+        _ratio_entry.bind('<Return>', lambda e: self._apply_plot_ratio())
+        _ratio_entry.bind('<FocusOut>', lambda e: self._apply_plot_ratio())
         self._plot_fig = Figure(figsize=(7.5, 2.6), dpi=100)
         self._plot_canvas = FigureCanvasTkAgg(self._plot_fig, master=plot_frame)
         self._plot_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -239,7 +255,9 @@ class StatsTestPanel:
     def _sync_test_type_to_group_count(self):
         n = sum(1 for r in self._row_frames if r['frame'].winfo_exists())
         if n > 2:
-            self._test_type_var.set("One-way ANOVA + Tukey")
+            cur = self._test_type_var.get()
+            if cur not in ("One-way ANOVA + Tukey", "Repeated-measures ANOVA"):
+                self._test_type_var.set("One-way ANOVA + Tukey")
         else:
             if self._test_type_var.get() == "One-way ANOVA + Tukey":
                 self._test_type_var.set("Pairwise t-test")
@@ -262,17 +280,20 @@ class StatsTestPanel:
         concrete = self._concrete_sessions()
         return ['All'] + concrete if 'All' not in concrete else concrete
 
-    def _format_sess_list_summary(self, sess_list: list[str]) -> str:
-        if not sess_list:
+    def _format_list_summary(self, items: list[str], all_fn, noun: str,
+                             short_threshold: int) -> str:
+        if not items:
             return '—'
-        all_c = self._concrete_sessions()
-        if set(sess_list) == set(all_c):
-            return f"All ({len(sess_list)})"
-        if len(sess_list) == 1:
-            return sess_list[0]
-        if len(sess_list) <= 3:
-            return ', '.join(sess_list)
-        return f"{len(sess_list)} sessions"
+        if len(items) == 1:
+            return items[0]
+        if len(items) <= short_threshold:
+            return ', '.join(items)
+        if set(items) == set(all_fn()):
+            return f"All ({len(items)})"
+        return f"{len(items)} {noun}"
+
+    def _format_sess_list_summary(self, sess_list: list[str]) -> str:
+        return self._format_list_summary(sess_list, self._concrete_sessions, "sessions", 3)
 
     def _pooling_mode(self, sess_list: list[str]) -> tuple[str, str | list[str] | None]:
         """``('all', None)`` | ``('one', session)`` | ``('multi', [sessions...])``."""
@@ -334,19 +355,21 @@ class StatsTestPanel:
             if sess in init:
                 lb.select_set(i)
 
-        result: list[str] | None = [None]
+        result: list[str] | None = None
 
         def _ok():
+            nonlocal result
             sels = lb.curselection()
             if not sels:
                 messagebox.showwarning(
                     'Sessions', 'Select at least one session.', parent=win)
                 return
-            result[0] = [sessions[i] for i in sels]
+            result = [sessions[i] for i in sels]
             win.destroy()
 
         def _cancel():
-            result[0] = None
+            nonlocal result
+            result = None
             win.destroy()
 
         btn_frame = ttk.Frame(win)
@@ -361,7 +384,7 @@ class StatsTestPanel:
         win.bind('<Return>', lambda e: _ok())
         win.bind('<Escape>', lambda e: _cancel())
         win.wait_window()
-        return result[0]
+        return result
 
     def _available_conn_types(self, data_type: str = "Conn Strength") -> list[str]:
         ui = self.ui
@@ -471,6 +494,83 @@ class StatsTestPanel:
         non_internal = [g for g in self.ui._sel_data._groups if not g.startswith('__')]
         return ['(all pairs)'] + sorted(non_internal)
 
+    def _resolve_cs_method(self) -> str:
+        ui = self.ui
+        if ui.center_container.cs_panel._conn_str_metric_var.get() == 'JBSI':
+            return "JBSI"
+        return ui.center_container.baseline_panel._conn_str_method_var.get()
+
+    def _format_grp_list_summary(self, grp_list: list[str]) -> str:
+        return self._format_list_summary(grp_list, self._available_groups, "groups", 2)
+
+    def _pick_stats_groups_dialog(self, *, initial: list[str] | None = None) -> list[str] | None:
+        """Multi-select group list (same UX as session picker)."""
+        groups = self._available_groups()
+        if not groups:
+            messagebox.showinfo('Groups', 'No groups available.', parent=self.root)
+            return None
+        win = tk.Toplevel(self.root)
+        win.title('Groups for stats row')
+        win.geometry('360x300')
+        win.resizable(True, True)
+        win.transient(self.root)
+        win.grab_set()
+
+        ttk.Label(win,
+                  text='Select groups  (Shift / Ctrl+click for multi-select):').pack(
+            anchor='w', padx=8, pady=(8, 2))
+
+        list_frame = ttk.Frame(win)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        lb = tk.Listbox(list_frame, selectmode=tk.EXTENDED, exportselection=False,
+                        height=12, activestyle='dotbox')
+        vsb = ttk.Scrollbar(list_frame, orient='vertical', command=lb.yview)
+        lb.configure(yscrollcommand=vsb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for g in groups:
+            lb.insert(tk.END, g)
+
+        init = [g for g in (initial or groups) if g in groups]
+        if not init:
+            init = list(groups)
+        lb.selection_clear(0, tk.END)
+        for i, g in enumerate(groups):
+            if g in init:
+                lb.select_set(i)
+
+        result: list[str] | None = None
+
+        def _ok():
+            nonlocal result
+            sels = lb.curselection()
+            if not sels:
+                messagebox.showwarning('Groups', 'Select at least one group.', parent=win)
+                return
+            result = [groups[i] for i in sels]
+            win.destroy()
+
+        def _cancel():
+            nonlocal result
+            result = None
+            win.destroy()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(btn_frame, text='Select All',
+                   command=lambda: lb.select_set(0, tk.END)).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text='Select None',
+                   command=lambda: lb.selection_clear(0, tk.END)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text='Cancel', command=_cancel).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text='Apply', command=_ok).pack(side=tk.RIGHT, padx=4)
+
+        win.bind('<Return>', lambda e: _ok())
+        win.bind('<KP_Enter>', lambda e: _ok())
+        lb.focus_set()
+        win.wait_window(win)
+        return result
+
     # ------------------------------------------------------------------
     # Row management
     # ------------------------------------------------------------------
@@ -516,13 +616,26 @@ class StatsTestPanel:
         sess_var = tk.StringVar(value=self._format_sess_list_summary(sess_list))
         ct_var = tk.StringVar(value=_first(conn_types, cur_ct_str))
         seg_var = tk.StringVar(value=_first(segments, cur_seg))
-        grp_var = tk.StringVar(value=groups[1] if len(groups) > 1 else (groups[0] if groups else ''))
+        default_grps = [groups[1]] if len(groups) > 1 else (groups[:1] if groups else [])
+        grp_list = list(default_grps)
+        grp_var = tk.StringVar(value=self._format_grp_list_summary(grp_list))
         data_var = tk.StringVar(value="Conn Strength")
 
+        # Color swatch + × packed first so they are never clipped by overflowing left items
+        color_var = tk.StringVar(value=_BAR_COLORS[idx % len(_BAR_COLORS)])
+
+        color_swatch = tk.Canvas(frame, width=18, height=18,
+                                  highlightthickness=1, highlightbackground='#888')
+        color_swatch.pack(side=tk.LEFT, padx=(0, 2))
+        _swatch_rect = color_swatch.create_rectangle(0, 0, 18, 18, fill=color_var.get(), outline='')
+
+        del_btn = ttk.Button(frame, text="×", width=2)
+        del_btn.pack(side=tk.LEFT, padx=(0, 4))
+
         ct_combo = ttk.Combobox(frame, textvariable=ct_var, values=conn_types,
-                                state='readonly', width=14)
+                                state='readonly', width=11)
         data_combo = ttk.Combobox(frame, textvariable=data_var, values=_DATA_TYPES,
-                                  state='readonly', width=15)
+                                  state='readonly', width=12)
 
         def _on_data_change(*_):
             # Guard against ttk callback firing during teardown
@@ -541,21 +654,24 @@ class StatsTestPanel:
         ttk.Entry(frame, textvariable=name_var, width=5).pack(side=tk.LEFT, padx=2)
         ct_combo.pack(side=tk.LEFT, padx=2)
         seg_combo = ttk.Combobox(frame, textvariable=seg_var, values=segments,
-                                 state='readonly', width=14)
+                                 state='readonly', width=11)
         seg_combo.pack(side=tk.LEFT, padx=2)
-        ttk.Combobox(frame, textvariable=grp_var, values=groups,
-                     state='readonly', width=14).pack(side=tk.LEFT, padx=2)
         data_combo.pack(side=tk.LEFT, padx=2)
 
         row = dict(frame=frame, name=name_var, sess=sess_var, sess_list=sess_list,
-                   ct=ct_var, seg=seg_var, grp=grp_var, data=data_var,
-                   seg_combo=seg_combo)
+                   ct=ct_var, seg=seg_var, grp=grp_var, grp_list=grp_list,
+                   data=data_var, seg_combo=seg_combo, color=color_var)
 
-        ttk.Button(frame, text='Sessions…', width=10,
+        ttk.Button(frame, text='Sessions…', width=8,
                    command=lambda r=row: self._on_row_pick_sessions(r)).pack(
                        side=tk.LEFT, padx=(2, 2), before=ct_combo)
-        ttk.Label(frame, textvariable=sess_var, width=22, anchor='w').pack(
+        ttk.Label(frame, textvariable=sess_var, width=14, anchor='w').pack(
             side=tk.LEFT, padx=(0, 2), before=ct_combo)
+        ttk.Button(frame, text='Groups…', width=7,
+                   command=lambda r=row: self._on_row_pick_groups(r)).pack(
+                       side=tk.LEFT, padx=(2, 2), before=data_combo)
+        ttk.Label(frame, textvariable=grp_var, width=10, anchor='w').pack(
+            side=tk.LEFT, padx=(0, 2), before=data_combo)
 
         def _del(r=row):
             # Defer destroy to let ttk combobox popdown close cleanly
@@ -570,7 +686,18 @@ class StatsTestPanel:
                     pass
             self._pending_afters.append(self.root.after_idle(_do))
 
-        ttk.Button(frame, text="×", width=2, command=_del).pack(side=tk.LEFT, padx=2)
+        del_btn.config(command=_del)
+
+        def _pick_color(cv=color_var):
+            from tkinter import colorchooser as _cc  # noqa: PLC0415
+            init = cv.get() or '#8FB3FF'
+            result = _cc.askcolor(color=init, parent=self.root, title="Pick group color")
+            if result and result[1]:
+                cv.set(result[1])
+                if color_swatch.winfo_exists():
+                    color_swatch.itemconfigure(_swatch_rect, fill=result[1])
+
+        color_swatch.bind('<Button-1>', lambda e: _pick_color())
         self._row_frames.append(row)
 
         # Initial sync (ensures ConnType list matches Data type)
@@ -592,6 +719,18 @@ class StatsTestPanel:
         if sel:
             row['sess_list'] = sel
             row['sess'].set(self._format_sess_list_summary(sel))
+
+    def _on_row_pick_groups(self, row: dict):
+        """Open multi-select group dialog."""
+        try:
+            if not row['frame'].winfo_exists():
+                return
+        except Exception:
+            return
+        sel = self._pick_stats_groups_dialog(initial=list(row['grp_list']))
+        if sel:
+            row['grp_list'] = sel
+            row['grp'].set(self._format_grp_list_summary(sel))
 
     def _seg_name_to_idx(self, name: str) -> int | None:
         """Resolve segment index for the **currently bound** UI session."""
@@ -653,8 +792,8 @@ class StatsTestPanel:
             return self._get_cs_values_bound(ct_str, seg_name, group_name, highres)
 
     def _get_cs_values_all_sessions(self, ct_str, seg_name, group_name, highres: bool):
-        print("here")
         ui = self.ui
+        method = self._resolve_cs_method()
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for sess in self._sessions_with_segment(seg_name):
@@ -664,13 +803,20 @@ class StatsTestPanel:
                 seg_idx = self._seg_name_to_idx(seg_name)
                 if seg_idx is None:
                     continue
+                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
+                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
+                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
                 pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
                 for ref, tgt in pairs:
                     try:
-                        val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx,
-                                                    highres=highres)
-                        if val is not None:
-                            cs_vals.append(val)
+                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                                               highres, eff_min_lag, eff_max_lag)
+                        if key not in ui._conn_strength_cache:
+                            ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                                                           highres=highres)
+                        entry = ui._conn_strength_cache.get(key)
+                        if entry is not None and entry[0] is not None:
+                            cs_vals.append(float(entry[0]))
                             valid_pairs.append((sess, int(ref), int(tgt)))
                     except Exception as exc:
                         print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
@@ -681,6 +827,7 @@ class StatsTestPanel:
         """Pool Conn Strength like ``All``, but only over *sessions* (order preserved)."""
         have = set(self._sessions_with_segment(seg_name))
         ui = self.ui
+        method = self._resolve_cs_method()
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for sess in sessions:
@@ -692,13 +839,20 @@ class StatsTestPanel:
                 seg_idx = self._seg_name_to_idx(seg_name)
                 if seg_idx is None:
                     continue
+                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
+                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
+                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
                 pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
                 for ref, tgt in pairs:
                     try:
-                        val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx,
-                                                    highres=highres)
-                        if val is not None:
-                            cs_vals.append(val)
+                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                                               highres, eff_min_lag, eff_max_lag)
+                        if key not in ui._conn_strength_cache:
+                            ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                                                           highres=highres)
+                        entry = ui._conn_strength_cache.get(key)
+                        if entry is not None and entry[0] is not None:
+                            cs_vals.append(float(entry[0]))
                             valid_pairs.append((sess, int(ref), int(tgt)))
                     except Exception as exc:
                         print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
@@ -708,6 +862,7 @@ class StatsTestPanel:
         """Conn strength for the session already bound on *ui*."""
         ui = self.ui
         sess = str(ui.key.session)
+        method = self._resolve_cs_method()
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:
             return [], []
@@ -716,13 +871,22 @@ class StatsTestPanel:
         if not pairs:
             return [], []
 
+        conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
+        eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
+        eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
+
         cs_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for ref, tgt in pairs:
             try:
-                val = ui._compute_cs_scalar(int(ref), int(tgt), seg_idx, highres=highres)
-                if val is not None:
-                    cs_vals.append(val)
+                key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                                       highres, eff_min_lag, eff_max_lag)
+                if key not in ui._conn_strength_cache:
+                    ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                                                   highres=highres)
+                entry = ui._conn_strength_cache.get(key)
+                if entry is not None and entry[0] is not None:
+                    cs_vals.append(float(entry[0]))
                     valid_pairs.append((int(ref), int(tgt)))
             except Exception as exc:
                 print(f"[StatsPanel] CS error ({ref},{tgt}): {exc}")
@@ -970,43 +1134,61 @@ class StatsTestPanel:
 
         ct = row['ct'].get()
         seg = row['seg'].get()
-        grp = row['grp'].get()
+        grp_list_row = row.get('grp_list') or [row['grp'].get()]
+        grp_list_row = [g for g in grp_list_row if g] or ['(all pairs)']
         dtype = row['data'].get()
         row['sess'].set(disp)
+        row['grp'].set(self._format_grp_list_summary(grp_list_row))
+
+        def _collect_for_grp(grp):
+            if dtype in {"Conn Strength"} | _CS_NORM_TYPES:
+                if mode == 'all':
+                    return self._get_cs_values('All', ct, seg, grp, highres=highres)
+                elif mode == 'one':
+                    return self._get_cs_values(arg, ct, seg, grp, highres=highres)
+                else:
+                    return self._get_cs_values_session_subset(arg, ct, seg, grp, highres)
+            elif dtype in ("Ref Firing Rate", "Tgt Firing Rate"):
+                role = 0 if dtype == "Ref Firing Rate" else 1
+                if mode == 'all':
+                    return self._get_role_firing_rate_values('All', ct, grp, role)
+                elif mode == 'one':
+                    return self._get_role_firing_rate_values(arg, ct, grp, role)
+                else:
+                    return self._get_role_fr_session_subset(arg, ct, grp, role)
+            elif dtype == "Baseline":
+                if mode == 'all':
+                    return self._get_baseline_values('All', ct, seg, grp)
+                elif mode == 'one':
+                    return self._get_baseline_values(arg, ct, seg, grp)
+                else:
+                    return self._get_baseline_session_subset(arg, ct, seg, grp)
+            return [], []
+
+        # Union across selected groups; deduplicate by pair key (first occurrence wins)
+        seen: set = set()
+        pairs: list = []
+        vals: list = []
+        for grp in grp_list_row:
+            gp, gv = _collect_for_grp(grp)
+            for p, v in zip(gp, gv):
+                pk = tuple(p) if isinstance(p, (list, tuple)) else p
+                if pk not in seen:
+                    seen.add(pk)
+                    pairs.append(p)
+                    vals.append(v)
 
         if dtype in {"Conn Strength"} | _CS_NORM_TYPES:
-            if mode == 'all':
-                pairs, vals = self._get_cs_values('All', ct, seg, grp, highres=highres)
-            elif mode == 'one':
-                pairs, vals = self._get_cs_values(arg, ct, seg, grp, highres=highres)
-            else:
-                pairs, vals = self._get_cs_values_session_subset(
-                    arg, ct, seg, grp, highres)
             try:
                 if self.ui.center_container.cs_panel._conn_str_nonneg_var.get():
                     vals = [max(float(v), 0.0) for v in (vals or [])]
             except Exception:
                 pass
-        elif dtype in ("Ref Firing Rate", "Tgt Firing Rate"):
-            role = 0 if dtype == "Ref Firing Rate" else 1
-            if mode == 'all':
-                pairs, vals = self._get_role_firing_rate_values('All', ct, grp, role)
-            elif mode == 'one':
-                pairs, vals = self._get_role_firing_rate_values(arg, ct, grp, role)
-            else:
-                pairs, vals = self._get_role_fr_session_subset(arg, ct, grp, role)
-        elif dtype == "Baseline":
-            if mode == 'all':
-                pairs, vals = self._get_baseline_values('All', ct, seg, grp)
-            elif mode == 'one':
-                pairs, vals = self._get_baseline_values(arg, ct, seg, grp)
-            else:
-                pairs, vals = self._get_baseline_session_subset(arg, ct, seg, grp)
-        else:
-            pairs, vals = [], []
 
-        return dict(name=name, session=disp, conn_type=ct, segment=seg, group=grp,
-                    data_type=dtype, pairs=pairs, vals=vals, highres=highres)
+        grp_label = self._format_grp_list_summary(grp_list_row)
+        color = (row['color'].get() if isinstance(row.get('color'), tk.StringVar) else None) or None
+        return dict(name=name, session=disp, conn_type=ct, segment=seg, group=grp_label,
+                    data_type=dtype, pairs=pairs, vals=vals, highres=highres, color=color)
 
     # ------------------------------------------------------------------
     # Run
@@ -1060,6 +1242,122 @@ class StatsTestPanel:
         except Exception as exc:
             result = {'error': f"Error: {exc}"}
         return result
+
+    def _run_rm_anova(self, groups: list[dict]) -> dict:
+        """Repeated-measures ANOVA across ≥2 groups matched by pair identity.
+
+        Uses pingouin if available, else statsmodels AnovaRM.
+        Nonparametric fallback: Friedman test + pairwise Wilcoxon (Bonferroni).
+        """
+        # Intersect pairs across all groups
+        pair_maps: list[dict] = []
+        for g in groups:
+            pairs = [tuple(p) for p in (g.get('pairs') or [])]
+            vals  = self._maybe_log_transform(
+                np.asarray(g.get('vals', []) or [], dtype=float))
+            pair_maps.append({p: v for p, v in zip(pairs, vals)})
+
+        common = sorted(set.intersection(*(set(pm) for pm in pair_maps)))
+        if len(common) < 2:
+            return {'error': f"Need ≥2 pairs present in all groups (found {len(common)})."}
+
+        group_names = [g.get('name', f'G{i+1}') for i, g in enumerate(groups)]
+        arrays = [np.array([pm[p] for p in common], dtype=float) for pm in pair_maps]
+        nonparametric = bool(getattr(self, '_nonparam_var', None) and self._nonparam_var.get())
+        n_comp = max(1, len(groups) * (len(groups) - 1) // 2)
+
+        if nonparametric:
+            from scipy import stats as _sp
+            stat, p_val = _sp.friedmanchisquare(*arrays)
+            posthoc = []
+            for i in range(len(groups)):
+                for j in range(i + 1, len(groups)):
+                    w_stat, w_p = _sp.wilcoxon(arrays[i], arrays[j], zero_method='wilcox')
+                    posthoc.append(dict(
+                        a=group_names[i], b=group_names[j],
+                        stat=float(w_stat), p_raw=float(w_p),
+                        p_adj=min(float(w_p) * n_comp, 1.0),
+                        reject=float(w_p) * n_comp < 0.05))
+            return dict(test='Friedman test', stat=float(stat), p_val=float(p_val),
+                        n_subjects=len(common), n_conditions=len(groups),
+                        posthoc=posthoc, posthoc_method='Wilcoxon (Bonferroni)',
+                        common_pairs=common)
+
+        # Parametric: try pingouin, fall back to statsmodels; Tukey HSD post-hoc
+        try:
+            from statsmodels.stats.multicomp import pairwise_tukeyhsd  # noqa: PLC0415
+            _has_tukey = True
+        except ImportError:
+            _has_tukey = False
+
+        def _tukey_posthoc(arrays_list, names):
+            if not _has_tukey:
+                return None, True  # (rows, missing)
+            combined = np.concatenate(arrays_list)
+            labels   = []
+            for nm, arr in zip(names, arrays_list):
+                labels.extend([nm] * len(arr))
+            tukey = pairwise_tukeyhsd(combined, labels)
+            rows = []
+            for row in tukey.summary().data[1:]:
+                a_nm, b_nm, meandiff, p_adj, lo, hi, reject = row
+                rows.append(dict(a=str(a_nm), b=str(b_nm),
+                                 meandiff=float(meandiff),
+                                 p_adj=float(p_adj), reject=bool(reject)))
+            return rows, False
+
+        _rm_rows = [{'subject': str(p), 'condition': gn, 'val': pm[p]}
+                    for gn, pm in zip(group_names, pair_maps)
+                    for p in common]
+
+        try:
+            import pingouin as pg  # noqa: PLC0415
+            import pandas as pd    # noqa: PLC0415
+            df  = pd.DataFrame(_rm_rows)
+            aov = pg.rm_anova(data=df, dv='val', within='condition',
+                              subject='subject', detailed=True)
+            cr  = aov[aov['Source'] == 'condition'].iloc[0]
+            # pingouin uses DF1/DF2 in newer versions, ddof1/ddof2 in older
+            df_num   = float(cr.get('DF1', cr.get('ddof1', float('nan'))))
+            df_denom = float(cr.get('DF2', cr.get('ddof2', float('nan'))))
+            tukey_rows, tukey_missing = _tukey_posthoc(arrays, group_names)
+            res = dict(test='Repeated-measures ANOVA',
+                       f_stat=float(cr['F']), p_val=float(cr['p-unc']),
+                       df_num=df_num, df_denom=df_denom,
+                       sphericity_eps=float(cr.get('eps', float('nan'))),
+                       n_subjects=len(common), n_conditions=len(groups),
+                       common_pairs=common)
+            if tukey_missing:
+                res['tukey_missing'] = True
+            else:
+                res['tukey'] = tukey_rows
+            return res
+        except ImportError:
+            pass
+
+        try:
+            from statsmodels.stats.anova import AnovaRM  # noqa: PLC0415
+            import pandas as pd                           # noqa: PLC0415
+            df    = pd.DataFrame(_rm_rows)
+            aov   = AnovaRM(df, 'val', 'subject', within=['condition']).fit()
+            table = aov.anova_table
+            tukey_rows, tukey_missing = _tukey_posthoc(arrays, group_names)
+            res = dict(test='Repeated-measures ANOVA',
+                       f_stat=float(table['F Value'].iloc[0]),
+                       p_val=float(table['Pr > F'].iloc[0]),
+                       df_num=float(table['Num DF'].iloc[0]),
+                       df_denom=float(table['Den DF'].iloc[0]),
+                       n_subjects=len(common), n_conditions=len(groups),
+                       common_pairs=common)
+            if tukey_missing:
+                res['tukey_missing'] = True
+            else:
+                res['tukey'] = tukey_rows
+            return res
+        except ImportError:
+            return {'error': "Repeated-measures ANOVA requires pingouin or statsmodels."}
+        except Exception as exc:
+            return {'error': f"RM-ANOVA error: {exc}"}
 
     def _run_test(self, a_vals, b_vals, a_pairs, b_pairs,
                   test_type, alternative: str, nonparametric: bool) -> dict:
@@ -1136,9 +1434,7 @@ class StatsTestPanel:
                     norm_vals.append((va - vb) / va)
                 else:                                   # geometric
                     denom = va + vb
-                    if denom == 0.0:
-                        continue
-                    norm_vals.append((va - vb) / denom)
+                    norm_vals.append((va - vb) / denom if denom != 0.0 else float('nan'))
                 norm_pairs.append(p)
             except (ZeroDivisionError, TypeError, ValueError):
                 pass
@@ -1148,14 +1444,19 @@ class StatsTestPanel:
             return {'error': f"Need ≥2 matched pairs (found {n}).",
                     'norm_vals': norm_vals, 'norm_pairs': norm_pairs}
 
-        arr    = np.array(norm_vals, dtype=float)
-        mean_v = float(np.mean(arr))
-        se_v   = float(np.std(arr, ddof=1) / np.sqrt(n))
+        arr     = np.array(norm_vals, dtype=float)
+        valid   = arr[~np.isnan(arr)]
+        n_valid = len(valid)
+        if n_valid < 2:
+            return {'error': f"Need ≥2 valid matched pairs (found {n_valid}).",
+                    'norm_vals': norm_vals, 'norm_pairs': norm_pairs}
+        mean_v = float(np.mean(valid))
+        se_v   = float(np.std(valid, ddof=1) / np.sqrt(n_valid))
         try:
-            t_stat, p_val = _stats.ttest_1samp(arr, 0.0)
+            t_stat, p_val = _stats.ttest_1samp(valid, 0.0)
             return dict(test='One-sample t-test (vs 0)',
                         t_stat=float(t_stat), p_val=float(p_val),
-                        n_used=n, mean=mean_v, se=se_v,
+                        n_used=n_valid, mean=mean_v, se=se_v,
                         norm_vals=norm_vals, norm_pairs=norm_pairs)
         except Exception as exc:
             return {'error': f"Error: {exc}",
@@ -1190,7 +1491,12 @@ class StatsTestPanel:
         groups_lo = [self._collect_group_data(r, highres=False) for r in active]
         groups_hi = result_hi = None
 
-        if len(active) > 2:
+        if test_type == "Repeated-measures ANOVA":
+            res_lo = self._run_rm_anova(groups_lo)
+            if run_hilo:
+                groups_hi = [self._collect_group_data(r, highres=True) for r in active]
+                result_hi = self._run_rm_anova(groups_hi)
+        elif len(active) > 2:
             res_lo = self._run_anova(groups_lo)
             if run_hilo:
                 groups_hi = [self._collect_group_data(r, highres=True) for r in active]
@@ -1223,26 +1529,46 @@ class StatsTestPanel:
                                           groups_hi=groups_hi, res_hi=result_hi)
         self._show_result('\n'.join(lines))
 
-        # For CS norm types, show A and B side-by-side with pairwise lines
-        # (only matched pairs), so the plot mirrors a paired comparison.
-        if dtype in _CS_NORM_TYPES:
-            def _norm_plot_pairwise(base_groups, result):
-                """Return (plot_groups, is_paired) with both groups trimmed to matched pairs."""
-                if not result or 'norm_pairs' not in result:
-                    return base_groups, False
-                matched = [tuple(p) for p in result['norm_pairs']]
-                def _trim(g):
+        # RM-ANOVA: trim all groups to the common matched pairs so pairwise lines are correct
+        if test_type == "Repeated-measures ANOVA":
+            def _trim_to_common(groups, result):
+                common = result.get('common_pairs') if result and 'error' not in result else None
+                if not common:
+                    return groups
+                common_set = {tuple(p) for p in common}
+                trimmed = []
+                for g in groups:
                     pairs = [tuple(p) for p in (g.get('pairs') or [])]
                     vals  = g.get('vals') or []
                     pmap  = {p: v for p, v in zip(pairs, vals)}
-                    mv    = [pmap[p] for p in matched if p in pmap]
-                    return dict(g, vals=mv, pairs=list(matched), data_type=dtype)
-                return [_trim(base_groups[0]), _trim(base_groups[1])], True
-            plot_lo, _paired_flag = _norm_plot_pairwise(groups_lo, res_lo)
-            plot_hi = None
-            if groups_hi is not None and result_hi is not None:
-                plot_hi, _ = _norm_plot_pairwise(groups_hi, result_hi)
+                    mv = [pmap[p] for p in common if p in pmap]
+                    trimmed.append(dict(g, vals=mv, pairs=list(common)))
+                return trimmed
+            plot_lo = _trim_to_common(groups_lo, res_lo)
+            plot_hi = _trim_to_common(groups_hi, result_hi) if groups_hi is not None else None
             self._result_data['is_paired_override'] = True
+            self._update_result_plot(plot_lo, plot_hi)
+            if self._export_btn:
+                self._export_btn.config(state=tk.NORMAL)
+            return
+
+        # For CS norm types: single bar of norm_vals tested against 0.
+        if dtype in _CS_NORM_TYPES:
+            a_name = groups_lo[0].get('name', 'A') if groups_lo else 'A'
+            b_name = groups_lo[1].get('name', 'B') if len(groups_lo) > 1 else 'B'
+            label  = f"({a_name}−{b_name})/{a_name}" if '% change' in dtype else f"({a_name}−{b_name})/({a_name}+{b_name})"
+            def _norm_single_group(result, lbl, dt):
+                if not result or 'norm_vals' not in result:
+                    return None
+                return [dict(name=lbl,
+                             vals=list(result['norm_vals']),
+                             pairs=list(result.get('norm_pairs', [])),
+                             data_type=dt)]
+            plot_lo = _norm_single_group(res_lo, label, dtype)
+            plot_hi = _norm_single_group(result_hi, label, dtype) if result_hi else None
+            if plot_lo is None:
+                plot_lo = groups_lo
+            self._result_data['is_one_sample'] = True
             self._update_result_plot(plot_lo, plot_hi)
         else:
             def _tx(groups):
@@ -1257,6 +1583,38 @@ class StatsTestPanel:
                                      _tx(groups_hi) if groups_hi is not None else None)
         if self._export_btn:
             self._export_btn.config(state=tk.NORMAL)
+
+    @staticmethod
+    def _get_pairwise_pvals(result, groups) -> list:
+        """Return list of {a, b, p_adj} from whatever pairwise structure result contains."""
+        if not result or 'error' in result:
+            return []
+        # Tukey (one-way ANOVA / RM-ANOVA) or Wilcoxon posthoc (Friedman)
+        for key in ('tukey', 'posthoc'):
+            rows = result.get(key)
+            if rows:
+                return [{'a': r['a'], 'b': r['b'], 'p_adj': r['p_adj']} for r in rows]
+        # Two-group test: single p_val
+        p = result.get('p_val')
+        if p is not None and groups and len(groups) >= 2:
+            a = (groups[0].get('name') or 'A')
+            b = (groups[1].get('name') or 'B')
+            return [{'a': a, 'b': b, 'p_adj': float(p)}]
+        return []
+
+    def _apply_plot_ratio(self):
+        raw = self._plot_ratio_var.get().strip()
+        try:
+            if ':' in raw:
+                w, h = raw.split(':', 1)
+                w, h = float(w), float(h)
+            else:
+                w, h = float(raw), self._plot_fig.get_figheight()
+            if w > 0 and h > 0:
+                self._plot_fig.set_size_inches(w, h)
+                self._on_plot_type_toggle()
+        except ValueError:
+            pass
 
     def _on_plot_type_toggle(self):
         """Redraw the current plot when the violin/bar toggle changes."""
@@ -1273,9 +1631,6 @@ class StatsTestPanel:
         fig = self._plot_fig
         fig.clf()
 
-        _BAR_COLORS = ['#8FB3FF', '#FFB3B3', '#B3FFB3', '#FFD9B3', '#E0B3FF',
-                       '#B3F0FF', '#FFB3E6']
-
         def _mean_sem(x):
             if x.size == 0:
                 return np.nan, 0.0
@@ -1287,9 +1642,22 @@ class StatsTestPanel:
                 return f"{p[1]}-{p[2]}" if len(p) == 3 else f"{p[0]}-{p[1]}"
             return str(p)
 
-        use_violin = getattr(self, '_violin_var', None) and self._violin_var.get()
+        use_violin    = getattr(self, '_violin_var',      None) and self._violin_var.get()
+        show_outliers = (self._show_outliers_var.get()
+                         if getattr(self, '_show_outliers_var', None) else True)
+        show_sig      = (self._show_sig_var.get()
+                         if getattr(self, '_show_sig_var', None) else False)
+        rd = self._result_data or {}
+        sig_lo = self._get_pairwise_pvals(rd.get('res_lo'), groups_lo) if show_sig else []
+        sig_hi = self._get_pairwise_pvals(rd.get('res_hi'), groups_hi or []) if show_sig else []
 
-        def _one_axis(ax, groups, title: str, paired: bool = False):
+        def _star(p) -> str:
+            if p < 0.001: return '***'
+            if p < 0.01:  return '**'
+            if p < 0.05:  return '*'
+            return 'ns'
+
+        def _one_axis(ax, groups, title: str, paired: bool = False, sig_pairs: list = []):
             if not groups or len(groups) < 1:
                 ax.axis('off')
                 return
@@ -1297,6 +1665,7 @@ class StatsTestPanel:
             names = [g.get('name', chr(65 + i)) or chr(65 + i) for i, g in enumerate(groups)]
             arrays = [np.array(g.get('vals', []) or [], dtype=float) for g in groups]
             pairs_lists = [g.get('pairs', []) for g in groups]
+            colors = [g.get('color') or _BAR_COLORS[i % len(_BAR_COLORS)] for i, g in enumerate(groups)]
 
             xs = np.arange(n_g, dtype=float)
             ax.set_title(title, fontsize=9, pad=2)
@@ -1313,7 +1682,7 @@ class StatsTestPanel:
                         showmedians=True, showextrema=True, widths=0.5,
                     )
                     for i, pc in enumerate(vp.get('bodies', [])):
-                        pc.set_facecolor(_BAR_COLORS[i % len(_BAR_COLORS)])
+                        pc.set_facecolor(colors[i % len(colors)])
                         pc.set_edgecolor('#333')
                         pc.set_alpha(0.7)
                     for part in ('cmedians', 'cmins', 'cmaxes', 'cbars'):
@@ -1324,7 +1693,7 @@ class StatsTestPanel:
                 means = np.array([_mean_sem(arr)[0] for arr in arrays])
                 errs  = np.array([_mean_sem(arr)[1] for arr in arrays])
                 ax.bar(xs, means, yerr=errs, capsize=4,
-                       color=_BAR_COLORS[:n_g], edgecolor='#333', linewidth=0.8)
+                       color=colors, edgecolor='#333', linewidth=0.8)
 
             # Pre-compute jitter so lines and dots share the same x positions
             rng = np.random.default_rng(0)
@@ -1334,17 +1703,23 @@ class StatsTestPanel:
                 all_xpos.append(np.full(arr.size, xs[i]) + jitter)
 
             # Paired connecting lines (drawn first so dots appear on top)
-            if paired and n_g == 2:
+            if paired and n_g >= 2:
                 def _pk(p):
                     return tuple(p) if isinstance(p, (list, tuple)) else p
-                map_B = {_pk(p): (all_xpos[1][j], float(arrays[1][j]))
-                         for j, p in enumerate(pairs_lists[1])}
-                for j, p in enumerate(pairs_lists[0]):
-                    if _pk(p) in map_B:
-                        xB, yB = map_B[_pk(p)]
-                        ax.plot([all_xpos[0][j], xB],
-                                [float(arrays[0][j]), yB],
-                                color='#888888', alpha=0.1, linewidth=0.7, zorder=1)
+                # Build lookup: pair_key -> (xpos, value) for each group
+                group_maps = [
+                    {_pk(p): (all_xpos[gi][j], float(arrays[gi][j]))
+                     for j, p in enumerate(pairs_lists[gi])}
+                    for gi in range(n_g)
+                ]
+                common_keys = set(group_maps[0])
+                for gm in group_maps[1:]:
+                    common_keys &= set(gm)
+                for pk in common_keys:
+                    xs_line = [group_maps[gi][pk][0] for gi in range(n_g)]
+                    ys_line = [group_maps[gi][pk][1] for gi in range(n_g)]
+                    ax.plot(xs_line, ys_line,
+                            color='#888888', alpha=0.1, linewidth=0.7, zorder=1)
 
             for i, (arr, pairs) in enumerate(zip(arrays, pairs_lists)):
                 if arr.size == 0:
@@ -1352,29 +1727,78 @@ class StatsTestPanel:
                 mean_v = float(np.mean(arr))
                 std_v  = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
                 xpos   = all_xpos[i]
-                ax.scatter(xpos, arr, s=14, color='#222', alpha=0.6, linewidths=0, zorder=2)
-                if std_v > 0:
-                    for j, (v, xj) in enumerate(zip(arr, xpos)):
-                        if abs(v - mean_v) > 3 * std_v:
-                            lbl = _fmt_pair_short(pairs[j] if j < len(pairs) else j)
-                            ax.annotate(lbl, (xj, float(v)), fontsize=6,
-                                        ha='center', va='bottom', color='#CC0000',
-                                        xytext=(0, 3), textcoords='offset points')
+                if show_outliers:
+                    ax.scatter(xpos, arr, s=14, color='#222', alpha=0.2, linewidths=0, zorder=2,marker='o')
+                    if std_v > 0:
+                        for j, (v, xj) in enumerate(zip(arr, xpos)):
+                            if abs(v - mean_v) > 3 * std_v:
+                                lbl = _fmt_pair_short(pairs[j] if j < len(pairs) else j)
+                                ax.annotate(lbl, (xj, float(v)), fontsize=6,
+                                            ha='center', va='bottom', color='#CC0000',
+                                            xytext=(0, 3), textcoords='offset points')
+                else:
+                    # hide points beyond 3 SD; show the rest
+                    if std_v > 0:
+                        mask = np.abs(arr - mean_v) <= 3 * std_v
+                    else:
+                        mask = np.ones(arr.size, dtype=bool)
+                    ax.scatter(xpos[mask], arr[mask], s=14, color='#222',
+                               alpha=0.2, linewidths=0, zorder=2,marker='o')
             ax.grid(axis='y', alpha=0.25, linewidth=0.7)
 
+            # Zero reference line for one-sample plots
+            is_one_sample = rd.get('is_one_sample', False)
+            if is_one_sample:
+                ax.axhline(0, color='#555', linewidth=0.8, linestyle='--', zorder=0)
+                # Annotate significance vs 0 above the single bar
+                if show_sig and sig_pairs:
+                    pass  # brackets handle it below
+                elif show_sig and n_g == 1:
+                    _res = (rd.get('res_hi') if title.endswith('(Hi-res)') else None) or rd.get('res_lo') or {}
+                    _p = _res.get('p_val')
+                    if _p is not None:
+                        all_data_1s = arrays[0] if arrays and arrays[0].size > 0 else np.array([0.0])
+                        _y = float(np.nanmax(all_data_1s)) * 1.15 if all_data_1s.size else 0.1
+                        ax.text(float(xs[0]), _y, _star(float(_p)),
+                                ha='center', va='bottom', fontsize=9, color='#333')
+
+            # Significance brackets
+            if sig_pairs:
+                name_to_x = {n: x for n, x in zip(names, xs)}
+                valid = [(r['a'], r['b'], r['p_adj'])
+                         for r in sig_pairs
+                         if r['a'] in name_to_x and r['b'] in name_to_x]
+                if valid:
+                    # Use current ylim top (accounts for error bars and auto-scale)
+                    y_lo, y_top = ax.get_ylim()
+                    y_span = max(abs(y_top - y_lo), 1e-6)
+                    step = y_span * 0.13
+                    tick_h = step * 0.3
+                    # shorter pairs get lower brackets to minimize crossings
+                    valid.sort(key=lambda t: abs(name_to_x[t[0]] - name_to_x[t[1]]))
+                    y_base = y_top + step * 0.2
+                    for level, (a_nm, b_nm, p_adj) in enumerate(valid):
+                        x0, x1 = name_to_x[a_nm], name_to_x[b_nm]
+                        y = y_base + step * level
+                        ax.plot([x0, x0, x1, x1], [y - tick_h, y, y, y - tick_h],
+                                color='#333', linewidth=0.9, clip_on=False)
+                        ax.text((x0 + x1) / 2, y + tick_h * 0.2, _star(p_adj),
+                                ha='center', va='bottom', fontsize=8,
+                                color='#333', clip_on=False)
+                    ax.set_ylim(top=y_base + step * (len(valid) + 0.8))
+
         dtype = (groups_lo[0].get('data_type') if groups_lo else '') or ''
-        rd = self._result_data or {}
         is_paired = (rd.get('test_type') == "Pairwise t-test"
                      or rd.get('is_paired_override', False))
         if groups_hi is not None:
             ax1 = fig.add_subplot(1, 2, 1)
             ax2 = fig.add_subplot(1, 2, 2, sharey=ax1)
-            _one_axis(ax1, groups_lo, f"{dtype} (Lo-res)", paired=is_paired)
-            _one_axis(ax2, groups_hi, f"{dtype} (Hi-res)", paired=is_paired)
+            _one_axis(ax1, groups_lo, f"{dtype} (Lo-res)", paired=is_paired, sig_pairs=sig_lo)
+            _one_axis(ax2, groups_hi, f"{dtype} (Hi-res)", paired=is_paired, sig_pairs=sig_hi)
             fig.tight_layout(pad=0.8, w_pad=1.2)
         else:
             ax = fig.add_subplot(1, 1, 1)
-            _one_axis(ax, groups_lo, f"{dtype}", paired=is_paired)
+            _one_axis(ax, groups_lo, f"{dtype}", paired=is_paired, sig_pairs=sig_lo)
             fig.tight_layout(pad=0.8)
 
         try:
@@ -1386,7 +1810,8 @@ class StatsTestPanel:
                              groups_hi=None, res_hi=None) -> list[str]:
         dtype = (self._result_data or {}).get('dtype', '')
         is_cs_norm = dtype in _CS_NORM_TYPES
-        is_anova = (not is_cs_norm and
+        is_rm_anova = (test_type == "Repeated-measures ANOVA")
+        is_anova = (not is_cs_norm and not is_rm_anova and
                     (len(groups) > 2 or test_type == "One-way ANOVA + Tukey"))
         a = groups[0].get('name', 'A') if groups else 'A'
         b = groups[1].get('name', 'B') if len(groups) > 1 else 'B'
@@ -1395,9 +1820,9 @@ class StatsTestPanel:
             sym = f"({a}−{b})/{a}" if '% change' in dtype else f"({a}−{b})/({a}+{b})"
             h0 = f"H0: mean {sym} = 0"
             h1 = f"H1: mean {sym} ≠ 0"
-        elif is_anova:
-            h0 = "H0: all group means equal"
-            h1 = "H1: at least one group mean differs"
+        elif is_anova or is_rm_anova:
+            h0 = "H0: all condition means equal (within subjects)" if is_rm_anova else "H0: all group means equal"
+            h1 = "H1: at least one condition mean differs"
         else:
             h0 = f"H0: μ{a} = μ{b}"
             h1 = (f"H1: μ{a} ≠ μ{b}" if alt == 'two-sided' else
@@ -1448,12 +1873,42 @@ class StatsTestPanel:
                            f"Δ={tk['meandiff']:+.4f}  p_adj={tk['p_adj']:.4f}{sig}")
             return tl
 
+        def _posthoc_lines(r, label=""):
+            ph = r.get('posthoc')
+            if not ph:
+                return []
+            method = r.get('posthoc_method', 'Post-hoc')
+            tl = [f"{method}{(' (' + label + ')') if label else ''}:"]
+            for row in ph:
+                sig = " *" if row.get('reject') else ""
+                stat_part = (f"t={row['t_stat']:+.3f}" if 't_stat' in row
+                             else f"stat={row.get('stat', float('nan')):.3f}")
+                tl.append(f"  {row['a']} vs {row['b']}: "
+                           f"{stat_part}  p={row['p_raw']:.4f}  p_adj={row['p_adj']:.4f}{sig}")
+            return tl
+
+        def _rm_stat_str(r):
+            ns = r.get('n_subjects', '?')
+            nc = r.get('n_conditions', '?')
+            if 'f_stat' in r:
+                eps = r.get('sphericity_eps')
+                eps_str = f"  ε={eps:.3f}" if eps is not None and not np.isnan(eps) else ""
+                return (f"F({r.get('df_num','?'):.0f},{r.get('df_denom','?'):.0f})"
+                        f"={r['f_stat']:.4f}  p={r['p_val']:.4f}"
+                        f"  n={ns} subjects × {nc} conditions{eps_str}")
+            if 'stat' in r:
+                return (f"χ²={r['stat']:.4f}  p={r['p_val']:.4f}"
+                        f"  n={ns} subjects × {nc} conditions")
+            return "stat=?"
+
         def _res_section(r, label=""):
             if 'error' in r:
                 return [r['error']]
             rl = [_stat_str(r)]
             if 'tukey' in r or r.get('tukey_missing'):
                 rl += _tukey_lines(r, label)
+            if 'posthoc' in r:
+                rl += _posthoc_lines(r, label)
             return rl
 
         if groups_hi is not None:
@@ -1464,6 +1919,14 @@ class StatsTestPanel:
         else:
             if 'error' in res:
                 lines.append(res['error'])
+            elif is_rm_anova:
+                lines.append(_rm_stat_str(res))
+                if 'tukey' in res or res.get('tukey_missing'):
+                    lines.append("")
+                    lines += _tukey_lines(res)
+                elif res.get('posthoc'):
+                    lines.append("")
+                    lines += _posthoc_lines(res)
             else:
                 if 'f_stat' in res:
                     lines.append(f"F = {res['f_stat']:.4f}")
@@ -1624,8 +2087,10 @@ class StatsTestPanel:
                 'sess_list': list(r.get('sess_list') or []),
                 'conn_type': r['ct'].get(),
                 'segment':   r['seg'].get(),
+                'grp_list':  list(r.get('grp_list') or [r['grp'].get()]),
                 'group':     r['grp'].get(),
                 'data_type': r['data'].get(),
+                'color':     (r['color'].get() if isinstance(r.get('color'), tk.StringVar) else None),
             })
 
         # Collect custom segment names referenced in rows
@@ -1837,7 +2302,11 @@ class StatsTestPanel:
 
         # Add rows
         for snap_row in rows_snap:
-            self._add_row()
+            try:
+                self._add_row()
+            except Exception as exc:
+                print(f"[StatsPanel] _add_row failed during restore: {exc}")
+                continue
             r = self._row_frames[-1]
             try:
                 r['name'].set(snap_row.get('name', ''))
@@ -1862,9 +2331,26 @@ class StatsTestPanel:
                 seg = snap_row.get('segment', '')
                 r['seg'].set(seg if seg in segs else (segs[0] if segs else ''))
                 grps = self._available_groups()
-                grp = snap_row.get('group', '')
-                r['grp'].set(grp if grp in grps else (grps[0] if grps else ''))
+                saved_gl = snap_row.get('grp_list') or [snap_row.get('group', '')]
+                gl = [g for g in saved_gl if g in grps]
+                if not gl:
+                    gl = [grps[0]] if grps else []
+                r['grp_list'] = gl
+                r['grp'].set(self._format_grp_list_summary(gl))
                 r['data'].set(snap_row.get('data_type', 'Conn Strength'))
+                saved_color = snap_row.get('color')
+                if saved_color and isinstance(r.get('color'), tk.StringVar):
+                    r['color'].set(saved_color)
+                    # Update color swatch
+                    for child in r['frame'].winfo_children():
+                        if isinstance(child, tk.Canvas):
+                            try:
+                                items = child.find_all()
+                                if items:
+                                    child.itemconfigure(items[0], fill=saved_color)
+                            except Exception:
+                                pass
+                            break
             except Exception as exc:
                 print(f"[StatsPanel] restore row: {exc}")
 

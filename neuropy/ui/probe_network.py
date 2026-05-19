@@ -166,6 +166,12 @@ class NetworkPanel:
         # ── Connection type toggles ──────────────────────────────────────
         ct_frame = ttk.Frame(ctrl)
         ct_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        # "Current pair" toggle — highlights only the current pair
+        self._net_cur_pair_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ct_frame, text="Current pair",
+                        variable=self._net_cur_pair_var,
+                        command=self.draw).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(ct_frame, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
         ttk.Label(ct_frame, text="Conn type:").pack(side=tk.LEFT, padx=(0, 2))
         _ct_labels = {
             ('pyr', 'pyr'):     'P→P',
@@ -210,7 +216,6 @@ class NetworkPanel:
                         variable=self._net_show_chid_var,
                         command=self.draw
                         ).pack(side=tk.LEFT, padx=(6, 0))
-        # "Current pair" is always-on — no toggle button needed
 
         # ── Group filter — wrapping toggle checkbuttons (multi-select / merge) ──
         group_lf = ttk.Frame(ctrl, relief='groove', borderwidth=1)
@@ -611,23 +616,6 @@ class NetworkPanel:
                         else self._NET_DEFAULT_I)
                     neuron_ct_color[partner] = c  # last wins; usually one type
 
-        # ── Identify neurons that share a peak channel (Bug 5) ───────────
-        # For channels with 2+ visible neurons: draw them side-by-side with
-        # a horizontal offset and gradient grayscale (100% → 80% → 60% …).
-        _CH_OFFSET = 6  # data-unit horizontal step between co-channel neurons
-        _same_ch_groups: dict = {}  # channel → [neuron_idx, ...]
-        if peak_channels is not None:
-            from collections import defaultdict as _dd
-            _ch_map = _dd(list)
-            for _i in range(n_neurons):
-                if hidden_shanks and shank_ids is not None and _i < len(shank_ids):
-                    if int(shank_ids[_i]) in hidden_shanks:
-                        continue
-                _ch_map[int(peak_channels[_i])].append(_i)
-            _same_ch_groups = {ch: idxs for ch, idxs in _ch_map.items()
-                               if len(idxs) > 1}
-        _same_ch_neuron_set: set = {i for idxs in _same_ch_groups.values() for i in idxs}
-
         # ── Draw neurons ──────────────────────────────────────────────────
         unconnected_o, unconnected_s = [], []  # pyr / inter with no connections
         connected_by_color: dict = {}  # color → (list_o, list_s)
@@ -640,8 +628,6 @@ class NetworkPanel:
                 continue    # focused neuron drawn individually below
             if idx in fp_neurons:
                 continue    # focused pair neurons drawn individually below
-            if idx in _same_ch_neuron_set:
-                continue    # same-channel group neurons drawn separately below
             # Shank visibility filter
             if hidden_shanks and shank_ids is not None and idx < len(shank_ids):
                 if int(shank_ids[idx]) in hidden_shanks:
@@ -677,30 +663,6 @@ class NetworkPanel:
             a = 0.3 if fp is not None else 1.0
             _scatter(o_list, '^', color, 50 if fp is None else 20, 4, alpha=a)
             _scatter(s_list, 'o', color, 50 if fp is None else 20, 4, alpha=a)
-
-        # ── Same-channel groups: side-by-side with gradient grayscale ────
-        for ch_idxs in _same_ch_groups.values():
-            n_ch = len(ch_idxs)
-            # Center the group: offsets are -(n-1)/2 … +(n-1)/2 steps
-            for rank, idx in enumerate(ch_idxs):
-                if fn is not None and idx == fn:
-                    continue
-                if idx in fp_neurons:
-                    continue
-                if ui._net_hide_unconnected and idx not in all_involved and idx not in cluster_neurons:
-                    continue
-                # 100% black → 80% black → 60% black … (each step +0.2 gray)
-                gray = min(0.0 + rank * 0.2, 0.85)
-                col = (gray, gray, gray)
-                x_off = (rank - (n_ch - 1) / 2.0) * _CH_OFFSET
-                ntype = nt[idx] if nt is not None else None
-                m = 'o' if ntype == 'inter' else '^'
-                sz = 50 if fp is None else 20
-                a = 0.3 if fp is not None else 1.0
-                ax.scatter([x_pos[idx] + x_off], [y_pos[idx]],
-                           s=sz, marker=m, color=col,
-                           zorder=4, linewidths=0, edgecolors='none', alpha=a)
-
         # Focused neuron (single neuron mode)
         if fn is not None and 0 <= fn < n_neurons:
             fn_ntype = nt[fn] if nt is not None else None
@@ -726,6 +688,8 @@ class NetworkPanel:
         for (ref, tgt), entries in pair_entries.items():
             if not ui._net_show_arrows:
                 break
+            if not (0 <= ref < n_neurons and 0 <= tgt < n_neurons):
+                continue
             has_reverse = (tgt, ref) in all_pair_set
             # Slight curve when a pair goes both directions
             rad = 0.18 if has_reverse else 0.0
@@ -838,7 +802,8 @@ class NetworkPanel:
             ax.add_patch(dashed)
 
         # ── Current pair arrow (additive, drawn on top) ──────────────────
-        if (current_pair is not None
+        cur_pair_on = self._net_cur_pair_var.get()
+        if (cur_pair_on and current_pair is not None
                 and ui._net_show_arrows
                 and 0 <= current_pair[0] < n_neurons
                 and 0 <= current_pair[1] < n_neurons):
@@ -867,8 +832,6 @@ class NetworkPanel:
             R_STEP = 4    # radius increment per additional ring
             GAP    = BASE_R + 4  # offset from channel x so circles don't cover neuron dot
 
-            hide_ch = self._net_hide_same_channel_var.get()
-
             # Collect all same-channel entries grouped by channel value
             _chan_entries: dict = {}  # ch → [(ref, tgt, entry)]
             for (ref, tgt), entries in pair_entries.items():
@@ -887,14 +850,7 @@ class NetworkPanel:
                 ref0 = ch_ents[0][0]
                 cx = x_pos[ref0] + GAP
                 cy = y_pos[ref0]
-                k = 0  # ring index counts only visible (non-hidden) entries
-                for (ref, tgt, entry) in ch_ents:
-                    is_cpair = (current_pair is not None
-                                and (ref, tgt) == current_pair)
-                    # Bug 2: hide when toggle is on, but always show current pair
-                    if hide_ch and not is_cpair:
-                        continue
-
+                for k, (ref, tgt, entry) in enumerate(ch_ents):
                     ct  = entry.get('conn_type')
                     col = self._NET_TYPE_COLOR.get(ct, '#888888')
                     r   = BASE_R + k * R_STEP
@@ -916,14 +872,6 @@ class NetworkPanel:
                                 arrowprops=dict(arrowstyle='->', color=col,
                                                 lw=1.0, mutation_scale=6),
                                 zorder=5)
-                    # Bug 1: draw bold black arc on top for the current pair
-                    if is_cpair:
-                        bold_arc = _Arc((cx, cy), 2 * r, 2 * r,
-                                        angle=0, theta1=20, theta2=340,
-                                        color='black', linewidth=3.0,
-                                        alpha=1.0 * line_alpha, zorder=6)
-                        ax.add_patch(bold_arc)
-                    k += 1
 
         # ── Legend ───────────────────────────────────────────────────────
         shown_types = set()
@@ -1108,11 +1056,11 @@ class NetworkPanel:
         self.draw()
 
     def _on_toggle_hide_same_channel(self):
-        self.draw()           # refreshes _last_shank_ids before list gray-out
+        self.draw()           # _last_shank_ids must be current for refresh_lists
         self.ui.refresh_lists()
 
     def _on_toggle_hide_same_shank(self):
-        self.draw()           # refreshes _last_shank_ids before list gray-out
+        self.draw()           # _last_shank_ids must be current for refresh_lists
         self.ui.refresh_lists()
 
     def _on_group_toggle(self, group_name):

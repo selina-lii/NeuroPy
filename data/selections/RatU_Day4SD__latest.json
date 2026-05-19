@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:49.097863",
+  "saved_at": "2026-05-19T00:24:04.956901",
   "session": "RatU_Day4SD",
   "selections": {
     "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
@@ -536,8 +536,7 @@
     },
     "61,52": {
       "groups": [
-        "Disinhib",
-        "wideMs"
+        "best"
       ]
     },
     "61,70": {
@@ -553,8 +552,7 @@
     "61,138": {
       "groups": [
         "best",
-        "good",
-        "lateMono"
+        "good"
       ]
     },
     "62,32": {
@@ -758,8 +756,7 @@
     },
     "86,85": {
       "groups": [
-        "good",
-        "lateMono"
+        "good"
       ]
     },
     "87,32": {
@@ -962,6 +959,7 @@
     },
     "99,138": {
       "groups": [
+        "good",
         "rift"
       ]
     },
@@ -987,8 +985,7 @@
     },
     "106,70": {
       "groups": [
-        "good",
-        "lateMono"
+        "good"
       ]
     },
     "106,98": {
@@ -1334,7 +1331,7 @@
     "139,39": {
       "groups": [
         "Disinhib",
-        "good"
+        "best"
       ]
     },
     "139,98": {
@@ -1348,7 +1345,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatU_Day4SD.ex_E.type_pyr-pyr": [],
     "sess_RatU_Day4SD.ex_E.type_pyr-inter": [],

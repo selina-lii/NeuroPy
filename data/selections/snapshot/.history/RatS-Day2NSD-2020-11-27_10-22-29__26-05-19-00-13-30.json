@@ -1,0 +1,28 @@
+{
+  "version": "4.0",
+  "name": "latest",
+  "saved_at": "2026-05-19T00:13:30.595879",
+  "session": "RatS-Day2NSD-2020-11-27_10-22-29",
+  "selections": {
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [
+      [
+        25,
+        29
+      ]
+    ],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    }
+  },
+  "deleted_by_type": {
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-pyr": []
+  }
+}

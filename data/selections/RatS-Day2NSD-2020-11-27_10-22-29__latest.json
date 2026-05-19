@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.755405",
+  "saved_at": "2026-05-19T00:24:04.643063",
   "session": "RatS-Day2NSD-2020-11-27_10-22-29",
   "selections": {
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
@@ -1388,6 +1388,11 @@
         "I-I-flip"
       ]
     },
+    "76,8": {
+      "groups": [
+        "good"
+      ]
+    },
     "76,67": {
       "groups": [
         "rhythm"
@@ -1424,6 +1429,7 @@
     "82,67": {
       "groups": [
         "best",
+        "good",
         "rhythm"
       ]
     },
@@ -1633,7 +1639,7 @@
     },
     "87,8": {
       "groups": [
-        "best"
+        "good"
       ]
     },
     "88,67": {
@@ -2085,7 +2091,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],

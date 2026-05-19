@@ -43,34 +43,16 @@ from matplotlib.figure import Figure
 from matplotlib.patches import FancyArrowPatch
 from matplotlib.lines import Line2D
 
-# Remove any stale scroll_event_windows patch left on FigureCanvasTkAgg by an older
-# version of this module.  After a module reload the old patch's __globals__ no
-# longer contain _orig_scroll, causing NameError on Ctrl+E waveform view.
-try:
-    import matplotlib.backends.backend_tkagg as _mpl_bk_cleanup
-    import matplotlib.backends._backend_tk as _mpl_bk2_cleanup
-    for _cls_cleanup in (
-        _mpl_bk_cleanup.FigureCanvasTkAgg,
-        _mpl_bk2_cleanup.FigureCanvasTk,
-    ):
-        if 'scroll_event_windows' in _cls_cleanup.__dict__:
-            del _cls_cleanup.scroll_event_windows
-    del _mpl_bk_cleanup, _mpl_bk2_cleanup, _cls_cleanup
-except Exception:
-    pass
-
 # Patch: winfo_containing raises KeyError('popdown') when a ttk Combobox
-# popdown is visible and a scroll event fires over a matplotlib canvas.
-# Patching scroll_event_windows on the class creates infinite recursion because
-# matplotlib's own scroll_event_windows calls self.scroll_event_windows internally.
-# Instead, patch the root of the problem: tkinter.Misc.winfo_containing.
+# dropdown is open and a scroll event hits a matplotlib canvas.
 try:
     import tkinter as _tk_patch
     _orig_winfo_containing = _tk_patch.Misc.winfo_containing
     if not getattr(_orig_winfo_containing, '_ccg_safe_patch', False):
-        def _winfo_containing_safe(self, rootX, rootY, displayof=0):
+        def _winfo_containing_safe(self, rootX, rootY, displayof=0,
+                                   _orig=_orig_winfo_containing):
             try:
-                return _orig_winfo_containing(self, rootX, rootY, displayof)
+                return _orig(self, rootX, rootY, displayof)
             except KeyError:
                 return None
         _winfo_containing_safe._ccg_safe_patch = True
@@ -93,14 +75,12 @@ from neuropy.analyses.jitter import JitterManager, _MAX_JITTER_QUEUE as _JITTER_
 from neuropy.analyses.ccg_classifier import (
     CCGTemplateClassifier, GroupTemplate, PeakRule,
     CCGClassifier, CCGClusterClassifier, ClassifyResult,
+    ccgconfig_to_main_template as _ccgconfig_to_main_template,
 )
-try:
-    from neuropy.analyses.ccg_classifier import ccgconfig_to_main_template as _ccgconfig_to_main_template
-except ImportError:
-    _ccgconfig_to_main_template = None
 # Connectivity strength
 import copy as _copy
-from neuropy.analyses.correlations import spike_correlations
+from neuropy.analyses.correlations import spike_correlations, sim_generate_train as _sim_generate_train
+from neuropy.analyses import custom_ccg as _custom_ccg_mod
 from neuropy.analyses.ms_connectivity import (
     EranConv, CCGConfig, CCGData, _CCG_RESOLUTION, deconv_autocorr,
     NormalizeBy, apply_norms_to_ccg, compute_pair_conn_strength_1d,
@@ -108,19 +88,15 @@ from neuropy.analyses.ms_connectivity import (
 )
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.core.neurons import Neurons
-import imageio
+from neuropy.core.epoch import Epoch as _Epoch
 from neuropy.ui.probe_network import NetworkPanel
+from neuropy.ui.time_slider import TimeSliderPanel
 from neuropy.ui.ccg_renderer import CCGRenderEngine
 from neuropy.ui.pair_selection_panel import LeftPanelContainer, SelectionData
 from neuropy.ui.ccg_mainview import (
     SpikeAttributionEngine, CenterPanelContainer,
 )
-from neuropy.ui.jitter import JitterController, JitterWorker
-
-try:
-    from neuropy.core.epoch import Epoch as _Epoch
-except ImportError:
-    _Epoch = None
+from neuropy.ui.jitter import JitterController, JitterWorker, JitterQueueDialog
 
 # Sentinel value for the virtual "All segments" view
 _ALL_SEGS = "All"
@@ -132,10 +108,2238 @@ _ALL_SESSION_MARKER = object()
 _ANY_SESSION_MARKER = _ALL_SESSION_MARKER
 _AVAIL_GROUP_HDR = "__avail_group_hdr__"
 
+# TODO: make this configurable per dataset — currently hardcoded for 8-session NSD/SD design
+_SESS_PER_BLOCK = 8   # sessions 1..N: idx<=_SESS_PER_BLOCK → NSD, idx>_SESS_PER_BLOCK → SD
+
 # maximum number of queued jitters (including the currently running one)
 _MAX_JITTER_QUEUE = 50
 
 
+# ---------------------------------------------------------------------------
+# Dialog helper classes — each wraps one dialog method from CCGReviewUI.
+# Call <ClassName>.show(ui) from CCGReviewUI methods.
+# ---------------------------------------------------------------------------
+
+
+class MergeGroupsDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        if len(ui._sel_data._groups) < 2:
+            messagebox.showinfo("Merge groups", "Need at least 2 groups to merge.")
+            return
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Merge Groups")
+        self.win.geometry("340x320")
+        self.win.grab_set()
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        win = self.win
+        ttk.Label(win, text="Select groups to merge:",
+                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        check_vars = {}
+        for gname in sorted(ui._sel_data._groups):
+            if gname.startswith('__'):
+                continue
+            var = tk.BooleanVar(value=False)
+            check_vars[gname] = var
+            ttk.Checkbutton(frame, text=gname, variable=var).pack(anchor='w')
+        name_frame = ttk.Frame(win)
+        name_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ttk.Label(name_frame, text="Merged group name:").pack(side=tk.LEFT)
+        name_entry = ttk.Entry(name_frame, width=20)
+        name_entry.pack(side=tk.LEFT, padx=4)
+
+        def do_merge():
+            selected = [g for g, v in check_vars.items() if v.get()]
+            if len(selected) < 2:
+                messagebox.showwarning("Merge", "Select at least 2 groups.")
+                return
+            target = name_entry.get().strip() or selected[0]
+            if not messagebox.askokcancel(
+                    "Merge groups",
+                    f"This will merge {len(selected)} groups into '{target}'.\n"
+                    "This cannot be undone. Proceed?"):
+                return
+            merged = {}
+            for g in selected:
+                g_data = ui._sel_data._groups.get(g, {})
+                if isinstance(g_data, set):
+                    sess = ui._current_session_str()
+                    merged.setdefault(sess, set()).update(g_data)
+                else:
+                    for sess, pairs in g_data.items():
+                        merged.setdefault(sess, set()).update(pairs)
+                if g != target:
+                    ui._sel_data._groups.pop(g, None)
+                    ui._sel_data._group_hotkeys.pop(g, None)
+                    ui._sel_data._group_notes.pop(g, None)
+            ui._sel_data._groups[target] = merged
+            ui._rebuild_groups_menu()
+            ui.refresh_lists()
+            win.destroy()
+
+        ttk.Button(win, text="Merge", command=do_merge).pack(pady=8)
+
+
+class AutoClassifyDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        if ui.ccg_data is None:
+            messagebox.showinfo("Auto-classify", "No CCG data loaded.", parent=ui.root)
+            return
+        if not ui._templates:
+            if messagebox.askyesno(
+                    "Auto-classify",
+                    "No templates defined yet.\n\nOpen the Template Editor first "
+                    "(Classify > Edit templates…) to define peak rules for each group."
+                    "\n\nOpen Template Editor now?",
+                    parent=ui.root):
+                ui._template_editor_dialog()
+            return
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Auto-classify pairs")
+        self.win.resizable(False, False)
+        self.win.grab_set()
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        win = self.win
+        pad = {'padx': 8, 'pady': 4}
+        scope_var = tk.StringVar(value='current')
+        ttk.Label(win, text="Scope:").grid(row=0, column=0, sticky='w', **pad)
+        ttk.Radiobutton(win, text="Current conn-type only",
+                        variable=scope_var, value='current').grid(
+            row=0, column=1, sticky='w', **pad)
+        ttk.Radiobutton(win, text="All available conn-types",
+                        variable=scope_var, value='all').grid(
+            row=1, column=1, sticky='w', **pad)
+        target_var = tk.StringVar(value='unlabeled')
+        ttk.Label(win, text="Classify:").grid(row=2, column=0, sticky='w', **pad)
+        ttk.Radiobutton(win, text="Unlabeled pairs only",
+                        variable=target_var, value='unlabeled').grid(
+            row=2, column=1, sticky='w', **pad)
+        ttk.Radiobutton(win, text="All pairs (read-only preview)",
+                        variable=target_var, value='all').grid(
+            row=3, column=1, sticky='w', **pad)
+        active = sorted(ui._active_templates) if ui._active_templates else sorted(ui._templates)
+        ttk.Label(win,
+                  text=f"Smooth: {ui._templates_smooth_ms:.1f} ms  |  "
+                       f"Templates: {', '.join(active) or '(none)'}",
+                  foreground='#336699').grid(
+            row=4, column=0, columnspan=3, sticky='w', **pad)
+        ttk.Label(win,
+                  text="(Smoothing and active templates are set in Classify > Edit templates…)",
+                  foreground='gray').grid(row=5, column=0, columnspan=3, sticky='w', **pad)
+
+        def _run():
+            win.destroy()
+            ui._run_auto_classify(
+                scope=scope_var.get(),
+                target=target_var.get(),
+                smooth_ms=ui._templates_smooth_ms,
+            )
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.grid(row=6, column=0, columnspan=3, pady=8)
+        ttk.Button(btn_frame, text="Run", command=_run).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
+
+
+class ManageGroupsDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        if not ui._sel_data._groups:
+            messagebox.showinfo("Manage groups", "No groups yet. Create one first.")
+            return
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Manage Groups")
+        self.win.geometry("480x420")
+        self.win.grab_set()
+        self._build()
+
+    def _add_group_tab(self, nb, gname, is_special=False):
+        ui = self._ui
+        win = self.win
+        display = gname[len(_SPECIAL_PREFIX):] if is_special else gname
+        frame = ttk.Frame(nb)
+        nb.add(frame, text=display)
+        top = ttk.Frame(frame)
+        top.pack(fill=tk.X, padx=6, pady=4)
+        ttk.Label(top, text="Name:").pack(side=tk.LEFT)
+        name_var = tk.StringVar(value=display)
+        ttk.Entry(top, textvariable=name_var, width=18).pack(side=tk.LEFT, padx=4)
+
+        def _do_rename(old=gname, nv=name_var, sp=is_special):
+            new = nv.get().strip()
+            if sp:
+                new = _SPECIAL_PREFIX + new
+            ui._rename_group(old, new, win)
+
+        ttk.Button(top, text="Rename", command=_do_rename).pack(side=tk.LEFT)
+        if not is_special:
+            hk_frame = ttk.Frame(frame)
+            hk_frame.pack(fill=tk.X, padx=6, pady=2)
+            ttk.Label(hk_frame, text="Hotkey (1–9/0/a–z):").pack(side=tk.LEFT)
+            hk_var = tk.StringVar(value=ui._sel_data._group_hotkeys.get(gname, ''))
+            ttk.Entry(hk_frame, textvariable=hk_var, width=6).pack(side=tk.LEFT, padx=4)
+            ttk.Button(hk_frame, text="Set",
+                       command=lambda g=gname, hv=hk_var: ui._set_group_hotkey(g, hv.get())).pack(
+                side=tk.LEFT)
+        ttk.Label(frame, text="Discussion notes:" if is_special else "Notes:"
+                  ).pack(anchor='w', padx=6, pady=(4, 0))
+        notes_h = 10 if is_special else 3
+        notes_text = tk.Text(frame, height=notes_h, width=40,
+                             font=('Arial', 9), wrap=tk.WORD)
+        notes_text.pack(fill=tk.BOTH if is_special else tk.X,
+                        expand=is_special, padx=6, pady=2)
+        notes_text.insert('1.0', ui._sel_data._group_notes.get(gname, ''))
+        notes_text.bind('<KeyRelease>',
+                        lambda e, g=gname, t=notes_text:
+                        ui._sel_data._group_notes.__setitem__(g, t.get('1.0', 'end-1c')))
+        ttk.Label(frame, text="Pairs in group:").pack(anchor='w', padx=6)
+        lb_frame = ttk.Frame(frame)
+        lb_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        sb = ttk.Scrollbar(lb_frame)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        lb = tk.Listbox(lb_frame, yscrollcommand=sb.set, font=('Courier', 9))
+        lb.pack(fill=tk.BOTH, expand=True)
+        sb.config(command=lb.yview)
+        g = ui._sel_data._groups.get(gname, {})
+        if isinstance(g, dict):
+            for sess in sorted(g):
+                pairs = g[sess]
+                if not pairs:
+                    continue
+                ct_map = ui._pairs_by_conn_type(sess, pairs)
+                for ct_label, ct_pairs in ct_map.items():
+                    lb.insert(tk.END, f"── {sess} | {ct_label} ──")
+                    lb.itemconfig(lb.size() - 1, foreground='#666')
+                    for pair in sorted(ct_pairs):
+                        lb.insert(tk.END, f"  [{pair[0]:3d}, {pair[1]:3d}]")
+        else:
+            for pair in sorted(g):
+                lb.insert(tk.END, f"[{pair[0]:3d}, {pair[1]:3d}]")
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(pady=4)
+        if is_special:
+            conv_label = "Convert to group"
+            def _do_convert(g=gname, d=display):
+                ui._rename_group(g, d, win)
+        else:
+            conv_label = "Convert to special group"
+            def _do_convert(g=gname, d=display):
+                ui._rename_group(g, _SPECIAL_PREFIX + d, win)
+        ttk.Button(btn_row, text=conv_label, command=_do_convert).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text=f"Delete group '{display}'",
+                   command=lambda g=gname: ui._delete_group(g, win)).pack(side=tk.LEFT, padx=4)
+
+    def _build(self):
+        nb = ttk.Notebook(self.win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        for gname in sorted(self._ui._sel_data._groups):
+            if gname.startswith('__'):
+                continue
+            self._add_group_tab(nb, gname, is_special=False)
+        special_names = sorted(g for g in self._ui._sel_data._groups
+                               if g.startswith(_SPECIAL_PREFIX))
+        if special_names:
+            special_frame = ttk.Frame(nb)
+            nb.add(special_frame, text="Special")
+            snb = ttk.Notebook(special_frame)
+            snb.pack(fill=tk.BOTH, expand=True)
+            for gname in special_names:
+                self._add_group_tab(snb, gname, is_special=True)
+        ttk.Button(self.win, text="Close", command=self.win.destroy).pack(pady=4)
+
+
+class SimulationDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        cls(ui)  # non-modal — no wait_window
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self._sim_state: dict = {}
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("CCG Simulation")
+        self.win.geometry("620x780")
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        win = self.win
+        pw = tk.PanedWindow(win, orient=tk.VERTICAL,
+                            sashrelief=tk.RAISED, sashwidth=5, bg='#CCCCCC')
+        pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        param_frame = ttk.Frame(pw, padding=6)
+        pw.add(param_frame, stretch='never')
+        top = ttk.Frame(param_frame)
+        top.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(top, text="Name:").pack(side=tk.LEFT)
+        sim_name_var = tk.StringVar(value="sim1")
+        ttk.Entry(top, textvariable=sim_name_var, width=20).pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Label(top, text="Duration:").pack(side=tk.LEFT)
+        sim_dur_var = tk.StringVar(value="60")
+        ttk.Entry(top, textvariable=sim_dur_var, width=8).pack(side=tk.LEFT, padx=(4, 4))
+        sim_dur_unit = tk.StringVar(value="s")
+        ttk.OptionMenu(top, sim_dur_unit, "s", "ms", "s", "min", "hour").pack(side=tk.LEFT)
+        common = ttk.Frame(param_frame)
+        common.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(common, text="Noise (gauss σ):").pack(side=tk.LEFT)
+        sim_noise_var = tk.StringVar(value="0.0")
+        ttk.Entry(common, textvariable=sim_noise_var, width=7).pack(side=tk.LEFT, padx=(2, 10))
+        ttk.Label(common, text="Excess synchrony (%):").pack(side=tk.LEFT)
+        sim_sync_var = tk.StringVar(value="0")
+        ttk.Entry(common, textvariable=sim_sync_var, width=7).pack(side=tk.LEFT, padx=(2, 10))
+        ttk.Label(common, text="Synaptic delay (ms):").pack(side=tk.LEFT)
+        sim_delay_var = tk.StringVar(value="1.5")
+        ttk.Entry(common, textvariable=sim_delay_var, width=7).pack(side=tk.LEFT, padx=(2, 0))
+        cols = ttk.Frame(param_frame)
+        cols.pack(fill=tk.X, pady=(0, 6))
+        cols.columnconfigure(0, weight=1)
+        cols.columnconfigure(1, weight=1)
+        sim_vars = {}
+        for col_idx, (role, title) in enumerate([('ref', 'Ref neuron'), ('tgt', 'Tgt neuron')]):
+            panel = ttk.LabelFrame(cols, text=title, padding=8)
+            panel.grid(row=0, column=col_idx, sticky='nsew',
+                       padx=(0 if col_idx == 0 else 4, 0))
+            v = {}
+            ttk.Label(panel, text="Nickname:").pack(anchor='w')
+            v['nickname'] = tk.StringVar(value=role)
+            ttk.Entry(panel, textvariable=v['nickname'], width=16).pack(anchor='w', pady=(0, 6))
+            ttk.Label(panel, text="Type:").pack(anchor='w')
+            v['type'] = tk.StringVar(value="E")
+            type_frame = ttk.Frame(panel)
+            type_frame.pack(anchor='w', pady=(0, 6))
+            for t in ("E", "I", "any"):
+                ttk.Radiobutton(type_frame, text=t, variable=v['type'],
+                                value=t).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Label(panel, text="Firing rate (Hz):").pack(anchor='w')
+            v['firing_rate'] = tk.StringVar(value="5.0")
+            ttk.Entry(panel, textvariable=v['firing_rate'], width=10).pack(anchor='w', pady=(0, 6))
+            ttk.Label(panel, text="Burst config:",
+                      font=('TkDefaultFont', 9, 'bold')).pack(anchor='w', pady=(4, 2))
+            ttk.Label(panel, text="Burst rate (%):").pack(anchor='w')
+            v['burst_rate'] = tk.StringVar(value="0")
+            ttk.Entry(panel, textvariable=v['burst_rate'], width=10).pack(anchor='w', pady=(0, 4))
+            ttk.Label(panel, text="Number of spikes/burst:").pack(anchor='w')
+            v['n_bursts'] = tk.StringVar(value="3")
+            ttk.Entry(panel, textvariable=v['n_bursts'], width=10).pack(anchor='w', pady=(0, 4))
+            ttk.Label(panel, text="Burst interval (ms):").pack(anchor='w')
+            v['burst_interval'] = tk.StringVar(value="5.0")
+            ttk.Entry(panel, textvariable=v['burst_interval'], width=10).pack(anchor='w', pady=(0, 4))
+            sim_vars[role] = v
+        bottom_frame = ttk.Frame(pw, padding=6)
+        pw.add(bottom_frame, stretch='always')
+        sim_fig = Figure(figsize=(6, 3.5))
+        sim_ax = sim_fig.add_subplot(111)
+        sim_ax.set_title("(no simulation run yet)", fontsize=10)
+        sim_canvas = FigureCanvasTkAgg(sim_fig, master=bottom_frame)
+        sim_res_label_var = tk.StringVar(value="Res: lowres")
+        btn_frame = ttk.Frame(bottom_frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(btn_frame, text="Compute CCG", command=lambda: ui._run_simulation(
+            win, sim_name_var, sim_dur_var, sim_dur_unit,
+            sim_noise_var, sim_sync_var, sim_delay_var,
+            sim_vars, sim_fig, sim_ax, sim_canvas, self._sim_state,
+            sim_res_label_var)).pack(side=tk.LEFT)
+        ttk.Button(
+            btn_frame, textvariable=sim_res_label_var,
+            command=lambda: ui._sim_toggle_resolution(
+                self._sim_state, sim_fig, sim_ax, sim_canvas, sim_res_label_var),
+            width=16).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+        sim_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        def _sim_ctrl_r(_e=None):
+            ui._sim_toggle_resolution(
+                self._sim_state, sim_fig, sim_ax, sim_canvas, sim_res_label_var)
+            return 'break'
+
+        win.bind('<Control-r>', _sim_ctrl_r)
+        win.bind('<Command-r>', _sim_ctrl_r)
+
+
+class SettingsDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Settings")
+        self.win.geometry("620x420")
+        self.win.resizable(True, True)
+        self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
+        self.win.bind('<Escape>', lambda e: self.win.destroy())
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        win = self.win
+        style = ttk.Style(win)
+        _raw_bg = style.lookup('TFrame', 'background') or ui.root.cget('bg')
+        try:
+            _rgb = win.winfo_rgb(_raw_bg)
+            _lum = (0.299 * _rgb[0] + 0.587 * _rgb[1] + 0.114 * _rgb[2]) / 65535
+        except Exception:
+            _lum = 1.0
+        _dark = _lum < 0.4
+        _CONT_BG  = '#1e1e1e'   if _dark else 'white'
+        _NAV_BG   = '#252526'   if _dark else '#f3f3f3'
+        _NAV_SEL  = '#37373d'   if _dark else '#dce8f5'
+        _FG       = '#cccccc'   if _dark else '#111111'
+        _FG_DIM   = '#888888'   if _dark else '#666666'
+        _SUM_BG   = '#2d2d2d'   if _dark else '#f8f8f8'
+        _HDR_FONT = ('Arial', 13, 'bold')
+        _LBL_FONT = ('Arial', 10)
+
+        bot = tk.Frame(win, bg=_NAV_BG)
+        ttk.Separator(win).pack(side=tk.BOTTOM, fill=tk.X)
+        bot.pack(side=tk.BOTTOM, fill=tk.X)
+
+        def _apply():
+            try:
+                v = int(_max_tog_var.get())
+                if 2 <= v <= 20:
+                    ui._settings['max_show_together'] = v
+                    ui._save_ui_state()
+            except (ValueError, tk.TclError):
+                pass
+            try:
+                fs = int(_min_font_var.get())
+                if 6 <= fs <= 32:
+                    ui._settings['min_font_size'] = fs
+                    ui._save_ui_state()
+                    ui._apply_min_font_size()
+            except (ValueError, tk.TclError):
+                pass
+            win.destroy()
+
+        ttk.Button(bot, text="Save", command=_apply).pack(side=tk.RIGHT, padx=8, pady=6)
+        ttk.Button(bot, text="Cancel", command=win.destroy).pack(side=tk.RIGHT, padx=0, pady=6)
+
+        sidebar = tk.Frame(win, bg=_NAV_BG, width=160)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar.pack_propagate(False)
+        ttk.Separator(win, orient='vertical').pack(side=tk.LEFT, fill=tk.Y)
+
+        cont_outer = tk.Frame(win, bg=_CONT_BG)
+        cont_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cont_canvas = tk.Canvas(cont_outer, bg=_CONT_BG, highlightthickness=0)
+        cont_scroll = ttk.Scrollbar(cont_outer, command=cont_canvas.yview)
+        cont_canvas.configure(yscrollcommand=cont_scroll.set)
+        cont_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        cont_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        content = tk.Frame(cont_canvas, bg=_CONT_BG)
+        cwin = cont_canvas.create_window((0, 0), window=content, anchor='nw')
+        content.bind('<Configure>', lambda e: (
+            cont_canvas.configure(scrollregion=cont_canvas.bbox('all')),
+            cont_canvas.itemconfig(cwin, width=cont_canvas.winfo_width()),
+        ))
+        cont_canvas.bind('<Configure>', lambda e:
+            cont_canvas.itemconfig(cwin, width=e.width))
+
+        _section_frames = {}
+        _nav_buttons    = {}
+
+        def _show_section(name):
+            for f in _section_frames.values():
+                f.pack_forget()
+            _section_frames[name].pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+            for n, b in _nav_buttons.items():
+                b.config(bg=_NAV_SEL if n == name else _NAV_BG, relief='flat')
+
+        def _add_section(name):
+            frame = tk.Frame(content, bg=_CONT_BG)
+            _section_frames[name] = frame
+            btn = tk.Button(sidebar, text=name, anchor='w', bd=0,
+                            bg=_NAV_BG, fg=_FG, activebackground=_NAV_SEL,
+                            activeforeground=_FG, font=_LBL_FONT,
+                            padx=12, pady=6,
+                            command=lambda n=name: _show_section(n))
+            btn.pack(fill=tk.X)
+            _nav_buttons[name] = btn
+            return frame
+
+        disp = _add_section('Display')
+        tk.Label(disp, text="Display", bg=_CONT_BG, fg=_FG,
+                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 12))
+        ttk.Separator(disp).pack(fill=tk.X, pady=(0, 10))
+        row = tk.Frame(disp, bg=_CONT_BG)
+        row.pack(fill=tk.X, pady=6)
+        tk.Label(row, text="Max pairs in 'Show Together':", bg=_CONT_BG,
+                 fg=_FG, font=_LBL_FONT).pack(side=tk.LEFT)
+        _max_tog_var = tk.IntVar(value=ui._settings.get('max_show_together', 5))
+        ttk.Spinbox(row, from_=2, to=20, textvariable=_max_tog_var,
+                    width=5).pack(side=tk.LEFT, padx=10)
+        tk.Label(row, text="(2–20)", bg=_CONT_BG,
+                 fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
+        row = tk.Frame(disp, bg=_CONT_BG)
+        row.pack(fill=tk.X, pady=6)
+        tk.Label(row, text="Minimum font size:", bg=_CONT_BG,
+                 fg=_FG, font=_LBL_FONT).pack(side=tk.LEFT)
+        _min_font_var = tk.IntVar(value=int(ui._settings.get('min_font_size', 9) or 9))
+        ttk.Spinbox(row, from_=6, to=32, textvariable=_min_font_var,
+                    width=5).pack(side=tk.LEFT, padx=10)
+        tk.Label(row, text="(6–32)", bg=_CONT_BG,
+                 fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
+
+        cache_sec = _add_section('Cache Config')
+        tk.Label(cache_sec, text="Cache Configuration", bg=_CONT_BG, fg=_FG,
+                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 4))
+        ttk.Separator(cache_sec).pack(fill=tk.X, pady=(0, 10))
+        _cache_config_help = tk.Label(cache_sec,
+                 text="Only one display configuration is saved to the PNG disk cache.\n"
+                      "Any other configuration is rendered in real-time (not cached).\n"
+                      "Set up the significance panel as desired, then capture it here.",
+                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9),
+                 justify='left', wraplength=380)
+        _cache_config_help.pack(anchor='w', pady=(0, 10))
+        _cache_summary_var = tk.StringVar()
+
+        def _refresh_cache_summary():
+            cfg = ui._cache_config
+            if cfg is None:
+                _cache_summary_var.set("No configuration set  (legacy mode: all states cached)")
+            else:
+                lines = []
+                on_sigs = [k.replace('_sig_', '').replace('_var', '')
+                           for k in ui._CACHE_CONFIG_ATTRS
+                           if k.startswith('_sig_') and cfg.get(k)]
+                lines.append(f"Sig overlays: {', '.join(on_sigs) or 'none'}")
+                on_lines = [k.replace('_line_', '').replace('_var', '')
+                            for k in ui._CACHE_CONFIG_ATTRS
+                            if k.startswith('_line_') and cfg.get(k)]
+                lines.append(f"Line styles:  {', '.join(on_lines) or 'none'}")
+                norms = cfg.get('active_norms') or []
+                lines.append(f"Norms:        {', '.join(norms) or 'raw'}")
+                lines.append(f"Alpha:        {cfg.get('active_alpha', '—')}")
+                _cache_summary_var.set('\n'.join(lines))
+
+        _refresh_cache_summary()
+        tk.Label(cache_sec, textvariable=_cache_summary_var,
+                 bg=_SUM_BG, fg=_FG, relief='groove', font=('Courier', 9),
+                 justify='left', anchor='nw', padx=8, pady=6).pack(fill=tk.X, pady=(0, 10))
+        cbtn_row = tk.Frame(cache_sec, bg=_CONT_BG)
+        cbtn_row.pack(anchor='w')
+
+        def _capture():
+            ui._cache_config = ui._current_display_config()
+            ui._save_ui_state()
+            _refresh_cache_summary()
+            ui._clear_all_png_cache()
+
+        def _clear_cache_config():
+            ui._cache_config = None
+            ui._save_ui_state()
+            _refresh_cache_summary()
+
+        ttk.Button(cbtn_row, text="Capture current settings",
+                   command=_capture).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(cbtn_row, text="Clear",
+                   command=_clear_cache_config).pack(side=tk.LEFT)
+
+        cache_mgmt = _add_section('Cache')
+        tk.Label(cache_mgmt, text="Cache", bg=_CONT_BG, fg=_FG,
+                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 4))
+        ttk.Separator(cache_mgmt).pack(fill=tk.X, pady=(0, 10))
+        _disk_var = tk.StringVar(value="–")
+        disk_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
+        disk_row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(disk_row, text="Cache folder:", bg=_CONT_BG, fg=_FG,
+                 font=_LBL_FONT).pack(side=tk.LEFT)
+        tk.Label(disk_row, text=ui.tmp_dir, bg=_CONT_BG, fg=_FG_DIM,
+                 font=('Arial', 9)).pack(side=tk.LEFT, padx=(6, 12))
+        tk.Label(disk_row, textvariable=_disk_var, bg=_CONT_BG, fg=_FG,
+                 font=_LBL_FONT).pack(side=tk.LEFT)
+
+        def _compute_disk_size():
+            total = 0
+            n_files = 0
+            try:
+                for fn in os.listdir(ui.tmp_dir):
+                    if fn.endswith('.png'):
+                        try:
+                            total += os.path.getsize(os.path.join(ui.tmp_dir, fn))
+                            n_files += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            if total < 1024 ** 2:
+                sz = f"{total / 1024:.1f} KB"
+            elif total < 1024 ** 3:
+                sz = f"{total / 1024**2:.1f} MB"
+            else:
+                sz = f"{total / 1024**3:.2f} GB"
+            return f"{n_files} PNGs  ·  {sz}"
+
+        tree_frame = tk.Frame(cache_mgmt, bg=_CONT_BG)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        cols = ('type', 'pairs', 'segs', 'pngs', 'pct')
+        tree = ttk.Treeview(tree_frame, columns=cols, show='tree headings',
+                            height=10, selectmode='none')
+        tree.heading('#0', text='Session')
+        tree.heading('type', text='Type')
+        tree.heading('pairs', text='Pairs')
+        tree.heading('segs', text='Segs')
+        tree.heading('pngs', text='PNGs')
+        tree.heading('pct', text='%')
+        tree.column('#0', width=160, stretch=True)
+        tree.column('type', width=120, stretch=True)
+        tree.column('pairs', width=50, anchor='e', stretch=False)
+        tree.column('segs', width=45, anchor='e', stretch=False)
+        tree.column('pngs', width=80, anchor='e', stretch=False)
+        tree.column('pct', width=55, anchor='e', stretch=False)
+        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree.tag_configure('full',    background='#d4edda')
+        tree.tag_configure('partial', background='')
+        tree.tag_configure('low',     background='#fff3cd')
+        tree.tag_configure('empty',   background='#f8d7da')
+
+        def _pct_tag(pct):
+            if pct >= 100: return 'full'
+            if pct >= 50:  return 'partial'
+            if pct > 0:    return 'low'
+            return 'empty'
+
+        def _count_pngs_for_pair(ref, tgt, n_segs, seg_names, cfg_now, has_hi):
+            count = 0
+            for seg in list(range(n_segs)) + [n_segs]:
+                seg_nm = ('All_segments' if seg == n_segs
+                          else seg_names[seg] if seg < len(seg_names)
+                          else str(seg))
+                norms = cfg_now.get('active_norms') or []
+                norm_key = '_'.join(sorted(norms)) if norms else 'raw'
+                alpha = cfg_now.get('active_alpha', 0.001)
+                for hires in ([False, True] if has_hi else [False]):
+                    res_key = '_hi' if hires else '_lo'
+                    for ak in (f'_a{alpha:.3f}', ''):
+                        fn = (f"pair_{ref}_{tgt}_{seg_nm}_{norm_key}"
+                              f"{ak}{res_key}.png")
+                        if os.path.isfile(os.path.join(ui.tmp_dir, fn)):
+                            count += 1
+                            break
+            return count
+
+        def _populate_tree_async():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            _disk_var.set("…")
+            cfg_now = ui._cache_config or ui._current_display_config()
+            nd_sessions = {}
+            for tk_, ptr in ui.cd.data.items():
+                nd_str = str(tk_.nd())
+                nd_sessions.setdefault(nd_str, []).append((tk_, ptr))
+            loaded_nd = {str(k.nd()) for k in ui.cd.data.keys()
+                         if getattr(ui.cd, '_ccg', {}).get(k.nd()) is not None}
+
+            def _worker():
+                disk_txt = _compute_disk_size()
+                rows = []
+                for nd_str, entries in sorted(nd_sessions.items()):
+                    is_loaded = nd_str in loaded_nd
+                    rows.append(('__nd__', nd_str, None))
+                    for type_key, ptr in sorted(entries, key=lambda x: str(x[0])):
+                        type_lbl = ui._type_label(type_key)
+                        if not is_loaded:
+                            rows.append(('__type__', nd_str,
+                                         (type_lbl, '–', '–', '–', '–', 'partial')))
+                            continue
+                        pairs_arr = ptr.inds2
+                        n_pairs = len(pairs_arr)
+                        n_segs = ptr.n_segments
+                        seg_names = list(ptr.edge_times['label'].values)
+                        has_hi = (hasattr(ui.cd, '_ccg_highres') and
+                                  ui.cd._ccg_highres.get(type_key.nd()) is not None)
+                        res_mult = 2 if has_hi else 1
+                        expected = n_pairs * (n_segs + 1) * res_mult
+                        actual = sum(
+                            _count_pngs_for_pair(int(inds[0]), int(inds[1]),
+                                                 n_segs, seg_names, cfg_now, has_hi)
+                            for inds in pairs_arr)
+                        pct = int(100 * actual / expected) if expected > 0 else 0
+                        pct_str = f"{pct}%" if expected > 0 else '–'
+                        rows.append(('__type__', nd_str,
+                                     (type_lbl, n_pairs, n_segs,
+                                      f"{actual}/{expected}", pct_str, _pct_tag(pct))))
+                return disk_txt, rows
+
+            def _render(disk_txt, rows):
+                if not win.winfo_exists():
+                    return
+                _disk_var.set(disk_txt)
+                nodes = {}
+                for kind, nd_str, payload in rows:
+                    if kind == '__nd__':
+                        nodes[nd_str] = tree.insert('', 'end', text=nd_str,
+                                                    values=('', '', '', '', ''), open=True)
+                    else:
+                        node = nodes.get(nd_str)
+                        if node is None:
+                            continue
+                        type_lbl, n_pairs, n_segs, pngs, pct_str, tag = payload
+                        tree.insert(node, 'end',
+                                    values=(type_lbl, n_pairs, n_segs, pngs, pct_str),
+                                    tags=(tag,))
+
+            import threading as _threading
+            def _run():
+                try:
+                    disk_txt, rows = _worker()
+                except Exception:
+                    disk_txt, rows = "err", []
+                win.after(0, lambda: _render(disk_txt, rows))
+            _threading.Thread(target=_run, daemon=True).start()
+
+        auto_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
+        auto_row.pack(anchor='w', pady=(0, 4))
+        _auto_var = tk.BooleanVar(value=ui._auto_pregen_enabled)
+
+        def _on_auto_toggle():
+            ui._auto_pregen_enabled = _auto_var.get()
+            ui._save_ui_state()
+
+        ttk.Checkbutton(auto_row, text="Auto-generate cache on session switch",
+                        variable=_auto_var, command=_on_auto_toggle).pack(side=tk.LEFT)
+        btn_row2 = tk.Frame(cache_mgmt, bg=_CONT_BG)
+        btn_row2.pack(anchor='w', pady=(0, 8))
+        _pregen_status_var = tk.StringVar(value="Idle")
+        ttk.Button(btn_row2, text="⚡ Run Pre-gen",
+                   command=lambda: ui._start_pregen_with_defaults(
+                       status_var=_pregen_status_var)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(btn_row2, textvariable=_pregen_status_var,
+                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
+        ttk.Button(btn_row2, text="\U0001f5d1 Clear all PNGs",
+                   command=lambda: (ui._clear_all_png_cache(),
+                                    _populate_tree_async())).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(btn_row2, text="↻ Refresh",
+                   command=_populate_tree_async).pack(side=tk.LEFT, padx=(8, 0))
+
+        def _show_cache_section():
+            _show_section('Cache')
+            win.after(10, _populate_tree_async)
+        _nav_buttons['Cache'].config(command=_show_cache_section)
+
+        def _on_resize(_e=None):
+            try:
+                w = max(int(cont_canvas.winfo_width()), 320)
+                _cache_config_help.config(wraplength=max(w - 80, 220))
+            except Exception:
+                pass
+            try:
+                tfw = max(int(tree_frame.winfo_width()), 320)
+                fixed = 50 + 45 + 80 + 55 + 20
+                rem = max(tfw - fixed, 200)
+                tree.column('#0', width=int(rem * 0.55))
+                tree.column('type', width=int(rem * 0.45))
+            except Exception:
+                pass
+
+        win.bind('<Configure>', _on_resize)
+        _show_section('Display')
+
+
+
+class ExportOptionsDialog:
+    """Export options dialog — returns option dict or None if cancelled."""
+
+    @classmethod
+    def show(cls, ui: "CCGReviewUI", fmt: str, preview_pair=None, selected_pairs=None):
+        dlg = cls(ui, fmt, preview_pair, selected_pairs)
+        dlg.win.wait_window()
+        if not dlg._out:
+            return None
+        dlg._out['_action'] = dlg._action.get('mode', 'current')
+        dlg._out['_selected_pairs'] = list(selected_pairs) if selected_pairs else []
+        dlg._out['_preview_pair'] = preview_pair
+        dlg._out['_fmt'] = fmt
+        dlg._out['_selected_groups'] = list(dlg._selected_groups)
+        return dlg._out
+
+
+    def __init__(self, ui: "CCGReviewUI", fmt: str, preview_pair=None, selected_pairs=None):
+        self._ui = ui
+        self._fmt = fmt
+        self._preview_pair = preview_pair
+        self._selected_pairs = selected_pairs
+        self._out: dict = {}
+        self._action: dict = {'mode': 'current'}
+        self._selected_groups: list = []
+        self._selected_segments: list = []
+        self._selected_subfolders: list = []
+        self._prev_img: dict = {'obj': None}
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        fmt = self._fmt
+        preview_pair = self._preview_pair
+        selected_pairs = self._selected_pairs
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Export options")
+        self.win.resizable(True, True)
+
+        # ------------------------------
+        # Group selection (export scope)
+        # ------------------------------
+        # Available groups exclude internal/special/private entries.
+        all_groups = sorted(
+            g for g in ui._sel_data._groups.keys()
+            if g and not str(g).startswith('__')
+        )
+        avail_groups = [g for g in all_groups if not str(g).startswith(_SPECIAL_PREFIX)]
+        self._selected_groups: list = []
+
+        # Export defaults persisted in ui_state.json via ui._settings
+        _exp_def = (ui._settings.get('export_defaults', {}) if isinstance(getattr(self, '_settings', None), dict) else {}) or {}
+        ccg_var = tk.StringVar(value=str(_exp_def.get('ccg_color') or ""))
+        base_var = tk.StringVar(value=str(_exp_def.get('baseline_color') or ""))
+        cs_shade_var      = tk.StringVar(value=str(_exp_def.get('cs_shade_color') or ""))
+        tw_color_var          = tk.StringVar(value=str(_exp_def.get('test_window_color') or ""))
+        tw_alpha_var          = tk.StringVar(value=str(_exp_def.get('test_window_alpha', "0.12")))
+        pval_line_color_var   = tk.StringVar(value=str(_exp_def.get('pval_line_color') or ""))
+        alpha_line_color_var  = tk.StringVar(value=str(_exp_def.get('alpha_line_color') or ""))
+        minfs_var = tk.StringVar(value=str(_exp_def.get('min_text_size', "8")))
+        show_prev_var = tk.BooleanVar(value=False)
+        ccg_a_var = tk.StringVar(value=str(_exp_def.get('ccg_alpha', "0.5")))
+        base_a_var = tk.StringVar(value=str(_exp_def.get('baseline_alpha', "0.3")))
+        show_legend_var = tk.BooleanVar(value=bool(_exp_def.get('show_legend', True)))
+        xticks_var = tk.StringVar(value=str(_exp_def.get('xticks_raw', "")))
+        mirror_ticks_var = tk.BooleanVar(value=bool(_exp_def.get('mirror_xticks', True)))
+        adaptive_tw_var  = tk.BooleanVar(value=bool(_exp_def.get('adaptive_tw_export', False)))
+        title_shanks_var      = tk.BooleanVar(value=bool(_exp_def.get('title_show_shanks',       True)))
+        title_inds_var        = tk.BooleanVar(value=bool(_exp_def.get('title_show_inds',         True)))
+        title_type_var        = tk.BooleanVar(value=bool(_exp_def.get('title_show_type',         True)))
+        title_seg_var         = tk.BooleanVar(value=bool(_exp_def.get('title_show_seg',          True)))
+        title_norm_var        = tk.BooleanVar(value=bool(_exp_def.get('title_show_norm_details', True)))
+        title_sess_var        = tk.BooleanVar(value=bool(_exp_def.get('title_show_session',      False)))
+        # Segment export selection (multi): union of segment labels across loaded types for this session.
+        # Stored as a list of strings in export_defaults['export_segments'].
+        seg_export_default = list(_exp_def.get('export_segments') or []) if isinstance(_exp_def, dict) else []
+        if not seg_export_default:
+            seg_export_default = ["Current"]
+        try:
+            nd_key = ui.key.nd() if getattr(self, 'key', None) is not None else None
+            type_keys = ui._available_type_keys(nd_key) if nd_key is not None else []
+            seg_union: set[str] = set()
+            for tk_ in type_keys:
+                ptr = ui.cd.data.get(tk_)
+                try:
+                    labels = list(ptr.edge_times['label'].values) if ptr is not None else []
+                except Exception:
+                    labels = []
+                for lab in labels:
+                    if lab is None:
+                        continue
+                    s = str(lab).strip()
+                    if s:
+                        seg_union.add(s)
+            # Unique custom segment names across all sessions
+            custom_seg_names: set[str] = set()
+            for _csl in (getattr(self, '_custom_segments_by_session', None) or {}).values():
+                for _cs in (_csl or []):
+                    if isinstance(_cs, dict) and _cs.get('name'):
+                        custom_seg_names.add(str(_cs['name']))
+            seg_export_choices = (["Current", "All"] + sorted(seg_union)
+                                  + sorted(custom_seg_names - seg_union))
+        except Exception:
+            seg_export_choices = ["Current", "All"]
+
+        # Subfolder hierarchy selection (multi + order)
+        subfolder_default = list(_exp_def.get('subfolder_by') or []) if isinstance(_exp_def, dict) else []
+        _subfolder_choices = ["conn type", "excitatory/inhibitory", "session", "animal"]
+        # sanitize defaults
+        subfolder_default = [x for x in subfolder_default if x in _subfolder_choices]
+
+        # Scrollable body (export options can grow tall)
+        outer = ttk.Frame(win)
+        outer.grid(row=0, column=0, sticky="nsew")
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+
+        frm = ttk.Frame(canvas, padding=10)
+        win_id = canvas.create_window((0, 0), window=frm, anchor='nw')
+
+        def _on_frame_configure(_event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def _on_canvas_configure(event):
+            # Keep inner frame width matched to canvas width
+            try:
+                canvas.itemconfigure(win_id, width=event.width)
+            except Exception:
+                pass
+
+        frm.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        frm.columnconfigure(1, weight=1)
+
+        # Group selection UI (above plot configs)
+        grp_frame = ttk.LabelFrame(frm, text="Groups")
+        grp_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        grp_frame.columnconfigure(0, weight=1)
+        grp_frame.columnconfigure(2, weight=1)
+
+        ttk.Label(grp_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        ttk.Label(grp_frame, text="Selected:").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
+
+        avail_lb = tk.Listbox(grp_frame, height=6, exportselection=False)
+        sel_lb = tk.Listbox(grp_frame, height=6, exportselection=False)
+        for g in avail_groups:
+            avail_lb.insert(tk.END, g)
+        avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
+        sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
+
+        mid = ttk.Frame(grp_frame)
+        mid.grid(row=1, column=1, sticky="ns", padx=6)
+
+        selected_tags_var = tk.StringVar(value="")
+        tags_lbl = ttk.Label(grp_frame, textvariable=selected_tags_var, foreground="#555555", wraplength=560)
+        tags_lbl.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 6))
+
+        def _refresh_group_tags():
+            # "recorded below selection list": show selected group names (tags)
+            if self._selected_groups:
+                selected_tags_var.set("Selected group tags: " + ", ".join(self._selected_groups))
+            else:
+                selected_tags_var.set("")
+
+        def _add_groups():
+            sel = list(avail_lb.curselection())
+            if not sel:
+                return
+            # Add in displayed order
+            names = [avail_lb.get(i) for i in sel]
+            # Remove from bottom-up to keep indices valid
+            for i in sorted(sel, reverse=True):
+                avail_lb.delete(i)
+            for g in names:
+                if g not in self._selected_groups:
+                    self._selected_groups.append(g)
+                    sel_lb.insert(tk.END, g)
+            _refresh_group_tags()
+
+        def _remove_groups():
+            sel = list(sel_lb.curselection())
+            if not sel:
+                return
+            names = [sel_lb.get(i) for i in sel]
+            for i in sorted(sel, reverse=True):
+                sel_lb.delete(i)
+            for g in names:
+                try:
+                    self._selected_groups.remove(g)
+                except ValueError:
+                    pass
+            # Return to available list (keep sorted)
+            cur = list(avail_lb.get(0, tk.END))
+            cur.extend(names)
+            cur = sorted(set(cur))
+            avail_lb.delete(0, tk.END)
+            for g in cur:
+                avail_lb.insert(tk.END, g)
+            _refresh_group_tags()
+
+        ttk.Button(mid, text="Add →", command=_add_groups).pack(pady=(10, 6))
+        ttk.Button(mid, text="← Remove", command=_remove_groups).pack()
+        avail_lb.bind("<Double-Button-1>", lambda e: _add_groups())
+        sel_lb.bind("<Double-Button-1>", lambda e: _remove_groups())
+
+        # Plot config fields (start after group section)
+        row0 = 1
+        ttk.Label(frm, text="CCG color (name or #hex):").grid(row=row0 + 0, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=ccg_var, width=22).grid(row=row0 + 0, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Baseline color (name or #hex):").grid(row=row0 + 1, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=base_var, width=22).grid(row=row0 + 1, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="CS shade color (name or #hex):").grid(row=row0 + 2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=cs_shade_var, width=22).grid(row=row0 + 2, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Test window color (name or #hex):").grid(row=row0 + 3, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=tw_color_var, width=22).grid(row=row0 + 3, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Test window alpha (0–1):").grid(row=row0 + 4, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=tw_alpha_var, width=10).grid(row=row0 + 4, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="P-value line color (name or #hex):").grid(row=row0 + 5, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=pval_line_color_var, width=22).grid(row=row0 + 5, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Alpha threshold color (name or #hex):").grid(row=row0 + 6, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=alpha_line_color_var, width=22).grid(row=row0 + 6, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Min text size (pt):").grid(row=row0 + 7, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=minfs_var, width=10).grid(row=row0 + 7, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="CCG alpha (0–1):").grid(row=row0 + 8, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=ccg_a_var, width=10).grid(row=row0 + 8, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="Baseline alpha (0–1):").grid(row=row0 + 9, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=base_a_var, width=10).grid(row=row0 + 9, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Checkbutton(frm, text="Show legend", variable=show_legend_var).grid(
+            row=row0 + 10, column=0, sticky="w", pady=(6, 0))
+
+        ttk.Label(frm, text="X ticks (ms, comma-separated):").grid(row=row0 + 11, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=xticks_var, width=28).grid(row=row0 + 11, column=1, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Checkbutton(frm, text="Mirror to negative ticks", variable=mirror_ticks_var).grid(
+            row=row0 + 12, column=0, sticky="w", pady=(0, 4))
+        title_frame = ttk.LabelFrame(frm, text="Title")
+        title_frame.grid(row=row0 + 13, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Checkbutton(title_frame, text="Shanks",      variable=title_shanks_var).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Checkbutton(title_frame, text="Inds",        variable=title_inds_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(title_frame, text="Type",        variable=title_type_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(title_frame, text="Segment name", variable=title_seg_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(title_frame, text="Norm details", variable=title_norm_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(title_frame, text="Session",     variable=title_sess_var).pack(side=tk.LEFT, padx=(0, 4))
+        print_stg_var  = tk.BooleanVar(value=bool(_exp_def.get('print_cs_stg',  False)))
+        print_jbsi_var = tk.BooleanVar(value=bool(_exp_def.get('print_cs_jbsi', False)))
+        tw_cs_frame = ttk.Frame(frm)
+        tw_cs_frame.grid(row=row0 + 14, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Checkbutton(tw_cs_frame, text="Adaptive test window",
+                        variable=adaptive_tw_var).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Label(tw_cs_frame, text="Print CS:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Checkbutton(tw_cs_frame, text="STG",  variable=print_stg_var).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Checkbutton(tw_cs_frame, text="JBSI", variable=print_jbsi_var).pack(side=tk.LEFT)
+        lores_var  = tk.BooleanVar(value=bool(_exp_def.get('export_lores', True)))
+        hires_var  = tk.BooleanVar(value=bool(_exp_def.get('export_hires', False)))
+        res_frame  = ttk.Frame(frm)
+        res_frame.grid(row=row0 + 15, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(res_frame, text="Resolution:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Checkbutton(res_frame, text="Lo-res", variable=lores_var).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(res_frame, text="Hi-res", variable=hires_var).pack(side=tk.LEFT)
+
+        # Segments selection UI (same pattern as Groups)
+        seg_frame = ttk.LabelFrame(frm, text="Segments to export")
+        seg_frame.grid(row=row0 + 16, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+        seg_frame.columnconfigure(0, weight=1)
+        seg_frame.columnconfigure(2, weight=1)
+        ttk.Label(seg_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        ttk.Label(seg_frame, text="Selected:").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
+
+        seg_avail_lb = tk.Listbox(seg_frame, height=6, exportselection=False)
+        seg_sel_lb = tk.Listbox(seg_frame, height=6, exportselection=False)
+        for s in seg_export_choices:
+            seg_avail_lb.insert(tk.END, s)
+        # preload selected segments
+        self._selected_segments: list = []
+        for s in seg_export_default:
+            if s in seg_export_choices and s not in self._selected_segments:
+                self._selected_segments.append(s)
+                seg_sel_lb.insert(tk.END, s)
+        # remove preselected from available
+        if self._selected_segments:
+            cur = [seg_avail_lb.get(i) for i in range(seg_avail_lb.size())]
+            seg_avail_lb.delete(0, tk.END)
+            for s in cur:
+                if s not in self._selected_segments:
+                    seg_avail_lb.insert(tk.END, s)
+
+        seg_avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
+        seg_sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
+
+        seg_mid = ttk.Frame(seg_frame)
+        seg_mid.grid(row=1, column=1, sticky="ns", padx=6)
+
+        def _add_segments():
+            sel = list(seg_avail_lb.curselection())
+            if not sel:
+                return
+            names = [seg_avail_lb.get(i) for i in sel]
+            for i in sorted(sel, reverse=True):
+                seg_avail_lb.delete(i)
+            for s in names:
+                if s not in self._selected_segments:
+                    self._selected_segments.append(s)
+                    seg_sel_lb.insert(tk.END, s)
+
+        def _remove_segments():
+            sel = list(seg_sel_lb.curselection())
+            if not sel:
+                return
+            names = [seg_sel_lb.get(i) for i in sel]
+            for i in sorted(sel, reverse=True):
+                seg_sel_lb.delete(i)
+            for s in names:
+                try:
+                    self._selected_segments.remove(s)
+                except ValueError:
+                    pass
+            cur = list(seg_avail_lb.get(0, tk.END))
+            cur.extend(names)
+            cur = sorted(set(cur), key=lambda x: (0 if x == "Current" else 1 if x == "All" else 2, x))
+            seg_avail_lb.delete(0, tk.END)
+            for s in cur:
+                if s not in self._selected_segments:
+                    seg_avail_lb.insert(tk.END, s)
+
+        ttk.Button(seg_mid, text="Add →", command=_add_segments).pack(pady=(10, 6))
+        ttk.Button(seg_mid, text="← Remove", command=_remove_segments).pack()
+        seg_avail_lb.bind("<Double-Button-1>", lambda e: _add_segments())
+        seg_sel_lb.bind("<Double-Button-1>", lambda e: _remove_segments())
+
+        # Subfolder hierarchy UI (dual list; selected list is reorderable by drag)
+        sf_frame = ttk.LabelFrame(frm, text="Subfolder by (optional)")
+        sf_frame.grid(row=row0 + 17, column=0, columnspan=2, sticky="ew", pady=(6, 6))
+        sf_frame.columnconfigure(0, weight=1)
+        sf_frame.columnconfigure(2, weight=1)
+        ttk.Label(sf_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        ttk.Label(sf_frame, text="Selected (drag to reorder):").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
+
+        sf_avail_lb = tk.Listbox(sf_frame, height=4, exportselection=False)
+        sf_sel_lb = tk.Listbox(sf_frame, height=4, exportselection=False)
+        self._selected_subfolders: list[str] = list(subfolder_default)
+        for s in _subfolder_choices:
+            if s not in self._selected_subfolders:
+                sf_avail_lb.insert(tk.END, s)
+        for s in self._selected_subfolders:
+            sf_sel_lb.insert(tk.END, s)
+
+        sf_avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
+        sf_sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
+
+        sf_mid = ttk.Frame(sf_frame)
+        sf_mid.grid(row=1, column=1, sticky="ns", padx=6)
+
+        def _add_subfolders():
+            sel = list(sf_avail_lb.curselection())
+            if not sel:
+                return
+            names = [sf_avail_lb.get(i) for i in sel]
+            for i in sorted(sel, reverse=True):
+                sf_avail_lb.delete(i)
+            for s in names:
+                if s not in self._selected_subfolders:
+                    self._selected_subfolders.append(s)
+                    sf_sel_lb.insert(tk.END, s)
+
+        def _remove_subfolders():
+            sel = list(sf_sel_lb.curselection())
+            if not sel:
+                return
+            names = [sf_sel_lb.get(i) for i in sel]
+            for i in sorted(sel, reverse=True):
+                sf_sel_lb.delete(i)
+            for s in names:
+                try:
+                    self._selected_subfolders.remove(s)
+                except ValueError:
+                    pass
+            cur = list(sf_avail_lb.get(0, tk.END))
+            cur.extend(names)
+            cur = sorted(set(cur), key=lambda x: _subfolder_choices.index(x) if x in _subfolder_choices else 999)
+            sf_avail_lb.delete(0, tk.END)
+            for s in cur:
+                if s not in self._selected_subfolders:
+                    sf_avail_lb.insert(tk.END, s)
+
+        ttk.Button(sf_mid, text="Add →", command=_add_subfolders).pack(pady=(10, 6))
+        ttk.Button(sf_mid, text="← Remove", command=_remove_subfolders).pack()
+        sf_avail_lb.bind("<Double-Button-1>", lambda e: _add_subfolders())
+        sf_sel_lb.bind("<Double-Button-1>", lambda e: _remove_subfolders())
+
+        # Drag-reorder for selected subfolder listbox
+        _drag_state = {'i': None}
+        def _sf_on_press(e):
+            try:
+                _drag_state['i'] = sf_sel_lb.nearest(e.y)
+            except Exception:
+                _drag_state['i'] = None
+        def _sf_on_drag(e):
+            try:
+                i0 = _drag_state.get('i')
+                if i0 is None:
+                    return
+                i1 = sf_sel_lb.nearest(e.y)
+                if i1 == i0:
+                    return
+                item = sf_sel_lb.get(i0)
+                sf_sel_lb.delete(i0)
+                sf_sel_lb.insert(i1, item)
+                # keep backing list in sync
+                try:
+                    self._selected_subfolders.pop(i0)
+                    self._selected_subfolders.insert(i1, item)
+                except Exception:
+                    pass
+                _drag_state['i'] = i1
+                sf_sel_lb.selection_clear(0, tk.END)
+                sf_sel_lb.selection_set(i1)
+            except Exception:
+                pass
+        sf_sel_lb.bind("<Button-1>", _sf_on_press)
+        sf_sel_lb.bind("<B1-Motion>", _sf_on_drag)
+
+        self._out = {}
+        self._action = {'mode': 'current'}  # 'current' | 'all'
+
+        def _collect_opts() -> dict:
+            o: dict = {}
+            o['ccg_color']         = (ccg_var.get() or '').strip() or None
+            o['baseline_color']    = (base_var.get() or '').strip() or None
+            o['cs_shade_color']    = (cs_shade_var.get() or '').strip() or None
+            o['test_window_color'] = (tw_color_var.get() or '').strip() or None
+            o['pval_line_color']   = (pval_line_color_var.get() or '').strip() or None
+            o['alpha_line_color']  = (alpha_line_color_var.get() or '').strip() or None
+            try:
+                v = float(tw_alpha_var.get())
+                o['test_window_alpha'] = v if np.isfinite(v) else None
+            except Exception:
+                o['test_window_alpha'] = None
+            try:
+                v = float(minfs_var.get())
+                o['min_text_size'] = v if np.isfinite(v) and v > 0 else None
+            except Exception:
+                o['min_text_size'] = None
+            try:
+                v = float(ccg_a_var.get())
+                o['ccg_alpha'] = v if np.isfinite(v) else None
+            except Exception:
+                o['ccg_alpha'] = None
+            try:
+                v = float(base_a_var.get())
+                o['baseline_alpha'] = v if np.isfinite(v) else None
+            except Exception:
+                o['baseline_alpha'] = None
+            o['show_legend'] = bool(show_legend_var.get())
+            o['mirror_xticks'] = bool(mirror_ticks_var.get())
+            raw = (xticks_var.get() or '').strip()
+            if raw:
+                vals = []
+                for part in raw.replace(';', ',').split(','):
+                    s = part.strip()
+                    if not s:
+                        continue
+                    try:
+                        vals.append(float(s))
+                    except Exception:
+                        continue
+                o['xticks_ms'] = vals
+            else:
+                o['xticks_ms'] = None
+            # Store raw for defaults (preserves user's formatting)
+            o['_xticks_raw'] = raw
+            o['export_segments']   = list(self._selected_segments) if self._selected_segments else ["Current"]
+            o['subfolder_by']      = list(self._selected_subfolders)
+            o['adaptive_tw_export'] = bool(adaptive_tw_var.get())
+            o['print_cs_stg']       = bool(print_stg_var.get())
+            o['print_cs_jbsi']      = bool(print_jbsi_var.get())
+            o['export_lores']       = bool(lores_var.get())
+            o['export_hires']       = bool(hires_var.get())
+            o['title_show_shanks']       = bool(title_shanks_var.get())
+            o['title_show_inds']         = bool(title_inds_var.get())
+            o['title_show_type']         = bool(title_type_var.get())
+            o['title_show_seg']          = bool(title_seg_var.get())
+            o['title_show_norm_details'] = bool(title_norm_var.get())
+            o['title_show_session']      = bool(title_sess_var.get())
+            return o
+
+        def _ok():
+            self._out.update(_collect_opts())
+            self.win.destroy()
+
+        def _cancel():
+            self._out.clear()
+            self.win.destroy()
+
+        def _save_export_defaults():
+            """Persist current export settings as defaults for next time."""
+            opts = _collect_opts()
+            try:
+                ui._settings.setdefault('export_defaults', {})
+                ui._settings['export_defaults'] = {
+                    'ccg_color':          opts.get('ccg_color') or "",
+                    'baseline_color':     opts.get('baseline_color') or "",
+                    'cs_shade_color':     opts.get('cs_shade_color') or "",
+                    'test_window_color':  opts.get('test_window_color') or "",
+                    'test_window_alpha':  opts.get('test_window_alpha') if opts.get('test_window_alpha') is not None else "0.12",
+                    'pval_line_color':    opts.get('pval_line_color') or "",
+                    'alpha_line_color':   opts.get('alpha_line_color') or "",
+                    'min_text_size': opts.get('min_text_size') if opts.get('min_text_size') is not None else "8",
+                    'ccg_alpha': opts.get('ccg_alpha') if opts.get('ccg_alpha') is not None else "0.5",
+                    'baseline_alpha': opts.get('baseline_alpha') if opts.get('baseline_alpha') is not None else "0.3",
+                    'show_legend': bool(opts.get('show_legend', True)),
+                    'mirror_xticks': bool(opts.get('mirror_xticks', True)),
+                    'xticks_raw': opts.get('_xticks_raw', ''),
+                    'export_segments':    opts.get('export_segments', ['Current']),
+                    'subfolder_by':       opts.get('subfolder_by', []),
+                    'adaptive_tw_export': bool(opts.get('adaptive_tw_export', False)),
+                    'print_cs_stg':       bool(opts.get('print_cs_stg',  False)),
+                    'print_cs_jbsi':      bool(opts.get('print_cs_jbsi', False)),
+                    'export_lores':       bool(opts.get('export_lores', True)),
+                    'export_hires':       bool(opts.get('export_hires', False)),
+                    'title_show_shanks':       bool(opts.get('title_show_shanks',       True)),
+                    'title_show_inds':         bool(opts.get('title_show_inds',         True)),
+                    'title_show_type':         bool(opts.get('title_show_type',         True)),
+                    'title_show_seg':          bool(opts.get('title_show_seg',          True)),
+                    'title_show_norm_details': bool(opts.get('title_show_norm_details', True)),
+                    'title_show_session':      bool(opts.get('title_show_session',      False)),
+                }
+                # Save UI state without touching selections
+                ui._save_all_state(selection_name=None, silent=True)
+            except Exception:
+                pass
+
+        # Preview area (optional)
+        prev_holder = ttk.Frame(frm)
+        prev_holder.grid(row=row0 + 19, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        prev_holder.columnconfigure(0, weight=1)
+        prev_holder.rowconfigure(0, weight=1)
+        prev_label = ttk.Label(prev_holder, text="", anchor="center")
+        prev_label.grid(row=0, column=0, sticky="nsew")
+        self._prev_img = {'obj': None}
+
+        def _render_preview():
+            if not show_prev_var.get():
+                prev_label.configure(text="")
+                prev_label.configure(image="")
+                self._prev_img['obj'] = None
+                return
+            if preview_pair is None:
+                prev_label.configure(text="(no pair selected)")
+                return
+            try:
+                # Build a PNG using the same rendering path (but without mutating UI state).
+                # Preview uses the current segment/resolution mode and first selected pair.
+                ref, tgt = int(preview_pair[0]), int(preview_pair[1])
+                seg = int(ui.current_segment)
+                highres = bool(getattr(self, '_highres_mode', False))
+                # Render preview directly (bypass viewer PNG cache) with export overrides.
+                tmp_over = {
+                    'ccg_color': (ccg_var.get() or '').strip() or None,
+                    'baseline_color': (base_var.get() or '').strip() or None,
+                    'cs_shade_color': (cs_shade_var.get() or '').strip() or None,
+                    'test_window_color': (tw_color_var.get() or '').strip() or None,
+                    'test_window_alpha': (float(tw_alpha_var.get()) if str(tw_alpha_var.get()).strip() else None),
+                    'pval_line_color':  (pval_line_color_var.get() or '').strip() or None,
+                    'alpha_line_color': (alpha_line_color_var.get() or '').strip() or None,
+                    'min_text_size': float(minfs_var.get()) if str(minfs_var.get()).strip() else None,
+                    'ccg_alpha': float(ccg_a_var.get()) if str(ccg_a_var.get()).strip() else None,
+                    'baseline_alpha': float(base_a_var.get()) if str(base_a_var.get()).strip() else None,
+                    'show_legend': bool(show_legend_var.get()),
+                    'mirror_xticks': bool(mirror_ticks_var.get()),
+                    'xticks_ms': ([(float(x.strip())) for x in (xticks_var.get() or '').split(',')
+                                   if x.strip()] if (xticks_var.get() or '').strip() else None),
+                    'print_cs_stg':  False,
+                    'print_cs_jbsi': False,
+                    'title_show_shanks':       bool(title_shanks_var.get()),
+                    'title_show_inds':         bool(title_inds_var.get()),
+                    'title_show_type':         bool(title_type_var.get()),
+                    'title_show_seg':          bool(title_seg_var.get()),
+                    'title_show_norm_details': bool(title_norm_var.get()),
+                    'title_show_session':      bool(title_sess_var.get()),
+                }
+                old = getattr(self, '_export_overrides', None)
+                ui._export_overrides = tmp_over
+                try:
+                    import tempfile, os as _os
+                    ctx = ui._render_engine.build_context(
+                        (ref, tgt), seg, highres, None, None)
+                    tmp_png = tempfile.mktemp(suffix='.png')
+                    ui._render_engine.write_png(ctx, tmp_png)
+                    png_path = tmp_png
+                finally:
+                    ui._export_overrides = old
+
+                try:
+                    from PIL import Image, ImageTk
+                    im = Image.open(png_path)
+                    max_w = 700
+                    max_h = 450
+                    w, h = im.size
+                    scale = min(max_w / max(w, 1), max_h / max(h, 1), 1.0)
+                    if scale < 1.0:
+                        im = im.resize((int(w * scale), int(h * scale)))
+                    tk_im = ImageTk.PhotoImage(im)
+                    prev_label.configure(image=tk_im, text="")
+                    self._prev_img['obj'] = tk_im  # keep reference
+                    try:
+                        _os.remove(png_path)
+                    except Exception:
+                        pass
+                except Exception:
+                    prev_label.configure(text=f"Preview ready: {os.path.basename(png_path)}")
+            except Exception as ex:
+                prev_label.configure(text=f"Preview failed: {ex}")
+
+        ttk.Checkbutton(frm, text="Show preview", variable=show_prev_var,
+                        command=_render_preview).grid(row=row0 + 18, column=0, sticky="w", pady=(8, 0))
+        # Re-render preview when override fields change (only if enabled)
+        for _v in (ccg_var, base_var, cs_shade_var, tw_color_var, tw_alpha_var,
+                   pval_line_color_var, alpha_line_color_var,
+                   minfs_var, ccg_a_var, base_a_var, xticks_var):
+            try:
+                _v.trace_add('write', lambda *a: _render_preview())
+            except Exception:
+                pass
+        try:
+            show_legend_var.trace_add('write', lambda *a: _render_preview())
+        except Exception:
+            pass
+        try:
+            mirror_ticks_var.trace_add('write', lambda *a: _render_preview())
+        except Exception:
+            pass
+        for _bv in (title_shanks_var, title_inds_var, title_type_var,
+                    title_seg_var, title_norm_var, title_sess_var):
+            try:
+                _bv.trace_add('write', lambda *a: _render_preview())
+            except Exception:
+                pass
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=row0 + 20, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text="Save export settings", command=_save_export_defaults).pack(
+            side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text=f"Export current as {fmt.upper()}", command=_ok).pack(side=tk.RIGHT)
+
+        # If multiple pairs explicitly selected in current list, also offer that
+        if selected_pairs and len(selected_pairs) > 1:
+            def _export_all():
+                self._action['mode'] = 'all'
+                _ok()
+            ttk.Button(btns, text=f"Export all selected ({len(selected_pairs)})…",
+                       command=_export_all).pack(side=tk.RIGHT, padx=(6, 6))
+
+        # Export bookmarked pairs
+        n_bm = len(getattr(self, '_bookmarked_pairs', set()) or set())
+        if n_bm > 0:
+            def _export_bookmarked():
+                self._action['mode'] = 'bookmarked'
+                _ok()
+            ttk.Button(btns, text=f"Export bookmarked ({n_bm})…",
+                       command=_export_bookmarked).pack(side=tk.RIGHT, padx=(6, 6))
+
+        # Export pairs from groups — show buttons whenever any groups exist
+        any_groups = bool(all_groups)  # all_groups includes special groups (filtered only __-prefix)
+        if any_groups:
+            def _export_groups():
+                self._action['mode'] = 'groups'
+                _ok()
+            ttk.Button(btns, text="Export selected group(s)…",
+                       command=_export_groups).pack(side=tk.RIGHT, padx=(6, 6))
+
+        self.win.protocol("WM_DELETE_WINDOW", _cancel)
+        self.win.bind("<Escape>", lambda e: _cancel())
+        self.win.update_idletasks()
+        self.win.lift()
+        self.win.focus_force()
+
+
+class TemplateEditorDialog:
+    """Non-modal dialog for creating/editing per-group CCG shape templates."""
+
+    @classmethod
+    def show(cls, ui: "CCGReviewUI", preselect: str = None) -> None:
+        cls(ui, preselect)
+
+    def __init__(self, ui: "CCGReviewUI", preselect: str = None):
+        self._ui = ui
+        self._build(preselect)
+
+    def _build(self, preselect: str = None):
+        ui = self._ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("CCG Template Editor")
+        self.win.geometry("1100x820")
+        self.win.resizable(True, True)
+
+        def _on_close():
+            self.win.destroy()
+            ui.root.focus_set()   # return keyboard focus to main window
+
+        self.win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        # Determine CCG half-window in ms (for preview x-range)
+        _x_half = 10.0
+        try:
+            _conf = (getattr(ui.ccg_data, 'conf', None)
+                     or getattr(ui.ccg_data, '_conf', None))
+            if _conf is not None:
+                _x_half = float(_conf.duration) * 500.0   # s → half-ms
+        except Exception:
+            pass
+
+        # Available conn_types for filter column
+        _all_ct = ['(all)', 'Excitatory', 'Inhibitory']
+        try:
+            for k in ui.cd.data:
+                ct = k.conn_type
+                s = ('-'.join(ct) if isinstance(ct, tuple) else str(ct)) if ct else '?'
+                if s not in _all_ct:
+                    _all_ct.append(s)
+        except Exception:
+            pass
+
+        # ── Top bar ──────────────────────────────────────────────────────
+        top = ttk.Frame(win)
+        top.pack(fill=tk.X, padx=8, pady=4)
+
+        ttk.Label(top, text="Group:").pack(side=tk.LEFT)
+        group_var = tk.StringVar()
+        group_cb  = ttk.Combobox(top, textvariable=group_var, state='readonly',
+                                 width=18)
+        group_cb.pack(side=tk.LEFT, padx=(4, 8))
+
+        ttk.Label(top, text="Smooth (ms):").pack(side=tk.LEFT)
+        smooth_var = tk.DoubleVar(value=ui._templates_smooth_ms)
+        ttk.Spinbox(top, textvariable=smooth_var, from_=0.0, to=10.0,
+                    increment=0.5, width=6).pack(side=tk.LEFT, padx=(2, 8))
+
+        # ── Main pane: left=rules, right=preview ─────────────────────────
+        pane = ttk.PanedWindow(win, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        # ── Left: rules table ────────────────────────────────────────────
+        left = ttk.Frame(pane)
+        pane.add(left, weight=1)
+
+        tbl_frame = ttk.LabelFrame(left, text="Rules")
+        tbl_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
+
+        _RULE_TYPES = ['peak', 'trough', 'baseline_low', 'not in',
+                       'trough-peak', 'peak-trough', 'min_bincount', 'min_bincount_avg']
+        _RES_OPTIONS = ['both', 'hi', 'lo']
+        col_hdrs   = ("", "Type", "Lag min", "Lag max",
+                      "W min", "W max", "Smooth", "Conn type", "Res", "Req", "Min cnt")
+        col_widths = (2,   8,     7,        7,
+                      7,    7,     5,       9,          6,    4,    7)
+        for c, (lbl, w) in enumerate(zip(col_hdrs, col_widths)):
+            ttk.Label(tbl_frame, text=lbl,
+                      font=('TkDefaultFont', 9, 'bold'),
+                      width=w).grid(row=0, column=c, padx=2, pady=2, sticky='w')
+
+        rule_rows: list = []
+        _row_counter = [0]   # monotonic — never reused so add_btn never collides
+
+        _preview_after = [None]
+
+        def _schedule_preview(*_):
+            if _preview_after[0] is not None:
+                try:
+                    self.win.after_cancel(_preview_after[0])
+                except Exception:
+                    pass
+            _preview_after[0] = self.win.after(120, _update_preview)
+
+        def _add_rule_row(rule_type='peak', lag_min=0.0, lag_max=5.0,
+                          w_min='', w_max='', smooth_ms='', conn_type='(all)',
+                          resolution='both', required=True, ref_group='',
+                          min_count=''):
+            _row_counter[0] += 1
+            r = _row_counter[0]
+            row = {
+                'type':       tk.StringVar(value=rule_type),
+                'lag_min':    tk.StringVar(value=str(lag_min)),
+                'lag_max':    tk.StringVar(value=str(lag_max)),
+                'w_min':      tk.StringVar(value='' if w_min == '' else str(w_min)),
+                'w_max':      tk.StringVar(value='' if w_max == '' else str(w_max)),
+                'smooth_ms':  tk.StringVar(value='' if smooth_ms == '' else str(smooth_ms)),
+                'conn_type':  tk.StringVar(value=conn_type),
+                'resolution': tk.StringVar(value=resolution),
+                'required':   tk.BooleanVar(value=required),
+                'ref_group':  tk.StringVar(value=ref_group),
+                'min_count':  tk.StringVar(value='' if min_count == '' else str(min_count)),
+                '_row':       r,
+            }
+
+            def _on_type_change(*_, rr=row):
+                rtype = rr['type'].get()
+                is_bl       = rtype == 'baseline_low'
+                is_notin    = rtype == 'not in'
+                is_mincount = rtype in ('min_bincount', 'min_bincount_avg')
+                # Lag entries: hidden for 'not in'
+                for e in rr.get('_lag_entries', []):
+                    e.grid_remove() if is_notin else e.grid()
+                # Width entries: hidden for 'not in' and 'min_bincount'; disabled for baseline_low
+                for e in rr.get('_width_entries', []):
+                    if is_notin or is_mincount:
+                        e.grid_remove()
+                    else:
+                        e.grid()
+                        e.config(state='disabled' if is_bl else 'normal')
+                # Smooth entry: hidden for 'not in' only
+                sm = rr.get('_smooth_entry')
+                if sm:
+                    sm.grid_remove() if is_notin else sm.grid()
+                # Ref group combobox: only for 'not in'
+                ref_cb = rr.get('_ref_cb')
+                if ref_cb:
+                    cur = group_var.get()
+                    known = sorted({g for g in list(ui._templates.keys())
+                                    + list(ui._sel_data._groups.keys() if ui._sel_data._groups else [])
+                                    if g != cur})
+                    ref_cb['values'] = known
+                    ref_cb.grid() if is_notin else ref_cb.grid_remove()
+                # Min count entry: only for 'min_bincount' rules
+                mc_e = rr.get('_min_count_entry')
+                if mc_e:
+                    mc_e.grid() if is_mincount else mc_e.grid_remove()
+                # Res combobox: hidden for 'not in'
+                res_cb = rr.get('_res_cb')
+                if res_cb:
+                    res_cb.grid_remove() if is_notin else res_cb.grid()
+                _schedule_preview()
+
+            def _del(rr=row):
+                for w in tbl_frame.grid_slaves():
+                    if w.grid_info().get('row') == rr['_row']:
+                        w.destroy()
+                if rr in rule_rows:
+                    rule_rows.remove(rr)
+                try:
+                    _place_add_btn()
+                except Exception:
+                    pass
+                _schedule_preview()
+
+            del_btn = ttk.Button(tbl_frame, text='×', width=2, command=_del)
+            del_btn.grid(row=r, column=0, padx=2)
+            row['_del_btn'] = del_btn
+
+            ttk.Combobox(tbl_frame, textvariable=row['type'],
+                         values=_RULE_TYPES, state='readonly',
+                         width=9).grid(row=r, column=1, padx=2, pady=1)
+            row['type'].trace_add('write', _on_type_change)
+
+            lag_entries = []
+            _lag_limits = {'lag_min': -_x_half, 'lag_max': _x_half}
+            for c, key in enumerate(['lag_min', 'lag_max'], start=2):
+                e = ttk.Entry(tbl_frame, textvariable=row[key], width=7)
+                e.grid(row=r, column=c, padx=2, pady=1, sticky='ew')
+                row[key].trace_add('write', _schedule_preview)
+                def _fill_limit(_, rr=row, k=key):
+                    rr[k].set(str(_lag_limits[k]))
+                    _schedule_preview()
+                    return 'break'
+                e.bind('<Double-Button-3>', _fill_limit)
+                e.bind('<Double-Button-2>', _fill_limit)
+                lag_entries.append(e)
+            row['_lag_entries'] = lag_entries
+
+            width_entries = []
+            for c, key in enumerate(['w_min', 'w_max'], start=4):
+                e = ttk.Entry(tbl_frame, textvariable=row[key], width=7)
+                e.grid(row=r, column=c, padx=2, pady=1, sticky='ew')
+                row[key].trace_add('write', _schedule_preview)
+                width_entries.append(e)
+            row['_width_entries'] = width_entries
+
+            # Per-rule smooth (ms) — blank means use global default
+            sm_e = ttk.Entry(tbl_frame, textvariable=row['smooth_ms'], width=5)
+            sm_e.grid(row=r, column=6, padx=2, pady=1, sticky='ew')
+            row['smooth_ms'].trace_add('write', _schedule_preview)
+            row['_smooth_entry'] = sm_e
+
+            # 'not in' group selector — spans columns 2-5, hidden by default
+            ref_cb = ttk.Combobox(tbl_frame, textvariable=row['ref_group'],
+                                  values=[], state='readonly', width=20)
+            ref_cb.grid(row=r, column=2, columnspan=4, padx=2, pady=1, sticky='ew')
+            ref_cb.grid_remove()
+            row['_ref_cb'] = ref_cb
+            row['ref_group'].trace_add('write', _schedule_preview)
+
+            ttk.Combobox(tbl_frame, textvariable=row['conn_type'],
+                         values=_all_ct, state='readonly',
+                         width=9).grid(row=r, column=7, padx=2, pady=1)
+            row['conn_type'].trace_add('write', _schedule_preview)
+
+            res_cb = ttk.Combobox(tbl_frame, textvariable=row['resolution'],
+                                  values=_RES_OPTIONS, state='readonly', width=5)
+            res_cb.grid(row=r, column=8, padx=2, pady=1)
+            row['resolution'].trace_add('write', _schedule_preview)
+            row['_res_cb'] = res_cb
+
+            ttk.Checkbutton(tbl_frame, variable=row['required']).grid(
+                row=r, column=9, padx=2, pady=1)
+            row['required'].trace_add('write', _schedule_preview)
+
+            # Min count entry (column 10) — shown only for min_bincount rules
+            mc_e = ttk.Entry(tbl_frame, textvariable=row['min_count'], width=7)
+            mc_e.grid(row=r, column=10, padx=2, pady=1, sticky='ew')
+            mc_e.grid_remove()   # hidden by default; _on_type_change shows it
+            row['min_count'].trace_add('write', _schedule_preview)
+            row['_min_count_entry'] = mc_e
+            rule_rows.append(row)
+            _on_type_change()   # set initial disabled state
+
+        # Add rule button
+        add_btn = ttk.Button(tbl_frame, text='+ Add rule')
+        _is_main = [False]
+
+        def _place_add_btn():
+            if _is_main[0]:
+                add_btn.grid_remove()
+                return
+            max_r = max((rr['_row'] for rr in rule_rows), default=0)
+            add_btn.grid(row=max_r + 1, column=0, columnspan=5,
+                         sticky='w', padx=4, pady=4)
+
+        def _add_and_reposition(**kw):
+            _add_rule_row(**kw)
+            _place_add_btn()
+            _schedule_preview()
+        add_btn.config(command=_add_and_reposition)
+        _place_add_btn()   # show button immediately even with no rules yet
+
+        # ── Extra constraints ────────────────────────────────────────────
+        extra = ttk.Frame(left)
+        extra.pack(fill=tk.X, pady=2)
+
+        baseline_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(extra, text="Expect low baseline before t=0",
+                        variable=baseline_var).pack(side=tk.LEFT, padx=4)
+        baseline_var.trace_add('write', _schedule_preview)
+
+        ttk.Label(extra, text="  n_peaks:").pack(side=tk.LEFT)
+        npmin_var = tk.StringVar(value='')
+        npmax_var = tk.StringVar(value='')
+        ttk.Label(extra, text="min").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Entry(extra, textvariable=npmin_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(extra, text="max").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Entry(extra, textvariable=npmax_var, width=4).pack(side=tk.LEFT, padx=2)
+
+        # ── Test / score readout (per-rule breakdown) ─────────────────────
+        test_txt = tk.Text(left, height=5, width=52, font=('Courier', 8),
+                           state=tk.DISABLED, relief=tk.FLAT,
+                           bg='#F0F4FA', fg='#1A237E', wrap=tk.WORD)
+        test_txt.pack(fill=tk.X, padx=4, pady=2)
+        test_txt.tag_config('pass', foreground='#2E7D32')   # green
+        test_txt.tag_config('fail', foreground='#C62828')   # red
+        test_txt.tag_config('head', foreground='#1565C0', font=('Courier', 8, 'bold'))
+
+        def _test_set(text, tag=None):
+            test_txt.config(state=tk.NORMAL)
+            test_txt.delete('1.0', tk.END)
+            test_txt.insert(tk.END, text, tag or '')
+            test_txt.config(state=tk.DISABLED)
+
+        def _test_append(text, tag=None):
+            test_txt.config(state=tk.NORMAL)
+            test_txt.insert(tk.END, text, tag or '')
+            test_txt.config(state=tk.DISABLED)
+
+        # ── Right: live preview canvas ────────────────────────────────────
+        right = ttk.LabelFrame(pane, text="Preview (Gaussian approximation)")
+        pane.add(right, weight=2)
+
+        _fig  = Figure(figsize=(4.8, 3.8), dpi=90, facecolor='#F8F8F8')
+        _ax   = _fig.add_subplot(111)
+        _canvas = FigureCanvasTkAgg(_fig, master=right)
+        _canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # ── Preview update ────────────────────────────────────────────────
+        _COLORS = ['#2196F3', '#E91E63', '#4CAF50', '#FF9800',
+                   '#9C27B0', '#00BCD4', '#795548', '#607D8B']
+
+        def _update_preview(*_):
+            _ax.clear()
+            x = np.linspace(-_x_half, _x_half, 600)
+            composite = np.zeros_like(x)
+
+            _ax.axhline(0, color='#AAAAAA', linewidth=0.8, linestyle='-')
+            _ax.axvline(0, color='#CCCCCC', linewidth=0.6)
+
+            has_rules = False
+            for i, row in enumerate(rule_rows):
+                col = _COLORS[i % len(_COLORS)]
+                req = row['required'].get()
+                alpha_band = 0.10
+                alpha_line = 0.9 if req else 0.45
+                ls = '-' if req else '--'
+                lbl_suffix = '' if req else ' (opt)'
+                rtype = row['type'].get()
+
+                try:
+                    lmin = float(row['lag_min'].get())
+                    lmax = float(row['lag_max'].get())
+                except ValueError:
+                    continue
+
+                center = (lmin + lmax) / 2.0
+
+                if rtype == 'not in':
+                    # 'not in' is a logic gate — not a visual shape, skip preview
+                    continue
+
+                if rtype in ('trough-peak', 'peak-trough'):
+                    # Biphasic: draw a trough+peak (or peak+trough) side by side
+                    span    = lmax - lmin
+                    c_left  = lmin + span * 0.25
+                    c_right = lmin + span * 0.75
+                    wmax_s  = row['w_max'].get().strip()
+                    wmin_s  = row['w_min'].get().strip()
+                    w_val   = (float(wmax_s) if wmax_s else
+                               (float(wmin_s) * 1.5 if wmin_s else span * 0.35))
+                    sigma_b = max(w_val / 2.3548, 1e-3)
+                    if rtype == 'trough-peak':
+                        pol_l, pol_r = -1, 1
+                    else:
+                        pol_l, pol_r = 1, -1
+                    g = (pol_l * np.exp(-0.5 * ((x - c_left)  / sigma_b) ** 2) +
+                         pol_r * np.exp(-0.5 * ((x - c_right) / sigma_b) ** 2))
+                    _ax.axvspan(lmin, lmax, alpha=alpha_band, color=col, linewidth=0)
+                    ct_lbl  = row['conn_type'].get()
+                    res_lbl = row['resolution'].get()
+                    ct_str  = f' [{ct_lbl}]' if ct_lbl != '(all)' else ''
+                    res_str = f' ({res_lbl})' if res_lbl and res_lbl != 'both' else ''
+                    label   = f"R{i+1} {rtype}{lbl_suffix}{ct_str}{res_str}"
+                    _ax.plot(x, g, color=col, linewidth=1.8, linestyle=ls, label=label)
+                    composite += g
+                    has_rules = True
+                    continue
+
+                if rtype == 'baseline_low':
+                    # Shaded suppressed region — flat at ~0.1
+                    _ax.axvspan(lmin, lmax, alpha=0.18, color=col, linewidth=0)
+                    _ax.annotate(
+                        f'R{i+1} baseline_low{lbl_suffix}',
+                        xy=(center, 0.08), fontsize=7, color=col,
+                        ha='center', va='bottom',
+                        bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.6))
+                    has_rules = True
+                    continue
+
+                wmax_s = row['w_max'].get().strip()
+                wmin_s = row['w_min'].get().strip()
+                wmax = float(wmax_s) if wmax_s else None
+                wmin = float(wmin_s) if wmin_s else None
+
+                # Choose display FWHM
+                if wmax is not None:
+                    fwhm = wmax
+                elif wmin is not None:
+                    fwhm = wmin * 1.5
+                else:
+                    fwhm = max(0.3, (lmax - lmin) * 0.75)
+                sigma = max(fwhm / 2.3548, 1e-3)
+
+                polarity = 1 if rtype == 'peak' else -1
+                g = polarity * np.exp(-0.5 * ((x - center) / sigma) ** 2)
+                composite += g
+
+                # Lag range band
+                _ax.axvspan(lmin, lmax, alpha=alpha_band, color=col, linewidth=0)
+                # Width constraint markers (dashed verticals at ±fwhm/2)
+                if wmax is not None:
+                    for side in (-1, 1):
+                        _ax.axvline(center + side * wmax / 2,
+                                    color=col, linewidth=0.8, linestyle=':',
+                                    alpha=0.7)
+                # Gaussian curve
+                ct_lbl  = row['conn_type'].get()
+                res_lbl = row.get('resolution') and row['resolution'].get()
+                ct_str  = f' [{ct_lbl}]' if ct_lbl != '(all)' else ''
+                res_str = f' ({res_lbl})' if res_lbl and res_lbl != 'both' else ''
+                label = f"R{i+1} {rtype}{lbl_suffix}{ct_str}{res_str}"
+                _ax.plot(x, g, color=col, linewidth=1.8, linestyle=ls, label=label)
+                # Peak marker
+                _ax.plot(center, polarity,
+                         marker='v' if polarity == -1 else '^',
+                         color=col, markersize=7,
+                         markeredgecolor='#333', markeredgewidth=0.6)
+                has_rules = True
+
+            # 'not in' exclusion rules — list as text below title
+            excl = [rr['ref_group'].get() for rr in rule_rows
+                    if rr['type'].get() == 'not in' and rr['ref_group'].get()]
+            if excl:
+                _ax.set_title(
+                    (_ax.get_title() or '') + f"\n✗ excl: {', '.join(excl)}",
+                    fontsize=9, fontweight='bold')
+
+            # Composite envelope
+            if sum(1 for rr in rule_rows
+                   if rr['type'].get() not in ('baseline_low', 'not in')) > 1:
+                _ax.plot(x, composite, color='#222', linewidth=2.2,
+                         alpha=0.5, linestyle=':', label='sum')
+
+            # Baseline-before-zero constraint
+            if baseline_var.get():
+                _ax.axvspan(-_x_half, 0, alpha=0.06, color='#F44336')
+                _ax.text(-_x_half * 0.92, 1.05, '← low baseline',
+                         color='#F44336', fontsize=7)
+
+            # Axes styling
+            _ax.set_xlim(-_x_half, _x_half)
+            cur_ylim = _ax.get_ylim()
+            _ax.set_ylim(min(-0.55, cur_ylim[0] - 0.05),
+                         max(1.25, cur_ylim[1] + 0.05))
+            _ax.set_xlabel("Lag (ms)", fontsize=8)
+            _ax.set_ylabel("Normalized amplitude", fontsize=8)
+            _ax.tick_params(labelsize=7)
+            gname = group_var.get()
+            _ax.set_title(f"Template: {gname}" if gname else "Template preview",
+                          fontsize=9, fontweight='bold')
+            if has_rules:
+                _ax.legend(fontsize=7, loc='upper right',
+                           framealpha=0.8, handlelength=1.6)
+            _fig.tight_layout(pad=0.8)
+            _canvas.draw_idle()
+
+        # ── Helpers ──────────────────────────────────────────────────────
+        def _current_template():
+            def _f(s):
+                """Parse a string to float; return None if blank or unparseable."""
+                v = str(s).strip()
+                if not v:
+                    return None
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return None
+
+            _POL = {'peak': 1, 'trough': -1, 'baseline_low': 0, 'not in': 2,
+                    'trough-peak': 3, 'peak-trough': 4,
+                    'min_bincount': 5, 'min_bincount_avg': 6}
+
+            rules = []
+            for row in rule_rows:
+                rtype = row['type'].get()
+                ct_s  = row['conn_type'].get()
+                res_s = row['resolution'].get()
+                req   = bool(row['required'].get())
+                pol   = _POL.get(rtype, 1)
+                if rtype == 'not in':
+                    rg = row['ref_group'].get().strip()
+                    if rg:
+                        rules.append(PeakRule(lag_min=0.0, lag_max=0.0,
+                                              polarity=2, required=req,
+                                              resolution=res_s, conn_type=ct_s,
+                                              ref_group=rg))
+                    continue
+                # lag_min / lag_max: use 0.0 as fallback so the rule is never silently dropped
+                lmin = _f(row['lag_min'].get()) if _f(row['lag_min'].get()) is not None else 0.0
+                lmax = _f(row['lag_max'].get()) if _f(row['lag_max'].get()) is not None else 0.0
+                rules.append(PeakRule(
+                    lag_min=lmin, lag_max=lmax,
+                    width_min=_f(row['w_min'].get()),
+                    width_max=_f(row['w_max'].get()),
+                    polarity=pol, required=req,
+                    resolution=res_s, conn_type=ct_s,
+                    smooth_ms=_f(row['smooth_ms'].get()),
+                    min_count=_f(row['min_count'].get()),
+                ))
+            npmin_s = npmin_var.get().strip()
+            npmax_s = npmax_var.get().strip()
+            return GroupTemplate(
+                name=group_var.get(),
+                peak_rules=rules,
+                n_peaks_min=int(npmin_s) if npmin_s else None,
+                n_peaks_max=int(npmax_s) if npmax_s else None,
+                baseline_low_before_zero=baseline_var.get(),
+            )
+
+        def _load_group(name):
+            _is_main[0] = (name == 'Main')
+            for rr in list(rule_rows):
+                for w in tbl_frame.grid_slaves():
+                    if w.grid_info().get('row') == rr['_row']:
+                        w.destroy()
+            rule_rows.clear()
+            tmpl = ui._templates.get(name)
+            if tmpl is not None:
+                for pr in tmpl.peak_rules:
+                    if pr.polarity == 2:
+                        _add_rule_row(
+                            rule_type='not in',
+                            conn_type=getattr(pr, 'conn_type', '(all)'),
+                            resolution=getattr(pr, 'resolution', 'both'),
+                            required=pr.required,
+                            ref_group=getattr(pr, 'ref_group', ''),
+                        )
+                        continue
+                    rtype = {0: 'baseline_low', 1: 'peak', -1: 'trough',
+                             3: 'trough-peak', 4: 'peak-trough',
+                             5: 'min_bincount', 6: 'min_bincount_avg'}.get(pr.polarity, 'trough')
+                    _add_rule_row(
+                        rule_type=rtype,
+                        lag_min=pr.lag_min, lag_max=pr.lag_max,
+                        w_min='' if pr.width_min is None else pr.width_min,
+                        w_max='' if pr.width_max is None else pr.width_max,
+                        smooth_ms='' if getattr(pr, 'smooth_ms', None) is None
+                                  else pr.smooth_ms,
+                        conn_type=getattr(pr, 'conn_type', '(all)'),
+                        resolution=getattr(pr, 'resolution', 'both'),
+                        required=pr.required,
+                        min_count='' if getattr(pr, 'min_count', None) is None
+                                  else pr.min_count,
+                    )
+                baseline_var.set(tmpl.baseline_low_before_zero)
+                npmin_var.set('' if tmpl.n_peaks_min is None else str(tmpl.n_peaks_min))
+                npmax_var.set('' if tmpl.n_peaks_max is None else str(tmpl.n_peaks_max))
+            else:
+                baseline_var.set(False)
+                npmin_var.set('')
+                npmax_var.set('')
+            _place_add_btn()
+            if _is_main[0]:
+                for rr in rule_rows:
+                    if rr.get('_del_btn'):
+                        rr['_del_btn'].config(state='disabled')
+            _update_preview()
+
+        def _on_group_change(*_):
+            if group_var.get() == _SEP:
+                return
+            _load_group(group_var.get())
+            _update_preview()
+
+        group_var.trace_add('write', lambda *_: _update_preview())
+
+        def _save_current():
+            name = group_var.get()
+            if not name or name == 'Main':
+                return
+            ui._templates[name] = _current_template()
+            ui._templates_smooth_ms = smooth_var.get()
+
+        def _test_on_current():
+            _save_current()
+            if not ui._templates:
+                _test_set("No templates defined.")
+                return
+            if ui.ccg_data is None:
+                _test_set("No CCG data loaded.")
+                return
+            conf = getattr(ui.ccg_data, 'conf', None) or getattr(
+                ui.ccg_data, '_conf', None)
+            if conf is None:
+                _test_set("Cannot read conf.")
+                return
+            nd = ui.key.nd()
+            cd = (ui.cd._ccg_highres.get(nd)
+                  if (hasattr(ui.cd, '_ccg_highres')
+                      and ui.cd._ccg_highres
+                      and ui.cd._ccg_highres.get(nd) is not None)
+                  else ui.ccg_data)
+            try:
+                ct = ui.key.conn_type
+                ct_str = ('-'.join(ct) if isinstance(ct, (list, tuple))
+                          else str(ct)) if ct else '(all)'
+            except Exception:
+                ct_str = '(all)'
+            clf = CCGTemplateClassifier(cd, conf, smooth_ms=smooth_var.get(),
+                                        conn_type_str=ct_str)
+            clf.load_templates(ui._templates)
+            inds = ui.all_inds[ui.current_pair_idx]
+            ref, tgt = int(inds[0]), int(inds[1])
+            detail = clf.score_pair_detail(ref, tgt)
+
+            test_txt.config(state=tk.NORMAL)
+            test_txt.delete('1.0', tk.END)
+            for gname, gdata in sorted(detail.items(),
+                                       key=lambda x: -x[1]['score']):
+                score = gdata['score']
+                test_txt.insert(tk.END, f"{gname}: {score:.2f}\n", ('head',))
+                for r in gdata['rules']:
+                    sym  = '✓' if r['matched'] else '✗'
+                    rtag = 'pass' if r['matched'] else 'fail'
+                    req  = '(req)' if r['required'] else '(opt)'
+                    test_txt.insert(
+                        tk.END,
+                        f"  {sym} {req} {r['label']}  sim={r['sim']:.2f}\n",
+                        rtag,
+                    )
+            test_txt.config(state=tk.DISABLED)
+
+            # Overlay the smoothed CCG on the preview canvas (normalized 0–1)
+            try:
+                _, ccg_smooth = clf.smooth_ccg(ref, tgt)
+                nb  = len(ccg_smooth)
+                bs  = conf.duration / (nb - 1) if nb > 1 else getattr(conf, 'bin_size', 0.001)
+                cb  = (nb - 1) // 2
+                lag_ms = (np.arange(nb) - cb) * bs * 1e3
+                vmin = ccg_smooth.min()
+                vmax = ccg_smooth.max()
+                ccg_norm = (ccg_smooth - vmin) / (vmax - vmin + 1e-12)
+                # Scale to y-range of current preview (peaks at ≈1 → shift to top quarter)
+                ccg_scaled = ccg_norm * 1.0  # maps 0→0, 1→1 in normalized units
+                _update_preview()   # redraw Gaussians first
+                _ccg_line, = _ax.plot(lag_ms, ccg_scaled, color='#1A237E',
+                                      linewidth=1.5, alpha=0.75, zorder=5,
+                                      label=f'CCG smooth ({ref}→{tgt})')
+                _ax.legend(fontsize=7, loc='upper right', framealpha=0.8, handlelength=1.6)
+                _canvas.draw_idle()
+
+                def _clear_ccg_overlay():
+                    try:
+                        _ccg_line.remove()
+                        _canvas.draw_idle()
+                    except Exception:
+                        pass
+                self.win.after(3000, _clear_ccg_overlay)
+            except Exception:
+                pass
+
+        def _save_to_file():
+            _save_current()
+            if not ui._templates:
+                messagebox.showwarning("Save templates",
+                                       "No templates to save.", parent=win)
+                return
+            path = ui._templates_path
+            try:
+                CCGTemplateClassifier.save_templates_to_file(
+                    path, ui._templates,
+                    smooth_ms=smooth_var.get(),
+                    classify_with=sorted(ui._active_templates) if ui._active_templates else None)
+            except Exception as exc:
+                messagebox.showerror("Save templates",
+                                     f"Save failed:\n{exc}", parent=win)
+                return
+            messagebox.showinfo("Save templates", f"Saved to:\n{path}", parent=win)
+            _rebuild_toggle_bar()
+
+        def _load_from_file():
+            path = filedialog.askopenfilename(
+                parent=win, title="Load templates",
+                initialdir=ui._clf_dir,
+                filetypes=[("JSON", "*.json"), ("All", "*")])
+            if not path:
+                return
+            loaded = CCGTemplateClassifier.load_templates_from_file(path)
+            if not loaded:
+                messagebox.showwarning("Load templates",
+                                       "No templates found in file.", parent=win)
+                return
+            ui._templates.update(loaded)
+            meta = CCGTemplateClassifier.load_file_metadata(path)
+            if meta.get('smooth_ms') is not None:
+                smooth_var.set(meta['smooth_ms'])
+                ui._templates_smooth_ms = meta['smooth_ms']
+            if meta.get('classify_with') is not None:
+                ui._active_templates = set(meta['classify_with'])
+                _rebuild_toggle_bar()
+            _refresh_groups()
+            if group_var.get() in loaded:
+                _load_group(group_var.get())
+            messagebox.showinfo("Load templates",
+                                f"Loaded {len(loaded)} template(s).", parent=win)
+
+        _SEP = '─────────────'
+
+        def _refresh_groups():
+            all_tmpl = list(ui._templates.keys())
+            main_names = ['Main'] if 'Main' in all_tmpl else []
+            secondary_tmpl = [n for n in all_tmpl if n != 'Main']
+            other_names = sorted(n for n in (ui._sel_data._groups or {})
+                             if n not in all_tmpl and not n.startswith('__'))
+            names = main_names[:]
+            if main_names and (secondary_tmpl or other_names):
+                names.append(_SEP)
+            names.extend(secondary_tmpl)
+            if secondary_tmpl and other_names:
+                names.append(_SEP)
+            elif not secondary_tmpl and other_names and main_names:
+                pass  # separator already added after Main
+            names.extend(other_names)
+            group_cb['values'] = names
+            cur = group_var.get()
+            if cur not in names and names:
+                first = next((n for n in names if n != _SEP), '')
+                group_var.set(first)
+                if first:
+                    _load_group(first)
+
+        group_cb.bind('<<ComboboxSelected>>', _on_group_change)
+
+        # ── Active-for-classify toggle bar ───────────────────────────────
+        # Toggle buttons (one per template) control which templates are used
+        # by Auto-classify.  State lives in ui._active_templates (empty = all).
+        act_frame = ttk.LabelFrame(win, text="Classify with:")
+        act_frame.pack(fill=tk.X, padx=8, pady=(0, 2))
+
+        _toggle_btns: dict = {}   # name → tk.Button
+
+        def _rebuild_toggle_bar():
+            for w in act_frame.winfo_children():
+                w.destroy()
+            _toggle_btns.clear()
+            for name in sorted(ui._templates):
+                if name == 'Main':
+                    continue
+                is_active = (not ui._active_templates or name in ui._active_templates)
+
+                btn = tk.Button(
+                    act_frame,
+                    text=f"{name}*" if is_active else name,
+                    relief='sunken' if is_active else 'raised'
+                )
+
+                def _toggle(n=name):
+                    print("clicked:", n)
+                    print("before:", ui._active_templates)
+
+                    if not ui._active_templates:
+                        ui._active_templates = set(ui._templates) - {n}
+                    elif n in ui._active_templates:
+                        ui._active_templates.discard(n)
+                        if not ui._active_templates:
+                            ui._active_templates = set()
+                    else:
+                        ui._active_templates.add(n)
+                    _rebuild_toggle_bar()
+
+                btn.config(command=_toggle)
+                btn.pack(side=tk.LEFT)
+                _toggle_btns[name] = btn
+        _rebuild_toggle_bar()
+
+        # ── Bottom buttons ────────────────────────────────────────────────
+        bot = ttk.Frame(win)
+        bot.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Button(bot, text="Test on current pair",
+                   command=_test_on_current).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bot, text="Save to file…",
+                   command=_save_to_file).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bot, text="Load from file…",
+                   command=_load_from_file).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bot, text="Close", command=_on_close).pack(side=tk.RIGHT, padx=4)
+
+        _refresh_groups()
+        if preselect and preselect in group_cb['values']:
+            group_var.set(preselect)
+            _load_group(preselect)
+        _rebuild_toggle_bar()
+        _place_add_btn()
+        _update_preview()
 
 class CCGReviewUI:
     """
@@ -158,10 +2362,13 @@ class CCGReviewUI:
         self.ccg_data = self.cd._ccg.get(key.nd()) if getattr(self.cd, '_ccg', None) else None
 
         # Neurons (normalization + network + waveforms)
-        self.neurons = (self.cd.nd.data[key.nd()]
-                        if getattr(self.cd, 'nd', None) is not None
-                           and self.ccg_pointer is not None
-                        else None)
+        try:
+            self.neurons = (self.cd.nd.data[key.nd()]
+                            if getattr(self.cd, 'nd', None) is not None
+                               and self.ccg_pointer is not None
+                            else None)
+        except KeyError:
+            self.neurons = None
 
         self._sel_data = SelectionData()
 
@@ -224,10 +2431,6 @@ class CCGReviewUI:
         self._custom_ccg_thread: threading.Thread = None
         self._custom_ccg_thread_result: list = []
         self._custom_ccg_poll_id = None
-        # Multi-chunk time-slider splits: track batches so we can prompt to save all
-        self._split_batch_next_id: int = 1
-        self._split_batch_counts: dict[int, int] = {}
-        self._split_batch_chunk_names: dict[int, list[str]] = {}
 
         # Extend-window CCG (tentative feature): cache per (pair, seg, res, ms)
         self._extend_cache: dict = {}
@@ -298,14 +2501,7 @@ class CCGReviewUI:
         self._panel_vars: dict = {}          # populated in setup_panels_menu
         self._waveforms_visible = False
 
-        # Time-slider / custom-segment state
-        self._slider_t_start: float = None
-        self._slider_t_end: float = None
-        self._slider_dragging: str = None    # 'start' | 'end' | None
-        self._ts_epoch_bounds = []           # [(t0_sec, t1_sec, label), …]
-        self._ts_total_sec: float = 0.0
-        self._ts_active_label: str = None    # label filter for overlapping themes (None = show all)
-        self._ts_segment_name: str = ""      # name for the next custom segment
+        # Custom segment state
         # Custom segments: each entry =
         #   {'name':str, 't0':float, 't1':float,
         #    'ccg': [1,N,N,bins], 'ccg_null', 'pval', 'pval_corrected',
@@ -325,19 +2521,6 @@ class CCGReviewUI:
         self._any_pair_handle_list: list[tuple] = []
         self._png_sess_slug: str = ""
         self._custom_ccg_inventory_sig: tuple = ()
-        # Load custom CCG dialog: refresh when saves complete while window may stay open
-        self._ts_load_custom_ccg_win = None
-        self._ts_load_custom_ccg_refresh = None  # callable() → repopulate tree
-
-        # Time slider theme state
-        self._ts_themes: dict = {}            # name -> Epoch object
-        self._ts_current_theme: str = 'segments'  # default = CCG segment edges
-
-        # Zoom/selection state (selection tool cursors, independent of custom-window cursors)
-        self._ts_zoom_start: float = None
-        self._ts_zoom_end: float = None
-        self._ts_zoom_dragging: str = None   # 'start' | 'end' | None
-
 
         # PNG cache
         self.tmp_dir = str(
@@ -612,7 +2795,7 @@ class CCGReviewUI:
         self._main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
 
         # Time slider (full-width, hidden by default; packed before paned)
-        self.setup_time_slider_panel(self._main_frame)
+        self.time_slider = TimeSliderPanel(self._main_frame, self)
 
         # Three-column PanedWindow
         self._paned = ttk.PanedWindow(self._main_frame, orient=tk.HORIZONTAL)
@@ -793,10 +2976,24 @@ class CCGReviewUI:
 
         # Restore core display vars (baseline solid/outline, test window, etc.)
         disp = s.get('display_vars', None)
-        if isinstance(disp, dict):
+        if isinstance(disp, dict) and hasattr(self, 'center_container'):
             try:
+                cc = self.center_container
+                panels = [getattr(cc, p, None) for p in
+                          ('correlogram_panel', 'baseline_panel', 'cs_panel',
+                           'jitter_panel', 'acg_panel')]
+                panels = [p for p in panels if p is not None]
                 for attr, val in disp.items():
-                    v = getattr(self, attr, None)
+                    if val is None:
+                        continue
+                    # Search panels first (where most display vars live), then self
+                    v = None
+                    for panel in panels:
+                        v = getattr(panel, attr, None)
+                        if v is not None:
+                            break
+                    if v is None:
+                        v = getattr(self, attr, None)
                     if v is None:
                         continue
                     try:
@@ -855,32 +3052,7 @@ class CCGReviewUI:
                 file_sess = base.split("__", 1)[0] if "__" in base else session
                 if not os.path.exists(p):
                     continue
-                npz = np.load(p, allow_pickle=False)
-                cs = dict(
-                    name=str(npz['name_']),
-                    t0=float(npz['t0_']),
-                    t1=float(npz['t1_']),
-                    ccg=npz['ccg'],
-                    ccg_null=npz['ccg_null'],
-                    pval=npz['pval'],
-                    pval_corrected=npz['pval_corrected'],
-                    compute_sec=(float(npz['compute_sec_'])
-                                 if 'compute_sec_' in npz else float('nan')),
-                    active_duration=(float(npz['active_duration_'])
-                                     if 'active_duration_' in npz else float('nan')),
-                    total_time_hours=(float(npz['total_time_hours_'])
-                                      if 'total_time_hours_' in npz else None),
-                    filter_state=(json.loads(str(npz['filter_state_']))
-                                  if 'filter_state_' in npz else {}),
-                    metadata=(json.loads(str(npz['metadata_']))
-                              if 'metadata_' in npz else {}),
-                    src_path=p,
-                    **(({'firing_rates': npz['firing_rates']})
-                       if 'firing_rates' in npz else {}),
-                )
-                for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-                    if k in npz:
-                        cs[k] = npz[k]
+                cs = _custom_ccg_mod.load_custom_segment_from_npz(p)
                 lst = self._custom_segments_by_session.setdefault(file_sess, [])
                 self._upsert_custom_segment_by_name(lst, cs)
                 if lst is self._custom_segments:
@@ -899,13 +3071,14 @@ class CCGReviewUI:
 
     # ── Menubar ────────────────────────────────────────────────────────
 
+    @property
     def _ui_state_path(self):
         return os.path.join(self._sel_save_dir, 'ui_state.json')
 
     def _load_ui_state(self) -> dict:
         """Return full saved UI state dict, or {} if not found/invalid."""
         try:
-            with open(self._ui_state_path(), 'r') as f:
+            with open(self._ui_state_path, 'r') as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -975,7 +3148,7 @@ class CCGReviewUI:
                     if isinstance(cs, dict) and cs.get('src_path')
                 ],
             }
-            with open(self._ui_state_path(), 'w') as f:
+            with open(self._ui_state_path, 'w') as f:
                 json.dump(state, f, indent=2)
         except Exception:
             pass
@@ -1144,179 +3317,7 @@ class CCGReviewUI:
             self._menu_tooltip_win = None
 
     def _simulation_dialog(self):
-        """Open the neuron-pair CCG simulation dialog."""
-        win = tk.Toplevel(self.root)
-        win.title("CCG Simulation")
-        win.geometry("620x780")
-
-        # Vertical PanedWindow: top = params, bottom = CCG result
-        pw = tk.PanedWindow(win, orient=tk.VERTICAL,
-                            sashrelief=tk.RAISED, sashwidth=5, bg='#CCCCCC')
-        pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        # ── Top pane: parameters ──
-        param_frame = ttk.Frame(pw, padding=6)
-        pw.add(param_frame, stretch='never')
-
-        # Name + duration row
-        top = ttk.Frame(param_frame)
-        top.pack(fill=tk.X, pady=(0, 4))
-
-        ttk.Label(top, text="Name:").pack(side=tk.LEFT)
-        sim_name_var = tk.StringVar(value="sim1")
-        ttk.Entry(top, textvariable=sim_name_var, width=20).pack(side=tk.LEFT, padx=(4, 12))
-
-        ttk.Label(top, text="Duration:").pack(side=tk.LEFT)
-        sim_dur_var = tk.StringVar(value="60")
-        ttk.Entry(top, textvariable=sim_dur_var, width=8).pack(side=tk.LEFT, padx=(4, 4))
-        sim_dur_unit = tk.StringVar(value="s")
-        ttk.OptionMenu(top, sim_dur_unit, "s", "ms", "s", "min", "hour").pack(side=tk.LEFT)
-
-        # Common parameters row
-        common = ttk.Frame(param_frame)
-        common.pack(fill=tk.X, pady=(0, 6))
-
-        ttk.Label(common, text="Noise (gauss \u03c3):").pack(side=tk.LEFT)
-        sim_noise_var = tk.StringVar(value="0.0")
-        ttk.Entry(common, textvariable=sim_noise_var, width=7).pack(side=tk.LEFT, padx=(2, 10))
-
-        ttk.Label(common, text="Excess synchrony (%):").pack(side=tk.LEFT)
-        sim_sync_var = tk.StringVar(value="0")
-        ttk.Entry(common, textvariable=sim_sync_var, width=7).pack(side=tk.LEFT, padx=(2, 10))
-
-        ttk.Label(common, text="Synaptic delay (ms):").pack(side=tk.LEFT)
-        sim_delay_var = tk.StringVar(value="1.5")
-        ttk.Entry(common, textvariable=sim_delay_var, width=7).pack(side=tk.LEFT, padx=(2, 0))
-
-        # Two-column neuron panels
-        cols = ttk.Frame(param_frame)
-        cols.pack(fill=tk.X, pady=(0, 6))
-        cols.columnconfigure(0, weight=1)
-        cols.columnconfigure(1, weight=1)
-
-        sim_vars = {}
-        for col_idx, (role, title) in enumerate([('ref', 'Ref neuron'), ('tgt', 'Tgt neuron')]):
-            panel = ttk.LabelFrame(cols, text=title, padding=8)
-            panel.grid(row=0, column=col_idx, sticky='nsew', padx=(0 if col_idx == 0 else 4, 0))
-
-            v = {}
-            ttk.Label(panel, text="Nickname:").pack(anchor='w')
-            v['nickname'] = tk.StringVar(value=role)
-            ttk.Entry(panel, textvariable=v['nickname'], width=16).pack(anchor='w', pady=(0, 6))
-
-            ttk.Label(panel, text="Type:").pack(anchor='w')
-            v['type'] = tk.StringVar(value="E")
-            type_frame = ttk.Frame(panel)
-            type_frame.pack(anchor='w', pady=(0, 6))
-            for t in ("E", "I", "any"):
-                ttk.Radiobutton(type_frame, text=t, variable=v['type'], value=t).pack(side=tk.LEFT, padx=(0, 6))
-
-            ttk.Label(panel, text="Firing rate (Hz):").pack(anchor='w')
-            v['firing_rate'] = tk.StringVar(value="5.0")
-            ttk.Entry(panel, textvariable=v['firing_rate'], width=10).pack(anchor='w', pady=(0, 6))
-
-            ttk.Label(panel, text="Burst config:", font=('TkDefaultFont', 9, 'bold')).pack(anchor='w', pady=(4, 2))
-
-            ttk.Label(panel, text="Burst rate (%):").pack(anchor='w')
-            v['burst_rate'] = tk.StringVar(value="0")
-            ttk.Entry(panel, textvariable=v['burst_rate'], width=10).pack(anchor='w', pady=(0, 4))
-
-            ttk.Label(panel, text="Number of spikes/burst:").pack(anchor='w')
-            v['n_bursts'] = tk.StringVar(value="3")
-            ttk.Entry(panel, textvariable=v['n_bursts'], width=10).pack(anchor='w', pady=(0, 4))
-
-            ttk.Label(panel, text="Burst interval (ms):").pack(anchor='w')
-            v['burst_interval'] = tk.StringVar(value="5.0")
-            ttk.Entry(panel, textvariable=v['burst_interval'], width=10).pack(anchor='w', pady=(0, 4))
-
-            sim_vars[role] = v
-
-        # ── Bottom pane: CCG result + buttons ──
-        bottom_frame = ttk.Frame(pw, padding=6)
-        pw.add(bottom_frame, stretch='always')
-
-        # State dict to hold simulation results for redraws
-        sim_state = {}
-
-        sim_fig = Figure(figsize=(6, 3.5))
-        sim_ax = sim_fig.add_subplot(111)
-        sim_ax.set_title("(no simulation run yet)", fontsize=10)
-        sim_canvas = FigureCanvasTkAgg(sim_fig, master=bottom_frame)
-
-        sim_res_label_var = tk.StringVar(value="Res: lowres")
-
-        # Buttons row at top of bottom pane
-        btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(btn_frame, text="Compute CCG", command=lambda: self._run_simulation(
-            win, sim_name_var, sim_dur_var, sim_dur_unit,
-            sim_noise_var, sim_sync_var, sim_delay_var,
-            sim_vars, sim_fig, sim_ax, sim_canvas, sim_state,
-            sim_res_label_var)).pack(side=tk.LEFT)
-        ttk.Button(
-            btn_frame, textvariable=sim_res_label_var,
-            command=lambda: self._sim_toggle_resolution(
-                sim_state, sim_fig, sim_ax, sim_canvas, sim_res_label_var),
-            width=16).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT)
-
-        sim_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        def _sim_ctrl_r(_e=None):
-            self._sim_toggle_resolution(
-                sim_state, sim_fig, sim_ax, sim_canvas, sim_res_label_var)
-            return 'break'
-
-        # One bind on the Toplevel: bindtags deliver Key-* here for any focused
-        # descendant (plot canvas, buttons, …) without double-firing.
-        win.bind('<Control-r>', _sim_ctrl_r)
-        win.bind('<Command-r>', _sim_ctrl_r)
-
-    @staticmethod
-    def _sim_generate_train(duration_s, firing_rate, noise_std,
-                            burst_rate_pct, n_per_burst, burst_interval_ms):
-        """Generate a Poisson spike train with optional bursting.
-
-        Parameters
-        ----------
-        duration_s : float  — total duration in seconds
-        firing_rate : float — mean rate in Hz
-        noise_std : float   — Gaussian jitter (seconds) added to each spike
-        burst_rate_pct : float — percentage of spikes that trigger a burst
-        n_per_burst : int   — number of extra spikes per burst
-        burst_interval_ms : float — inter-spike interval within a burst (ms)
-
-        Returns
-        -------
-        np.ndarray of spike times in seconds, sorted
-        """
-        rng = np.random.default_rng()
-        # Base Poisson process
-        n_expected = int(firing_rate * duration_s * 1.2) + 100
-        isis = rng.exponential(1.0 / firing_rate, size=n_expected)
-        times = np.cumsum(isis)
-        times = times[times < duration_s]
-
-        # Gaussian noise
-        if noise_std > 0:
-            times = times + rng.normal(0, noise_std, size=len(times))
-
-        # Bursting: for each spike with probability burst_rate_pct/100,
-        # add n_per_burst extra spikes at burst_interval_ms intervals
-        if burst_rate_pct > 0 and n_per_burst > 0:
-            burst_mask = rng.random(len(times)) < (burst_rate_pct / 100.0)
-            burst_origins = times[burst_mask]
-            extra = []
-            isi_s = burst_interval_ms / 1000.0
-            for b in burst_origins:
-                for k in range(1, n_per_burst + 1):
-                    extra.append(b + k * isi_s)
-            if extra:
-                times = np.concatenate([times, np.array(extra)])
-
-        times = np.sort(times)
-        times = times[(times >= 0) & (times < duration_s)]
-        return times
+        SimulationDialog.show(self)
 
     def _sim_compute_correlogram(self, sim_neurons, bin_size, duration, conf):
         """Return (ccg_1d, null_1d, pval_1d, bin_size_eff) for one bin size."""
@@ -1412,11 +3413,11 @@ class CCGReviewUI:
             return
 
         # Generate spike trains
-        ref_train = self._sim_generate_train(
+        ref_train = _sim_generate_train(
             dur_s, params['ref']['rate'], noise_std,
             params['ref']['burst_rate'], params['ref']['n_bursts'],
             params['ref']['burst_interval'])
-        tgt_train = self._sim_generate_train(
+        tgt_train = _sim_generate_train(
             dur_s, params['tgt']['rate'], noise_std,
             params['tgt']['burst_rate'], params['tgt']['n_bursts'],
             params['tgt']['burst_interval'])
@@ -1466,85 +3467,7 @@ class CCGReviewUI:
         self._sim_redraw_plot(fig, ax, canvas, sim_state)
 
     def _jitter_queue_dialog(self):
-        """Show a dialog listing all queued (and running) jitter/CCG tasks."""
-        win = tk.Toplevel(self.root)
-        win.title("Jitter Queue")
-        win.geometry("460x340")
-
-        frame = ttk.Frame(win, padding=8)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(frame, text="Queued tasks", font=('TkDefaultFont', 11, 'bold')).pack(anchor='w')
-
-        list_frame = ttk.Frame(frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
-        lb = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
-                        selectmode=tk.EXTENDED, font=('TkFixedFont', 10))
-        scrollbar.config(command=lb.yview)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        def _refresh():
-            lb.delete(0, tk.END)
-            for i, task in enumerate(self._jitter_pending):
-                ref, tgt = task[1], task[2]
-                n = task[3]
-                res = task[4]
-                seg = task[6] if len(task) > 6 else None
-                seg_s = f" seg{seg}" if seg is not None else ""
-                status = "▶ RUNNING" if i == 0 and self._is_task_running() else "  queued"
-                lb.insert(tk.END, f"{status}  jitter [{ref},{tgt}] n={n} {res}{seg_s}")
-            for i, task in enumerate(self._custom_ccg_pending):
-                name = (task.get('name') if isinstance(task, dict) else task[3])
-                status = "▶ RUNNING" if i == 0 and self._custom_ccg_is_running() else "  queued"
-                lb.insert(tk.END, f"{status}  custom CCG '{name}'")
-            if lb.size() == 0:
-                lb.insert(tk.END, "  (empty)")
-
-        def _delete_selected():
-            sel = lb.curselection()
-            if not sel:
-                return
-            n_jitter = len(self._jitter_pending)
-            n_ccg    = len(self._custom_ccg_pending)
-            running_jitter = self._is_task_running()
-            running_ccg    = self._custom_ccg_is_running()
-            jitter_to_remove = []
-            ccg_to_remove    = []
-            for s in sel:
-                if s < n_jitter:
-                    if s == 0 and running_jitter:
-                        continue
-                    jitter_to_remove.append(s)
-                else:
-                    ccg_idx = s - n_jitter
-                    if ccg_idx == 0 and running_ccg:
-                        continue
-                    ccg_to_remove.append(ccg_idx)
-            if jitter_to_remove:
-                pending = list(self._jitter_pending)
-                for idx in sorted(jitter_to_remove, reverse=True):
-                    pending.pop(idx)
-                self._jitter_pending.clear()
-                self._jitter_pending.extend(pending)
-                self._update_jitter_btn_text()
-            if ccg_to_remove:
-                pending = list(self._custom_ccg_pending)
-                for idx in sorted(ccg_to_remove, reverse=True):
-                    removed = pending.pop(idx)
-                    self._on_split_batch_task_done(removed)
-                self._custom_ccg_pending.clear()
-                self._custom_ccg_pending.extend(pending)
-            _refresh()
-
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(btn_frame, text="Delete selected", command=_delete_selected).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Refresh", command=_refresh).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT)
-
-        _refresh()
+        JitterQueueDialog.show(self)
 
     def _jitter_clear_queue(self):
         """Remove all pending (non-running) tasks from jitter and custom CCG queues."""
@@ -1585,414 +3508,7 @@ class CCGReviewUI:
                                   'https://github.com/selina-lii/NeuroPy'))
 
     def _settings_dialog(self):
-        """VSCode-style settings dialog with a left nav and right content area."""
-        win = tk.Toplevel(self.root)
-        win.title("Settings")
-        win.geometry("620x420")
-        win.resizable(True, True)
-        win.protocol("WM_DELETE_WINDOW", win.destroy)
-        win.bind('<Escape>', lambda e: win.destroy())
-
-        # ── Derive colors from the main window theme ───────────────────
-        style = ttk.Style(win)
-        _raw_bg = style.lookup('TFrame', 'background') or self.root.cget('bg')
-        try:
-            _rgb = win.winfo_rgb(_raw_bg)
-            _lum = (0.299 * _rgb[0] + 0.587 * _rgb[1] + 0.114 * _rgb[2]) / 65535
-        except Exception:
-            _lum = 1.0   # assume light if can't detect
-        _dark = _lum < 0.4
-        _CONT_BG  = '#1e1e1e'   if _dark else 'white'
-        _NAV_BG   = '#252526'   if _dark else '#f3f3f3'
-        _NAV_SEL  = '#37373d'   if _dark else '#dce8f5'
-        _FG       = '#cccccc'   if _dark else '#111111'
-        _FG_DIM   = '#888888'   if _dark else '#666666'
-        _SUM_BG   = '#2d2d2d'   if _dark else '#f8f8f8'
-        _HDR_FONT = ('Arial', 13, 'bold')
-        _LBL_FONT = ('Arial', 10)
-
-        # ── Bottom bar — packed FIRST so it anchors to bottom ──────────
-        bot = tk.Frame(win, bg=_NAV_BG)
-        ttk.Separator(win).pack(side=tk.BOTTOM, fill=tk.X)
-        bot.pack(side=tk.BOTTOM, fill=tk.X)
-
-        def _apply():
-            try:
-                v = int(_max_tog_var.get())
-                if 2 <= v <= 20:
-                    self._settings['max_show_together'] = v
-                    self._save_ui_state()
-            except (ValueError, tk.TclError):
-                pass
-            try:
-                fs = int(_min_font_var.get())
-                if 6 <= fs <= 32:
-                    self._settings['min_font_size'] = fs
-                    self._save_ui_state()
-                    self._apply_min_font_size()
-            except (ValueError, tk.TclError):
-                pass
-            win.destroy()
-
-        ttk.Button(bot, text="Save", command=_apply).pack(
-            side=tk.RIGHT, padx=8, pady=6)
-        ttk.Button(bot, text="Cancel", command=win.destroy).pack(
-            side=tk.RIGHT, padx=0, pady=6)
-
-        # ── Left sidebar (section list) ────────────────────────────────
-        sidebar = tk.Frame(win, bg=_NAV_BG, width=160)
-        sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        sidebar.pack_propagate(False)
-        ttk.Separator(win, orient='vertical').pack(side=tk.LEFT, fill=tk.Y)
-
-        # ── Right content area (scrollable) ───────────────────────────
-        cont_outer = tk.Frame(win, bg=_CONT_BG)
-        cont_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        cont_canvas = tk.Canvas(cont_outer, bg=_CONT_BG, highlightthickness=0)
-        cont_scroll = ttk.Scrollbar(cont_outer, command=cont_canvas.yview)
-        cont_canvas.configure(yscrollcommand=cont_scroll.set)
-        cont_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        cont_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        content = tk.Frame(cont_canvas, bg=_CONT_BG)
-        cwin = cont_canvas.create_window((0, 0), window=content, anchor='nw')
-        content.bind('<Configure>', lambda e: (
-            cont_canvas.configure(scrollregion=cont_canvas.bbox('all')),
-            cont_canvas.itemconfig(cwin, width=cont_canvas.winfo_width()),
-        ))
-        cont_canvas.bind('<Configure>', lambda e:
-            cont_canvas.itemconfig(cwin, width=e.width))
-
-        # ── Registry of sections ───────────────────────────────────────
-        _section_frames = {}
-        _nav_buttons    = {}
-
-        def _show_section(name):
-            for f in _section_frames.values():
-                f.pack_forget()
-            _section_frames[name].pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
-            for n, b in _nav_buttons.items():
-                b.config(bg=_NAV_SEL if n == name else _NAV_BG, relief='flat')
-
-        def _add_section(name):
-            frame = tk.Frame(content, bg=_CONT_BG)
-            _section_frames[name] = frame
-            btn = tk.Button(sidebar, text=name, anchor='w', bd=0,
-                            bg=_NAV_BG, fg=_FG, activebackground=_NAV_SEL,
-                            activeforeground=_FG, font=_LBL_FONT,
-                            padx=12, pady=6,
-                            command=lambda n=name: _show_section(n))
-            btn.pack(fill=tk.X)
-            _nav_buttons[name] = btn
-            return frame
-
-        # ── Display section ────────────────────────────────────────────
-        disp = _add_section('Display')
-        tk.Label(disp, text="Display", bg=_CONT_BG, fg=_FG,
-                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 12))
-        ttk.Separator(disp).pack(fill=tk.X, pady=(0, 10))
-
-        row = tk.Frame(disp, bg=_CONT_BG)
-        row.pack(fill=tk.X, pady=6)
-        tk.Label(row, text="Max pairs in 'Show Together':", bg=_CONT_BG,
-                 fg=_FG, font=_LBL_FONT).pack(side=tk.LEFT)
-        _max_tog_var = tk.IntVar(value=self._settings.get('max_show_together', 5))
-        ttk.Spinbox(row, from_=2, to=20, textvariable=_max_tog_var,
-                    width=5).pack(side=tk.LEFT, padx=10)
-        tk.Label(row, text="(2–20)", bg=_CONT_BG,
-                 fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
-
-        row = tk.Frame(disp, bg=_CONT_BG)
-        row.pack(fill=tk.X, pady=6)
-        tk.Label(row, text="Minimum font size:", bg=_CONT_BG,
-                 fg=_FG, font=_LBL_FONT).pack(side=tk.LEFT)
-        _min_font_var = tk.IntVar(value=int(self._settings.get('min_font_size', 9) or 9))
-        ttk.Spinbox(row, from_=6, to=32, textvariable=_min_font_var,
-                    width=5).pack(side=tk.LEFT, padx=10)
-        tk.Label(row, text="(6–32)", bg=_CONT_BG,
-                 fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
-
-        # ── Cache Configuration section ────────────────────────────────
-        cache_sec = _add_section('Cache Config')
-        tk.Label(cache_sec, text="Cache Configuration", bg=_CONT_BG, fg=_FG,
-                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 4))
-        ttk.Separator(cache_sec).pack(fill=tk.X, pady=(0, 10))
-        _cache_config_help = tk.Label(cache_sec,
-                 text="Only one display configuration is saved to the PNG disk cache.\n"
-                      "Any other configuration is rendered in real-time (not cached).\n"
-                      "Set up the significance panel as desired, then capture it here.",
-                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9),
-                 justify='left', wraplength=380)
-        _cache_config_help.pack(anchor='w', pady=(0, 10))
-
-        _cache_summary_var = tk.StringVar()
-
-        def _refresh_cache_summary():
-            cfg = self._cache_config
-            if cfg is None:
-                _cache_summary_var.set("No configuration set  (legacy mode: all states cached)")
-            else:
-                lines = []
-                on_sigs = [k.replace('_sig_', '').replace('_var', '')
-                           for k in self._CACHE_CONFIG_ATTRS
-                           if k.startswith('_sig_') and cfg.get(k)]
-                lines.append(f"Sig overlays: {', '.join(on_sigs) or 'none'}")
-                on_lines = [k.replace('_line_', '').replace('_var', '')
-                            for k in self._CACHE_CONFIG_ATTRS
-                            if k.startswith('_line_') and cfg.get(k)]
-                lines.append(f"Line styles:  {', '.join(on_lines) or 'none'}")
-                norms = cfg.get('active_norms') or []
-                lines.append(f"Norms:        {', '.join(norms) or 'raw'}")
-                lines.append(f"Alpha:        {cfg.get('active_alpha', '—')}")
-                _cache_summary_var.set('\n'.join(lines))
-
-        _refresh_cache_summary()
-        tk.Label(cache_sec, textvariable=_cache_summary_var,
-                 bg=_SUM_BG, fg=_FG, relief='groove', font=('Courier', 9),
-                 justify='left', anchor='nw', padx=8, pady=6).pack(fill=tk.X, pady=(0, 10))
-
-        cbtn_row = tk.Frame(cache_sec, bg=_CONT_BG)
-        cbtn_row.pack(anchor='w')
-
-        def _capture():
-            self._cache_config = self._current_display_config()
-            self._save_ui_state()
-            _refresh_cache_summary()
-            self._clear_all_png_cache()
-
-        def _clear_cache_config():
-            self._cache_config = None
-            self._save_ui_state()
-            _refresh_cache_summary()
-
-        ttk.Button(cbtn_row, text="Capture current settings",
-                   command=_capture).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cbtn_row, text="Clear",
-                   command=_clear_cache_config).pack(side=tk.LEFT)
-
-        # ── Cache Management section ───────────────────────────────────
-        cache_mgmt = _add_section('Cache')
-        tk.Label(cache_mgmt, text="Cache", bg=_CONT_BG, fg=_FG,
-                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 4))
-        ttk.Separator(cache_mgmt).pack(fill=tk.X, pady=(0, 10))
-
-        # -- Disk usage row
-        _disk_var = tk.StringVar(value="–")
-        disk_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        disk_row.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(disk_row, text="Cache folder:", bg=_CONT_BG, fg=_FG,
-                 font=_LBL_FONT).pack(side=tk.LEFT)
-        tk.Label(disk_row, text=self.tmp_dir, bg=_CONT_BG, fg=_FG_DIM,
-                 font=('Arial', 9)).pack(side=tk.LEFT, padx=(6, 12))
-        tk.Label(disk_row, textvariable=_disk_var, bg=_CONT_BG, fg=_FG,
-                 font=_LBL_FONT).pack(side=tk.LEFT)
-
-        def _compute_disk_size():
-            total = 0
-            n_files = 0
-            try:
-                for fn in os.listdir(self.tmp_dir):
-                    if fn.endswith('.png'):
-                        try:
-                            total += os.path.getsize(
-                                os.path.join(self.tmp_dir, fn))
-                            n_files += 1
-                        except OSError:
-                            pass
-            except OSError:
-                pass
-            if total < 1024 ** 2:
-                sz = f"{total / 1024:.1f} KB"
-            elif total < 1024 ** 3:
-                sz = f"{total / 1024**2:.1f} MB"
-            else:
-                sz = f"{total / 1024**3:.2f} GB"
-            return f"{n_files} PNGs  ·  {sz}"
-
-        # -- Completeness tree
-        tree_frame = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        cols = ('type', 'pairs', 'segs', 'pngs', 'pct')
-        tree = ttk.Treeview(tree_frame, columns=cols, show='tree headings',
-                            height=10, selectmode='none')
-        tree.heading('#0', text='Session')
-        tree.heading('type', text='Type')
-        tree.heading('pairs', text='Pairs')
-        tree.heading('segs', text='Segs')
-        tree.heading('pngs', text='PNGs')
-        tree.heading('pct', text='%')
-        tree.column('#0', width=160, stretch=True)
-        tree.column('type', width=120, stretch=True)
-        tree.column('pairs', width=50, anchor='e', stretch=False)
-        tree.column('segs', width=45, anchor='e', stretch=False)
-        tree.column('pngs', width=80, anchor='e', stretch=False)
-        tree.column('pct', width=55, anchor='e', stretch=False)
-        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Color tags for completeness rows
-        tree.tag_configure('full',    background='#d4edda')  # green
-        tree.tag_configure('partial', background='')
-        tree.tag_configure('low',     background='#fff3cd')  # amber
-        tree.tag_configure('empty',   background='#f8d7da')  # red
-
-        def _pct_tag(pct):
-            if pct >= 100:
-                return 'full'
-            if pct >= 50:
-                return 'partial'
-            if pct > 0:
-                return 'low'
-            return 'empty'
-
-        def _count_pngs_for_pair(ref, tgt, n_segs, seg_names, cfg_now, has_hi):
-            """Count existing PNGs on disk for this pair using _png_path-style names."""
-            count = 0
-            for seg in list(range(n_segs)) + [n_segs]:
-                seg_nm = ('All_segments' if seg == n_segs
-                          else seg_names[seg] if seg < len(seg_names)
-                          else str(seg))
-                norms = cfg_now.get('active_norms') or []
-                norm_key = '_'.join(sorted(norms)) if norms else 'raw'
-                alpha = cfg_now.get('active_alpha', 0.001)
-                for hires in ([False, True] if has_hi else [False]):
-                    res_key = '_hi' if hires else '_lo'
-                    # alpha_key: only present when pval_corrected exists;
-                    # check with and without for robustness
-                    for ak in (f'_a{alpha:.3f}', ''):
-                        fn = (f"pair_{ref}_{tgt}_{seg_nm}_{norm_key}"
-                              f"{ak}{res_key}.png")
-                        if os.path.isfile(os.path.join(self.tmp_dir, fn)):
-                            count += 1
-                            break  # found one — count once per (pair,seg,res)
-            return count
-
-        def _populate_tree_async():
-            """Populate cache completeness table without freezing Settings UI."""
-            for iid in tree.get_children():
-                tree.delete(iid)
-            _disk_var.set("…")
-
-            cfg_now = self._cache_config or self._current_display_config()
-            nd_sessions = {}   # nd_key_str → list of (type_key, ptr)
-            for tk_, ptr in self.cd.data.items():
-                nd_str = str(tk_.nd())
-                nd_sessions.setdefault(nd_str, []).append((tk_, ptr))
-
-            loaded_nd = {str(k.nd()) for k in self.cd.data.keys()
-                         if getattr(self.cd, '_ccg', {}).get(k.nd()) is not None}
-
-            def _worker():
-                disk_txt = _compute_disk_size()
-                rows = []
-                for nd_str, entries in sorted(nd_sessions.items()):
-                    is_loaded = nd_str in loaded_nd
-                    # nd header row
-                    rows.append(('__nd__', nd_str, None))
-                    for type_key, ptr in sorted(entries, key=lambda x: str(x[0])):
-                        type_lbl = self._type_label(type_key)
-                        if not is_loaded:
-                            rows.append(('__type__', nd_str, (type_lbl, '–', '–', '–', '–', 'partial')))
-                            continue
-                        pairs_arr = ptr.inds2
-                        n_pairs = len(pairs_arr)
-                        n_segs = ptr.n_segments
-                        seg_names = list(ptr.edge_times['label'].values)
-                        has_hi = (hasattr(self.cd, '_ccg_highres') and
-                                  self.cd._ccg_highres.get(type_key.nd()) is not None)
-                        res_mult = 2 if has_hi else 1
-                        expected = n_pairs * (n_segs + 1) * res_mult
-                        actual = 0
-                        for inds in pairs_arr:
-                            ref2, tgt2 = int(inds[0]), int(inds[1])
-                            actual += _count_pngs_for_pair(
-                                ref2, tgt2, n_segs, seg_names, cfg_now, has_hi)
-                        pct = int(100 * actual / expected) if expected > 0 else 0
-                        pct_str = f"{pct}%" if expected > 0 else '–'
-                        tag = _pct_tag(pct)
-                        rows.append(('__type__', nd_str, (type_lbl, n_pairs, n_segs,
-                                                         f"{actual}/{expected}", pct_str, tag)))
-                return disk_txt, rows
-
-            def _render(disk_txt, rows):
-                if not win.winfo_exists():
-                    return
-                _disk_var.set(disk_txt)
-                nodes = {}
-                for kind, nd_str, payload in rows:
-                    if kind == '__nd__':
-                        nodes[nd_str] = tree.insert('', 'end', text=nd_str,
-                                                    values=('', '', '', '', ''), open=True)
-                    else:
-                        node = nodes.get(nd_str)
-                        if node is None:
-                            continue
-                        type_lbl, n_pairs, n_segs, pngs, pct_str, tag = payload
-                        tree.insert(node, 'end',
-                                    values=(type_lbl, n_pairs, n_segs, pngs, pct_str),
-                                    tags=(tag,))
-
-            import threading as _threading
-            def _run():
-                try:
-                    disk_txt, rows = _worker()
-                except Exception:
-                    disk_txt, rows = "err", []
-                win.after(0, lambda: _render(disk_txt, rows))
-            _threading.Thread(target=_run, daemon=True).start()
-
-        # -- Auto pre-gen toggle
-        auto_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        auto_row.pack(anchor='w', pady=(0, 4))
-        _auto_var = tk.BooleanVar(value=self._auto_pregen_enabled)
-        def _on_auto_toggle():
-            self._auto_pregen_enabled = _auto_var.get()
-            self._save_ui_state()
-        ttk.Checkbutton(auto_row, text="Auto-generate cache on session switch",
-                        variable=_auto_var, command=_on_auto_toggle).pack(side=tk.LEFT)
-
-        # -- Button row
-        btn_row2 = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        btn_row2.pack(anchor='w', pady=(0, 8))
-
-        _pregen_status_var = tk.StringVar(value="Idle")
-        ttk.Button(btn_row2, text="⚡ Run Pre-gen",
-                   command=lambda: self._start_pregen_with_defaults(
-                       status_var=_pregen_status_var)).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(btn_row2, textvariable=_pregen_status_var,
-                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
-        ttk.Button(btn_row2, text="🗑 Clear all PNGs",
-                   command=lambda: (self._clear_all_png_cache(),
-                                    _populate_tree_async())).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Button(btn_row2, text="↻ Refresh",
-                   command=_populate_tree_async).pack(side=tk.LEFT, padx=(8, 0))
-
-        # Wire Cache nav button to also populate tree when clicked
-        def _show_cache_section():
-            _show_section('Cache')
-            win.after(10, _populate_tree_async)
-        _nav_buttons['Cache'].config(command=_show_cache_section)
-
-        # Keep cache section wrapping/columns responsive to window size
-        def _on_resize(_e=None):
-            try:
-                w = max(int(cont_canvas.winfo_width()), 320)
-                _cache_config_help.config(wraplength=max(w - 80, 220))
-            except Exception:
-                pass
-            try:
-                tfw = max(int(tree_frame.winfo_width()), 320)
-                # Allocate remaining space to the stretchy columns (#0 and 'type')
-                fixed = 50 + 45 + 80 + 55 + 20
-                rem = max(tfw - fixed, 200)
-                tree.column('#0', width=int(rem * 0.55))
-                tree.column('type', width=int(rem * 0.45))
-            except Exception:
-                pass
-        win.bind('<Configure>', _on_resize)
-
-        _show_section('Display')
+        SettingsDialog.show(self)
 
     def _min_font_size(self) -> int:
         """Minimum allowed font size for UI labels/lists."""
@@ -2006,7 +3522,10 @@ class CCGReviewUI:
         """Clamp selected UI fonts to at least the configured minimum size."""
         import tkinter.font as _tkfont
 
-        min_fs = self._min_font_size()
+        try:
+            min_fs = max(6, min(32, int(self._settings.get('min_font_size', 9) or 9)))
+        except Exception:
+            min_fs = 9
 
         # Pair selection list bodies
         for lb_name in ('unselected_list', 'selected_list'):
@@ -2055,7 +3574,7 @@ class CCGReviewUI:
 
         # Time slider legend chips — rebuild
         try:
-            self._ts_update_legend()
+            self.time_slider._ts_update_legend()
         except Exception:
             pass
 
@@ -2506,169 +4025,6 @@ class CCGReviewUI:
 
     # ── Time slider panel ──────────────────────────────────────────────
 
-    def setup_time_slider_panel(self, parent):
-        """Full-width time-window selector — hidden by default."""
-        self.time_slider_frame = ttk.LabelFrame(
-            parent, text="Time Slider - Behavioral Epochs")
-        # Not packed — shown when 'Time Slider' panel is enabled
-
-        # Theme selector row
-        theme_row = ttk.Frame(self.time_slider_frame)
-        theme_row.pack(fill=tk.X, padx=4, pady=(2, 0))
-        ttk.Label(theme_row, text="Theme:").pack(side=tk.LEFT)
-        self._ts_theme_var = tk.StringVar(value='segments')
-        self._ts_theme_combo = ttk.Combobox(
-            theme_row, textvariable=self._ts_theme_var,
-            values=['segments'], width=16, state='readonly')
-        self._ts_theme_combo.pack(side=tk.LEFT, padx=4)
-        self._ts_theme_combo.bind('<<ComboboxSelected>>', self._on_ts_theme_change)
-        self._ts_theme_info_var = tk.StringVar(value="")
-        ttk.Label(theme_row, textvariable=self._ts_theme_info_var,
-                  font=('Courier', 8), foreground='#666').pack(
-            side=tk.LEFT, padx=6)
-
-        # ── Overlap label selector (inline, hidden until multi-label theme) ──
-        self._ts_overlap_row = ttk.Frame(theme_row)
-        # Not packed initially — shown inline when theme has multiple labels
-        ttk.Label(self._ts_overlap_row, text="Show:").pack(side=tk.LEFT, padx=(0, 2))
-        self._ts_label_var = tk.StringVar(value='All')
-        self._ts_label_combo = ttk.Combobox(
-            self._ts_overlap_row, textvariable=self._ts_label_var,
-            values=['All'], width=12, state='readonly')
-        self._ts_label_combo.pack(side=tk.LEFT)
-        self._ts_label_combo.bind('<<ComboboxSelected>>', self._on_ts_label_change)
-        ttk.Button(self._ts_overlap_row, text="All",
-                   command=self._on_ts_label_reset).pack(side=tk.LEFT, padx=2)
-
-        # ── Tool bar (right side of theme row) ──
-        toolbar = ttk.Frame(theme_row)
-        toolbar.pack(side=tk.RIGHT, padx=(0, 4))
-        ttk.Button(toolbar, text="💾", width=2,
-                   command=self._ts_save_custom_ccg).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="📂", width=2,
-                   command=self._ts_load_custom_ccg).pack(side=tk.LEFT, padx=1)
-        ttk.Label(toolbar, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
-        self._ts_snap_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text="Snap",
-                        variable=self._ts_snap_var).pack(side=tk.LEFT, padx=2)
-        self._ts_tool_var = tk.StringVar(value='none')
-        self._ts_selection_btn = ttk.Checkbutton(
-            toolbar, text="Zoom-in", variable=self._ts_tool_var,
-            onvalue='selection', offvalue='none',
-            command=self._on_ts_tool_change)
-        self._ts_selection_btn.pack(side=tk.LEFT, padx=2)
-        self._ts_lock_var = tk.BooleanVar(value=False)
-        self._ts_lock_btn = ttk.Checkbutton(
-            toolbar, text="\U0001F512 Lock", variable=self._ts_lock_var,
-            command=self._on_ts_tool_change)
-        self._ts_lock_btn.pack(side=tk.LEFT, padx=2)
-
-        # ── Legend row (below theme row, populated by _ts_update_legend) ──
-        self._ts_legend_frame = ttk.Frame(self.time_slider_frame)
-        # Packed dynamically by _ts_update_legend
-
-        # ── Main canvas ──
-        self._ts_main_canvas_frame = ttk.Frame(self.time_slider_frame)
-        top = self._ts_main_canvas_frame
-        top.pack(fill=tk.X, padx=4, pady=(2, 0))
-
-        self.ts_canvas = tk.Canvas(top, height=56, bg='#F5F5F5', cursor='crosshair')
-        self.ts_canvas.pack(fill=tk.X, expand=True)
-        self.ts_canvas.bind('<Configure>',      self._ts_redraw)
-        self.ts_canvas.bind('<Button-1>',        self._ts_mouse_press)
-        self.ts_canvas.bind('<B1-Motion>',       self._ts_mouse_drag)
-        self.ts_canvas.bind('<ButtonRelease-1>', self._ts_mouse_release)
-
-        # ── CCG time range bar (below main canvas, always visible) ──
-        self._ts_ccg_ctrl = ttk.Frame(self.time_slider_frame)
-        ccg_ctrl = self._ts_ccg_ctrl
-        ccg_ctrl.pack(fill=tk.X, padx=4, pady=(2, 0))
-        ttk.Label(ccg_ctrl, text="CCG time range",
-                  font=('Arial', 8, 'bold'), foreground='#444').pack(
-            side=tk.LEFT, padx=(0, 6))
-        def _bind_resolve(entry, var):
-            def _resolve(e=None):
-                raw = var.get().strip().lower()
-                if raw in ('start', 'end'):
-                    var.set(raw)  # keep sentinel as-is
-                    return
-                try:
-                    sec = self._ts_hms_to_sec(raw)
-                    var.set(self._ts_sec_to_hms(sec))
-                except (ValueError, IndexError):
-                    pass
-            entry.bind('<Return>', _resolve)
-            entry.bind('<FocusOut>', _resolve)
-
-        ttk.Label(ccg_ctrl, text="Start:").pack(side=tk.LEFT)
-        self._ts_start_var = tk.StringVar(value="00:00:00")
-        _e = ttk.Entry(ccg_ctrl, textvariable=self._ts_start_var, width=10)
-        _e.pack(side=tk.LEFT, padx=2)
-        _bind_resolve(_e, self._ts_start_var)
-        ttk.Label(ccg_ctrl, text="End:").pack(side=tk.LEFT, padx=(6, 0))
-        self._ts_end_var = tk.StringVar(value="00:00:00")
-        _e = ttk.Entry(ccg_ctrl, textvariable=self._ts_end_var, width=10)
-        _e.pack(side=tk.LEFT, padx=2)
-        _bind_resolve(_e, self._ts_end_var)
-        ttk.Button(ccg_ctrl, text="Set",
-                   command=self._on_time_slider_set).pack(side=tk.LEFT, padx=4)
-        ttk.Label(ccg_ctrl, text="Name:").pack(side=tk.LEFT, padx=(8, 0))
-        self._ts_name_var = tk.StringVar(value="")
-        ttk.Entry(ccg_ctrl, textvariable=self._ts_name_var,
-                  width=14).pack(side=tk.LEFT, padx=2)
-        ttk.Label(ccg_ctrl, text="Splits:").pack(side=tk.LEFT, padx=(6, 0))
-        self._ts_splits_var = tk.IntVar(value=1)
-        ttk.Spinbox(ccg_ctrl, from_=1, to=99, textvariable=self._ts_splits_var,
-                    width=3).pack(side=tk.LEFT, padx=2)
-        ttk.Label(ccg_ctrl, text="Overlap(s):").pack(side=tk.LEFT, padx=(4, 0))
-        self._ts_overlap_sec_var = tk.StringVar(value="0")
-        ttk.Entry(ccg_ctrl, textvariable=self._ts_overlap_sec_var,
-                  width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ccg_ctrl, text="Clear",
-                   command=self._on_time_slider_clear).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Button(ccg_ctrl, text="Apply to Multiple Sessions",
-                   command=self._on_time_slider_apply_multiple_sessions).pack(side=tk.LEFT, padx=(2, 2))
-        self._ts_status_var = tk.StringVar(value="")
-        ttk.Label(ccg_ctrl, textvariable=self._ts_status_var,
-                  font=('Courier', 8), foreground='#555').pack(
-            side=tk.LEFT, padx=8)
-
-        # ── Zoom detail canvas (hidden until zoom is active) ──
-        self._ts_zoom_frame = ttk.Frame(self.time_slider_frame)
-        # Not packed initially — shown when zoom region is set
-        # Radiating lines canvas (thin strip between main and zoom)
-        self._ts_radiate_canvas = tk.Canvas(
-            self._ts_zoom_frame, height=16, bg='#FEFEFE',
-            highlightthickness=0)
-        self._ts_radiate_canvas.pack(fill=tk.X, expand=True, side=tk.TOP)
-        self._ts_zoom_canvas = tk.Canvas(
-            self._ts_zoom_frame, height=56, bg='#FAFAFA', cursor='crosshair')
-        self._ts_zoom_canvas.pack(fill=tk.X, expand=True)
-        self._ts_zoom_canvas.bind('<Configure>', self._ts_zoom_redraw)
-
-        # ── Zoom time range bar (below zoom canvas, shown with zoom) ──
-        self._ts_zoom_ctrl = ttk.Frame(self._ts_zoom_frame)
-        self._ts_zoom_ctrl.pack(fill=tk.X, padx=4, pady=(2, 0))
-        ttk.Label(self._ts_zoom_ctrl, text="Zoom range",
-                  font=('Arial', 8, 'bold'), foreground='#444').pack(
-            side=tk.LEFT, padx=(0, 6))
-        ttk.Label(self._ts_zoom_ctrl, text="Start:").pack(side=tk.LEFT)
-        self._ts_zoom_start_var = tk.StringVar(value="00:00:00")
-        _ze = ttk.Entry(self._ts_zoom_ctrl, textvariable=self._ts_zoom_start_var,
-                        width=10)
-        _ze.pack(side=tk.LEFT, padx=2)
-        _bind_resolve(_ze, self._ts_zoom_start_var)
-        ttk.Label(self._ts_zoom_ctrl, text="End:").pack(
-            side=tk.LEFT, padx=(6, 0))
-        self._ts_zoom_end_var = tk.StringVar(value="00:00:00")
-        _ze = ttk.Entry(self._ts_zoom_ctrl, textvariable=self._ts_zoom_end_var,
-                        width=10)
-        _ze.pack(side=tk.LEFT, padx=2)
-        _bind_resolve(_ze, self._ts_zoom_end_var)
-        ttk.Button(self._ts_zoom_ctrl, text="Set",
-                   command=self._on_zoom_range_set).pack(
-            side=tk.LEFT, padx=4)
-
     # ── Bottom bar ─────────────────────────────────────────────────────
 
     def setup_bottom_panel(self):
@@ -2727,7 +4083,7 @@ class CCGReviewUI:
         elif name == 'Waveforms':
             self._toggle_waveforms_panel()
         elif name == 'Time Slider':
-            self._toggle_time_slider()
+            self.time_slider.toggle()
         elif name == 'Group Hotkeys':
             if show:
                 self._refresh_hotkeys_bar()
@@ -2747,25 +4103,6 @@ class CCGReviewUI:
                 self._plot_pw.forget(self.wave_frame)
             except tk.TclError:
                 pass
-
-    def _toggle_time_slider(self):
-        show = self._panel_vars['Time Slider'].get()
-        print(f"[CCGReviewUI] _toggle_time_slider show={show}")
-        if show:
-            try:
-                self.time_slider_frame.pack(
-                    in_=self._main_frame, side=tk.TOP,
-                    fill=tk.X, before=self._paned, pady=(0, 4))
-                self._ts_discover_themes()
-                self._ts_init_times()
-                print(f"[CCGReviewUI]   epoch_bounds={len(self._ts_epoch_bounds)} "
-                      f"total_sec={self._ts_total_sec:.1f}")
-                self._ts_redraw()
-            except Exception as ex:
-                print(f"[CCGReviewUI]   ERROR in _toggle_time_slider: {ex}")
-                traceback.print_exc()
-        else:
-            self.time_slider_frame.pack_forget()
 
     def _toggle_resolution(self):
         """Toggle between low-res ``_ccg`` and high-res ``_ccg_highres``."""
@@ -2939,6 +4276,13 @@ class CCGReviewUI:
 
         _ct_map = {'pyr': 'PYR', 'inter': 'INT', 'int': 'INT'}
 
+        do_lores   = bool((opt or {}).get('export_lores', True))
+        do_hires   = bool((opt or {}).get('export_hires', False))
+        # Fall back to lo-res if neither is selected
+        if not do_lores and not do_hires:
+            do_lores = True
+        _cs_by_sess = getattr(self, '_custom_segments_by_session', None) or {}
+
         old_state = {
             'key': self.key,
             'ccg_pointer': self.ccg_pointer,
@@ -2948,6 +4292,8 @@ class CCGReviewUI:
             'segment_names': getattr(self, 'segment_names', []),
             'current_pair_idx': int(getattr(self, 'current_pair_idx', 0)),
             'current_segment': int(getattr(self, 'current_segment', 0)),
+            '_custom_segments': getattr(self, '_custom_segments', []),
+            '_highres_mode': getattr(self, '_highres_mode', False),
         }
 
         n_ok = 0
@@ -2964,10 +4310,13 @@ class CCGReviewUI:
                                 if getattr(self.cd, 'nd', None) is not None else None)
                 self.n_segments = ptr.n_segments
                 self.segment_names = list(ptr.edge_times['label'].values)
+                # Swap custom segments to this session's list so custom indices resolve correctly
+                self._custom_segments = _cs_by_sess.get(sess, []) or []
                 # Resolve segment indices for this pointer.
                 # - Current: use UI's current_segment (clamped to this ptr)
                 # - All: use ptr.n_segments sentinel
-                # - Label: map label->index for this ptr; if missing, skip that segment
+                # - Named: first try regular segment label, then try custom segment name (silent skip)
+                _reg_labels = list(ptr.edge_times['label'].values)
                 seg_indices: list[int] = []
                 for export_seg in export_segs:
                     if export_seg == 'All':
@@ -2981,12 +4330,18 @@ class CCGReviewUI:
                             seg_idx = int(ptr.n_segments)
                         seg_indices.append(int(seg_idx))
                         continue
+                    # Try regular segment label
                     try:
-                        seg_indices.append(int(list(ptr.edge_times['label'].values).index(export_seg)))
-                    except Exception:
-                        n_fail += 1
-                        fail_msgs.append(f"({ref},{tgt}) [{sess}] missing segment '{export_seg}'")
+                        seg_indices.append(int(_reg_labels.index(export_seg)))
                         continue
+                    except ValueError:
+                        pass
+                    # Try custom segment name for this session (silent skip if absent)
+                    _ci = next((i for i, _cs in enumerate(self._custom_segments)
+                                if isinstance(_cs, dict) and _cs.get('name') == export_seg), None)
+                    if _ci is not None:
+                        seg_indices.append(int(ptr.n_segments) + 1 + _ci)
+                    # else: silently skip — this session doesn't have that custom segment
                 # de-dupe while preserving order
                 _seen_seg = set()
                 seg_indices = [s for s in seg_indices if not (s in _seen_seg or _seen_seg.add(s))]
@@ -3068,6 +4423,27 @@ class CCGReviewUI:
                 except Exception:
                     base_dir = folder
 
+                def _has_hires():
+                    return (hasattr(self.cd, '_ccg_highres')
+                            and self.cd._ccg_highres.get(nd_key) is not None)
+
+                def _render_one(seg, highres: bool, path: str):
+                    self._highres_mode = highres
+                    if highres and _has_hires():
+                        self.ccg_data = self.cd._ccg_highres.get(nd_key)
+                    else:
+                        self.ccg_data = (self.cd._ccg.get(nd_key)
+                                         if getattr(self.cd, '_ccg', None) else self.ccg_data)
+                    old_eo = getattr(self, '_export_overrides', None)
+                    self._export_overrides = opt
+                    try:
+                        ctx = self._render_engine.build_context(
+                            np.array([ref, tgt]), seg, highres, None, None)
+                        dpi = 300 if fmt == 'png' else None
+                        self._render_engine.write_png(ctx, path, dpi=dpi)
+                    finally:
+                        self._export_overrides = old_eo
+
                 # Export one file per selected segment (render directly; bypass viewer cache)
                 for seg_idx in seg_indices:
                     self.current_segment = int(seg_idx)
@@ -3075,26 +4451,54 @@ class CCGReviewUI:
                     if seg == int(ptr.n_segments):
                         seg_tag = "All"
                     elif self._is_custom_segment(seg):
-                        seg_tag = "custom"
+                        ci_tag = self._custom_seg_index(seg)
+                        cs_name = (self._custom_segments[ci_tag].get('name', f'custom{ci_tag}')
+                                   if ci_tag < len(self._custom_segments) else f'custom{ci_tag}')
+                        seg_tag = re.sub(r'[^A-Za-z0-9_\-]', '_', str(cs_name))
                     else:
                         seg_tag = f"seg{seg}"
-                    fname = f"{sess}_{type_str}{sh}_ccg_{ref}_{tgt}_{seg_tag}.{fmt}"
-                    out_path = os.path.join(base_dir, fname)
-                    old_eo = getattr(self, '_export_overrides', None)
-                    self._export_overrides = opt
+                    base_name = f"{sess}_{type_str}{sh}_ccg_{ref}_{tgt}_{seg_tag}"
+                    if not bool((opt or {}).get('title_show_norm_details', True)):
+                        _active_norms = sorted(nm.name for nm in getattr(self, 'active_norms', set()))
+                        if _active_norms:
+                            base_name += '_' + '_'.join(_active_norms)
                     try:
-                        ctx = self._render_engine.build_context(
-                            np.array([ref, tgt]), seg,
-                            bool(getattr(self, '_highres_mode', False)),
-                            None, None)
-                        dpi = 300 if fmt == 'png' else None
-                        self._render_engine.write_png(ctx, out_path, dpi=dpi)
+                        if do_lores and do_hires and _has_hires():
+                            # Render both resolutions and combine side by side
+                            import tempfile as _tf
+                            with _tf.NamedTemporaryFile(suffix='.png', delete=False) as _tlo:
+                                lo_path = _tlo.name
+                            with _tf.NamedTemporaryFile(suffix='.png', delete=False) as _thi:
+                                hi_path = _thi.name
+                            try:
+                                _render_one(seg, False, lo_path)
+                                _render_one(seg, True,  hi_path)
+                                _lo_img = Image.open(lo_path)
+                                _hi_img = Image.open(hi_path)
+                                _h = max(_lo_img.height, _hi_img.height)
+                                _combined = Image.new('RGB',
+                                                      (_lo_img.width + _hi_img.width, _h),
+                                                      (255, 255, 255))
+                                _combined.paste(_lo_img, (0, 0))
+                                _combined.paste(_hi_img, (_lo_img.width, 0))
+                                out_path = os.path.join(base_dir, f"{base_name}_lohires.{fmt}")
+                                _combined.save(out_path, dpi=(300, 300))
+                            finally:
+                                for _p in (lo_path, hi_path):
+                                    try:
+                                        os.remove(_p)
+                                    except OSError:
+                                        pass
+                        elif do_hires and _has_hires():
+                            out_path = os.path.join(base_dir, f"{base_name}_hires.{fmt}")
+                            _render_one(seg, True, out_path)
+                        else:
+                            out_path = os.path.join(base_dir, f"{base_name}.{fmt}")
+                            _render_one(seg, False, out_path)
                         n_ok += 1
                     except Exception as ex:
                         n_fail += 1
                         fail_msgs.append(f"({ref},{tgt}) seg={seg_tag}: {ex}")
-                    finally:
-                        self._export_overrides = old_eo
         finally:
             self.key = old_state['key']
             self.ccg_pointer = old_state['ccg_pointer']
@@ -3104,20 +4508,23 @@ class CCGReviewUI:
             self.segment_names = old_state['segment_names']
             self.current_pair_idx = old_state['current_pair_idx']
             self.current_segment = old_state.get('current_segment', self.current_segment)
+            self._custom_segments = old_state.get('_custom_segments', self._custom_segments)
+            self._highres_mode = old_state.get('_highres_mode', self._highres_mode)
             try:
                 self.update_plot()
             except Exception:
                 pass
 
         if n_fail == 0:
-            messagebox.showinfo("Export", f"Exported {n_ok} file(s) to:\n\n{folder}")
+            messagebox.showinfo("Export", f"Exported {n_ok} file(s) to:\n\n{folder}",
+                                parent=self.root)
         else:
             msg = f"Exported {n_ok} file(s) to:\n\n{folder}\n\nFailed: {n_fail}"
             if fail_msgs:
                 msg += "\n\n" + "\n".join(fail_msgs[:12])
                 if len(fail_msgs) > 12:
                     msg += f"\n… ({len(fail_msgs) - 12} more)"
-            messagebox.showwarning("Export", msg)
+            messagebox.showwarning("Export", msg, parent=self.root)
 
     def _export_all_selected_pairs(self, fmt: str, opt: dict):
         """Export pairs listed in opt['_selected_pairs'] (current-session subset)."""
@@ -3316,610 +4723,7 @@ class CCGReviewUI:
         self._export_pairs_with_handles(fmt=fmt, opt=opt, items=items, folder=folder)
 
     def _export_options_dialog(self, fmt: str, preview_pair=None, selected_pairs=None):
-        """Return export overrides dict or None if cancelled.
-
-        When multiple pairs are selected in the lists, this dialog also offers
-        an 'Export all selected pairs…' option. Preview (if enabled) always
-        shows only the first selected pair.
-        """
-        win = tk.Toplevel(self.root)
-        win.title("Export options")
-        win.resizable(True, True)
-
-        # ------------------------------
-        # Group selection (export scope)
-        # ------------------------------
-        # Available groups exclude internal/special/private entries.
-        all_groups = sorted(
-            g for g in self._sel_data._groups.keys()
-            if g and not str(g).startswith('__')
-        )
-        avail_groups = [g for g in all_groups if not str(g).startswith(_SPECIAL_PREFIX)]
-        selected_groups: list[str] = []
-
-        # Export defaults persisted in ui_state.json via self._settings
-        _exp_def = (self._settings.get('export_defaults', {}) if isinstance(getattr(self, '_settings', None), dict) else {}) or {}
-        ccg_var = tk.StringVar(value=str(_exp_def.get('ccg_color') or ""))
-        base_var = tk.StringVar(value=str(_exp_def.get('baseline_color') or ""))
-        cs_shade_var      = tk.StringVar(value=str(_exp_def.get('cs_shade_color') or ""))
-        tw_color_var          = tk.StringVar(value=str(_exp_def.get('test_window_color') or ""))
-        tw_alpha_var          = tk.StringVar(value=str(_exp_def.get('test_window_alpha', "0.12")))
-        pval_line_color_var   = tk.StringVar(value=str(_exp_def.get('pval_line_color') or ""))
-        alpha_line_color_var  = tk.StringVar(value=str(_exp_def.get('alpha_line_color') or ""))
-        minfs_var = tk.StringVar(value=str(_exp_def.get('min_text_size', "8")))
-        show_prev_var = tk.BooleanVar(value=False)
-        ccg_a_var = tk.StringVar(value=str(_exp_def.get('ccg_alpha', "0.5")))
-        base_a_var = tk.StringVar(value=str(_exp_def.get('baseline_alpha', "0.3")))
-        show_legend_var = tk.BooleanVar(value=bool(_exp_def.get('show_legend', True)))
-        xticks_var = tk.StringVar(value=str(_exp_def.get('xticks_raw', "")))
-        mirror_ticks_var = tk.BooleanVar(value=bool(_exp_def.get('mirror_xticks', True)))
-        # Segment export selection (multi): union of segment labels across loaded types for this session.
-        # Stored as a list of strings in export_defaults['export_segments'].
-        seg_export_default = list(_exp_def.get('export_segments') or []) if isinstance(_exp_def, dict) else []
-        if not seg_export_default:
-            seg_export_default = ["Current"]
-        try:
-            nd_key = self.key.nd() if getattr(self, 'key', None) is not None else None
-            type_keys = self._available_type_keys(nd_key) if nd_key is not None else []
-            seg_union: set[str] = set()
-            for tk_ in type_keys:
-                ptr = self.cd.data.get(tk_)
-                try:
-                    labels = list(ptr.edge_times['label'].values) if ptr is not None else []
-                except Exception:
-                    labels = []
-                for lab in labels:
-                    if lab is None:
-                        continue
-                    s = str(lab).strip()
-                    if s:
-                        seg_union.add(s)
-            seg_export_choices = ["Current", "All"] + sorted(seg_union)
-        except Exception:
-            seg_export_choices = ["Current", "All"]
-
-        # Subfolder hierarchy selection (multi + order)
-        subfolder_default = list(_exp_def.get('subfolder_by') or []) if isinstance(_exp_def, dict) else []
-        _subfolder_choices = ["conn type", "excitatory/inhibitory", "session", "animal"]
-        # sanitize defaults
-        subfolder_default = [x for x in subfolder_default if x in _subfolder_choices]
-
-        # Scrollable body (export options can grow tall)
-        outer = ttk.Frame(win)
-        outer.grid(row=0, column=0, sticky="nsew")
-        win.columnconfigure(0, weight=1)
-        win.rowconfigure(0, weight=1)
-
-        canvas = tk.Canvas(outer, highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(0, weight=1)
-
-        frm = ttk.Frame(canvas, padding=10)
-        win_id = canvas.create_window((0, 0), window=frm, anchor='nw')
-
-        def _on_frame_configure(_event=None):
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception:
-                pass
-
-        def _on_canvas_configure(event):
-            # Keep inner frame width matched to canvas width
-            try:
-                canvas.itemconfigure(win_id, width=event.width)
-            except Exception:
-                pass
-
-        frm.bind("<Configure>", _on_frame_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
-
-        frm.columnconfigure(1, weight=1)
-
-        # Group selection UI (above plot configs)
-        grp_frame = ttk.LabelFrame(frm, text="Groups")
-        grp_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-        grp_frame.columnconfigure(0, weight=1)
-        grp_frame.columnconfigure(2, weight=1)
-
-        ttk.Label(grp_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
-        ttk.Label(grp_frame, text="Selected:").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
-
-        avail_lb = tk.Listbox(grp_frame, height=6, exportselection=False)
-        sel_lb = tk.Listbox(grp_frame, height=6, exportselection=False)
-        for g in avail_groups:
-            avail_lb.insert(tk.END, g)
-        avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
-        sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
-
-        mid = ttk.Frame(grp_frame)
-        mid.grid(row=1, column=1, sticky="ns", padx=6)
-
-        selected_tags_var = tk.StringVar(value="")
-        tags_lbl = ttk.Label(grp_frame, textvariable=selected_tags_var, foreground="#555555", wraplength=560)
-        tags_lbl.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 6))
-
-        def _refresh_group_tags():
-            # "recorded below selection list": show selected group names (tags)
-            if selected_groups:
-                selected_tags_var.set("Selected group tags: " + ", ".join(selected_groups))
-            else:
-                selected_tags_var.set("")
-
-        def _add_groups():
-            sel = list(avail_lb.curselection())
-            if not sel:
-                return
-            # Add in displayed order
-            names = [avail_lb.get(i) for i in sel]
-            # Remove from bottom-up to keep indices valid
-            for i in sorted(sel, reverse=True):
-                avail_lb.delete(i)
-            for g in names:
-                if g not in selected_groups:
-                    selected_groups.append(g)
-                    sel_lb.insert(tk.END, g)
-            _refresh_group_tags()
-
-        def _remove_groups():
-            sel = list(sel_lb.curselection())
-            if not sel:
-                return
-            names = [sel_lb.get(i) for i in sel]
-            for i in sorted(sel, reverse=True):
-                sel_lb.delete(i)
-            for g in names:
-                try:
-                    selected_groups.remove(g)
-                except ValueError:
-                    pass
-            # Return to available list (keep sorted)
-            cur = list(avail_lb.get(0, tk.END))
-            cur.extend(names)
-            cur = sorted(set(cur))
-            avail_lb.delete(0, tk.END)
-            for g in cur:
-                avail_lb.insert(tk.END, g)
-            _refresh_group_tags()
-
-        ttk.Button(mid, text="Add →", command=_add_groups).pack(pady=(10, 6))
-        ttk.Button(mid, text="← Remove", command=_remove_groups).pack()
-        avail_lb.bind("<Double-Button-1>", lambda e: _add_groups())
-        sel_lb.bind("<Double-Button-1>", lambda e: _remove_groups())
-
-        # Plot config fields (start after group section)
-        row0 = 1
-        ttk.Label(frm, text="CCG color (name or #hex):").grid(row=row0 + 0, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=ccg_var, width=22).grid(row=row0 + 0, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Baseline color (name or #hex):").grid(row=row0 + 1, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=base_var, width=22).grid(row=row0 + 1, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="CS shade color (name or #hex):").grid(row=row0 + 2, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=cs_shade_var, width=22).grid(row=row0 + 2, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Test window color (name or #hex):").grid(row=row0 + 3, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=tw_color_var, width=22).grid(row=row0 + 3, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Test window alpha (0–1):").grid(row=row0 + 4, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=tw_alpha_var, width=10).grid(row=row0 + 4, column=1, sticky="w", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="P-value line color (name or #hex):").grid(row=row0 + 5, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=pval_line_color_var, width=22).grid(row=row0 + 5, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Alpha threshold color (name or #hex):").grid(row=row0 + 6, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=alpha_line_color_var, width=22).grid(row=row0 + 6, column=1, sticky="ew", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Min text size (pt):").grid(row=row0 + 7, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=minfs_var, width=10).grid(row=row0 + 7, column=1, sticky="w", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="CCG alpha (0–1):").grid(row=row0 + 8, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=ccg_a_var, width=10).grid(row=row0 + 8, column=1, sticky="w", padx=(8, 0), pady=4)
-
-        ttk.Label(frm, text="Baseline alpha (0–1):").grid(row=row0 + 9, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=base_a_var, width=10).grid(row=row0 + 9, column=1, sticky="w", padx=(8, 0), pady=4)
-
-        ttk.Checkbutton(frm, text="Show legend", variable=show_legend_var).grid(
-            row=row0 + 10, column=0, sticky="w", pady=(6, 0))
-
-        ttk.Label(frm, text="X ticks (ms, comma-separated):").grid(row=row0 + 11, column=0, sticky="w", pady=4)
-        ttk.Entry(frm, textvariable=xticks_var, width=28).grid(row=row0 + 11, column=1, sticky="ew", padx=(8, 0), pady=4)
-        ttk.Checkbutton(frm, text="Mirror to negative ticks", variable=mirror_ticks_var).grid(
-            row=row0 + 12, column=0, sticky="w", pady=(0, 4))
-
-        # Segments selection UI (same pattern as Groups)
-        seg_frame = ttk.LabelFrame(frm, text="Segments to export")
-        seg_frame.grid(row=row0 + 13, column=0, columnspan=2, sticky="ew", pady=(10, 6))
-        seg_frame.columnconfigure(0, weight=1)
-        seg_frame.columnconfigure(2, weight=1)
-        ttk.Label(seg_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
-        ttk.Label(seg_frame, text="Selected:").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
-
-        seg_avail_lb = tk.Listbox(seg_frame, height=6, exportselection=False)
-        seg_sel_lb = tk.Listbox(seg_frame, height=6, exportselection=False)
-        for s in seg_export_choices:
-            seg_avail_lb.insert(tk.END, s)
-        # preload selected segments
-        selected_segments: list[str] = []
-        for s in seg_export_default:
-            if s in seg_export_choices and s not in selected_segments:
-                selected_segments.append(s)
-                seg_sel_lb.insert(tk.END, s)
-        # remove preselected from available
-        if selected_segments:
-            cur = [seg_avail_lb.get(i) for i in range(seg_avail_lb.size())]
-            seg_avail_lb.delete(0, tk.END)
-            for s in cur:
-                if s not in selected_segments:
-                    seg_avail_lb.insert(tk.END, s)
-
-        seg_avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
-        seg_sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
-
-        seg_mid = ttk.Frame(seg_frame)
-        seg_mid.grid(row=1, column=1, sticky="ns", padx=6)
-
-        def _add_segments():
-            sel = list(seg_avail_lb.curselection())
-            if not sel:
-                return
-            names = [seg_avail_lb.get(i) for i in sel]
-            for i in sorted(sel, reverse=True):
-                seg_avail_lb.delete(i)
-            for s in names:
-                if s not in selected_segments:
-                    selected_segments.append(s)
-                    seg_sel_lb.insert(tk.END, s)
-
-        def _remove_segments():
-            sel = list(seg_sel_lb.curselection())
-            if not sel:
-                return
-            names = [seg_sel_lb.get(i) for i in sel]
-            for i in sorted(sel, reverse=True):
-                seg_sel_lb.delete(i)
-            for s in names:
-                try:
-                    selected_segments.remove(s)
-                except ValueError:
-                    pass
-            cur = list(seg_avail_lb.get(0, tk.END))
-            cur.extend(names)
-            cur = sorted(set(cur), key=lambda x: (0 if x == "Current" else 1 if x == "All" else 2, x))
-            seg_avail_lb.delete(0, tk.END)
-            for s in cur:
-                if s not in selected_segments:
-                    seg_avail_lb.insert(tk.END, s)
-
-        ttk.Button(seg_mid, text="Add →", command=_add_segments).pack(pady=(10, 6))
-        ttk.Button(seg_mid, text="← Remove", command=_remove_segments).pack()
-        seg_avail_lb.bind("<Double-Button-1>", lambda e: _add_segments())
-        seg_sel_lb.bind("<Double-Button-1>", lambda e: _remove_segments())
-
-        # Subfolder hierarchy UI (dual list; selected list is reorderable by drag)
-        sf_frame = ttk.LabelFrame(frm, text="Subfolder by (optional)")
-        sf_frame.grid(row=row0 + 14, column=0, columnspan=2, sticky="ew", pady=(6, 6))
-        sf_frame.columnconfigure(0, weight=1)
-        sf_frame.columnconfigure(2, weight=1)
-        ttk.Label(sf_frame, text="Available:").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
-        ttk.Label(sf_frame, text="Selected (drag to reorder):").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
-
-        sf_avail_lb = tk.Listbox(sf_frame, height=4, exportselection=False)
-        sf_sel_lb = tk.Listbox(sf_frame, height=4, exportselection=False)
-        selected_subfolders: list[str] = list(subfolder_default)
-        for s in _subfolder_choices:
-            if s not in selected_subfolders:
-                sf_avail_lb.insert(tk.END, s)
-        for s in selected_subfolders:
-            sf_sel_lb.insert(tk.END, s)
-
-        sf_avail_lb.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
-        sf_sel_lb.grid(row=1, column=2, sticky="ew", padx=6, pady=4)
-
-        sf_mid = ttk.Frame(sf_frame)
-        sf_mid.grid(row=1, column=1, sticky="ns", padx=6)
-
-        def _add_subfolders():
-            sel = list(sf_avail_lb.curselection())
-            if not sel:
-                return
-            names = [sf_avail_lb.get(i) for i in sel]
-            for i in sorted(sel, reverse=True):
-                sf_avail_lb.delete(i)
-            for s in names:
-                if s not in selected_subfolders:
-                    selected_subfolders.append(s)
-                    sf_sel_lb.insert(tk.END, s)
-
-        def _remove_subfolders():
-            sel = list(sf_sel_lb.curselection())
-            if not sel:
-                return
-            names = [sf_sel_lb.get(i) for i in sel]
-            for i in sorted(sel, reverse=True):
-                sf_sel_lb.delete(i)
-            for s in names:
-                try:
-                    selected_subfolders.remove(s)
-                except ValueError:
-                    pass
-            cur = list(sf_avail_lb.get(0, tk.END))
-            cur.extend(names)
-            cur = sorted(set(cur), key=lambda x: _subfolder_choices.index(x) if x in _subfolder_choices else 999)
-            sf_avail_lb.delete(0, tk.END)
-            for s in cur:
-                if s not in selected_subfolders:
-                    sf_avail_lb.insert(tk.END, s)
-
-        ttk.Button(sf_mid, text="Add →", command=_add_subfolders).pack(pady=(10, 6))
-        ttk.Button(sf_mid, text="← Remove", command=_remove_subfolders).pack()
-        sf_avail_lb.bind("<Double-Button-1>", lambda e: _add_subfolders())
-        sf_sel_lb.bind("<Double-Button-1>", lambda e: _remove_subfolders())
-
-        # Drag-reorder for selected subfolder listbox
-        _drag_state = {'i': None}
-        def _sf_on_press(e):
-            try:
-                _drag_state['i'] = sf_sel_lb.nearest(e.y)
-            except Exception:
-                _drag_state['i'] = None
-        def _sf_on_drag(e):
-            try:
-                i0 = _drag_state.get('i')
-                if i0 is None:
-                    return
-                i1 = sf_sel_lb.nearest(e.y)
-                if i1 == i0:
-                    return
-                item = sf_sel_lb.get(i0)
-                sf_sel_lb.delete(i0)
-                sf_sel_lb.insert(i1, item)
-                # keep backing list in sync
-                try:
-                    selected_subfolders.pop(i0)
-                    selected_subfolders.insert(i1, item)
-                except Exception:
-                    pass
-                _drag_state['i'] = i1
-                sf_sel_lb.selection_clear(0, tk.END)
-                sf_sel_lb.selection_set(i1)
-            except Exception:
-                pass
-        sf_sel_lb.bind("<Button-1>", _sf_on_press)
-        sf_sel_lb.bind("<B1-Motion>", _sf_on_drag)
-
-        out = {}
-        action = {'mode': 'current'}  # 'current' | 'all'
-
-        def _collect_opts() -> dict:
-            o: dict = {}
-            o['ccg_color']         = (ccg_var.get() or '').strip() or None
-            o['baseline_color']    = (base_var.get() or '').strip() or None
-            o['cs_shade_color']    = (cs_shade_var.get() or '').strip() or None
-            o['test_window_color'] = (tw_color_var.get() or '').strip() or None
-            o['pval_line_color']   = (pval_line_color_var.get() or '').strip() or None
-            o['alpha_line_color']  = (alpha_line_color_var.get() or '').strip() or None
-            try:
-                v = float(tw_alpha_var.get())
-                o['test_window_alpha'] = v if np.isfinite(v) else None
-            except Exception:
-                o['test_window_alpha'] = None
-            try:
-                v = float(minfs_var.get())
-                o['min_text_size'] = v if np.isfinite(v) and v > 0 else None
-            except Exception:
-                o['min_text_size'] = None
-            try:
-                v = float(ccg_a_var.get())
-                o['ccg_alpha'] = v if np.isfinite(v) else None
-            except Exception:
-                o['ccg_alpha'] = None
-            try:
-                v = float(base_a_var.get())
-                o['baseline_alpha'] = v if np.isfinite(v) else None
-            except Exception:
-                o['baseline_alpha'] = None
-            o['show_legend'] = bool(show_legend_var.get())
-            o['mirror_xticks'] = bool(mirror_ticks_var.get())
-            raw = (xticks_var.get() or '').strip()
-            if raw:
-                vals = []
-                for part in raw.replace(';', ',').split(','):
-                    s = part.strip()
-                    if not s:
-                        continue
-                    try:
-                        vals.append(float(s))
-                    except Exception:
-                        continue
-                o['xticks_ms'] = vals
-            else:
-                o['xticks_ms'] = None
-            # Store raw for defaults (preserves user's formatting)
-            o['_xticks_raw'] = raw
-            o['export_segments'] = list(selected_segments) if selected_segments else ["Current"]
-            o['subfolder_by'] = list(selected_subfolders)
-            return o
-
-        def _ok():
-            out.update(_collect_opts())
-            win.destroy()
-
-        def _cancel():
-            out.clear()
-            win.destroy()
-
-        def _save_export_defaults():
-            """Persist current export settings as defaults for next time."""
-            opts = _collect_opts()
-            try:
-                self._settings.setdefault('export_defaults', {})
-                self._settings['export_defaults'] = {
-                    'ccg_color':          opts.get('ccg_color') or "",
-                    'baseline_color':     opts.get('baseline_color') or "",
-                    'cs_shade_color':     opts.get('cs_shade_color') or "",
-                    'test_window_color':  opts.get('test_window_color') or "",
-                    'test_window_alpha':  opts.get('test_window_alpha') if opts.get('test_window_alpha') is not None else "0.12",
-                    'pval_line_color':    opts.get('pval_line_color') or "",
-                    'alpha_line_color':   opts.get('alpha_line_color') or "",
-                    'min_text_size': opts.get('min_text_size') if opts.get('min_text_size') is not None else "8",
-                    'ccg_alpha': opts.get('ccg_alpha') if opts.get('ccg_alpha') is not None else "0.5",
-                    'baseline_alpha': opts.get('baseline_alpha') if opts.get('baseline_alpha') is not None else "0.3",
-                    'show_legend': bool(opts.get('show_legend', True)),
-                    'mirror_xticks': bool(opts.get('mirror_xticks', True)),
-                    'xticks_raw': opts.get('_xticks_raw', ''),
-                    'export_segments': opts.get('export_segments', ['Current']),
-                    'subfolder_by': opts.get('subfolder_by', []),
-                }
-                # Save UI state without touching selections
-                self._save_all_state(selection_name=None, silent=True)
-            except Exception:
-                pass
-
-        # Preview area (optional)
-        prev_holder = ttk.Frame(frm)
-        prev_holder.grid(row=row0 + 16, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
-        prev_holder.columnconfigure(0, weight=1)
-        prev_holder.rowconfigure(0, weight=1)
-        prev_label = ttk.Label(prev_holder, text="", anchor="center")
-        prev_label.grid(row=0, column=0, sticky="nsew")
-        prev_img = {'obj': None}
-
-        def _render_preview():
-            if not show_prev_var.get():
-                prev_label.configure(text="")
-                prev_label.configure(image="")
-                prev_img['obj'] = None
-                return
-            if preview_pair is None:
-                prev_label.configure(text="(no pair selected)")
-                return
-            try:
-                # Build a PNG using the same rendering path (but without mutating UI state).
-                # Preview uses the current segment/resolution mode and first selected pair.
-                ref, tgt = int(preview_pair[0]), int(preview_pair[1])
-                seg = int(self.current_segment)
-                highres = bool(getattr(self, '_highres_mode', False))
-                # Render preview directly (bypass viewer PNG cache) with export overrides.
-                tmp_over = {
-                    'ccg_color': (ccg_var.get() or '').strip() or None,
-                    'baseline_color': (base_var.get() or '').strip() or None,
-                    'cs_shade_color': (cs_shade_var.get() or '').strip() or None,
-                    'test_window_color': (tw_color_var.get() or '').strip() or None,
-                    'test_window_alpha': (float(tw_alpha_var.get()) if str(tw_alpha_var.get()).strip() else None),
-                    'pval_line_color':  (pval_line_color_var.get() or '').strip() or None,
-                    'alpha_line_color': (alpha_line_color_var.get() or '').strip() or None,
-                    'min_text_size': float(minfs_var.get()) if str(minfs_var.get()).strip() else None,
-                    'ccg_alpha': float(ccg_a_var.get()) if str(ccg_a_var.get()).strip() else None,
-                    'baseline_alpha': float(base_a_var.get()) if str(base_a_var.get()).strip() else None,
-                    'show_legend': bool(show_legend_var.get()),
-                    'mirror_xticks': bool(mirror_ticks_var.get()),
-                    'xticks_ms': ([(float(x.strip())) for x in (xticks_var.get() or '').split(',')
-                                   if x.strip()] if (xticks_var.get() or '').strip() else None),
-                }
-                old = getattr(self, '_export_overrides', None)
-                self._export_overrides = tmp_over
-                try:
-                    import tempfile, os as _os
-                    ctx = self._render_engine.build_context(
-                        (ref, tgt), seg, highres, None, None)
-                    tmp_png = tempfile.mktemp(suffix='.png')
-                    self._render_engine.write_png(ctx, tmp_png)
-                    png_path = tmp_png
-                finally:
-                    self._export_overrides = old
-
-                try:
-                    from PIL import Image, ImageTk
-                    im = Image.open(png_path)
-                    max_w = 700
-                    max_h = 450
-                    w, h = im.size
-                    scale = min(max_w / max(w, 1), max_h / max(h, 1), 1.0)
-                    if scale < 1.0:
-                        im = im.resize((int(w * scale), int(h * scale)))
-                    tk_im = ImageTk.PhotoImage(im)
-                    prev_label.configure(image=tk_im, text="")
-                    prev_img['obj'] = tk_im  # keep reference
-                    try:
-                        _os.remove(png_path)
-                    except Exception:
-                        pass
-                except Exception:
-                    prev_label.configure(text=f"Preview ready: {os.path.basename(png_path)}")
-            except Exception as ex:
-                prev_label.configure(text=f"Preview failed: {ex}")
-
-        ttk.Checkbutton(frm, text="Show preview", variable=show_prev_var,
-                        command=_render_preview).grid(row=row0 + 15, column=0, sticky="w", pady=(8, 0))
-        # Re-render preview when override fields change (only if enabled)
-        for _v in (ccg_var, base_var, cs_shade_var, tw_color_var, tw_alpha_var,
-                   pval_line_color_var, alpha_line_color_var,
-                   minfs_var, ccg_a_var, base_a_var, xticks_var):
-            try:
-                _v.trace_add('write', lambda *a: _render_preview())
-            except Exception:
-                pass
-        try:
-            show_legend_var.trace_add('write', lambda *a: _render_preview())
-        except Exception:
-            pass
-        try:
-            mirror_ticks_var.trace_add('write', lambda *a: _render_preview())
-        except Exception:
-            pass
-
-        btns = ttk.Frame(frm)
-        btns.grid(row=row0 + 17, column=0, columnspan=2, sticky="e", pady=(10, 0))
-        ttk.Button(btns, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btns, text="Save export settings", command=_save_export_defaults).pack(
-            side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btns, text=f"Export current as {fmt.upper()}", command=_ok).pack(side=tk.RIGHT)
-
-        # If multiple pairs explicitly selected in current list, also offer that
-        if selected_pairs and len(selected_pairs) > 1:
-            def _export_all():
-                action['mode'] = 'all'
-                _ok()
-            ttk.Button(btns, text=f"Export all selected ({len(selected_pairs)})…",
-                       command=_export_all).pack(side=tk.RIGHT, padx=(6, 6))
-
-        # Export bookmarked pairs
-        n_bm = len(getattr(self, '_bookmarked_pairs', set()) or set())
-        if n_bm > 0:
-            def _export_bookmarked():
-                action['mode'] = 'bookmarked'
-                _ok()
-            ttk.Button(btns, text=f"Export bookmarked ({n_bm})…",
-                       command=_export_bookmarked).pack(side=tk.RIGHT, padx=(6, 6))
-
-        # Export pairs from groups — show buttons whenever any groups exist
-        any_groups = bool(all_groups)  # all_groups includes special groups (filtered only __-prefix)
-        if any_groups:
-            def _export_groups():
-                action['mode'] = 'groups'
-                _ok()
-            ttk.Button(btns, text="Export selected group(s)…",
-                       command=_export_groups).pack(side=tk.RIGHT, padx=(6, 6))
-
-        win.protocol("WM_DELETE_WINDOW", _cancel)
-        win.bind("<Escape>", lambda e: _cancel())
-        win.update_idletasks()
-        win.lift()
-        win.focus_force()
-        win.wait_window()
-
-        if not out:
-            return None
-        out['_action'] = action.get('mode', 'current')
-        out['_selected_pairs'] = list(selected_pairs) if selected_pairs else []
-        out['_preview_pair'] = preview_pair
-        out['_fmt'] = fmt
-        out['_selected_groups'] = list(selected_groups)
-        return out
+        return ExportOptionsDialog.show(self, fmt=fmt, preview_pair=preview_pair, selected_pairs=selected_pairs)
 
     def _view_values(self, item):
         """Print values of a CCG data item to cell output."""
@@ -4356,7 +5160,7 @@ class CCGReviewUI:
                         _meta=metadata, _ccg_data=ccg_data_obj, _neurons=neurons_obj):
             try:
                 neurons_override = (
-                    self._ts_apply_brain_state_intervals(_intervals, _t0, _t1, neurons_obj=_neurons)
+                    self.time_slider._ts_apply_brain_state_intervals(_intervals, _t0, _t1, neurons_obj=_neurons)
                     if _intervals is not None else None)
                 result = self._compute_custom_segment(
                     _t0, _t1, _name,
@@ -4440,7 +5244,7 @@ class CCGReviewUI:
                 self._update_segment_label()
                 self.update_plot()
             if hasattr(self, '_ts_status_var'):
-                self._ts_status_var.set(f"Done: {result.get('name', '')}")
+                self.time_slider._ts_status_var.set(f"Done: {result.get('name', '')}")
             self.root.bell()
         elif result is not None and result.get('error'):
             messagebox.showerror("Custom CCG", f"Computation failed:\n{result['error']}")
@@ -4765,6 +5569,17 @@ class CCGReviewUI:
         keys = self._all_nd_keys()
         return keys[1:] if keys and keys[0] is _ALL_SESSION_MARKER else keys
 
+    def _sess_title_label(self, sess: str) -> str:
+        """Return 'session=NSD 2' style label for use in plot titles."""
+        ordered = [str(getattr(nk, 'session', nk)) for nk in self._real_nd_keys_ordered()]
+        try:
+            idx = ordered.index(sess) + 1   # 1-based
+        except ValueError:
+            return f"session={sess}"
+        block_label = "SD" if idx > _SESS_PER_BLOCK else "NSD"
+        block_num   = ((idx - 1) % _SESS_PER_BLOCK) + 1
+        return f"session={block_label}{block_num}"
+
     def _sanitize_sess_slug(self, sess: str) -> str:
         s = re.sub(r'[^\w.\-]+', '_', str(sess))[:48]
         return s or 'sess'
@@ -4994,10 +5809,6 @@ class CCGReviewUI:
         except Exception:
             pass
 
-    def _enter_any_session_mode(self):
-        """Backward-compat wrapper for older call sites."""
-        self._enter_all_session_mode()
-
     def _exit_all_session_mode(self):
         """Leave ``All`` mode (flush pointers/stores first if entering from multi-save)."""
         self._flush_any_selections_to_pointers()
@@ -5025,10 +5836,6 @@ class CCGReviewUI:
         except Exception:
             pass
 
-    def _exit_any_session_mode(self):
-        """Backward-compat wrapper for older call sites."""
-        self._exit_all_session_mode()
-
     def _bind_context_to_type_key(self, tk):
         """Point ccg_pointer / ccg_data / neurons at *tk* without touching triple sets."""
         ptr = self.cd.data.get(tk)
@@ -5047,8 +5854,11 @@ class CCGReviewUI:
             self.ccg_data = self.cd._ccg_highres[nd_key]
         else:
             self.ccg_data = self.cd._ccg.get(nd_key)
-        self.neurons = (self.cd.nd.data[nd_key]
-                        if getattr(self.cd, 'nd', None) is not None else None)
+        try:
+            self.neurons = (self.cd.nd.data[nd_key]
+                            if getattr(self.cd, 'nd', None) is not None else None)
+        except KeyError:
+            self.neurons = None
         self.n_segments = ptr.n_segments
         self.segment_names = list(ptr.edge_times['label'].values)
 
@@ -5185,13 +5995,6 @@ class CCGReviewUI:
             return str(inds[0]), (int(inds[1]), int(inds[2]))
         return self._current_session_str(), (int(inds[0]), int(inds[1]))
 
-    def _pair_row_selected_trip(self, inds):
-        """Selected-list row → ``selected_inds`` key (sess, r, t) in any-mode."""
-        if (getattr(self, '_session_any_mode', False) and isinstance(inds, tuple)
-                and len(inds) >= 3 and isinstance(inds[0], Key)):
-            return (str(inds[0].session), int(inds[1]), int(inds[2]))
-        return inds
-
     def _pair_in_group(self, pair, group_name: str) -> bool:
         sess, p2 = self._pair_sess_rt(pair)
         return p2 in self._group_pairs(group_name, session=sess)
@@ -5248,8 +6051,11 @@ class CCGReviewUI:
         else:
             self._highres_mode = False   # reset if highres not available
             self.ccg_data = self.cd._ccg.get(nd_key)
-        self.neurons = (self.cd.nd.data[new_key.nd()]
-                        if getattr(self.cd, 'nd', None) is not None else None)
+        try:
+            self.neurons = (self.cd.nd.data[new_key.nd()]
+                            if getattr(self.cd, 'nd', None) is not None else None)
+        except KeyError:
+            self.neurons = None
         # all_inds is a @property — no assignment needed
         self.n_segments = self.ccg_pointer.n_segments
         self.segment_names = list(self.ccg_pointer.edge_times['label'].values)
@@ -5297,19 +6103,10 @@ class CCGReviewUI:
         if self._auto_pregen_enabled and self._cache_config is not None:
             self._launch_pregen_subprocess(dict(self._cache_config), priority='auto')
         _sess_ch = getattr(self, '_switch_key_session_changed', False)
-        if _sess_ch:
-            self._ts_refresh_epochs_for_current_key()
-        else:
-            self._ts_reinit_times_for_current_key()
-            self._ts_refresh_union_if_all_sessions_mode()
+        self.time_slider.on_key_changed()
+        if not _sess_ch:
+            self.time_slider.on_session_mode_changed()
         self._switch_key_session_changed = False
-
-    def _ts_reinit_times_for_current_key(self):
-        """Refresh time-slider bounds from the current CCG pointer / theme (same session)."""
-        if getattr(self, '_ts_theme_combo', None) is None:
-            return
-        self._ts_init_times()
-        self._ts_redraw()
 
     def _custom_ccg_has_unsaved(self) -> bool:
         """True if any in-memory custom segment has no on-disk .npz (or file missing)."""
@@ -5323,42 +6120,6 @@ class CCGReviewUI:
                 if not p or not os.path.isfile(str(p)):
                     return True
         return False
-
-    def _maybe_prompt_save_custom_ccgs_before_session_switch(self) -> bool:
-        """Return True to proceed switching session; False to cancel (revert session combo)."""
-        if not self._custom_ccg_has_unsaved():
-            return True
-        r = messagebox.askyesnocancel(
-            "Unsaved custom CCGs",
-            "Custom CCG segments belong only to the current session. They are not valid "
-            "after you switch sessions.\n\n"
-            "You have one or more custom segments that are not saved to a .npz file.\n\n"
-            "Save them now?\n"
-            "  Yes — open the save dialog\n"
-            "  No — discard those segments and switch\n"
-            "  Cancel — stay on this session")
-        if r is None:
-            return False
-        if r:
-            self._ts_save_custom_ccg()
-            if self._custom_ccg_has_unsaved():
-                messagebox.showwarning(
-                    "Custom CCGs not saved",
-                    "Some custom segments are still unsaved. Session switch was cancelled.")
-                return False
-            return True
-        return True
-
-    def _ts_refresh_epochs_for_current_key(self):
-        """Re-discover behavioral Epoch objects for the current session and refresh bounds."""
-        combo = getattr(self, '_ts_theme_combo', None)
-        if combo is None:
-            return
-        self._ts_discover_themes()
-        vals = tuple(combo.cget('values') or ())
-        if vals and self._ts_theme_var.get() not in vals:
-            self._ts_theme_var.set('segments')
-        self._on_ts_theme_change()
 
     # ------------------------------------------------------------------
     # Dropdown callbacks
@@ -5384,12 +6145,29 @@ class CCGReviewUI:
                 return
 
         self._autosave_current()
-        if not self._maybe_prompt_save_custom_ccgs_before_session_switch():
+
+        def _revert_session_combo():
             cur_nd = self.key.nd()
             self._session_var.set(
                 self._session_label(_ALL_SESSION_MARKER) if cur_any
                 else self._session_label(cur_nd))
-            return
+
+        if self._custom_ccg_has_unsaved():
+            r = messagebox.askyesnocancel(
+                "Unsaved custom CCGs",
+                "Unsaved custom segments will be lost when switching sessions.\n\n"
+                "Save them now? (No = discard, Cancel = stay)")
+            if r is None:
+                _revert_session_combo()
+                return
+            if r:
+                self.time_slider._ts_save_custom_ccg()
+                if self._custom_ccg_has_unsaved():
+                    messagebox.showwarning(
+                        "Custom CCGs not saved",
+                        "Some custom segments are still unsaved. Session switch was cancelled.")
+                    _revert_session_combo()
+                    return
         try:
             self._stacked_segments.clear()
         except Exception:
@@ -6196,7 +6974,7 @@ class CCGReviewUI:
                             if cursor < t1:
                                 intervals.append((cursor, t1))
                         if intervals:
-                            neurons_eff = self._ts_apply_brain_state_intervals(intervals, t0, t1)
+                            neurons_eff = self.time_slider._ts_apply_brain_state_intervals(intervals, t0, t1)
             except Exception:
                 neurons_eff = self.neurons
         elif segment != self.n_segments:
@@ -6322,7 +7100,7 @@ class CCGReviewUI:
     # ------------------------------------------------------------------
 
     _HISTORY_SUBDIR = '.history'
-    _AUTOSAVE_INTERVAL_MS = 15 * 60 * 1000  # 15 minutes
+    _AUTOSAVE_INTERVAL_MS = 30 * 60 * 1000  # 30 minutes
 
     def _history_dir(self) -> str:
         return os.path.join(self._sel_save_dir, self._HISTORY_SUBDIR)
@@ -6379,7 +7157,7 @@ class CCGReviewUI:
         if not os.path.isdir(hdir):
             return
         import subprocess
-        cutoff = datetime.datetime.now() - datetime.timedelta(days=3)
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=7)
         removed = []
         for fname in os.listdir(hdir):
             if not fname.endswith('.json'):
@@ -6398,9 +7176,9 @@ class CCGReviewUI:
                                 os.path.relpath(p, repo)],
                                cwd=repo, capture_output=True)
             subprocess.run(['git', 'commit', '--no-gpg-sign', '-m',
-                            f'[history] purge {len(removed)} files older than 3 days'],
+                            f'[history] purge {len(removed)} files older than 7 days'],
                            cwd=repo, capture_output=True)
-            print(f"[CCGReviewUI] purged {len(removed)} history files older than 3 days")
+            print(f"[CCGReviewUI] purged {len(removed)} history files older than 7 days")
 
     def _purge_tmp_png_cache(self, days: int = 3):
         """Delete cached PNGs in tmp_dir older than *days* days."""
@@ -6772,8 +7550,11 @@ class CCGReviewUI:
             return
         self.ccg_pointer = ptr
         self.ccg_data = self.cd._ccg.get(nd_key)
-        self.neurons = (self.cd.nd.data[nd_key]
-                        if getattr(self.cd, 'nd', None) is not None else None)
+        try:
+            self.neurons = (self.cd.nd.data[nd_key]
+                            if getattr(self.cd, 'nd', None) is not None else None)
+        except KeyError:
+            self.neurons = None
         self.n_segments = self.ccg_pointer.n_segments
         self.segment_names = list(self.ccg_pointer.edge_times['label'].values)
         # Restore selection state from pointer if available
@@ -6991,6 +7772,47 @@ class CCGReviewUI:
         except Exception:
             self.center_container.cs_panel._conn_str_label.config(text="CS: err")
 
+    def _cs_annotation_lines(self, ref: int, tgt: int, seg, highres: bool,
+                              print_stg: bool, print_jbsi: bool) -> list:
+        """Return ["STG: val"] and/or ["JBSI: val"] for export annotation."""
+        if not print_stg and not print_jbsi:
+            return []
+        lines = []
+        try:
+            eff_min_lag, eff_max_lag = self._effective_lags(ref, tgt)
+            method = self.center_container.baseline_panel._conn_str_method_var.get()
+
+            def _fmt(v):
+                if v is None:
+                    return "n/a"
+                x = float(v)
+                return f"{x:.2f}" if abs(x) >= 1000 else f"{x:.3g}"
+
+            if print_stg:
+                try:
+                    k = self._cs_cache_key(ref, tgt, seg, method, highres,
+                                           eff_min_lag, eff_max_lag)
+                    if k not in self._conn_strength_cache:
+                        self._compute_pair_conn_strength(ref, tgt, seg, highres=highres)
+                    v, _ = self._conn_strength_cache.get(k, (None, None))
+                    lines.append(f"STG: {_fmt(v)}")
+                except Exception:
+                    lines.append("STG: n/a")
+
+            if print_jbsi:
+                try:
+                    k_jbsi = self._cs_cache_key(ref, tgt, seg, 'JBSI', highres,
+                                                 eff_min_lag, eff_max_lag)
+                    if k_jbsi not in self._conn_strength_cache:
+                        self._compute_pair_conn_strength(ref, tgt, seg, highres=highres)
+                    v, _ = self._conn_strength_cache.get(k_jbsi, (None, None))
+                    lines.append(f"JBSI: {_fmt(v)}")
+                except Exception:
+                    lines.append("JBSI: n/a")
+        except Exception:
+            pass
+        return lines
+
     def _update_conn_str_metric_availability(self):
         """Enable/disable CS metric radio buttons (e.g., JBSI needs jitter)."""
         if not hasattr(self, 'center_container'):
@@ -7191,8 +8013,10 @@ class CCGReviewUI:
 
     def _effective_lags(self, ref: int, tgt: int):
         """Return (min_lag, max_lag) accounting for adaptive test window."""
-        if (self.center_container.baseline_panel._adaptive_tw_var.get()
-                and self._pair_qualifies_for_adaptive_tw(ref, tgt)):
+        _eo = getattr(self, '_export_overrides', None)
+        _adaptive = (_eo.get('adaptive_tw_export', False) if _eo
+                     else self.center_container.baseline_panel._adaptive_tw_var.get())
+        if (_adaptive and self._pair_qualifies_for_adaptive_tw(ref, tgt)):
             return self._ADAPTIVE_TW_MIN_LAG, self._ADAPTIVE_TW_MAX_LAG
         conf = self.ccg_data.conf if self.ccg_data else None
         if conf is None:
@@ -7334,8 +8158,8 @@ class CCGReviewUI:
                     return str(si)
 
                 self.fig.clear()
-                axes_grid = self.fig.subplots(len(segs), n_cols, squeeze=False)
-                for row_i, seg in enumerate(segs):
+                axes_grid = self.fig.subplots(n_cols, len(segs), squeeze=False)
+                for col_i, seg in enumerate(segs):
                     if n_cols == 2:
                         pngs = [
                             self._render_png_with_res(inds, seg, highres=False),
@@ -7343,7 +8167,8 @@ class CCGReviewUI:
                         ]
                     else:
                         pngs = [self._render_png_with_res(inds, seg, highres=False)]
-                    for ax, png, col_title in zip(axes_grid[row_i], pngs, col_titles):
+                    for row_i, (png, col_title) in enumerate(zip(pngs, col_titles)):
+                        ax = axes_grid[row_i][col_i]
                         ax.imshow(mpimg.imread(png))
                         ax.axis('off')
                         t = _seg_label(seg)
@@ -7421,11 +8246,15 @@ class CCGReviewUI:
                 """Map compact waveform to full (ch_per_shank, n_samples) grid."""
                 if wf_neuron.ndim == 1:
                     return np.tile(wf_neuron, (ch_per_shank, 1))
+                if discarded is None or len(discarded) == 0:
+                    return wf_neuron
                 channel_ids = ch_per_shank * shank_id + np.arange(ch_per_shank)
                 mask = ~np.isin(channel_ids, discarded)
                 start = int(ch_per_shank * shank_id
                             - np.sum(discarded < ch_per_shank * shank_id))
                 length = int(np.sum(mask))
+                if length == 0 or wf_neuron.shape[0] < length:
+                    return wf_neuron
                 clean = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
                 clean[mask] = wf_neuron[start:start + length]
                 return clean
@@ -7460,705 +8289,7 @@ class CCGReviewUI:
     # Time slider
     # ------------------------------------------------------------------
 
-    def _ts_discover_themes(self):
-        """Discover available Epoch objects from the session for theme switching."""
-        self._ts_themes = {}
-        self._ts_theme_label_union_all_sessions = {}
-        # Known Epoch attribute names on session objects (ProcessData)
-        _EPOCH_ATTRS = [
-            'paradigm', 'brainstates', 'theta', 'theta_epochs',
-            'ripple', 'sw', 'spindle', 'pbe', 'off_epochs',
-            'micro_arousals', 'artifact', 'handling',
-            'maze1_run', 'maze2_run', 'maze_run', 'remaze_run',
-        ]
-        sessions = getattr(getattr(self.cd, 'nd', None), '_sessions', None)
-        if not sessions:
-            return
-        if not isinstance(sessions, (list, tuple)):
-            sessions = [sessions]
-        # Use the first session that matches our current key
-        session_name = getattr(self.key, 'session', None)
-        session = None
-        for s in sessions:
-            nd = getattr(self.cd, 'nd', None)
-            if nd is not None:
-                sname = nd._short_session_name(s)
-                if sname == session_name:
-                    session = s
-                    break
-        if session is None:
-            print(f"[TimeSlider] no matching session object for {session_name}")
-            return
-        for attr in _EPOCH_ATTRS:
-            obj = getattr(session, attr, None)
-            if obj is not None and _Epoch is not None and isinstance(obj, _Epoch):
-                if obj.n_epochs > 0:
-                    self._ts_themes[attr] = obj
-        # Update combobox values
-        theme_names = ['segments'] + sorted(self._ts_themes.keys())
-        self._ts_theme_combo['values'] = theme_names
-        n_themes = len(self._ts_themes)
-        self._ts_theme_info_var.set(
-            f"{n_themes} theme{'s' if n_themes != 1 else ''} available")
-        self._ts_rebuild_theme_label_union_for_all_sessions()
-
-    def _ts_all_process_data_sessions(self):
-        """ProcessData objects for every loaded session (for cross-session label union)."""
-        nd = getattr(self.cd, 'nd', None)
-        if nd is None:
-            return []
-        raw = getattr(nd, '_sessions', None)
-        if raw is None:
-            raw = []
-        elif not isinstance(raw, (list, tuple)):
-            raw = [raw]
-        objs = [s for s in raw if s is not None]
-        if objs:
-            return objs
-        out = []
-        seen = set()
-        for nk in self._real_nd_keys_ordered():
-            s = self._session_obj_for_nd_key(nk)
-            if s is None:
-                continue
-            sid = id(s)
-            if sid in seen:
-                continue
-            seen.add(sid)
-            out.append(s)
-        return out
-
-    def _ts_refresh_union_if_all_sessions_mode(self):
-        """Recompute All-session label union without resetting the time-slider theme/handles."""
-        if not getattr(self, '_session_any_mode', False):
-            return
-        if getattr(self, '_ts_theme_combo', None) is None:
-            return
-        self._ts_rebuild_theme_label_union_for_all_sessions()
-        self._ts_label_colors = None
-        self._ts_update_overlap_ui()
-        self._ts_redraw()
-
-    def _ts_rebuild_theme_label_union_for_all_sessions(self):
-        """When Session=All, map each theme to sorted unique labels seen on any session."""
-        self._ts_theme_label_union_all_sessions = {}
-        if not getattr(self, '_session_any_mode', False):
-            return
-        session_objs = self._ts_all_process_data_sessions()
-        if not session_objs:
-            return
-        for attr in self._ts_themes.keys():
-            acc = set()
-            for s in session_objs:
-                obj = getattr(s, attr, None)
-                if obj is None or _Epoch is None or not isinstance(obj, _Epoch):
-                    continue
-                if obj.n_epochs <= 0:
-                    continue
-                for lbl in obj.labels:
-                    s = str(lbl).strip()
-                    if s:
-                        acc.add(s)
-            if acc:
-                self._ts_theme_label_union_all_sessions[attr] = sorted(acc)
-        # segments: union of segment labels across every loaded CCG pointer
-        seg = set()
-        data = getattr(self.cd, 'data', None)
-        if data:
-            for ptr in data.values():
-                if ptr is None:
-                    continue
-                try:
-                    et = ptr.edge_times
-                except Exception:
-                    continue
-                cols = getattr(et, 'columns', None)
-                if cols is None or 'label' not in cols:
-                    continue
-                for v in et['label'].values:
-                    s = str(v).strip()
-                    if s:
-                        seg.add(s)
-        if seg:
-            self._ts_theme_label_union_all_sessions['segments'] = sorted(seg)
-
-    def _on_ts_theme_change(self, _event=None):
-        """Handle theme combobox selection — repopulate epoch bounds."""
-        theme = self._ts_theme_var.get()
-        self._ts_current_theme = theme
-        # Reset handles
-        self._slider_t_start = None
-        self._slider_t_end = None
-        if hasattr(self, '_ts_start_var'):
-            self._ts_start_var.set("00:00:00")
-        if hasattr(self, '_ts_end_var'):
-            self._ts_end_var.set("00:00:00")
-        # Reset zoom
-        self._ts_zoom_start = None
-        self._ts_zoom_end = None
-        self._ts_zoom_start_var.set("00:00:00")
-        self._ts_zoom_end_var.set("00:00:00")
-        self._ts_zoom_frame.pack_forget()
-        # Reset label color cache for new theme
-        self._ts_label_colors = None
-        self._ts_init_times()
-        self._ts_redraw()
-
-    def _ts_collect_theme_ui_labels(self) -> list[str]:
-        """Non-blank labels for overlap + legend; Session=All includes union (also stripped)."""
-        theme = getattr(self, '_ts_current_theme', 'segments')
-        acc = {str(lb).strip() for _, _, lb in self._ts_epoch_bounds if str(lb).strip()}
-        if getattr(self, '_session_any_mode', False):
-            extra = (getattr(self, '_ts_theme_label_union_all_sessions', None)
-                     or {}).get(theme, ())
-            acc |= {str(x).strip() for x in (extra or ()) if str(x).strip()}
-        out = sorted(acc)
-        if not out and theme != 'segments' and theme in getattr(self, '_ts_themes', {}):
-            return [theme]
-        return out
-
-    def _ts_update_overlap_ui(self):
-        """Update the label-filter dropdown for the current theme."""
-        combo = getattr(self, '_ts_label_combo', None)
-        row = getattr(self, '_ts_overlap_row', None)
-        if combo is None or row is None:
-            return
-        theme = getattr(self, '_ts_current_theme', 'segments')
-        all_labels = self._ts_collect_theme_ui_labels()
-        if len(all_labels) > 1:
-            sorted_labels = ['All'] + all_labels + ['NONE']
-            combo['values'] = sorted_labels
-            self._ts_label_var.set('All')
-        else:
-            # Single-label theme (e.g. ripple): show theme name + NONE
-            display_name = theme if theme != 'segments' else all_labels[0] if all_labels else 'segments'
-            combo['values'] = [display_name, 'NONE']
-            self._ts_label_var.set(display_name)
-        row.pack(side=tk.LEFT, padx=(8, 0))
-        self._ts_active_label = None
-        # Reset label color cache so it rebuilds for new theme
-        self._ts_label_colors = None
-        self._ts_update_legend()
-
-    def _ts_init_times(self):
-        """Populate epoch bounds from the selected theme or edge_times."""
-        theme = getattr(self, '_ts_current_theme', 'segments')
-
-        if theme != 'segments' and theme in self._ts_themes:
-            # Use Epoch object directly
-            epoch = self._ts_themes[theme]
-            labs = [str(x).strip() for x in epoch.labels]
-            self._ts_epoch_bounds = [
-                (float(s), float(e), lb)
-                for s, e, lb in zip(epoch.starts, epoch.stops, labs)]
-            unique_nonblank = {lb for lb in labs if lb}
-            # No usable labels (e.g. ripple): collapse to theme name for UI/chips
-            if len(unique_nonblank) == 0:
-                self._ts_epoch_bounds = [
-                    (s, e, theme) for s, e, _ in self._ts_epoch_bounds]
-            elif len(unique_nonblank) <= 1:
-                self._ts_epoch_bounds = [
-                    (s, e, theme) for s, e, _ in self._ts_epoch_bounds]
-            self._ts_total_sec = (float(epoch.stops.max())
-                                  if len(epoch.stops) else 1.0)
-            self._ts_update_overlap_ui()
-            return
-
-        # Default: use CCG segment edge_times
-        et = self.ccg_pointer.edge_times
-        cols = et.columns.tolist()
-
-        # Find start/stop columns by common name conventions
-        def _find_col(candidates):
-            for c in candidates:
-                if c in cols:
-                    return c
-            return None
-
-        start_col = _find_col(['start', 't_start', 'start_time', 'start_s'])
-        stop_col  = _find_col(['stop',  't_end',   'end_time',   'stop_s', 'end'])
-
-        self._ts_epoch_bounds = []
-        if start_col and stop_col:
-            for _, row in et.iterrows():
-                t0 = float(row[start_col])
-                t1 = float(row[stop_col])
-                self._ts_epoch_bounds.append((t0, t1, str(row['label'])))
-            self._ts_total_sec = (
-                max((b[1] for b in self._ts_epoch_bounds), default=1.0)
-                if self._ts_epoch_bounds else 1.0)
-        else:
-            # Fall back: reconstruct from cumulative effective_time_hours
-            t = 0.0
-            for _, row in et.iterrows():
-                dur = float(row['effective_time_hours']) * 3600.0
-                self._ts_epoch_bounds.append((t, t + dur, str(row['label'])))
-                t += dur
-            self._ts_total_sec = t if t > 0 else 1.0
-        self._ts_update_overlap_ui()
-
-    def _ts_t_to_x(self, t: float) -> int:
-        w = max(self.ts_canvas.winfo_width(), 20)
-        return int((t / max(self._ts_total_sec, 1)) * (w - 20) + 10)
-
-    def _ts_x_to_t(self, x: int) -> float:
-        w = max(self.ts_canvas.winfo_width(), 20)
-        return max(0.0, min(self._ts_total_sec,
-                            (x - 10) / max(w - 20, 1) * self._ts_total_sec))
-
-    def _on_ts_tool_change(self):
-        """Handle toolbar selection / lock toggle."""
-        locked = self._ts_lock_var.get()
-        selection = self._ts_tool_var.get() == 'selection'
-        if locked:
-            self.ts_canvas.config(cursor='arrow')
-        elif selection:
-            self.ts_canvas.config(cursor='plus')
-        else:
-            self.ts_canvas.config(cursor='crosshair')
-        # Hide zoom panel when selection is off
-        if not selection:
-            self._ts_zoom_frame.pack_forget()
-            self._ts_zoom_start = None
-            self._ts_zoom_end = None
-        self._ts_redraw()
-
-    # ── Drawing ───────────────────────────────────────────────────────
-
-    _TS_COLORS = ['#BBDEFB', '#C8E6C9', '#FFF9C4', '#FFE0B2', '#E1BEE7',
-                  '#F8BBD0', '#D7CCC8', '#B2EBF2', '#DCEDC8', '#F0F4C3']
-
-    _TS_NONE_COLOR = '#E0E0E0'
-
-    def _ts_label_color_map(self):
-        """Return {label: color} mapping — consistent color per unique label."""
-        if not hasattr(self, '_ts_label_colors') or self._ts_label_colors is None:
-            self._ts_label_colors = {}
-        # Rebuild if labels changed
-        all_labels = self._ts_collect_theme_ui_labels()
-        expected = set(all_labels) | {'NONE'}
-        if expected != set(self._ts_label_colors.keys()):
-            self._ts_label_colors = {
-                lbl: self._TS_COLORS[i % len(self._TS_COLORS)]
-                for i, lbl in enumerate(all_labels)
-            }
-            self._ts_label_colors['NONE'] = self._TS_NONE_COLOR
-        return self._ts_label_colors
-
-    def _ts_draw_epochs(self, canvas, t_to_x, bounds, h):
-        """Draw epoch rectangles on a canvas using given t_to_x mapping."""
-        cmap = self._ts_label_color_map()
-        y_bot = h - 16  # leave room for time axis
-        for t0, t1, lbl in bounds:
-            x0, x1 = t_to_x(t0), t_to_x(t1)
-            color = cmap.get(lbl, '#E0E0E0')
-            canvas.create_rectangle(x0, 6, x1, y_bot,
-                                    fill=color, outline='#90A4AE')
-            if x1 - x0 > 22:
-                canvas.create_text((x0 + x1) // 2, (6 + y_bot) // 2,
-                                   text=lbl, font=('Arial', 7), fill='#333')
-
-    def _ts_update_legend(self):
-        """Populate legend row with toggle-able swatches for each unique label."""
-        frame = self._ts_legend_frame
-        for w in frame.winfo_children():
-            w.destroy()
-        cmap = self._ts_label_color_map()
-        self._ts_legend_toggles = {}
-        _fs = max(7, self._min_font_size())
-        for lbl, color in cmap.items():
-            var = tk.BooleanVar(value=True)
-            self._ts_legend_toggles[lbl] = var
-            # Combined swatch+label as a single clickable button
-            btn = tk.Frame(frame, cursor='hand2')
-            btn.pack(side=tk.LEFT, padx=(4, 6), pady=1)
-            swatch = tk.Frame(btn, width=12, height=10, bg=color,
-                              highlightbackground='#90A4AE', highlightthickness=1)
-            swatch.pack(side=tk.LEFT, padx=(0, 2))
-            swatch.pack_propagate(False)
-            lbl_w = tk.Label(btn, text=lbl, font=('Arial', _fs),
-                             fg='#333', relief=tk.RAISED, bd=1, padx=2)
-            lbl_w.pack(side=tk.LEFT)
-
-            def _toggle(v=var, s=swatch, l=lbl_w, c=color):
-                v.set(not v.get())
-                if v.get():
-                    s.config(bg=c)
-                    l.config(fg='#333', relief=tk.RAISED)
-                else:
-                    s.config(bg='#D0D0D0')
-                    l.config(fg='#AAA', relief=tk.SUNKEN)
-            for w in (swatch, lbl_w, btn):
-                w.bind('<Button-1>', lambda e, t=_toggle: t())
-        frame.pack(fill=tk.X, padx=4, pady=(1, 0),
-                   before=self._ts_main_canvas_frame)
-
-    def _ts_draw_time_axis(self, canvas, t_to_x, t_min, t_max, h):
-        """Draw time axis tick marks and labels at the bottom of a canvas."""
-        w = canvas.winfo_width()
-        if w < 40:
-            return
-        span = t_max - t_min
-        if span <= 0:
-            return
-        # Choose tick interval: aim for ~6-10 ticks
-        raw = span / 8.0
-        # Round to nice intervals (in seconds)
-        nice_intervals = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600,
-                          900, 1800, 3600, 7200, 14400, 28800]
-        tick_step = nice_intervals[-1]
-        for ni in nice_intervals:
-            if ni >= raw:
-                tick_step = ni
-                break
-        # Draw ticks
-        y_tick = h - 2
-        y_label = h - 1
-        t = (int(t_min / tick_step) + 1) * tick_step if t_min % tick_step != 0 else t_min
-        # Always draw first and last
-        endpoints = {t_min, t_max}
-        drawn_x = []
-        for tp in sorted(endpoints):
-            x = t_to_x(tp)
-            if 5 <= x <= w - 5:
-                canvas.create_line(x, y_tick - 4, x, y_tick, fill='#888')
-                canvas.create_text(x, y_label, text=self._ts_sec_to_hms(tp),
-                                   font=('Courier', 6), fill='#666', anchor='s')
-                drawn_x.append(x)
-        while t <= t_max:
-            x = t_to_x(t)
-            # Skip if too close to an already-drawn label
-            if 5 <= x <= w - 5 and all(abs(x - dx) > 38 for dx in drawn_x):
-                canvas.create_line(x, y_tick - 4, x, y_tick, fill='#888')
-                canvas.create_text(x, y_label, text=self._ts_sec_to_hms(t),
-                                   font=('Courier', 6), fill='#666', anchor='s')
-                drawn_x.append(x)
-            t += tick_step
-
-    def _ts_draw_handles(self, canvas, t_to_x, h, t_start, t_end,
-                         color_start='#1565C0', color_end='#B71C1C'):
-        """Draw cursor handles and selection range on a canvas."""
-        for t, color in [(t_start, color_start), (t_end, color_end)]:
-            if t is not None:
-                x = t_to_x(t)
-                canvas.create_line(x, 2, x, h - 2, fill=color, width=2)
-                canvas.create_polygon(x - 5, 2, x + 5, 2, x, 10,
-                                      fill=color, outline='')
-        if t_start is not None and t_end is not None:
-            x0, x1 = t_to_x(t_start), t_to_x(t_end)
-            canvas.create_rectangle(x0, 8, x1, h - 8,
-                                    fill='', outline=color_start,
-                                    width=2, dash=(4, 2))
-
-    _TS_NONE = 'NONE'  # sentinel for gap intervals
-
-    def _on_ts_label_change(self, _event=None):
-        """Handle overlap label combobox selection."""
-        val = self._ts_label_var.get()
-        if val == 'All':
-            self._ts_active_label = None
-        elif val == self._TS_NONE:
-            self._ts_active_label = self._TS_NONE
-        else:
-            # Could be a real label or the theme display name (single-label themes)
-            all_labels = self._ts_collect_theme_ui_labels()
-            if val in all_labels:
-                self._ts_active_label = val
-            else:
-                # Theme display name for single-label theme → show all intervals
-                self._ts_active_label = None
-        self._ts_redraw()
-
-    def _on_ts_label_reset(self):
-        """Revert to showing all labels."""
-        self._ts_active_label = None
-        combo = getattr(self, '_ts_label_combo', None)
-        if combo:
-            vals = list(combo['values'])
-            self._ts_label_var.set(vals[0] if vals else 'All')
-        else:
-            self._ts_label_var.set('All')
-        self._ts_redraw()
-
-    def _ts_visible_bounds(self):
-        """Return epoch bounds filtered by active label (or all if None).
-        NONE returns gaps between all epoch intervals."""
-        if self._ts_active_label is None:
-            return self._ts_epoch_bounds
-        if self._ts_active_label == self._TS_NONE:
-            return self._ts_compute_gaps()
-        return [(t0, t1, lbl) for t0, t1, lbl in self._ts_epoch_bounds
-                if lbl == self._ts_active_label]
-
-    def _ts_compute_gaps(self):
-        """Compute time gaps between all epoch intervals."""
-        if not self._ts_epoch_bounds:
-            return [(0, self._ts_total_sec, 'NONE')]
-        # Merge overlapping intervals first
-        sorted_bounds = sorted(self._ts_epoch_bounds, key=lambda x: x[0])
-        merged = []
-        cur_start, cur_end = sorted_bounds[0][0], sorted_bounds[0][1]
-        for t0, t1, _ in sorted_bounds[1:]:
-            if t0 <= cur_end:
-                cur_end = max(cur_end, t1)
-            else:
-                merged.append((cur_start, cur_end))
-                cur_start, cur_end = t0, t1
-        merged.append((cur_start, cur_end))
-        # Build gaps
-        gaps = []
-        if merged[0][0] > 0:
-            gaps.append((0, merged[0][0], 'NONE'))
-        for i in range(len(merged) - 1):
-            gap_start = merged[i][1]
-            gap_end = merged[i + 1][0]
-            if gap_end > gap_start:
-                gaps.append((gap_start, gap_end, 'NONE'))
-        if merged[-1][1] < self._ts_total_sec:
-            gaps.append((merged[-1][1], self._ts_total_sec, 'NONE'))
-        return gaps
-
-    def _ts_redraw(self, event=None):
-        c = self.ts_canvas
-        c.delete('all')
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 20:
-            return
-
-        if getattr(self, '_session_any_mode', False):
-            c.create_text(
-                w // 2, h // 2,
-                text="All sessions view — no single behavioral timeline to display.\n"
-                     "Use 'Set' + 'Apply to Multiple Sessions' to compute custom CCGs for sessions.",
-                anchor='center', font=('Arial', 9), fill='#555', justify='center')
-            return
-
-        if not self._ts_epoch_bounds:
-            return
-
-        self._ts_draw_epochs(c, self._ts_t_to_x, self._ts_visible_bounds(), h)
-        self._ts_draw_time_axis(c, self._ts_t_to_x, 0, self._ts_total_sec, h)
-
-        # Draw select-mode handles (custom window cursors)
-        self._ts_draw_handles(c, self._ts_t_to_x, h,
-                              self._slider_t_start, self._slider_t_end)
-
-        # Draw selection/zoom handles (orange) when selection tool active
-        if self._ts_tool_var.get() == 'selection':
-            self._ts_draw_handles(c, self._ts_t_to_x, h,
-                                  self._ts_zoom_start, self._ts_zoom_end,
-                                  color_start='#E65100', color_end='#BF360C')
-            # Shade zoom region
-            if self._ts_zoom_start is not None and self._ts_zoom_end is not None:
-                zx0 = self._ts_t_to_x(self._ts_zoom_start)
-                zx1 = self._ts_t_to_x(self._ts_zoom_end)
-                c.create_rectangle(zx0, 4, zx1, h - 4,
-                                   fill='#FFF3E0', outline='#E65100',
-                                   width=1, stipple='gray25')
-            self._ts_zoom_redraw()
-            self._ts_draw_radiate_lines()
-
-    # ── Zoom detail canvas ────────────────────────────────────────────
-
-    def _ts_zoom_t_to_x(self, t: float) -> int:
-        """Map time to x within the zoom canvas, using zoom region bounds."""
-        w = max(self._ts_zoom_canvas.winfo_width(), 20)
-        z0 = self._ts_zoom_start if self._ts_zoom_start is not None else 0
-        z1 = self._ts_zoom_end if self._ts_zoom_end is not None else self._ts_total_sec
-        span = max(z1 - z0, 1e-6)
-        return int(((t - z0) / span) * (w - 20) + 10)
-
-    def _ts_zoom_redraw(self, event=None):
-        """Redraw the zoomed-in detail canvas."""
-        zc = self._ts_zoom_canvas
-        zc.delete('all')
-        if self._ts_zoom_start is None or self._ts_zoom_end is None:
-            return
-        w = zc.winfo_width()
-        h = zc.winfo_height()
-        if w < 20:
-            return
-
-        z0, z1 = self._ts_zoom_start, self._ts_zoom_end
-
-        # Filter epoch bounds that overlap the zoom region (respects active label)
-        zoomed_bounds = [
-            (max(t0, z0), min(t1, z1), lbl)
-            for t0, t1, lbl in self._ts_visible_bounds()
-            if t1 > z0 and t0 < z1
-        ]
-        self._ts_draw_epochs(zc, self._ts_zoom_t_to_x, zoomed_bounds, h)
-        self._ts_draw_time_axis(zc, self._ts_zoom_t_to_x, z0, z1, h)
-
-        # Draw select-mode handles within zoom view
-        self._ts_draw_handles(zc, self._ts_zoom_t_to_x, h,
-                              self._slider_t_start, self._slider_t_end)
-
-    def _ts_draw_radiate_lines(self):
-        """Draw radiating lines connecting zoom region on main canvas to zoom canvas."""
-        rc = self._ts_radiate_canvas
-        rc.delete('all')
-        if self._ts_zoom_start is None or self._ts_zoom_end is None:
-            return
-        w = rc.winfo_width()
-        rh = rc.winfo_height()
-        if w < 20:
-            return
-
-        # Top points: zoom region edges on main canvas
-        zx0_main = self._ts_t_to_x(self._ts_zoom_start)
-        zx1_main = self._ts_t_to_x(self._ts_zoom_end)
-
-        # Bottom points: full width of zoom canvas
-        zx0_zoom = 10
-        zx1_zoom = max(self._ts_zoom_canvas.winfo_width(), 20) - 10
-
-        # Draw radiating lines
-        rc.create_line(zx0_main, 0, zx0_zoom, rh,
-                       fill='#E65100', width=1, dash=(3, 3))
-        rc.create_line(zx1_main, 0, zx1_zoom, rh,
-                       fill='#E65100', width=1, dash=(3, 3))
-
-    # ── Mouse interaction ─────────────────────────────────────────────
-
-    def _ts_mouse_press(self, event):
-        if self._ts_lock_var.get():
-            return  # all cursor interaction disabled
-        selection = self._ts_tool_var.get() == 'selection'
-        if selection:
-            self._ts_zoom_mouse_press(event)
-            return
-        # Default: custom CCG window tool
-        if self._slider_t_start is None:
-            self._slider_dragging = 'start'
-        elif self._slider_t_end is None:
-            self._slider_dragging = 'end'
-        else:
-            xs = self._ts_t_to_x(self._slider_t_start)
-            xe = self._ts_t_to_x(self._slider_t_end)
-            self._slider_dragging = ('start'
-                                     if abs(event.x - xs) <= abs(event.x - xe)
-                                     else 'end')
-        self._ts_update_handle(event.x)
-
-    def _ts_mouse_drag(self, event):
-        if self._ts_lock_var.get():
-            return
-        if self._ts_tool_var.get() == 'selection':
-            self._ts_zoom_mouse_drag(event)
-            return
-        self._ts_update_handle(event.x)
-
-    def _ts_mouse_release(self, event):
-        if self._ts_lock_var.get():
-            return
-        if self._ts_tool_var.get() == 'selection':
-            self._ts_zoom_mouse_release(event)
-            return
-        self._ts_update_handle(event.x, snap=True)
-        self._slider_dragging = None
-
-    def _ts_update_handle(self, canvas_x: int, snap: bool = False):
-        t = self._ts_x_to_t(canvas_x)
-        if snap and self._ts_snap_var.get() and self._ts_epoch_bounds:
-            bounds_t = [b for (t0, t1, _) in self._ts_epoch_bounds
-                        for b in (t0, t1)]
-            for bt in bounds_t:
-                if abs(self._ts_t_to_x(bt) - canvas_x) <= 25:
-                    t = bt
-                    break
-        if self._slider_dragging == 'start':
-            cap = self._slider_t_end if self._slider_t_end is not None else self._ts_total_sec
-            self._slider_t_start = min(t, cap)
-            self._ts_start_var.set(self._ts_sec_to_hms(self._slider_t_start))
-        elif self._slider_dragging == 'end':
-            floor = self._slider_t_start if self._slider_t_start is not None else 0.0
-            self._slider_t_end = max(t, floor)
-            self._ts_end_var.set(self._ts_sec_to_hms(self._slider_t_end))
-        self._ts_redraw()
-
-    # ── Zoom tool mouse handlers ──────────────────────────────────────
-
-    def _ts_zoom_mouse_press(self, event):
-        if self._ts_zoom_start is None:
-            self._ts_zoom_dragging = 'start'
-        elif self._ts_zoom_end is None:
-            self._ts_zoom_dragging = 'end'
-        else:
-            xs = self._ts_t_to_x(self._ts_zoom_start)
-            xe = self._ts_t_to_x(self._ts_zoom_end)
-            self._ts_zoom_dragging = ('start'
-                                      if abs(event.x - xs) <= abs(event.x - xe)
-                                      else 'end')
-        self._ts_zoom_update(event.x)
-
-    def _ts_zoom_mouse_drag(self, event):
-        self._ts_zoom_update(event.x)
-
-    def _ts_zoom_mouse_release(self, event):
-        self._ts_zoom_update(event.x, snap=True)
-        self._ts_zoom_dragging = None
-        # Show zoom canvas once both ends are placed
-        if self._ts_zoom_start is not None and self._ts_zoom_end is not None:
-            self._ts_zoom_frame.pack(fill=tk.X, padx=4, pady=(0, 0),
-                                     after=self._ts_ccg_ctrl)
-            self._ts_zoom_redraw()
-            self._ts_draw_radiate_lines()
-
-    def _ts_zoom_update(self, canvas_x: int, snap: bool = False):
-        t = self._ts_x_to_t(canvas_x)
-        if snap and self._ts_snap_var.get() and self._ts_epoch_bounds:
-            bounds_t = [b for (t0, t1, _) in self._ts_epoch_bounds
-                        for b in (t0, t1)]
-            for bt in bounds_t:
-                if abs(self._ts_t_to_x(bt) - canvas_x) <= 25:
-                    t = bt
-                    break
-        if self._ts_zoom_dragging == 'start':
-            cap = self._ts_zoom_end if self._ts_zoom_end is not None else self._ts_total_sec
-            self._ts_zoom_start = min(t, cap)
-            self._ts_zoom_start_var.set(self._ts_sec_to_hms(self._ts_zoom_start))
-        elif self._ts_zoom_dragging == 'end':
-            floor = self._ts_zoom_start if self._ts_zoom_start is not None else 0.0
-            self._ts_zoom_end = max(t, floor)
-            self._ts_zoom_end_var.set(self._ts_sec_to_hms(self._ts_zoom_end))
-        self._ts_redraw()
-
-    def _on_zoom_range_set(self):
-        """Set zoom range from the zoom time entry boxes."""
-        try:
-            t0 = self._ts_hms_to_sec(self._ts_zoom_start_var.get())
-            t1 = self._ts_hms_to_sec(self._ts_zoom_end_var.get())
-        except (ValueError, IndexError):
-            return
-        if t1 <= t0:
-            return
-        self._ts_zoom_start = max(0.0, min(t0, self._ts_total_sec))
-        self._ts_zoom_end = max(0.0, min(t1, self._ts_total_sec))
-        self._ts_zoom_start_var.set(self._ts_sec_to_hms(self._ts_zoom_start))
-        self._ts_zoom_end_var.set(self._ts_sec_to_hms(self._ts_zoom_end))
-        self._ts_redraw()
-
-    def _ts_hms_to_sec(self, hms: str) -> float:
-        s = hms.strip().lower()
-        if s == 'start':
-            return 0.0
-        if s == 'end':
-            return float(getattr(self, '_ts_total_sec', 0))
-        parts = s.split(':')
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        elif len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
-        return float(parts[0])
-
     @staticmethod
-    def _ts_sec_to_hms(sec) -> str:
-        if sec is None:
-            return "end"
-        sec = int(sec)
-        return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
 
     @staticmethod
     def _resolve_ts_time(val, t_start: float, t_end: float) -> float:
@@ -8209,105 +8340,6 @@ class CCGReviewUI:
             suffix = f"{i + 1}"
             chunks.append((cs, ce, base_name + suffix))
         return chunks
-
-    def _on_time_slider_set(self):
-        spec = self._build_custom_spec(for_all=False)
-        if spec is None:
-            return
-        filter_state = spec.get('filter_state', {})
-        # Resolve sentinels for current session (use min/max times, not first/last table row)
-        t_sess_start, t_sess_end = self._session_wall_clock_extent_for_key(self.key)
-        t0 = self._resolve_ts_time(spec['t0'], t_sess_start, t_sess_end)
-        t1 = self._resolve_ts_time(spec['t1'], t_sess_start, t_sess_end)
-        lone = self._single_exclusive_segment_filter_label(filter_state)
-        if lone is not None:
-            span = self._union_span_for_segment_label(self.key, lone)
-            if span is not None:
-                t0, t1 = span[0], span[1]
-                t0 = self._resolve_ts_time(t0, t_sess_start, t_sess_end)
-                t1 = self._resolve_ts_time(t1, t_sess_start, t_sess_end)
-        self._slider_t_start = t0
-        self._slider_t_end = t1
-        n_splits = max(1, int(spec.get('n_splits') or 1))
-        overlap_sec = max(0.0, float(spec.get('overlap_sec') or 0.0))
-        chunks = self._split_time_range(t0, t1, n_splits, overlap_sec, spec['name'])
-        split_bid = None
-        if n_splits > 1:
-            split_bid = self._split_batch_next_id
-            self._split_batch_next_id += 1
-        split_names: list[str] = []
-        queued = 0
-        for chunk_t0, chunk_t1, chunk_name in chunks:
-            bs_result = self._ts_brain_state_intervals(chunk_t0, chunk_t1)
-            if bs_result is False:
-                continue
-            intervals, active_duration = bs_result
-            metadata = {
-                'name': chunk_name,
-                'theme': filter_state.get('theme', 'segments'),
-                'labels': filter_state.get('labels', {}),
-                'scope': spec.get('scope', self._current_session_str()),
-                'session': str(self.key.session),
-                'timing': {'t0': chunk_t0, 't1': chunk_t1},
-            }
-            ok = self._enqueue_custom_ccg_task(
-                key=self.key,
-                t0=chunk_t0,
-                t1=chunk_t1,
-                name=chunk_name,
-                intervals=intervals,
-                active_duration=active_duration,
-                filter_state=filter_state,
-                metadata=metadata,
-                auto_save=False,
-                load_into_ui=True,
-                split_batch_id=split_bid,
-            )
-            if ok:
-                queued += 1
-                if split_bid is not None:
-                    split_names.append(chunk_name)
-        if split_bid is not None and split_names:
-            self._split_batch_counts[split_bid] = len(split_names)
-            self._split_batch_chunk_names[split_bid] = split_names
-        if queued:
-            self._record_custom_ccg_suggestion(spec)
-            label = spec['name'] if n_splits == 1 else f"{spec['name']} ({queued} chunks)"
-            self._ts_status_var.set(f"Queued: {label}")
-            self._custom_ccg_start_next()
-
-    def _on_time_slider_apply_multiple_sessions(self):
-        spec = self._build_custom_spec(for_all=False)
-        if spec is None:
-            return
-        all_nd_keys = self._real_nd_keys_ordered()
-        if not all_nd_keys:
-            messagebox.showinfo("Sessions", "No sessions available.")
-            return
-        session_labels = [str(nk.session) for nk in all_nd_keys]
-        current_sess = str(self.key.session) if not getattr(self, '_session_any_mode', False) else None
-        selected = self._pick_sessions_dialog(
-            title="Apply custom CCG to sessions",
-            sessions=session_labels,
-            current_session=current_sess,
-        )
-        if not selected:
-            return
-        is_all = len(selected) == len(session_labels)
-        spec['sessions'] = selected
-        spec['scope'] = 'All' if is_all else (
-            selected[0] if len(selected) == 1 else ', '.join(selected[:2]) + ('…' if len(selected) > 2 else ''))
-        self._record_custom_ccg_suggestion(spec)
-        queued = self._queue_custom_ccg_for_spec(
-            spec, for_all=is_all, auto_save=True,
-            target_sessions=None if is_all else selected,
-        )
-        if queued:
-            sess_label = "all sessions" if is_all else f"{len(selected)} session(s)"
-            self._ts_status_var.set(f"Queued {queued} task(s) for {sess_label}")
-            self._custom_ccg_start_next()
-        else:
-            self._ts_status_var.set("No missing custom CCGs for selected sessions")
 
     def _pick_sessions_dialog(self, title: str, sessions: list[str],
                               current_session: str | None = None) -> list[str] | None:
@@ -8384,7 +8416,7 @@ class CCGReviewUI:
             if isinstance(v, str) and v.lower() in ('start', 'end'):
                 return v
             try:
-                return self._ts_sec_to_hms(float(v))
+                return self.time_slider._ts_sec_to_hms(float(v))
             except Exception:
                 return str(v)
 
@@ -8410,10 +8442,10 @@ class CCGReviewUI:
                     spec, for_all=(str(spec.get('scope', '')).lower() == 'all'),
                     auto_save=True)
             if queued:
-                self._ts_status_var.set(f"Queued {queued} suggested custom CCG task(s)")
+                self.time_slider._ts_status_var.set(f"Queued {queued} suggested custom CCG task(s)")
                 self._custom_ccg_start_next()
             else:
-                self._ts_status_var.set("All suggested custom CCGs already exist")
+                self.time_slider._ts_status_var.set("All suggested custom CCGs already exist")
             win.destroy()
 
         btns = ttk.Frame(win)
@@ -8423,29 +8455,6 @@ class CCGReviewUI:
         ttk.Button(btns, text="Generate all",
                    command=lambda: _run(range(len(specs)))).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
-
-    def _on_time_slider_clear(self):
-        self._custom_segments.clear()
-        if hasattr(self, '_ts_status_var'):
-            self._ts_status_var.set("")
-        # Reset time selection
-        self._slider_t_start = None
-        self._slider_t_end = None
-        if hasattr(self, '_ts_start_var'):
-            self._ts_start_var.set("00:00:00")
-        if hasattr(self, '_ts_end_var'):
-            self._ts_end_var.set("00:00:00")
-        # Reset zoom
-        self._ts_zoom_start = None
-        self._ts_zoom_end = None
-        self._ts_zoom_start_var.set("00:00:00")
-        self._ts_zoom_end_var.set("00:00:00")
-        self._ts_zoom_frame.pack_forget()
-        # Reset to first real segment
-        self.current_segment = 0
-        self._build_sig_chips()
-        self._update_segment_label()
-        self.update_plot()
 
     def _session_obj_for_nd_key(self, nd_key):
         sessions = getattr(getattr(self.cd, 'nd', None), '_sessions', None)
@@ -8773,8 +8782,8 @@ class CCGReviewUI:
             chunks = self._split_time_range(t0_r, t1_r, n_splits, overlap_sec, str(spec['name']))
             split_bid = None
             if len(chunks) > 1 and (_any or str(tk_.session) == str(self.key.session)):
-                split_bid = self._split_batch_next_id
-                self._split_batch_next_id += 1
+                split_bid = self.time_slider._split_batch_next_id
+                self.time_slider._split_batch_next_id += 1
             split_names: list[str] = []
             for chunk_t0, chunk_t1, chunk_name in chunks:
                 lo = min(t_sess_start, t_sess_end)
@@ -8820,101 +8829,18 @@ class CCGReviewUI:
                     if split_bid is not None:
                         split_names.append(chunk_name)
             if split_bid is not None and split_names:
-                self._split_batch_counts[split_bid] = len(split_names)
-                self._split_batch_chunk_names[split_bid] = split_names
+                self.time_slider._split_batch_counts[split_bid] = len(split_names)
+                self.time_slider._split_batch_chunk_names[split_bid] = split_names
         return queued
 
     # ------------------------------------------------------------------
     # Custom-window CCG
     # ------------------------------------------------------------------
 
-    def _ts_brain_state_intervals(self, t0, t1):
-        """Validate brain-state toggles and return the active intervals (main-thread, fast).
-
-        Returns:
-            (None, t1-t0)        — no restriction (all toggles on or no toggles)
-            (intervals, active_sec) — filtered intervals list with total active seconds
-            False                 — abort (no active labels or no intervals in range)
-        """
-        toggles = getattr(self, '_ts_legend_toggles', {})
-        if not toggles or all(v.get() for v in toggles.values()):
-            return (None, t1 - t0)
-        active_labels = {lbl for lbl, v in toggles.items() if v.get()}
-        if not active_labels:
-            messagebox.showwarning("Brain-state filter",
-                                   "All epoch labels are toggled off. "
-                                   "Enable at least one label to compute CCG.")
-            return False
-        if self.neurons is None:
-            return (None, t1 - t0)
-        available_labels = {lbl for _, _, lbl in self._ts_epoch_bounds}
-        none_active = 'NONE' in active_labels
-        real_active = active_labels - {'NONE'}
-        real_labels = real_active & available_labels
-        intervals = []
-        for s, e, lbl in self._ts_epoch_bounds:
-            if lbl in real_labels:
-                s_clipped, e_clipped = max(s, t0), min(e, t1)
-                if e_clipped > s_clipped:
-                    intervals.append((s_clipped, e_clipped))
-        if none_active:
-            epoch_times = sorted(
-                (max(s, t0), min(e, t1))
-                for s, e, _ in self._ts_epoch_bounds
-                if min(e, t1) > max(s, t0))
-            cursor = t0
-            for es, ee in epoch_times:
-                if es > cursor:
-                    intervals.append((cursor, es))
-                cursor = max(cursor, ee)
-            if cursor < t1:
-                intervals.append((cursor, t1))
-        if not intervals:
-            messagebox.showwarning("Brain-state filter",
-                                   "No active epoch intervals in the selected time range.")
-            return False
-        active_sec = sum(e - s for s, e in intervals)
-        return (intervals, active_sec)
-
-    def _ts_apply_brain_state_intervals(self, intervals, t0, t1, neurons_obj=None):
-        """Filter self.neurons to the given intervals and return a new Neurons object.
-        Called in the background worker thread — deepcopy stays off the main thread.
-        """
-        source_neurons = neurons_obj if neurons_obj is not None else self.neurons
-        neurons = deepcopy(source_neurons)
-        filtered_trains = []
-        for st in neurons.spiketrains:
-            mask = np.zeros(len(st), dtype=bool)
-            for s, e in intervals:
-                mask |= (st >= s) & (st <= e)
-            filtered_trains.append(st[mask])
-        return Neurons(
-            spiketrains=filtered_trains,
-            t_stop=t1, t_start=t0,
-            sampling_rate=neurons.sampling_rate,
-            neuron_ids=neurons.neuron_ids,
-            neuron_type=neurons.neuron_type,
-            waveforms=neurons.waveforms,
-            waveforms_amplitude=neurons.waveforms_amplitude,
-            peak_channels=getattr(neurons, 'peak_channels', None),
-            shank_ids=getattr(neurons, 'shank_ids', None),
-            metadata=neurons.metadata,
-        )
-
     def _compute_custom_segment(self, t0: float, t1: float, name: str,
                                 neurons_override=None, active_duration=None,
                                 key_override=None, neurons_obj=None,
                                 ccg_data_obj=None, metadata=None):
-        """Compute full CCG pipeline for a custom time window.
-
-        Runs spike_correlations → EranConv._conv → multiple_correction
-        at **both** low-res (1 ms) and high-res (0.1 ms) bin sizes so
-        that Ctrl+R resolution toggle works on custom segments too.
-
-        Returns a dict with keys: name, t0, t1, ccg, ccg_null, pval,
-        pval_corrected (low-res), firing_rates, and optionally ccg_hi,
-        ccg_null_hi, pval_hi, pval_corrected_hi — or None on failure.
-        """
         key_eff = key_override or self.key
         neurons_eff = neurons_obj if neurons_obj is not None else self.neurons
         cd_eff = ccg_data_obj if ccg_data_obj is not None else self.ccg_data
@@ -8922,85 +8848,20 @@ class CCGReviewUI:
             messagebox.showerror("Custom CCG", "No neuron data available.")
             return None
         try:
-
             neurons_slice = (neurons_override if neurons_override is not None
-                            else neurons_eff.time_slice(t0, t1))
-            if active_duration is None:
-                active_duration = t1 - t0
-            conf = cd_eff.conf
-            n_neurons = neurons_eff.n_neurons
-            neuron_inds = np.arange(n_neurons)
-            method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
-            ei = getattr(key_eff, 'excitability', 'E')
-
-            def _run_pipeline(bin_size, label):
-                print(f"[CustomSegment] computing {label} CCG for {name} "
-                      f"({t1-t0:.1f}s, {n_neurons} neurons, "
-                      f"bin={bin_size*1e3:.2f}ms) ...")
-                ccg = spike_correlations(
-                    neurons=neurons_slice,
-                    neuron_inds=neuron_inds,
-                    bin_size=bin_size,
-                    window_size=conf.duration,
-                    symmetrize=conf.symmetrize_ccg,
-                    use_acceleration=conf.use_acceleration,
-                )
-                ccg = ccg[np.newaxis, ...]
-                # Compute W from the actual bin_size used, not from conf
-                # (conf.bin_size may be mutated to high-res)
-                W = conf.conv_window / bin_size
-                pvals, pred, qvals = EranConv._conv(
-                    ccg, W=W, wintype="gauss",
-                    hollow_frac=None)
-                p_raw = pvals if ei == 'E' else qvals
-                _, pval_corrected = EranConv.multiple_correction(
-                    p_raw, conf.alpha, method=method)
-                print(f"[CustomSegment] {label} done. shape={ccg.shape}")
-                return ccg, pred, p_raw, pval_corrected
-
-            # Low-res (always)
-            lo_bs = _CCG_RESOLUTION['lowres']
-            ccg_lo, pred_lo, pval_lo, pvalc_lo = _run_pipeline(lo_bs, 'lowres')
-
-            # Firing rates over the active duration
-            firing_rates = np.array(
-                [len(st) for st in neurons_slice.spiketrains],
-                dtype=float) / max(active_duration, 1e-9)
-
-            result = {
-                'name':              name,
-                't0':                t0,
-                't1':                t1,
-                'ccg':               ccg_lo,
-                'ccg_null':          pred_lo,
-                'pval':              pval_lo,
-                'pval_corrected':    pvalc_lo,
-                'firing_rates':      firing_rates,
-                'active_duration':   active_duration,
-                # total_time_hours: active recording time in hours — needed for
-                # TIME_SPAN normalisation on custom segments.
-                'total_time_hours':  active_duration / 3600.0,
-                'metadata':          metadata or {},
-            }
-
-            # High-res (only if highres data is available for this session)
-            has_highres = (hasattr(self.cd, '_ccg_highres') and
-                           bool(self.cd._ccg_highres))
-            if has_highres:
-                hi_bs = _CCG_RESOLUTION['highres']
-                ccg_hi, pred_hi, pval_hi, pvalc_hi = _run_pipeline(
-                    hi_bs, 'highres')
-                result['ccg_hi'] = ccg_hi
-                result['ccg_null_hi'] = pred_hi
-                result['pval_hi'] = pval_hi
-                result['pval_corrected_hi'] = pvalc_hi
-
-            return result
+                             else neurons_eff.time_slice(t0, t1))
+            has_highres = bool(getattr(self.cd, '_ccg_highres', None))
+            return _custom_ccg_mod.compute_custom_ccg(
+                t0, t1, name, neurons_slice, cd_eff.conf,
+                has_highres=has_highres,
+                active_duration=active_duration,
+                excitability=getattr(key_eff, 'excitability', 'E'),
+                metadata=metadata,
+            )
         except Exception as ex:
             print(f"[CustomSegment] ERROR: {ex}")
             traceback.print_exc()
-            messagebox.showerror("Custom CCG",
-                                 f"Error computing CCG:\n{ex}")
+            messagebox.showerror("Custom CCG", f"Error computing CCG:\n{ex}")
             return None
 
     # ------------------------------------------------------------------
@@ -9275,119 +9136,7 @@ class CCGReviewUI:
         return result
 
     def _manage_groups_dialog(self):
-        """Pop-up window to rename groups, view pairs, assign hotkeys."""
-        if not self._sel_data._groups:
-            messagebox.showinfo("Manage groups", "No groups yet. Create one first.")
-            return
-        win = tk.Toplevel(self.root)
-        win.title("Manage Groups")
-        win.geometry("480x420")
-        win.grab_set()
-
-        nb = ttk.Notebook(win)
-        nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        def _add_group_tab(nb, gname, is_special=False):
-            display = gname[len(_SPECIAL_PREFIX):] if is_special else gname
-            frame = ttk.Frame(nb)
-            nb.add(frame, text=display)
-
-            top = ttk.Frame(frame)
-            top.pack(fill=tk.X, padx=6, pady=4)
-            ttk.Label(top, text="Name:").pack(side=tk.LEFT)
-            name_var = tk.StringVar(value=display)
-            ttk.Entry(top, textvariable=name_var, width=18).pack(
-                side=tk.LEFT, padx=4)
-            def _do_rename(old=gname, nv=name_var, sp=is_special):
-                new = nv.get().strip()
-                if sp:
-                    new = _SPECIAL_PREFIX + new
-                self._rename_group(old, new, win)
-            ttk.Button(top, text="Rename", command=_do_rename).pack(side=tk.LEFT)
-
-            if not is_special:
-                hk_frame = ttk.Frame(frame)
-                hk_frame.pack(fill=tk.X, padx=6, pady=2)
-                ttk.Label(hk_frame, text="Hotkey (1–9/0/a–z):").pack(side=tk.LEFT)
-                hk_var = tk.StringVar(value=self._sel_data._group_hotkeys.get(gname, ''))
-                hk_entry = ttk.Entry(hk_frame, textvariable=hk_var, width=6)
-                hk_entry.pack(side=tk.LEFT, padx=4)
-                ttk.Button(hk_frame, text="Set",
-                           command=lambda g=gname, hv=hk_var: self._set_group_hotkey(g, hv.get())).pack(
-                    side=tk.LEFT)
-
-            # Notes — larger for special groups
-            ttk.Label(frame, text="Discussion notes:" if is_special else "Notes:"
-                      ).pack(anchor='w', padx=6, pady=(4, 0))
-            notes_h = 10 if is_special else 3
-            notes_text = tk.Text(frame, height=notes_h, width=40,
-                                 font=('Arial', 9), wrap=tk.WORD)
-            notes_text.pack(fill=tk.BOTH if is_special else tk.X,
-                            expand=is_special, padx=6, pady=2)
-            notes_text.insert('1.0', self._sel_data._group_notes.get(gname, ''))
-            notes_text.bind('<KeyRelease>',
-                            lambda e, g=gname, t=notes_text:
-                            self._sel_data._group_notes.__setitem__(g, t.get('1.0', 'end-1c')))
-
-            ttk.Label(frame, text="Pairs in group:").pack(anchor='w', padx=6)
-            lb_frame = ttk.Frame(frame)
-            lb_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-            sb = ttk.Scrollbar(lb_frame)
-            sb.pack(side=tk.RIGHT, fill=tk.Y)
-            lb = tk.Listbox(lb_frame, yscrollcommand=sb.set, font=('Courier', 9))
-            lb.pack(fill=tk.BOTH, expand=True)
-            sb.config(command=lb.yview)
-            g = self._sel_data._groups.get(gname, {})
-            if isinstance(g, dict):
-                for sess in sorted(g):
-                    pairs = g[sess]
-                    if not pairs:
-                        continue
-                    # Group pairs by conn_type
-                    ct_map = self._pairs_by_conn_type(sess, pairs)
-                    for ct_label, ct_pairs in ct_map.items():
-                        lb.insert(tk.END, f"── {sess} | {ct_label} ──")
-                        lb.itemconfig(lb.size() - 1, foreground='#666')
-                        for pair in sorted(ct_pairs):
-                            lb.insert(tk.END,
-                                      f"  [{pair[0]:3d}, {pair[1]:3d}]")
-            else:
-                for pair in sorted(g):
-                    lb.insert(tk.END, f"[{pair[0]:3d}, {pair[1]:3d}]")
-            btn_row = ttk.Frame(frame)
-            btn_row.pack(pady=4)
-            # Convert button: toggle between regular ↔ special
-            if is_special:
-                conv_label = "Convert to group"
-                def _do_convert(g=gname, d=display):
-                    self._rename_group(g, d, win)   # strip prefix → regular group
-            else:
-                conv_label = "Convert to special group"
-                def _do_convert(g=gname, d=display):
-                    self._rename_group(g, _SPECIAL_PREFIX + d, win)
-            ttk.Button(btn_row, text=conv_label,
-                       command=_do_convert).pack(side=tk.LEFT, padx=4)
-            ttk.Button(btn_row, text=f"Delete group '{display}'",
-                       command=lambda g=gname: self._delete_group(g, win)).pack(
-                side=tk.LEFT, padx=4)
-
-        # Regular groups
-        for gname in sorted(self._sel_data._groups):
-            if gname.startswith('__'):
-                continue
-            _add_group_tab(nb, gname, is_special=False)
-
-        # Special groups — own notebook section
-        special_names = sorted(g for g in self._sel_data._groups if g.startswith(_SPECIAL_PREFIX))
-        if special_names:
-            special_frame = ttk.Frame(nb)
-            nb.add(special_frame, text="Special")
-            snb = ttk.Notebook(special_frame)
-            snb.pack(fill=tk.BOTH, expand=True)
-            for gname in special_names:
-                _add_group_tab(snb, gname, is_special=True)
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=4)
-
+        ManageGroupsDialog.show(self)
 
     def _rename_group(self, old_name, new_name, win=None):
         new_name = new_name.strip()
@@ -9454,921 +9203,9 @@ class CCGReviewUI:
     # ------------------------------------------------------------------
 
     def _template_editor_dialog(self, preselect: str = None):
-        """
-        Dialog for creating / editing per-group CCG shape templates.
-
-        Rule types: peak, trough, baseline_low (counts in lag range expected
-        to be below a fraction of the peak).  Each rule can also be restricted
-        to specific conn_types.  A live Gaussian preview updates as rules change.
-        """
-        win = tk.Toplevel(self.root)
-        win.title("CCG Template Editor")
-        win.geometry("1100x820")
-        win.resizable(True, True)
-
-        def _on_close():
-            win.destroy()
-            self.root.focus_set()   # return keyboard focus to main window
-
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-
-        # Determine CCG half-window in ms (for preview x-range)
-        _x_half = 10.0
-        try:
-            _conf = (getattr(self.ccg_data, 'conf', None)
-                     or getattr(self.ccg_data, '_conf', None))
-            if _conf is not None:
-                _x_half = float(_conf.duration) * 500.0   # s → half-ms
-        except Exception:
-            pass
-
-        # Available conn_types for filter column
-        _all_ct = ['(all)', 'Excitatory', 'Inhibitory']
-        try:
-            for k in self.cd.data:
-                ct = k.conn_type
-                s = ('-'.join(ct) if isinstance(ct, tuple) else str(ct)) if ct else '?'
-                if s not in _all_ct:
-                    _all_ct.append(s)
-        except Exception:
-            pass
-
-        # ── Top bar ──────────────────────────────────────────────────────
-        top = ttk.Frame(win)
-        top.pack(fill=tk.X, padx=8, pady=4)
-
-        ttk.Label(top, text="Group:").pack(side=tk.LEFT)
-        group_var = tk.StringVar()
-        group_cb  = ttk.Combobox(top, textvariable=group_var, state='readonly',
-                                 width=18)
-        group_cb.pack(side=tk.LEFT, padx=(4, 8))
-
-        ttk.Label(top, text="Smooth (ms):").pack(side=tk.LEFT)
-        smooth_var = tk.DoubleVar(value=self._templates_smooth_ms)
-        ttk.Spinbox(top, textvariable=smooth_var, from_=0.0, to=10.0,
-                    increment=0.5, width=6).pack(side=tk.LEFT, padx=(2, 8))
-
-        # ── Main pane: left=rules, right=preview ─────────────────────────
-        pane = ttk.PanedWindow(win, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-
-        # ── Left: rules table ────────────────────────────────────────────
-        left = ttk.Frame(pane)
-        pane.add(left, weight=1)
-
-        tbl_frame = ttk.LabelFrame(left, text="Rules")
-        tbl_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
-
-        _RULE_TYPES = ['peak', 'trough', 'baseline_low', 'not in',
-                       'trough-peak', 'peak-trough', 'min_bincount', 'min_bincount_avg']
-        _RES_OPTIONS = ['both', 'hi', 'lo']
-        col_hdrs   = ("", "Type", "Lag min", "Lag max",
-                      "W min", "W max", "Smooth", "Conn type", "Res", "Req", "Min cnt")
-        col_widths = (2,   8,     7,        7,
-                      7,    7,     5,       9,          6,    4,    7)
-        for c, (lbl, w) in enumerate(zip(col_hdrs, col_widths)):
-            ttk.Label(tbl_frame, text=lbl,
-                      font=('TkDefaultFont', 9, 'bold'),
-                      width=w).grid(row=0, column=c, padx=2, pady=2, sticky='w')
-
-        rule_rows: list = []
-        _row_counter = [0]   # monotonic — never reused so add_btn never collides
-
-        _preview_after = [None]
-
-        def _schedule_preview(*_):
-            if _preview_after[0] is not None:
-                try:
-                    win.after_cancel(_preview_after[0])
-                except Exception:
-                    pass
-            _preview_after[0] = win.after(120, _update_preview)
-
-        def _add_rule_row(rule_type='peak', lag_min=0.0, lag_max=5.0,
-                          w_min='', w_max='', smooth_ms='', conn_type='(all)',
-                          resolution='both', required=True, ref_group='',
-                          min_count=''):
-            _row_counter[0] += 1
-            r = _row_counter[0]
-            row = {
-                'type':       tk.StringVar(value=rule_type),
-                'lag_min':    tk.StringVar(value=str(lag_min)),
-                'lag_max':    tk.StringVar(value=str(lag_max)),
-                'w_min':      tk.StringVar(value='' if w_min == '' else str(w_min)),
-                'w_max':      tk.StringVar(value='' if w_max == '' else str(w_max)),
-                'smooth_ms':  tk.StringVar(value='' if smooth_ms == '' else str(smooth_ms)),
-                'conn_type':  tk.StringVar(value=conn_type),
-                'resolution': tk.StringVar(value=resolution),
-                'required':   tk.BooleanVar(value=required),
-                'ref_group':  tk.StringVar(value=ref_group),
-                'min_count':  tk.StringVar(value='' if min_count == '' else str(min_count)),
-                '_row':       r,
-            }
-
-            def _on_type_change(*_, rr=row):
-                rtype = rr['type'].get()
-                is_bl       = rtype == 'baseline_low'
-                is_notin    = rtype == 'not in'
-                is_mincount = rtype in ('min_bincount', 'min_bincount_avg')
-                # Lag entries: hidden for 'not in'
-                for e in rr.get('_lag_entries', []):
-                    e.grid_remove() if is_notin else e.grid()
-                # Width entries: hidden for 'not in' and 'min_bincount'; disabled for baseline_low
-                for e in rr.get('_width_entries', []):
-                    if is_notin or is_mincount:
-                        e.grid_remove()
-                    else:
-                        e.grid()
-                        e.config(state='disabled' if is_bl else 'normal')
-                # Smooth entry: hidden for 'not in' only
-                sm = rr.get('_smooth_entry')
-                if sm:
-                    sm.grid_remove() if is_notin else sm.grid()
-                # Ref group combobox: only for 'not in'
-                ref_cb = rr.get('_ref_cb')
-                if ref_cb:
-                    cur = group_var.get()
-                    known = sorted({g for g in list(self._templates.keys())
-                                    + list(self._sel_data._groups.keys() if self._sel_data._groups else [])
-                                    if g != cur})
-                    ref_cb['values'] = known
-                    ref_cb.grid() if is_notin else ref_cb.grid_remove()
-                # Min count entry: only for 'min_bincount' rules
-                mc_e = rr.get('_min_count_entry')
-                if mc_e:
-                    mc_e.grid() if is_mincount else mc_e.grid_remove()
-                # Res combobox: hidden for 'not in'
-                res_cb = rr.get('_res_cb')
-                if res_cb:
-                    res_cb.grid_remove() if is_notin else res_cb.grid()
-                _schedule_preview()
-
-            def _del(rr=row):
-                for w in tbl_frame.grid_slaves():
-                    if w.grid_info().get('row') == rr['_row']:
-                        w.destroy()
-                if rr in rule_rows:
-                    rule_rows.remove(rr)
-                try:
-                    _place_add_btn()
-                except Exception:
-                    pass
-                _schedule_preview()
-
-            del_btn = ttk.Button(tbl_frame, text='×', width=2, command=_del)
-            del_btn.grid(row=r, column=0, padx=2)
-            row['_del_btn'] = del_btn
-
-            ttk.Combobox(tbl_frame, textvariable=row['type'],
-                         values=_RULE_TYPES, state='readonly',
-                         width=9).grid(row=r, column=1, padx=2, pady=1)
-            row['type'].trace_add('write', _on_type_change)
-
-            lag_entries = []
-            _lag_limits = {'lag_min': -_x_half, 'lag_max': _x_half}
-            for c, key in enumerate(['lag_min', 'lag_max'], start=2):
-                e = ttk.Entry(tbl_frame, textvariable=row[key], width=7)
-                e.grid(row=r, column=c, padx=2, pady=1, sticky='ew')
-                row[key].trace_add('write', _schedule_preview)
-                def _fill_limit(_, rr=row, k=key):
-                    rr[k].set(str(_lag_limits[k]))
-                    _schedule_preview()
-                    return 'break'
-                e.bind('<Double-Button-3>', _fill_limit)
-                e.bind('<Double-Button-2>', _fill_limit)
-                lag_entries.append(e)
-            row['_lag_entries'] = lag_entries
-
-            width_entries = []
-            for c, key in enumerate(['w_min', 'w_max'], start=4):
-                e = ttk.Entry(tbl_frame, textvariable=row[key], width=7)
-                e.grid(row=r, column=c, padx=2, pady=1, sticky='ew')
-                row[key].trace_add('write', _schedule_preview)
-                width_entries.append(e)
-            row['_width_entries'] = width_entries
-
-            # Per-rule smooth (ms) — blank means use global default
-            sm_e = ttk.Entry(tbl_frame, textvariable=row['smooth_ms'], width=5)
-            sm_e.grid(row=r, column=6, padx=2, pady=1, sticky='ew')
-            row['smooth_ms'].trace_add('write', _schedule_preview)
-            row['_smooth_entry'] = sm_e
-
-            # 'not in' group selector — spans columns 2-5, hidden by default
-            ref_cb = ttk.Combobox(tbl_frame, textvariable=row['ref_group'],
-                                  values=[], state='readonly', width=20)
-            ref_cb.grid(row=r, column=2, columnspan=4, padx=2, pady=1, sticky='ew')
-            ref_cb.grid_remove()
-            row['_ref_cb'] = ref_cb
-            row['ref_group'].trace_add('write', _schedule_preview)
-
-            ttk.Combobox(tbl_frame, textvariable=row['conn_type'],
-                         values=_all_ct, state='readonly',
-                         width=9).grid(row=r, column=7, padx=2, pady=1)
-            row['conn_type'].trace_add('write', _schedule_preview)
-
-            res_cb = ttk.Combobox(tbl_frame, textvariable=row['resolution'],
-                                  values=_RES_OPTIONS, state='readonly', width=5)
-            res_cb.grid(row=r, column=8, padx=2, pady=1)
-            row['resolution'].trace_add('write', _schedule_preview)
-            row['_res_cb'] = res_cb
-
-            ttk.Checkbutton(tbl_frame, variable=row['required']).grid(
-                row=r, column=9, padx=2, pady=1)
-            row['required'].trace_add('write', _schedule_preview)
-
-            # Min count entry (column 10) — shown only for min_bincount rules
-            mc_e = ttk.Entry(tbl_frame, textvariable=row['min_count'], width=7)
-            mc_e.grid(row=r, column=10, padx=2, pady=1, sticky='ew')
-            mc_e.grid_remove()   # hidden by default; _on_type_change shows it
-            row['min_count'].trace_add('write', _schedule_preview)
-            row['_min_count_entry'] = mc_e
-            rule_rows.append(row)
-            _on_type_change()   # set initial disabled state
-
-        # Add rule button
-        add_btn = ttk.Button(tbl_frame, text='+ Add rule')
-        _is_main = [False]
-
-        def _place_add_btn():
-            if _is_main[0]:
-                add_btn.grid_remove()
-                return
-            max_r = max((rr['_row'] for rr in rule_rows), default=0)
-            add_btn.grid(row=max_r + 1, column=0, columnspan=5,
-                         sticky='w', padx=4, pady=4)
-
-        def _add_and_reposition(**kw):
-            _add_rule_row(**kw)
-            _place_add_btn()
-            _schedule_preview()
-        add_btn.config(command=_add_and_reposition)
-        _place_add_btn()   # show button immediately even with no rules yet
-
-        # ── Extra constraints ────────────────────────────────────────────
-        extra = ttk.Frame(left)
-        extra.pack(fill=tk.X, pady=2)
-
-        baseline_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(extra, text="Expect low baseline before t=0",
-                        variable=baseline_var).pack(side=tk.LEFT, padx=4)
-        baseline_var.trace_add('write', _schedule_preview)
-
-        ttk.Label(extra, text="  n_peaks:").pack(side=tk.LEFT)
-        npmin_var = tk.StringVar(value='')
-        npmax_var = tk.StringVar(value='')
-        ttk.Label(extra, text="min").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Entry(extra, textvariable=npmin_var, width=4).pack(side=tk.LEFT, padx=2)
-        ttk.Label(extra, text="max").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Entry(extra, textvariable=npmax_var, width=4).pack(side=tk.LEFT, padx=2)
-
-        # ── Test / score readout (per-rule breakdown) ─────────────────────
-        test_txt = tk.Text(left, height=5, width=52, font=('Courier', 8),
-                           state=tk.DISABLED, relief=tk.FLAT,
-                           bg='#F0F4FA', fg='#1A237E', wrap=tk.WORD)
-        test_txt.pack(fill=tk.X, padx=4, pady=2)
-        test_txt.tag_config('pass', foreground='#2E7D32')   # green
-        test_txt.tag_config('fail', foreground='#C62828')   # red
-        test_txt.tag_config('head', foreground='#1565C0', font=('Courier', 8, 'bold'))
-
-        def _test_set(text, tag=None):
-            test_txt.config(state=tk.NORMAL)
-            test_txt.delete('1.0', tk.END)
-            test_txt.insert(tk.END, text, tag or '')
-            test_txt.config(state=tk.DISABLED)
-
-        def _test_append(text, tag=None):
-            test_txt.config(state=tk.NORMAL)
-            test_txt.insert(tk.END, text, tag or '')
-            test_txt.config(state=tk.DISABLED)
-
-        # ── Right: live preview canvas ────────────────────────────────────
-        right = ttk.LabelFrame(pane, text="Preview (Gaussian approximation)")
-        pane.add(right, weight=2)
-
-        _fig  = Figure(figsize=(4.8, 3.8), dpi=90, facecolor='#F8F8F8')
-        _ax   = _fig.add_subplot(111)
-        _canvas = FigureCanvasTkAgg(_fig, master=right)
-        _canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        # ── Preview update ────────────────────────────────────────────────
-        _COLORS = ['#2196F3', '#E91E63', '#4CAF50', '#FF9800',
-                   '#9C27B0', '#00BCD4', '#795548', '#607D8B']
-
-        def _update_preview(*_):
-            _ax.clear()
-            x = np.linspace(-_x_half, _x_half, 600)
-            composite = np.zeros_like(x)
-
-            _ax.axhline(0, color='#AAAAAA', linewidth=0.8, linestyle='-')
-            _ax.axvline(0, color='#CCCCCC', linewidth=0.6)
-
-            has_rules = False
-            for i, row in enumerate(rule_rows):
-                col = _COLORS[i % len(_COLORS)]
-                req = row['required'].get()
-                alpha_band = 0.10
-                alpha_line = 0.9 if req else 0.45
-                ls = '-' if req else '--'
-                lbl_suffix = '' if req else ' (opt)'
-                rtype = row['type'].get()
-
-                try:
-                    lmin = float(row['lag_min'].get())
-                    lmax = float(row['lag_max'].get())
-                except ValueError:
-                    continue
-
-                center = (lmin + lmax) / 2.0
-
-                if rtype == 'not in':
-                    # 'not in' is a logic gate — not a visual shape, skip preview
-                    continue
-
-                if rtype in ('trough-peak', 'peak-trough'):
-                    # Biphasic: draw a trough+peak (or peak+trough) side by side
-                    span    = lmax - lmin
-                    c_left  = lmin + span * 0.25
-                    c_right = lmin + span * 0.75
-                    wmax_s  = row['w_max'].get().strip()
-                    wmin_s  = row['w_min'].get().strip()
-                    w_val   = (float(wmax_s) if wmax_s else
-                               (float(wmin_s) * 1.5 if wmin_s else span * 0.35))
-                    sigma_b = max(w_val / 2.3548, 1e-3)
-                    if rtype == 'trough-peak':
-                        pol_l, pol_r = -1, 1
-                    else:
-                        pol_l, pol_r = 1, -1
-                    g = (pol_l * np.exp(-0.5 * ((x - c_left)  / sigma_b) ** 2) +
-                         pol_r * np.exp(-0.5 * ((x - c_right) / sigma_b) ** 2))
-                    _ax.axvspan(lmin, lmax, alpha=alpha_band, color=col, linewidth=0)
-                    ct_lbl  = row['conn_type'].get()
-                    res_lbl = row['resolution'].get()
-                    ct_str  = f' [{ct_lbl}]' if ct_lbl != '(all)' else ''
-                    res_str = f' ({res_lbl})' if res_lbl and res_lbl != 'both' else ''
-                    label   = f"R{i+1} {rtype}{lbl_suffix}{ct_str}{res_str}"
-                    _ax.plot(x, g, color=col, linewidth=1.8, linestyle=ls, label=label)
-                    composite += g
-                    has_rules = True
-                    continue
-
-                if rtype == 'baseline_low':
-                    # Shaded suppressed region — flat at ~0.1
-                    _ax.axvspan(lmin, lmax, alpha=0.18, color=col, linewidth=0)
-                    _ax.annotate(
-                        f'R{i+1} baseline_low{lbl_suffix}',
-                        xy=(center, 0.08), fontsize=7, color=col,
-                        ha='center', va='bottom',
-                        bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.6))
-                    has_rules = True
-                    continue
-
-                wmax_s = row['w_max'].get().strip()
-                wmin_s = row['w_min'].get().strip()
-                wmax = float(wmax_s) if wmax_s else None
-                wmin = float(wmin_s) if wmin_s else None
-
-                # Choose display FWHM
-                if wmax is not None:
-                    fwhm = wmax
-                elif wmin is not None:
-                    fwhm = wmin * 1.5
-                else:
-                    fwhm = max(0.3, (lmax - lmin) * 0.75)
-                sigma = max(fwhm / 2.3548, 1e-3)
-
-                polarity = 1 if rtype == 'peak' else -1
-                g = polarity * np.exp(-0.5 * ((x - center) / sigma) ** 2)
-                composite += g
-
-                # Lag range band
-                _ax.axvspan(lmin, lmax, alpha=alpha_band, color=col, linewidth=0)
-                # Width constraint markers (dashed verticals at ±fwhm/2)
-                if wmax is not None:
-                    for side in (-1, 1):
-                        _ax.axvline(center + side * wmax / 2,
-                                    color=col, linewidth=0.8, linestyle=':',
-                                    alpha=0.7)
-                # Gaussian curve
-                ct_lbl  = row['conn_type'].get()
-                res_lbl = row.get('resolution') and row['resolution'].get()
-                ct_str  = f' [{ct_lbl}]' if ct_lbl != '(all)' else ''
-                res_str = f' ({res_lbl})' if res_lbl and res_lbl != 'both' else ''
-                label = f"R{i+1} {rtype}{lbl_suffix}{ct_str}{res_str}"
-                _ax.plot(x, g, color=col, linewidth=1.8, linestyle=ls, label=label)
-                # Peak marker
-                _ax.plot(center, polarity,
-                         marker='v' if polarity == -1 else '^',
-                         color=col, markersize=7,
-                         markeredgecolor='#333', markeredgewidth=0.6)
-                has_rules = True
-
-            # 'not in' exclusion rules — list as text below title
-            excl = [rr['ref_group'].get() for rr in rule_rows
-                    if rr['type'].get() == 'not in' and rr['ref_group'].get()]
-            if excl:
-                _ax.set_title(
-                    (_ax.get_title() or '') + f"\n✗ excl: {', '.join(excl)}",
-                    fontsize=9, fontweight='bold')
-
-            # Composite envelope
-            if sum(1 for rr in rule_rows
-                   if rr['type'].get() not in ('baseline_low', 'not in')) > 1:
-                _ax.plot(x, composite, color='#222', linewidth=2.2,
-                         alpha=0.5, linestyle=':', label='sum')
-
-            # Baseline-before-zero constraint
-            if baseline_var.get():
-                _ax.axvspan(-_x_half, 0, alpha=0.06, color='#F44336')
-                _ax.text(-_x_half * 0.92, 1.05, '← low baseline',
-                         color='#F44336', fontsize=7)
-
-            # Axes styling
-            _ax.set_xlim(-_x_half, _x_half)
-            cur_ylim = _ax.get_ylim()
-            _ax.set_ylim(min(-0.55, cur_ylim[0] - 0.05),
-                         max(1.25, cur_ylim[1] + 0.05))
-            _ax.set_xlabel("Lag (ms)", fontsize=8)
-            _ax.set_ylabel("Normalized amplitude", fontsize=8)
-            _ax.tick_params(labelsize=7)
-            gname = group_var.get()
-            _ax.set_title(f"Template: {gname}" if gname else "Template preview",
-                          fontsize=9, fontweight='bold')
-            if has_rules:
-                _ax.legend(fontsize=7, loc='upper right',
-                           framealpha=0.8, handlelength=1.6)
-            _fig.tight_layout(pad=0.8)
-            _canvas.draw_idle()
-
-        # ── Helpers ──────────────────────────────────────────────────────
-        def _current_template():
-            def _f(s):
-                """Parse a string to float; return None if blank or unparseable."""
-                v = str(s).strip()
-                if not v:
-                    return None
-                try:
-                    return float(v)
-                except (ValueError, TypeError):
-                    return None
-
-            _POL = {'peak': 1, 'trough': -1, 'baseline_low': 0, 'not in': 2,
-                    'trough-peak': 3, 'peak-trough': 4,
-                    'min_bincount': 5, 'min_bincount_avg': 6}
-
-            rules = []
-            for row in rule_rows:
-                rtype = row['type'].get()
-                ct_s  = row['conn_type'].get()
-                res_s = row['resolution'].get()
-                req   = bool(row['required'].get())
-                pol   = _POL.get(rtype, 1)
-                if rtype == 'not in':
-                    rg = row['ref_group'].get().strip()
-                    if rg:
-                        rules.append(PeakRule(lag_min=0.0, lag_max=0.0,
-                                              polarity=2, required=req,
-                                              resolution=res_s, conn_type=ct_s,
-                                              ref_group=rg))
-                    continue
-                # lag_min / lag_max: use 0.0 as fallback so the rule is never silently dropped
-                lmin = _f(row['lag_min'].get()) if _f(row['lag_min'].get()) is not None else 0.0
-                lmax = _f(row['lag_max'].get()) if _f(row['lag_max'].get()) is not None else 0.0
-                rules.append(PeakRule(
-                    lag_min=lmin, lag_max=lmax,
-                    width_min=_f(row['w_min'].get()),
-                    width_max=_f(row['w_max'].get()),
-                    polarity=pol, required=req,
-                    resolution=res_s, conn_type=ct_s,
-                    smooth_ms=_f(row['smooth_ms'].get()),
-                    min_count=_f(row['min_count'].get()),
-                ))
-            npmin_s = npmin_var.get().strip()
-            npmax_s = npmax_var.get().strip()
-            return GroupTemplate(
-                name=group_var.get(),
-                peak_rules=rules,
-                n_peaks_min=int(npmin_s) if npmin_s else None,
-                n_peaks_max=int(npmax_s) if npmax_s else None,
-                baseline_low_before_zero=baseline_var.get(),
-            )
-
-        def _load_group(name):
-            _is_main[0] = (name == 'Main')
-            for rr in list(rule_rows):
-                for w in tbl_frame.grid_slaves():
-                    if w.grid_info().get('row') == rr['_row']:
-                        w.destroy()
-            rule_rows.clear()
-            tmpl = self._templates.get(name)
-            if tmpl is not None:
-                for pr in tmpl.peak_rules:
-                    if pr.polarity == 2:
-                        _add_rule_row(
-                            rule_type='not in',
-                            conn_type=getattr(pr, 'conn_type', '(all)'),
-                            resolution=getattr(pr, 'resolution', 'both'),
-                            required=pr.required,
-                            ref_group=getattr(pr, 'ref_group', ''),
-                        )
-                        continue
-                    rtype = {0: 'baseline_low', 1: 'peak', -1: 'trough',
-                             3: 'trough-peak', 4: 'peak-trough',
-                             5: 'min_bincount', 6: 'min_bincount_avg'}.get(pr.polarity, 'trough')
-                    _add_rule_row(
-                        rule_type=rtype,
-                        lag_min=pr.lag_min, lag_max=pr.lag_max,
-                        w_min='' if pr.width_min is None else pr.width_min,
-                        w_max='' if pr.width_max is None else pr.width_max,
-                        smooth_ms='' if getattr(pr, 'smooth_ms', None) is None
-                                  else pr.smooth_ms,
-                        conn_type=getattr(pr, 'conn_type', '(all)'),
-                        resolution=getattr(pr, 'resolution', 'both'),
-                        required=pr.required,
-                        min_count='' if getattr(pr, 'min_count', None) is None
-                                  else pr.min_count,
-                    )
-                baseline_var.set(tmpl.baseline_low_before_zero)
-                npmin_var.set('' if tmpl.n_peaks_min is None else str(tmpl.n_peaks_min))
-                npmax_var.set('' if tmpl.n_peaks_max is None else str(tmpl.n_peaks_max))
-            else:
-                baseline_var.set(False)
-                npmin_var.set('')
-                npmax_var.set('')
-            _place_add_btn()
-            if _is_main[0]:
-                for rr in rule_rows:
-                    if rr.get('_del_btn'):
-                        rr['_del_btn'].config(state='disabled')
-            _update_preview()
-
-        def _on_group_change(*_):
-            if group_var.get() == _SEP:
-                return
-            _load_group(group_var.get())
-            _update_preview()
-
-        group_var.trace_add('write', lambda *_: _update_preview())
-
-        def _save_current():
-            name = group_var.get()
-            if not name or name == 'Main':
-                return
-            self._templates[name] = _current_template()
-            self._templates_smooth_ms = smooth_var.get()
-
-        def _test_on_current():
-            _save_current()
-            if not self._templates:
-                _test_set("No templates defined.")
-                return
-            if self.ccg_data is None:
-                _test_set("No CCG data loaded.")
-                return
-            conf = getattr(self.ccg_data, 'conf', None) or getattr(
-                self.ccg_data, '_conf', None)
-            if conf is None:
-                _test_set("Cannot read conf.")
-                return
-            nd = self.key.nd()
-            cd = (self.cd._ccg_highres.get(nd)
-                  if (hasattr(self.cd, '_ccg_highres')
-                      and self.cd._ccg_highres
-                      and self.cd._ccg_highres.get(nd) is not None)
-                  else self.ccg_data)
-            try:
-                ct = self.key.conn_type
-                ct_str = ('-'.join(ct) if isinstance(ct, (list, tuple))
-                          else str(ct)) if ct else '(all)'
-            except Exception:
-                ct_str = '(all)'
-            clf = CCGTemplateClassifier(cd, conf, smooth_ms=smooth_var.get(),
-                                        conn_type_str=ct_str)
-            clf.load_templates(self._templates)
-            inds = self.all_inds[self.current_pair_idx]
-            ref, tgt = int(inds[0]), int(inds[1])
-            detail = clf.score_pair_detail(ref, tgt)
-
-            test_txt.config(state=tk.NORMAL)
-            test_txt.delete('1.0', tk.END)
-            for gname, gdata in sorted(detail.items(),
-                                       key=lambda x: -x[1]['score']):
-                score = gdata['score']
-                test_txt.insert(tk.END, f"{gname}: {score:.2f}\n", ('head',))
-                for r in gdata['rules']:
-                    sym  = '✓' if r['matched'] else '✗'
-                    rtag = 'pass' if r['matched'] else 'fail'
-                    req  = '(req)' if r['required'] else '(opt)'
-                    test_txt.insert(
-                        tk.END,
-                        f"  {sym} {req} {r['label']}  sim={r['sim']:.2f}\n",
-                        rtag,
-                    )
-            test_txt.config(state=tk.DISABLED)
-
-            # Overlay the smoothed CCG on the preview canvas (normalized 0–1)
-            try:
-                _, ccg_smooth = clf.smooth_ccg(ref, tgt)
-                nb  = len(ccg_smooth)
-                bs  = conf.duration / (nb - 1) if nb > 1 else getattr(conf, 'bin_size', 0.001)
-                cb  = (nb - 1) // 2
-                lag_ms = (np.arange(nb) - cb) * bs * 1e3
-                vmin = ccg_smooth.min()
-                vmax = ccg_smooth.max()
-                ccg_norm = (ccg_smooth - vmin) / (vmax - vmin + 1e-12)
-                # Scale to y-range of current preview (peaks at ≈1 → shift to top quarter)
-                ccg_scaled = ccg_norm * 1.0  # maps 0→0, 1→1 in normalized units
-                _update_preview()   # redraw Gaussians first
-                _ccg_line, = _ax.plot(lag_ms, ccg_scaled, color='#1A237E',
-                                      linewidth=1.5, alpha=0.75, zorder=5,
-                                      label=f'CCG smooth ({ref}→{tgt})')
-                _ax.legend(fontsize=7, loc='upper right', framealpha=0.8, handlelength=1.6)
-                _canvas.draw_idle()
-
-                def _clear_ccg_overlay():
-                    try:
-                        _ccg_line.remove()
-                        _canvas.draw_idle()
-                    except Exception:
-                        pass
-                win.after(3000, _clear_ccg_overlay)
-            except Exception:
-                pass
-
-        def _save_to_file():
-            _save_current()
-            if not self._templates:
-                messagebox.showwarning("Save templates",
-                                       "No templates to save.", parent=win)
-                return
-            path = self._templates_path
-            try:
-                CCGTemplateClassifier.save_templates_to_file(
-                    path, self._templates,
-                    smooth_ms=smooth_var.get(),
-                    classify_with=sorted(self._active_templates) if self._active_templates else None)
-            except Exception as exc:
-                messagebox.showerror("Save templates",
-                                     f"Save failed:\n{exc}", parent=win)
-                return
-            messagebox.showinfo("Save templates", f"Saved to:\n{path}", parent=win)
-            _rebuild_toggle_bar()
-
-        def _load_from_file():
-            path = filedialog.askopenfilename(
-                parent=win, title="Load templates",
-                initialdir=self._clf_dir,
-                filetypes=[("JSON", "*.json"), ("All", "*")])
-            if not path:
-                return
-            loaded = CCGTemplateClassifier.load_templates_from_file(path)
-            if not loaded:
-                messagebox.showwarning("Load templates",
-                                       "No templates found in file.", parent=win)
-                return
-            self._templates.update(loaded)
-            meta = CCGTemplateClassifier.load_file_metadata(path)
-            if meta.get('smooth_ms') is not None:
-                smooth_var.set(meta['smooth_ms'])
-                self._templates_smooth_ms = meta['smooth_ms']
-            if meta.get('classify_with') is not None:
-                self._active_templates = set(meta['classify_with'])
-                _rebuild_toggle_bar()
-            _refresh_groups()
-            if group_var.get() in loaded:
-                _load_group(group_var.get())
-            messagebox.showinfo("Load templates",
-                                f"Loaded {len(loaded)} template(s).", parent=win)
-
-        _SEP = '─────────────'
-
-        def _refresh_groups():
-            all_tmpl = list(self._templates.keys())
-            main_names = ['Main'] if 'Main' in all_tmpl else []
-            secondary_tmpl = [n for n in all_tmpl if n != 'Main']
-            other_names = sorted(n for n in (self._sel_data._groups or {})
-                             if n not in all_tmpl and not n.startswith('__'))
-            names = main_names[:]
-            if main_names and (secondary_tmpl or other_names):
-                names.append(_SEP)
-            names.extend(secondary_tmpl)
-            if secondary_tmpl and other_names:
-                names.append(_SEP)
-            elif not secondary_tmpl and other_names and main_names:
-                pass  # separator already added after Main
-            names.extend(other_names)
-            group_cb['values'] = names
-            cur = group_var.get()
-            if cur not in names and names:
-                first = next((n for n in names if n != _SEP), '')
-                group_var.set(first)
-                if first:
-                    _load_group(first)
-
-        group_cb.bind('<<ComboboxSelected>>', _on_group_change)
-
-        # ── Active-for-classify toggle bar ───────────────────────────────
-        # Toggle buttons (one per template) control which templates are used
-        # by Auto-classify.  State lives in self._active_templates (empty = all).
-        act_frame = ttk.LabelFrame(win, text="Classify with:")
-        act_frame.pack(fill=tk.X, padx=8, pady=(0, 2))
-
-        _toggle_btns: dict = {}   # name → tk.Button
-
-        def _rebuild_toggle_bar():
-            for w in act_frame.winfo_children():
-                w.destroy()
-            _toggle_btns.clear()
-            for name in sorted(self._templates):
-                if name == 'Main':
-                    continue
-                is_active = (not self._active_templates or name in self._active_templates)
-
-                btn = tk.Button(
-                    act_frame,
-                    text=f"{name}*" if is_active else name,
-                    relief='sunken' if is_active else 'raised'
-                )
-
-                def _toggle(n=name):
-                    print("clicked:", n)
-                    print("before:", self._active_templates)
-
-                    if not self._active_templates:
-                        self._active_templates = set(self._templates) - {n}
-                    elif n in self._active_templates:
-                        self._active_templates.discard(n)
-                        if not self._active_templates:
-                            self._active_templates = set()
-                    else:
-                        self._active_templates.add(n)
-                    _rebuild_toggle_bar()
-
-                btn.config(command=_toggle)
-                btn.pack(side=tk.LEFT)
-                _toggle_btns[name] = btn
-        _rebuild_toggle_bar()
-
-        # ── Bottom buttons ────────────────────────────────────────────────
-        bot = ttk.Frame(win)
-        bot.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(bot, text="Test on current pair",
-                   command=_test_on_current).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bot, text="Save to file…",
-                   command=_save_to_file).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bot, text="Load from file…",
-                   command=_load_from_file).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bot, text="Close", command=_on_close).pack(side=tk.RIGHT, padx=4)
-
-        _refresh_groups()
-        if preselect and preselect in group_cb['values']:
-            group_var.set(preselect)
-            _load_group(preselect)
-        _rebuild_toggle_bar()
-        _place_add_btn()
-        _update_preview()
-
-    # ------------------------------------------------------------------
-
+        TemplateEditorDialog.show(self, preselect=preselect)
     def _auto_classify_dialog(self):
-        """Settings dialog for template-based auto-classification."""
-        if self.ccg_data is None:
-            messagebox.showinfo("Auto-classify", "No CCG data loaded.",
-                                parent=self.root)
-            return
-        if not self._templates:
-            if messagebox.askyesno(
-                    "Auto-classify",
-                    "No templates defined yet.\n\nOpen the Template Editor first "
-                    "(Classify > Edit templates…) to define peak rules for each group."
-                    "\n\nOpen Template Editor now?",
-                    parent=self.root):
-                self._template_editor_dialog()
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("Auto-classify pairs")
-        win.resizable(False, False)
-        win.grab_set()
-        pad = {'padx': 8, 'pady': 4}
-
-        # Scope
-        scope_var = tk.StringVar(value='current')
-        ttk.Label(win, text="Scope:").grid(row=0, column=0, sticky='w', **pad)
-        ttk.Radiobutton(win, text="Current conn-type only",
-                        variable=scope_var, value='current').grid(
-            row=0, column=1, sticky='w', **pad)
-        ttk.Radiobutton(win, text="All available conn-types",
-                        variable=scope_var, value='all').grid(
-            row=1, column=1, sticky='w', **pad)
-
-        # Pairs to classify
-        target_var = tk.StringVar(value='unlabeled')
-        ttk.Label(win, text="Classify:").grid(row=2, column=0, sticky='w', **pad)
-        ttk.Radiobutton(win, text="Unlabeled pairs only",
-                        variable=target_var, value='unlabeled').grid(
-            row=2, column=1, sticky='w', **pad)
-        ttk.Radiobutton(win, text="All pairs (read-only preview)",
-                        variable=target_var, value='all').grid(
-            row=3, column=1, sticky='w', **pad)
-
-        # Smoothing — mirrors Template Editor setting (read-only info)
-        active = sorted(self._active_templates) if self._active_templates else sorted(self._templates)
-        ttk.Label(win,
-                  text=f"Smooth: {self._templates_smooth_ms:.1f} ms  |  "
-                       f"Templates: {', '.join(active) or '(none)'}",
-                  foreground='#336699').grid(
-            row=4, column=0, columnspan=3, sticky='w', **pad)
-        ttk.Label(win,
-                  text="(Smoothing and active templates are set in Classify > Edit templates…)",
-                  foreground='gray').grid(row=5, column=0, columnspan=3, sticky='w', **pad)
-
-        def _run():
-            win.destroy()
-            self._run_auto_classify(
-                scope=scope_var.get(),
-                target=target_var.get(),
-                smooth_ms=self._templates_smooth_ms,
-            )
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.grid(row=6, column=0, columnspan=3, pady=8)
-        ttk.Button(btn_frame, text="Run", command=_run).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
-
-    def _visualize_cluster_embedding(self, scope='current', smooth_sigma=1.0):
-        """
-        Fit CCGClusterClassifier and show a matplotlib PCA scatter of the
-        training set, coloured by group label.  Opens a non-blocking figure
-        window — does not modify any state.
-        """
-        if self.ccg_data is None:
-            return
-
-        keys_to_run = ([self.key] if scope == 'current'
-                       else self._available_type_keys(self.key.nd()))
-
-        for tk_ in keys_to_run:
-            nd_key = tk_.nd()
-            cd = (self.cd._ccg_highres.get(nd_key)
-                  if (hasattr(self.cd, '_ccg_highres')
-                      and self.cd._ccg_highres
-                      and self.cd._ccg_highres.get(nd_key) is not None)
-                  else self.cd._ccg.get(nd_key))
-            if cd is None:
-                continue
-            conf = getattr(cd, 'conf', None) or getattr(cd, '_conf', None)
-            if conf is None:
-                conf = getattr(self.cd, 'conf', None)
-            if conf is None:
-                continue
-
-            ptr = self.cd.data.get(tk_)
-            if ptr is None or ptr.inds is None:
-                continue
-            local_pairs = set(map(tuple, ptr.inds2))
-
-            labeled_pairs: dict = {}
-            for gname, sess_dict in self._sel_data._groups.items():
-                if gname.startswith('__'):
-                    continue
-                all_in_group: set = set()
-                if isinstance(sess_dict, set):
-                    all_in_group = sess_dict
-                elif isinstance(sess_dict, dict):
-                    for sp in sess_dict.values():
-                        all_in_group.update(sp)
-                resolved = all_in_group & local_pairs
-                if resolved:
-                    labeled_pairs[gname] = resolved
-            deleted_local = self.deleted_inds & local_pairs
-
-            if not labeled_pairs and not deleted_local:
-                continue
-
-            all_labeled: set = set()
-            for s in labeled_pairs.values():
-                all_labeled.update(s)
-            all_labeled.update(deleted_local)
-            unlabeled = [p for p in sorted(local_pairs) if p not in all_labeled]
-
-            ct_str = (('-'.join(tk_.conn_type) if isinstance(tk_.conn_type, tuple)
-                       else str(tk_.conn_type)) if tk_.conn_type else 'unknown')
-
-            clf = CCGClusterClassifier(cd, conf, smooth_sigma=smooth_sigma)
-            counts = clf.fit(labeled_pairs, deleted_local,
-                             all_pairs=sorted(local_pairs))
-            if not counts:
-                continue
-
-            sess = self._current_session_str()
-            fig = clf.plot_embedding(
-                labeled_pairs=labeled_pairs,
-                deleted_pairs=deleted_local,
-                unlabeled_pairs=unlabeled,
-                title=f"{sess}  |  {ct_str}  |  smooth={smooth_sigma:.1f}",
-            )
-            fig.canvas.manager.set_window_title(f"Cluster embedding — {ct_str}")
-            plt.show(block=False)
+        AutoClassifyDialog.show(self)
 
     def _run_auto_classify(self, scope, target, smooth_ms=2.0):
         """Run template classifier and open preview dialog."""
@@ -10473,66 +9310,7 @@ class CCGReviewUI:
         self.refresh_lists()
 
     def _merge_groups_dialog(self):
-        """Dialog to merge two or more groups into one."""
-        if len(self._sel_data._groups) < 2:
-            messagebox.showinfo("Merge groups",
-                                "Need at least 2 groups to merge.")
-            return
-        win = tk.Toplevel(self.root)
-        win.title("Merge Groups")
-        win.geometry("340x320")
-        win.grab_set()
-
-        ttk.Label(win, text="Select groups to merge:",
-                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
-
-        frame = ttk.Frame(win)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10)
-        check_vars = {}
-        for gname in sorted(self._sel_data._groups):
-            if gname.startswith('__'):
-                continue
-            var = tk.BooleanVar(value=False)
-            check_vars[gname] = var
-            ttk.Checkbutton(frame, text=gname, variable=var).pack(anchor='w')
-
-        name_frame = ttk.Frame(win)
-        name_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
-        ttk.Label(name_frame, text="Merged group name:").pack(side=tk.LEFT)
-        name_entry = ttk.Entry(name_frame, width=20)
-        name_entry.pack(side=tk.LEFT, padx=4)
-
-        def do_merge():
-            selected = [g for g, v in check_vars.items() if v.get()]
-            if len(selected) < 2:
-                messagebox.showwarning("Merge", "Select at least 2 groups.")
-                return
-            target = name_entry.get().strip() or selected[0]
-            if not messagebox.askokcancel(
-                    "Merge groups",
-                    f"This will merge {len(selected)} groups into '{target}'.\n"
-                    "This cannot be undone. Proceed?"):
-                return
-            merged = {}
-            for g in selected:
-                g_data = self._sel_data._groups.get(g, {})
-                if isinstance(g_data, set):
-                    # Legacy flat format
-                    sess = self._current_session_str()
-                    merged.setdefault(sess, set()).update(g_data)
-                else:
-                    for sess, pairs in g_data.items():
-                        merged.setdefault(sess, set()).update(pairs)
-                if g != target:
-                    self._sel_data._groups.pop(g, None)
-                    self._sel_data._group_hotkeys.pop(g, None)
-                    self._sel_data._group_notes.pop(g, None)
-            self._sel_data._groups[target] = merged
-            self._rebuild_groups_menu()
-            self.refresh_lists()
-            win.destroy()
-
-        ttk.Button(win, text="Merge", command=do_merge).pack(pady=8)
+        MergeGroupsDialog.show(self)
 
     def _set_group_hotkey(self, group_name, key_str):
         """Assign hotkey: single digit 1–9/0 or single letter a–z."""
@@ -10870,8 +9648,6 @@ class CCGReviewUI:
             valid = self._all_inds_set_for_ptr(ptr)
             raw = set(self._pair_deleted_store.get(str(tk_), set())) & valid
             deleted_by_type[str(tk_)] = [[int(r), int(c)] for r, c in sorted(raw)]
-        # Legacy single-list field = current key only (older readers)
-        deleted_ser = deleted_by_type.get(str(self.key), [])
         return {
             'version': '4.0',
             'name': name,
@@ -10879,7 +9655,6 @@ class CCGReviewUI:
             'session': getattr(self.key, 'session', 'sess'),
             'selections': selections_by_type,
             'pair_tags': pair_tags_ser,
-            'deleted': deleted_ser,
             'deleted_by_type': deleted_by_type,
         }
 
@@ -11049,32 +9824,22 @@ class CCGReviewUI:
                 f"Please delete this file and re-save your selection."
             ) from exc
 
-        version = data.get('version', '1.0')
-        if version >= '2.0' and 'selections' in data:
-            selections_by_type = data.get('selections', {})
-            type_keys = self._available_type_keys(self.key.nd())
-            selections_by_type = self._enforce_label_selection_integrity_file(
-                selections_by_type, data.get('pair_tags', {}), type_keys)
-            for tk_ in type_keys:
-                ptr = self.cd.data.get(tk_)
-                if ptr is None:
-                    continue
-                pairs = selections_by_type.get(str(tk_), [])
-                if pairs:
-                    ptr.manually_selected_inds = np.array(
-                        [[int(r), int(c)] for r, c in pairs], dtype=int)
-                else:
-                    ptr.manually_selected_inds = None
-            cur_sel = selections_by_type.get(str(self.key), [])
-            selected = set(tuple(int(v) for v in p) for p in cur_sel)
-        else:
-            # v1.0 backward compat
-            file_key = data.get('key', '')
-            if file_key == str(self.key):
-                selected = set(tuple(int(v) for v in p)
-                               for p in data.get('selected', []))
+        selections_by_type = data.get('selections', {})
+        type_keys = self._available_type_keys(self.key.nd())
+        selections_by_type = self._enforce_label_selection_integrity_file(
+            selections_by_type, data.get('pair_tags', {}), type_keys)
+        for tk_ in type_keys:
+            ptr = self.cd.data.get(tk_)
+            if ptr is None:
+                continue
+            pairs = selections_by_type.get(str(tk_), [])
+            if pairs:
+                ptr.manually_selected_inds = np.array(
+                    [[int(r), int(c)] for r, c in pairs], dtype=int)
             else:
-                selected = set()
+                ptr.manually_selected_inds = None
+        cur_sel = selections_by_type.get(str(self.key), [])
+        selected = set(tuple(int(v) for v in p) for p in cur_sel)
 
         self._push_undo()
         current_available = set(map(tuple, self.all_inds))
@@ -11093,29 +9858,15 @@ class CCGReviewUI:
             selected = selected & current_available
 
         self.selected_inds = selected
-        # Per–conn-type deleted sets (v4.0+ optional deleted_by_type; else legacy flat list)
-        type_keys_ld = self._available_type_keys(self.key.nd())
-        tkey_strs = [str(tk) for tk in type_keys_ld]
-        dbtype = data.get('deleted_by_type')
         self._pair_deleted_store = {}
-        if isinstance(dbtype, dict) and dbtype:
-            for k_str, plist in dbtype.items():
-                self._pair_deleted_store[k_str] = {
-                    tuple(int(v) for v in p) for p in plist}
-        else:
-            raw_deleted = data.get('deleted', []) or []
-            if raw_deleted:
-                st = {tuple(int(v) for v in p) for p in raw_deleted}
-                for k_str in tkey_strs:
-                    self._pair_deleted_store[k_str] = set(st)
+        dbtype = data.get('deleted_by_type') or {}
+        for k_str, plist in dbtype.items():
+            self._pair_deleted_store[k_str] = {
+                tuple(int(v) for v in p) for p in plist}
         self.deleted_inds = (
             set(self._pair_deleted_store.get(str(self.key), set())) & current_available
         )
         self.unselected_inds = current_available - selected - self.deleted_inds
-
-        if restore_groups and version < '4.0':
-            # v3.x: groups stored in the session file itself (legacy)
-            self._restore_groups_from_data(data)
 
         # Load pair_tags for this session — always reset to avoid stale cross-session tags
         self._sel_data._pair_tags = {}
@@ -11128,24 +9879,12 @@ class CCGReviewUI:
             pair = (int(parts[0]), int(parts[1]))
             entry = dict(tdata) if isinstance(tdata, dict) else {'notes': str(tdata)}
             self._sel_data._pair_tags[pair] = entry
-            # Reconstruct current-session group membership from pair_tags.groups.
-            # Supports both legacy numeric IDs (v4.0 earlier) and current name-based storage.
-            if version >= '4.0' and 'groups' in entry:
+            if 'groups' in entry:
                 for gitem in entry['groups']:
-                    gname = None
-                    if isinstance(gitem, (str,)):
-                        gname = gitem
-                    else:
-                        try:
-                            gid = int(gitem)
-                            g = self._sel_data._group_registry.get(gid, {})
-                            gname = g.get('name') if g else None
-                        except Exception:
-                            gname = None
+                    gname = gitem if isinstance(gitem, str) else None
                     if gname:
                         self._sel_data._groups.setdefault(str(gname), {}).setdefault(
                             cur_sess, set()).add(pair)
-            # v3.x: also handle old 'tags' key as plain string list (keep as-is)
         self._enforce_label_selection_integrity_live()
         self._sync_sel_data()
         if not _skip_redraw:
@@ -11400,44 +10139,6 @@ class CCGReviewUI:
 
         entry.bind('<Return>', lambda e: _save_named())
 
-    def save_gifs(self):
-        """Generate per-pair animated GIFs cycling over segments.
-
-        Kept separate from save_selections so it can be called explicitly
-        after all PNGs have been rendered at a consistent figure size.
-        Each frame is resized to the shape of the first frame so imageio
-        can stack them into a GIF.
-        """
-        selected_array = np.array(sorted(self.selected_inds))
-        if self.n_segments <= 1 or len(selected_array) == 0:
-            print("Nothing to GIF (need >1 segment and ≥1 selected pair).")
-            return
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        gif_folder = os.path.join(self.tmp_dir, f"review_{timestamp}")
-        os.makedirs(gif_folder, exist_ok=True)
-        print(f"Generating GIFs for {len(selected_array)} selected pairs...")
-        for inds in selected_array:
-            raw_frames = []
-            for seg in range(self.n_segments):
-                png_path = self._png_path(inds, seg)
-                if not os.path.exists(png_path):
-                    png_path = self._render_png(inds, seg)
-                raw_frames.append(mpimg.imread(png_path))
-            # Normalise to uint8 and resize to first frame's shape
-            h, w = raw_frames[0].shape[:2]
-            frames_u8 = []
-            for f in raw_frames:
-                arr = (f * 255).astype(np.uint8) if f.max() <= 1.0 else f.astype(np.uint8)
-                if arr.shape[:2] != (h, w):
-                    arr = np.array(
-                        Image.fromarray(arr).resize((w, h), Image.LANCZOS))
-                frames_u8.append(arr)
-            gif_path = os.path.join(gif_folder,
-                                    f"pair_{inds[0]}_{inds[1]}.gif")
-            imageio.mimsave(gif_path, frames_u8, duration=0.8)
-        print(f"GIFs saved to: {gif_folder}")
-        return gif_folder
-
     def _start_heartbeat(self):
         """Periodic no-op to keep the Tk event loop alive in Jupyter."""
         def _beat():
@@ -11571,33 +10272,25 @@ class CCGReviewUI:
         lst.append(result)
         return len(lst) - 1, True
 
-    def _ccg_cache_filename(self, seg_name: str) -> str:
-        return self._ccg_cache_filename_for_key(seg_name, key=self.key)
-
-    def _ccg_cache_prefix_for_key(self, key=None) -> str:
-        """Prefix that all cache files for a session share."""
-        key = key or self.key
-        return f"{str(key.session)}__"
-
     def _ccg_cache_prefix(self) -> str:
-        return self._ccg_cache_prefix_for_key(key=self.key)
+        return f"{str(self.key.session)}__"
 
     def _current_filter_state(self) -> dict:
-        toggles = getattr(self, '_ts_legend_toggles', {})
+        toggles = getattr(self.time_slider, '_ts_legend_toggles', {})
         return {
-            'theme': getattr(self, '_ts_current_theme', 'segments'),
+            'theme': self.time_slider._ts_current_theme,
             'labels': {str(lbl): bool(v.get()) for lbl, v in toggles.items()},
         }
 
     def _build_custom_spec(self, *, for_all: bool, for_session: str | None = None):
-        raw_t0 = self._ts_start_var.get().strip().lower() if hasattr(self, '_ts_start_var') else "00:00:00"
-        raw_t1 = self._ts_end_var.get().strip().lower() if hasattr(self, '_ts_end_var') else "00:00:00"
+        raw_t0 = self.time_slider._ts_start_var.get().strip().lower()
+        raw_t1 = self.time_slider._ts_end_var.get().strip().lower()
         # Preserve sentinel strings; otherwise parse to float
         if raw_t0 == 'start':
             t0 = 'start'
         else:
             try:
-                t0 = self._ts_hms_to_sec(raw_t0)
+                t0 = self.time_slider._ts_hms_to_sec(raw_t0)
             except (ValueError, IndexError):
                 messagebox.showerror("Time window", "Invalid start time. Use HH:MM:SS or 'start'.")
                 return None
@@ -11605,7 +10298,7 @@ class CCGReviewUI:
             t1 = 'end'
         else:
             try:
-                t1 = self._ts_hms_to_sec(raw_t1)
+                t1 = self.time_slider._ts_hms_to_sec(raw_t1)
             except (ValueError, IndexError):
                 messagebox.showerror("Time window", "Invalid end time. Use HH:MM:SS or 'end'.")
                 return None
@@ -11615,17 +10308,17 @@ class CCGReviewUI:
                 messagebox.showerror("Time window", "End time must be after start time.")
                 return None
         try:
-            n_splits = max(1, int(getattr(self, '_ts_splits_var', None) and self._ts_splits_var.get() or 1))
+            n_splits = max(1, int(self.time_slider._ts_splits_var.get()))
         except (ValueError, TypeError):
             n_splits = 1
         try:
-            overlap_sec = max(0.0, float(getattr(self, '_ts_overlap_sec_var', None) and self._ts_overlap_sec_var.get() or 0))
+            overlap_sec = max(0.0, float(self.time_slider._ts_overlap_sec_var.get()))
         except (ValueError, TypeError):
             overlap_sec = 0.0
-        name = self._ts_name_var.get().strip() if hasattr(self, '_ts_name_var') else ""
+        name = self.time_slider._ts_name_var.get().strip()
         if not name:
-            t0_str = t0 if isinstance(t0, str) else self._ts_sec_to_hms(t0)
-            t1_str = t1 if isinstance(t1, str) else self._ts_sec_to_hms(t1)
+            t0_str = t0 if isinstance(t0, str) else self.time_slider._ts_sec_to_hms(t0)
+            t1_str = t1 if isinstance(t1, str) else self.time_slider._ts_sec_to_hms(t1)
             name = f"{t0_str}–{t1_str}"
         spec = {
             'name': name,
@@ -11642,43 +10335,12 @@ class CCGReviewUI:
 
     @staticmethod
     def _custom_spec_key(spec: dict) -> tuple:
-        fs = spec.get('filter_state', {}) or {}
-        labels = fs.get('labels', {}) or {}
-        t0_raw = spec.get('t0', 0.0)
-        t1_raw = spec.get('t1', 0.0)
-        t0_key = str(t0_raw) if isinstance(t0_raw, str) else float(t0_raw)
-        t1_key = str(t1_raw) if isinstance(t1_raw, str) else float(t1_raw)
-        return (
-            str(spec.get('name', '')),
-            t0_key,
-            t1_key,
-            str(fs.get('theme', 'segments')),
-            tuple(sorted((str(k), bool(v)) for k, v in labels.items())),
-        )
+        return _custom_ccg_mod.custom_spec_key(spec)
 
     def _normalize_custom_spec(self, spec: dict) -> dict:
-        fs = spec.get('filter_state', {}) or {}
-        labels = fs.get('labels', {}) or {}
-        sessions = spec.get('sessions', []) or []
-        sessions = sorted(str(s) for s in sessions if s is not None)
-        t0_raw = spec.get('t0', 0.0)
-        t1_raw = spec.get('t1', 0.0)
-        t0 = str(t0_raw) if isinstance(t0_raw, str) and t0_raw.lower() in ('start', 'end') else float(t0_raw)
-        t1 = str(t1_raw) if isinstance(t1_raw, str) and t1_raw.lower() in ('start', 'end') else float(t1_raw)
-        return {
-            'name': str(spec.get('name', '')),
-            't0': t0,
-            't1': t1,
-            'filter_state': {
-                'theme': str(fs.get('theme', 'segments')),
-                'labels': {str(k): bool(v) for k, v in labels.items()},
-            },
-            'scope': str(spec.get('scope', self._current_session_str())),
-            'created_from_session': str(spec.get('created_from_session', self._current_session_str())),
-            'sessions': sessions,
-            'n_splits': int(spec.get('n_splits') or 1),
-            'overlap_sec': float(spec.get('overlap_sec') or 0.0),
-        }
+        return _custom_ccg_mod.normalize_custom_spec(
+            spec, default_session=self._current_session_str()
+        )
 
     def _load_custom_ccg_suggestions(self) -> list[dict]:
         path = self._custom_ccg_suggestions_path
@@ -11836,8 +10498,8 @@ class CCGReviewUI:
             if win.winfo_exists():
                 fn()
         except tk.TclError:
-            self._ts_load_custom_ccg_win = None
-            self._ts_load_custom_ccg_refresh = None
+            self.time_slider._ts_load_custom_ccg_win = None
+            self.time_slider._ts_load_custom_ccg_refresh = None
 
     def _save_custom_segment_objects(self, segments: list, *, show_saved_message: bool = True) -> list[str]:
         """Write custom segment dicts to npz (correct session prefix per segment)."""
@@ -11852,26 +10514,7 @@ class CCGReviewUI:
                 self._purge_timestamped_custom_ccg_npz(_sess_w, str(cs['name']))
                 fname = self._ccg_cache_filename_for_key(cs['name'], key=save_key)
                 path = os.path.join(self._ccg_cache_dir, fname)
-                arrays = dict(
-                    name_=np.array(cs['name']),
-                    t0_=np.array(cs['t0']),
-                    t1_=np.array(cs['t1']),
-                    ccg=cs['ccg'],
-                    ccg_null=cs['ccg_null'],
-                    pval=cs['pval'],
-                    pval_corrected=cs['pval_corrected'],
-                    compute_sec_=np.array(cs.get('compute_sec', float('nan'))),
-                    active_duration_=np.array(cs.get('active_duration', float('nan'))),
-                    total_time_hours_=np.array(cs.get('total_time_hours', float('nan'))),
-                    filter_state_=np.array(json.dumps(cs.get('filter_state', {}))),
-                    metadata_=np.array(json.dumps(cs.get('metadata', {}))),
-                    **({'firing_rates': cs['firing_rates']}
-                       if 'firing_rates' in cs else {}),
-                )
-                for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-                    if k in cs:
-                        arrays[k] = cs[k]
-                np.savez_compressed(path, **arrays)
+                _custom_ccg_mod.save_custom_segment_to_npz(cs, path)
                 cs['src_path'] = path
                 name = str(cs['name'])
                 saved.append(name)
@@ -11891,78 +10534,11 @@ class CCGReviewUI:
                     "Saved",
                     "Saved custom CCG segment(s):\n" + "\n".join(lines))
             if hasattr(self, '_ts_status_var'):
-                self._ts_status_var.set(f"Saved: {', '.join(dict.fromkeys(saved))}")
+                self.time_slider._ts_status_var.set(f"Saved: {', '.join(dict.fromkeys(saved))}")
             self._emit_custom_ccg_inventory_event()
             self._save_ui_state()
             self._refresh_custom_ccg_load_dialog_if_open()
         return saved
-
-    def _save_custom_segments_at_indices(self, indices: list[int]) -> list[str]:
-        """Write selected custom segments (indices into active ``_custom_segments``) to npz."""
-        objs = []
-        for ci in sorted(set(indices)):
-            if 0 <= ci < len(self._custom_segments):
-                objs.append(self._custom_segments[ci])
-        return self._save_custom_segment_objects(objs)
-
-    def _ts_save_custom_ccg(self):
-        """Save one or more current custom segments to disk."""
-        buckets = getattr(self, '_custom_segments_by_session', None) or {}
-        if not any(lst for lst in buckets.values()):
-            messagebox.showinfo("Save custom CCG", "No custom segments to save.")
-            return
-
-        any_mode = getattr(self, '_session_any_mode', False)
-        total_sess = max(1, len(self._real_nd_keys_ordered()))
-
-        if any_mode:
-            all_segs = [cs for lst in buckets.values()
-                        for cs in lst if isinstance(cs, dict)]
-            if not all_segs:
-                messagebox.showinfo("Save custom CCG", "No custom segments to save.")
-                return
-            self._save_custom_segment_objects(all_segs, show_saved_message=True)
-            try:
-                self._build_sig_chips()
-                self._update_segment_label()
-            except Exception:
-                pass
-            return
-
-        if len(self._custom_segments) == 1:
-            to_save = [0]
-        else:
-            win = tk.Toplevel(self.root)
-            win.title("Save custom CCG")
-            win.geometry("340x260")
-            win.grab_set()
-            ttk.Label(win, text="Select segments to save:").pack(
-                anchor='w', padx=8, pady=(8, 2))
-            lb = tk.Listbox(win, selectmode=tk.MULTIPLE, height=8)
-            lb.pack(fill=tk.BOTH, expand=True, padx=8)
-            for cs in self._custom_segments:
-                lb.insert(tk.END,
-                          f"{cs['name']}  ({self._ts_sec_to_hms(cs['t0'])}–"
-                          f"{self._ts_sec_to_hms(cs['t1'])})")
-            lb.select_set(0, tk.END)
-            chosen = []
-
-            def _ok():
-                chosen.extend(lb.curselection())
-                win.destroy()
-
-            btn_f = ttk.Frame(win)
-            btn_f.pack(fill=tk.X, padx=8, pady=6)
-            ttk.Button(btn_f, text="Save selected", command=_ok).pack(
-                side=tk.RIGHT, padx=4)
-            ttk.Button(btn_f, text="Cancel",
-                       command=win.destroy).pack(side=tk.RIGHT)
-            win.wait_window(win)
-            if not chosen:
-                return
-            to_save = list(chosen)
-
-        self._save_custom_segments_at_indices(to_save)
 
     def _archive_stale_custom_ccgs(self):
         """Move saved custom CCG files that pre-date the total_time_hours field to _trash/.
@@ -11983,282 +10559,6 @@ class CCGReviewUI:
                 pass
         return len(archived), trash_dir
 
-    def _ts_load_custom_ccg(self):
-        """Scan cache dir for saved custom segments and load selected ones additively."""
-        # Archive stale files (those missing total_time_hours) before showing dialog
-        n_archived, trash_dir = self._archive_stale_custom_ccgs()
-        if n_archived:
-            messagebox.showinfo(
-                "Stale custom CCGs archived",
-                f"{n_archived} old custom CCG file(s) were moved to:\n  {trash_dir}\n\n"
-                "These files lack the 'total_time' field required for correct Time Span "
-                "normalisation and cannot be loaded. They are preserved in the trash folder.")
-        prefix = self._ccg_cache_prefix()
-        if getattr(self, '_session_all_mode', False):
-            pattern = os.path.join(self._ccg_cache_dir, "*.npz")
-        else:
-            pattern = os.path.join(self._ccg_cache_dir, f"{prefix}*.npz")
-        paths = sorted(_glob.glob(pattern))
-        if not paths:
-            messagebox.showinfo(
-                "Load custom CCG",
-                f"No saved custom CCGs found for\n{prefix[:-2]}")
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("Load custom CCG")
-        win.geometry("560x380")
-        win.grab_set()
-        ttk.Label(win, text="Select segments to load (click ▶ to expand details):").pack(
-            anchor='w', padx=8, pady=(8, 2))
-
-        tree_frame = ttk.Frame(win)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8)
-        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
-        tv = ttk.Treeview(tree_frame, selectmode='extended',
-                          yscrollcommand=vsb.set, show='tree')
-        vsb.config(command=tv.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tv.column('#0', width=520, stretch=True)
-
-        # tag: detail rows are not selectable, shown in grey
-        tv.tag_configure('detail', foreground='#666')
-        tv.tag_configure('file',   foreground='#000')
-        tv.tag_configure('group',  foreground='#333', font=('TkDefaultFont', 9, 'bold'))
-
-        name_cov, _n_total_sessions = self._custom_ccg_name_session_coverage()
-        _n_sess_denom = max(1, _n_total_sessions)
-
-        def _dur_str(dur):
-            if dur != dur:  return ""          # nan
-            if dur >= 60:   return f"  ⏱ {dur/60:.1f}min"
-            return f"  ⏱ {dur:.0f}s"
-
-        def _parse_meta(p, *, child_session_line: bool = False):
-            """Return (summary_line, [bullet_strings]) from npz metadata."""
-            base = os.path.basename(p)
-            file_sess = base.split("__", 1)[0] if "__" in base else ""
-            parts = base.replace('.npz', '').rsplit('__', 1)
-            date_str = parts[1] if len(parts) > 1 else ''
-            safe_name = parts[0].replace('_', ' ') if parts else base
-            bullets = []
-            t0, t1 = None, None
-            try:
-                m = np.load(p, allow_pickle=False)
-                if 'name_' in m:
-                    safe_name = str(m['name_'])
-                t0 = float(m['t0_']) if 't0_' in m else None
-                t1 = float(m['t1_']) if 't1_' in m else None
-                if t0 is not None and t1 is not None:
-                    bullets.append(
-                        f"Time range: {self._ts_sec_to_hms(t0)} – {self._ts_sec_to_hms(t1)}")
-                dur = float(m['compute_sec_']) if 'compute_sec_' in m else float('nan')
-                if dur == dur:
-                    bullets.append(f"Compute time: {_dur_str(dur).strip()}")
-                act = float(m['active_duration_']) if 'active_duration_' in m else float('nan')
-                if act == act:
-                    bullets.append(f"Active duration: {act:.1f}s")
-                if 'filter_state_' in m:
-                    fs = json.loads(str(m['filter_state_']))
-                    theme = fs.get('theme', '')
-                    labels = fs.get('labels', {})
-                    if theme:
-                        bullets.append(f"Theme: {theme}")
-                    if labels:
-                        on  = [l for l, v in labels.items() if v]
-                        off = [l for l, v in labels.items() if not v]
-                        if on:
-                            bullets.append(f"Active labels: {', '.join(on)}")
-                        if off:
-                            bullets.append(f"Inactive labels: {', '.join(off)}")
-                if 'metadata_' in m:
-                    md = json.loads(str(m['metadata_']))
-                    src = md.get('session')
-                    if src:
-                        bullets.append(f"Derived from session: {src}")
-                has_fr = 'firing_rates' in m
-                has_hi = 'ccg_hi' in m
-                flags = []
-                if has_fr: flags.append("firing rates")
-                if has_hi: flags.append("hi-res CCG")
-                if flags:
-                    bullets.append(f"Contains: {', '.join(flags)}")
-            except Exception:
-                pass
-            if child_session_line:
-                tr = ""
-                if t0 is not None and t1 is not None:
-                    tr = (f"{self._ts_sec_to_hms(t0)}–{self._ts_sec_to_hms(t1)}  ·  ")
-                summary = f"{file_sess or '?'}  ·  {tr}[{date_str}]"
-            else:
-                summary = f"{safe_name}  [{date_str}]"
-            return summary, bullets
-
-        # file_meta maps iid → path
-        file_meta = {}
-
-        def _populate(path_list):
-            for top in tv.get_children():
-                tv.delete(top)
-            file_meta.clear()
-            _groups: dict[str, list[str]] = collections.defaultdict(list)
-            for p in path_list:
-                spec = self._custom_npz_spec(p) or {}
-                nm = str(spec.get('name', '')).strip()
-                if not nm:
-                    nm = os.path.basename(p).replace('.npz', '')
-                _groups[nm].append(p)
-            for gname in sorted(_groups.keys(), key=lambda s: s.lower()):
-                plist = sorted(
-                    _groups[gname],
-                    key=lambda pp: (os.path.basename(pp).split('__', 1)[0], pp),
-                )
-                n_have = len(name_cov.get(gname, set()))
-                parent_text = (
-                    f"▶ {gname}  ({n_have}/{_n_sess_denom} sessions)")
-                pid = tv.insert('', tk.END, text=parent_text,
-                                tags=('group',), open=True)
-                for p in plist:
-                    summary, bullets = _parse_meta(p, child_session_line=True)
-                    iid = tv.insert(pid, tk.END, text=f"☐  {summary}",
-                                    tags=('file',), open=False)
-                    file_meta[iid] = p
-                    for b in bullets:
-                        tv.insert(iid, tk.END, text=f"    • {b}", tags=('detail',))
-
-        _populate(paths)
-
-        # Clicking a file row toggles its checkbox marker (selection via Treeview selection)
-        # Prevent detail rows from being selected
-        def _on_click(event):
-            iid = tv.identify_row(event.y)
-            if iid:
-                tags = tv.item(iid, 'tags')
-                if 'detail' in tags or 'group' in tags:
-                    tv.selection_remove(iid)
-
-        tv.bind('<ButtonRelease-1>', _on_click)
-
-        def _refresh_list():
-            new_paths = sorted(_glob.glob(pattern))
-            _populate(new_paths)
-            self._emit_custom_ccg_inventory_event()
-            if not file_meta:
-                win.destroy()
-
-        def _selected_file_iids():
-            return [iid for iid in tv.selection()
-                    if 'file' in tv.item(iid, 'tags')]
-
-        def _delete():
-            sel = _selected_file_iids()
-            if not sel:
-                return
-            names = [tv.item(iid, 'text').lstrip('☐ ').split('  [')[0] for iid in sel]
-            if not messagebox.askyesno(
-                    "Delete files",
-                    f"Permanently delete {len(sel)} file(s)?\n"
-                    + "\n".join(f"  • {n}" for n in names)):
-                return
-            for iid in sel:
-                try:
-                    os.remove(file_meta[iid])
-                except Exception as ex:
-                    print(f"[LoadCustomCCG] delete failed: {ex}")
-            _refresh_list()
-            self._emit_custom_ccg_inventory_event()
-
-        def _ok():
-            sel = _selected_file_iids()
-            if not sel:
-                win.destroy()
-                return
-            added = []
-            touched_view = False
-            last_idx = 0
-            for iid in sel:
-                p = file_meta[iid]
-                try:
-                    npz = np.load(p, allow_pickle=False)
-                    cs = dict(
-                        name=str(npz['name_']),
-                        t0=float(npz['t0_']),
-                        t1=float(npz['t1_']),
-                        ccg=npz['ccg'],
-                        ccg_null=npz['ccg_null'],
-                        pval=npz['pval'],
-                        pval_corrected=npz['pval_corrected'],
-                        compute_sec=(float(npz['compute_sec_'])
-                                     if 'compute_sec_' in npz else float('nan')),
-                        active_duration=(float(npz['active_duration_'])
-                                         if 'active_duration_' in npz else float('nan')),
-                        total_time_hours=(float(npz['total_time_hours_'])
-                                          if 'total_time_hours_' in npz else None),
-                        filter_state=(json.loads(str(npz['filter_state_']))
-                                      if 'filter_state_' in npz else {}),
-                        metadata=(json.loads(str(npz['metadata_']))
-                                  if 'metadata_' in npz else {}),
-                        src_path=p,
-                        **(({'firing_rates': npz['firing_rates']})
-                           if 'firing_rates' in npz else {}),
-                    )
-                    for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-                        if k in npz:
-                            cs[k] = npz[k]
-                    bn = os.path.basename(p)
-                    file_sess = bn.split("__", 1)[0] if "__" in bn else str(self.key.session)
-                    lst = self._custom_segments_by_session.setdefault(file_sess, [])
-                    last_idx, _ = self._upsert_custom_segment_by_name(lst, cs)
-                    if lst is self._custom_segments:
-                        touched_view = True
-                    added.append(cs['name'])
-                except Exception as ex:
-                    print(f"[LoadCustomCCG] failed to load {p}: {ex}")
-            win.destroy()
-            if added and touched_view:
-                self._build_sig_chips()
-                self.current_segment = self.n_segments + 1 + last_idx
-                self._clamp_current_segment_for_session()
-                self._update_segment_label()
-                self.update_plot()
-                if hasattr(self, '_ts_status_var'):
-                    from collections import Counter as _Ctr
-                    _cnts = _Ctr(added)
-                    _parts = [f"{n} ({c})" if c > 1 else n for n, c in _cnts.items()]
-                    self._ts_status_var.set(f"Loaded: {', '.join(_parts)}")
-                self._save_ui_state()
-            elif added:
-                if hasattr(self, '_ts_status_var'):
-                    self._ts_status_var.set(
-                        f"Loaded {len(added)} segment(s) for other session(s); "
-                        "switch pairs to that session to view chips.")
-                self._save_ui_state()
-
-        def _clear_load_dialog_ref(_e=None):
-            if getattr(self, '_ts_load_custom_ccg_win', None) is win:
-                self._ts_load_custom_ccg_win = None
-                self._ts_load_custom_ccg_refresh = None
-
-        self._ts_load_custom_ccg_win = win
-        self._ts_load_custom_ccg_refresh = _refresh_list
-        win.bind(
-            '<Destroy>',
-            lambda e: _clear_load_dialog_ref() if e.widget is win else None,
-        )
-
-        btn_f = ttk.Frame(win)
-        btn_f.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(btn_f, text="Refresh list", command=_refresh_list).pack(
-            side=tk.LEFT, padx=4)
-        ttk.Button(btn_f, text="Load selected", command=_ok).pack(
-            side=tk.RIGHT, padx=4)
-        ttk.Button(btn_f, text="Delete selected",
-                   command=_delete).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_f, text="Cancel",
-                   command=win.destroy).pack(side=tk.RIGHT)
-
-
 # ---------------------------------------------------------------------------
 
 def _load_last_key() -> 'Key | None':
@@ -12277,7 +10577,6 @@ def _load_last_key() -> 'Key | None':
         return Key(**kd)
     except Exception:
         return None
-
 
 def launch_ccg_review(cd, key=None):
     """

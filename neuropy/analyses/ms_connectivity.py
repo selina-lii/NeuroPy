@@ -38,7 +38,7 @@ DATA_ROOT = str(_REPO_ROOT / "data")
 # CCG resolution presets (bin_size in seconds)
 _CCG_RESOLUTION = {
     'lowres':  1e-3,    # 1 ms   — default, fast
-    'highres': 1e-4,  # 0.1 ms — finer temporal resolution (must exceed 1/sample_rate)
+    'highres': 1/3*1e-4,  # 0.1 ms — finer temporal resolution (must exceed 1/sample_rate)
 }
 
 
@@ -2204,11 +2204,13 @@ class EranConv:
         return pair_inds
 
     def _cell_type_mask(self, pair_inds, neuron_type, conn_types):
+        if pair_inds.ndim == 1:
+            pair_inds = pair_inds.reshape(0, 2)
         sig_pairs = {}
-        # Conn types with no pairs are marked with None
         if not _hasvalue(pair_inds):
             for ct in conn_types:
                 sig_pairs[ct] = None
+            return sig_pairs
 
         # Condition 3: Ref/Target are specific cell types
         for ct in conn_types:

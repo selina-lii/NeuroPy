@@ -470,3 +470,97 @@ class JitterController:
                 ui.center_container.correlogram_panel._line_jitter_var.set(False)
             return True
         return False
+
+
+class JitterQueueDialog:
+    """Dialog showing all queued and running jitter/custom-CCG tasks."""
+
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.win = tk.Toplevel(ui.root)
+        self.win.title("Jitter Queue")
+        self.win.geometry("460x340")
+        self._build()
+
+    def _build(self):
+        ui = self._ui
+        win = self.win
+        from tkinter import ttk
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Queued tasks",
+                  font=('TkDefaultFont', 11, 'bold')).pack(anchor='w')
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        lb = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                        selectmode=tk.EXTENDED, font=('TkFixedFont', 10))
+        scrollbar.config(command=lb.yview)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _refresh():
+            lb.delete(0, tk.END)
+            for i, task in enumerate(ui._jitter_pending):
+                ref, tgt = task[1], task[2]
+                n = task[3]
+                res = task[4]
+                seg = task[6] if len(task) > 6 else None
+                seg_s = f" seg{seg}" if seg is not None else ""
+                status = "▶ RUNNING" if i == 0 and ui._is_task_running() else "  queued"
+                lb.insert(tk.END, f"{status}  jitter [{ref},{tgt}] n={n} {res}{seg_s}")
+            for i, task in enumerate(ui._custom_ccg_pending):
+                name = (task.get('name') if isinstance(task, dict) else task[3])
+                status = "▶ RUNNING" if i == 0 and ui._custom_ccg_is_running() else "  queued"
+                lb.insert(tk.END, f"{status}  custom CCG '{name}'")
+            if lb.size() == 0:
+                lb.insert(tk.END, "  (empty)")
+
+        def _delete_selected():
+            sel = lb.curselection()
+            if not sel:
+                return
+            n_jitter = len(ui._jitter_pending)
+            running_jitter = ui._is_task_running()
+            running_ccg = ui._custom_ccg_is_running()
+            jitter_to_remove = []
+            ccg_to_remove = []
+            for s in sel:
+                if s < n_jitter:
+                    if s == 0 and running_jitter:
+                        continue
+                    jitter_to_remove.append(s)
+                else:
+                    ccg_idx = s - n_jitter
+                    if ccg_idx == 0 and running_ccg:
+                        continue
+                    ccg_to_remove.append(ccg_idx)
+            if jitter_to_remove:
+                pending = list(ui._jitter_pending)
+                for idx in sorted(jitter_to_remove, reverse=True):
+                    pending.pop(idx)
+                ui._jitter_pending.clear()
+                ui._jitter_pending.extend(pending)
+                ui._update_jitter_btn_text()
+            if ccg_to_remove:
+                pending = list(ui._custom_ccg_pending)
+                for idx in sorted(ccg_to_remove, reverse=True):
+                    removed = pending.pop(idx)
+                    ui._on_split_batch_task_done(removed)
+                ui._custom_ccg_pending.clear()
+                ui._custom_ccg_pending.extend(pending)
+            _refresh()
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(btn_frame, text="Delete selected",
+                   command=_delete_selected).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Refresh",
+                   command=_refresh).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Close",
+                   command=win.destroy).pack(side=tk.RIGHT)
+        _refresh()

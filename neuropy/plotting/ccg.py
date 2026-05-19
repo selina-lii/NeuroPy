@@ -51,6 +51,13 @@ def plot_ccg_panel(
     test_window_alpha=None,
     pval_line_color=None,
     alpha_line_color=None,
+    title_show_shanks=True,
+    title_show_inds=True,
+    title_show_type=True,
+    title_show_seg=True,
+    title_show_norm_details=True,
+    title_show_session=False,
+    title_session_label="",
 ):
     """Single CCG plot into provided axis.
 
@@ -178,9 +185,13 @@ def plot_ccg_panel(
                        color=_tw_color, label=f'Test window ({ml_ms:.0f}–{xl_ms:.0f} ms)')
 
         ax.set_xlabel("Time (ms)")
-        ylabel = "Count"
         if normalize_info is not None:
-            ylabel = "Count " + normalize_info
+            if title_show_norm_details:
+                ylabel = "Count " + normalize_info
+            else:
+                ylabel = "Count (normalized)"
+        else:
+            ylabel = "Count"
         ax.set_ylabel(ylabel)
 
         # Set explicit ms ticks: 0 always, plus standard landmarks within range
@@ -189,10 +200,21 @@ def plot_ccg_panel(
         xticks = sorted(t for t in candidate_ticks if abs(t) <= half_w_ms)
         ax.set_xticks(xticks)
 
-        sig_marker = '*' if is_significant_pair else ''
-        type_str = f', type={neuron_type}' if neuron_type is not None else ''
-        ax.set_title(
-            f"{segment_id}: shank={ids}, inds={inds}{type_str}{sig_marker}")
+        title_parts = []
+        if title_show_session and title_session_label:
+            title_parts.append(title_session_label)
+        if title_show_seg and segment_id:
+            title_parts.append(f"{segment_id}:")
+        if title_show_shanks and ids is not None:
+            shank_str = ' '.join(str(x) for x in ids)
+            title_parts.append(f"shank=({shank_str})")
+        if title_show_inds and inds is not None:
+            inds_str = ' '.join(str(x) for x in inds)
+            title_parts.append(f"inds=({inds_str})")
+        if title_show_type and neuron_type is not None:
+            type_str = '->'.join(str(x) for x in neuron_type)
+            title_parts.append(type_str)
+        ax.set_title(', '.join(title_parts))
         sns.despine(ax=ax)
 
         _has_pval = any(x is not None for x in (pval, pval_corrected, j_pval, j_sig))

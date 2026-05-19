@@ -1,0 +1,605 @@
+{
+  "version": "4.0",
+  "name": "latest",
+  "saved_at": "2026-05-19T00:13:27.877941",
+  "session": "RatR_Day1NSD",
+  "selections": {
+    "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [
+      [
+        6,
+        11
+      ],
+      [
+        13,
+        11
+      ]
+    ],
+    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-pyr": [
+      [
+        2,
+        11
+      ],
+      [
+        5,
+        0
+      ],
+      [
+        5,
+        11
+      ],
+      [
+        6,
+        9
+      ],
+      [
+        6,
+        43
+      ],
+      [
+        7,
+        9
+      ],
+      [
+        7,
+        11
+      ],
+      [
+        7,
+        43
+      ],
+      [
+        13,
+        9
+      ],
+      [
+        15,
+        0
+      ],
+      [
+        15,
+        9
+      ],
+      [
+        15,
+        11
+      ],
+      [
+        15,
+        12
+      ],
+      [
+        16,
+        11
+      ],
+      [
+        18,
+        11
+      ],
+      [
+        18,
+        12
+      ],
+      [
+        19,
+        11
+      ],
+      [
+        20,
+        11
+      ],
+      [
+        21,
+        9
+      ],
+      [
+        21,
+        11
+      ],
+      [
+        22,
+        11
+      ],
+      [
+        24,
+        11
+      ],
+      [
+        25,
+        11
+      ],
+      [
+        25,
+        29
+      ],
+      [
+        26,
+        11
+      ],
+      [
+        28,
+        11
+      ],
+      [
+        29,
+        9
+      ],
+      [
+        29,
+        11
+      ],
+      [
+        30,
+        9
+      ],
+      [
+        30,
+        11
+      ],
+      [
+        31,
+        11
+      ],
+      [
+        32,
+        0
+      ],
+      [
+        32,
+        11
+      ],
+      [
+        34,
+        9
+      ],
+      [
+        36,
+        0
+      ],
+      [
+        36,
+        11
+      ],
+      [
+        36,
+        12
+      ],
+      [
+        37,
+        11
+      ],
+      [
+        37,
+        12
+      ],
+      [
+        38,
+        11
+      ],
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ],
+      [
+        42,
+        11
+      ],
+      [
+        42,
+        43
+      ],
+      [
+        45,
+        0
+      ],
+      [
+        45,
+        11
+      ],
+      [
+        46,
+        0
+      ],
+      [
+        46,
+        9
+      ],
+      [
+        46,
+        11
+      ],
+      [
+        46,
+        12
+      ],
+      [
+        46,
+        43
+      ],
+      [
+        47,
+        9
+      ],
+      [
+        47,
+        12
+      ],
+      [
+        48,
+        9
+      ],
+      [
+        50,
+        9
+      ],
+      [
+        51,
+        9
+      ],
+      [
+        51,
+        11
+      ],
+      [
+        52,
+        11
+      ]
+    ]
+  },
+  "pair_tags": {
+    "2,11": {
+      "groups": [
+        "Disinhib",
+        "leak",
+        "ok",
+        "refractory"
+      ]
+    },
+    "5,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "5,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "6,9": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "6,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "6,43": {
+      "groups": [
+        "?",
+        "msconn",
+        "refractory"
+      ]
+    },
+    "7,9": {
+      "groups": [
+        "5-13",
+        "good",
+        "msconn"
+      ]
+    },
+    "7,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "7,43": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "13,9": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "13,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "15,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "15,9": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "15,11": {
+      "groups": [
+        "best",
+        "refractory"
+      ]
+    },
+    "15,12": {
+      "groups": [
+        "2peakms",
+        "Disinhib",
+        "Interesting",
+        "leak",
+        "refractory"
+      ]
+    },
+    "16,11": {
+      "groups": [
+        "rhythm",
+        "rift"
+      ]
+    },
+    "18,11": {
+      "groups": [
+        "Disinhib",
+        "best",
+        "refractory"
+      ]
+    },
+    "18,12": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "19,11": {
+      "groups": [
+        "Disinhib",
+        "good",
+        "ok"
+      ]
+    },
+    "20,11": {
+      "groups": [
+        "best",
+        "leak",
+        "refractory"
+      ]
+    },
+    "21,9": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "21,11": {
+      "groups": [
+        "Disinhib",
+        "good",
+        "refractory"
+      ]
+    },
+    "22,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "24,11": {
+      "groups": [
+        "burst"
+      ]
+    },
+    "25,11": {
+      "groups": [
+        "refractory"
+      ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
+    "26,11": {
+      "groups": [
+        "ok",
+        "refractory"
+      ]
+    },
+    "28,11": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "29,9": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "29,11": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "30,9": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "30,11": {
+      "groups": [
+        "leak",
+        "ok",
+        "refractory"
+      ]
+    },
+    "31,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "32,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "32,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "34,9": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "36,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "36,11": {
+      "groups": [
+        "best",
+        "leak",
+        "refractory"
+      ]
+    },
+    "36,12": {
+      "groups": [
+        "msconn",
+        "ok"
+      ]
+    },
+    "37,11": {
+      "groups": [
+        "burst",
+        "refractory"
+      ]
+    },
+    "37,12": {
+      "groups": [
+        "leak"
+      ]
+    },
+    "38,11": {
+      "groups": [
+        "2side_dips",
+        "good"
+      ]
+    },
+    "39,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "40,0": {
+      "groups": [
+        "2peakms",
+        "Interesting",
+        "ok",
+        "rhythm"
+      ]
+    },
+    "42,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "42,43": {
+      "groups": [
+        "Disinhib",
+        "rift"
+      ]
+    },
+    "45,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "45,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "46,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "46,9": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "46,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "46,12": {
+      "groups": [
+        "?",
+        "rhythm"
+      ]
+    },
+    "46,43": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "47,9": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "47,12": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "48,9": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "50,9": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "51,9": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "51,11": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "52,11": {
+      "groups": [
+        "Disinhib",
+        "good",
+        "rift"
+      ]
+    }
+  },
+  "deleted_by_type": {
+    "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-inter": [],
+    "sess_RatR_Day1NSD.ex_I.type_inter-pyr": []
+  }
+}

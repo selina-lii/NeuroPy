@@ -297,7 +297,7 @@ class NeuronsDataset(AnalysisDataset):
         return sess_name
 
     def _time_filter(self, session):
-        neurons = session.neurons
+        neurons = session.neurons_stable
         neurons.metadata['intervals'] = np.array(
             [[neurons.t_start, neurons.t_stop]])  #TODO move elsewhere
         if self.conf.neuron_types is not None:

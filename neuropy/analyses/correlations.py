@@ -1363,3 +1363,31 @@ def spike_correlations(
                                           symmetrize=symmetrize)
     print(f"[spike_correlations] done  shape={correlograms.shape}")
     return correlograms
+
+
+def sim_generate_train(duration_s: float, firing_rate: float, noise_std: float,
+                       burst_rate_pct: float, n_per_burst: int,
+                       burst_interval_ms: float) -> np.ndarray:
+    """Generate a Poisson spike train with optional bursting.
+
+    Returns spike times in seconds, sorted.
+    """
+    rng = np.random.default_rng()
+    n_expected = int(firing_rate * duration_s * 1.2) + 100
+    isis = rng.exponential(1.0 / firing_rate, size=n_expected)
+    times = np.cumsum(isis)
+    times = times[times < duration_s]
+    if noise_std > 0:
+        times = times + rng.normal(0, noise_std, size=len(times))
+    if burst_rate_pct > 0 and n_per_burst > 0:
+        burst_mask = rng.random(len(times)) < (burst_rate_pct / 100.0)
+        burst_origins = times[burst_mask]
+        extra = []
+        isi_s = burst_interval_ms / 1000.0
+        for b in burst_origins:
+            for k in range(1, n_per_burst + 1):
+                extra.append(b + k * isi_s)
+        if extra:
+            times = np.concatenate([times, np.array(extra)])
+    times = np.sort(times)
+    return times[(times >= 0) & (times < duration_s)]

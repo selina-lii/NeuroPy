@@ -1,0 +1,595 @@
+{
+  "version": "4.0",
+  "name": "latest",
+  "saved_at": "2026-05-18T21:48:12.299553",
+  "session": "RatV_Day2SD",
+  "selections": {
+    "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "1,53": {
+      "groups": [
+        "2peakms",
+        "Disinhib",
+        "rhythm",
+        "rift"
+      ]
+    },
+    "1,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "2,53": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "3,53": {
+      "groups": [
+        "2peakms",
+        "Disinhib"
+      ]
+    },
+    "3,56": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "4,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "4,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "4,14": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "4,50": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "4,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "4,56": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "5,6": {
+      "groups": [
+        "pos_skew",
+        "rift"
+      ]
+    },
+    "5,14": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "5,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "7,53": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "7,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "8,53": {
+      "groups": [
+        "Disinhib",
+        "good",
+        "rift"
+      ]
+    },
+    "8,56": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "11,0": {
+      "groups": [
+        "2peakms",
+        "leak",
+        "ok"
+      ]
+    },
+    "11,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "11,36": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "11,51": {
+      "groups": [
+        "burst"
+      ]
+    },
+    "12,6": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "12,14": {
+      "groups": [
+        "leak",
+        "pos_skew",
+        "rift"
+      ]
+    },
+    "12,36": {
+      "groups": [
+        "refractory"
+      ]
+    },
+    "12,51": {
+      "groups": [
+        "?"
+      ]
+    },
+    "13,14": {
+      "groups": [
+        "rift",
+        "triple"
+      ]
+    },
+    "13,36": {
+      "groups": [
+        "msconn",
+        "ok",
+        "rift"
+      ]
+    },
+    "13,51": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "15,6": {
+      "groups": [
+        "leak",
+        "msconn",
+        "ok"
+      ]
+    },
+    "15,14": {
+      "groups": [
+        "leak",
+        "msconn"
+      ]
+    },
+    "17,55": {
+      "groups": [
+        "ok",
+        "rift"
+      ]
+    },
+    "17,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "18,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "18,14": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "18,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "18,51": {
+      "groups": [
+        "msconn",
+        "rhythm"
+      ]
+    },
+    "20,0": {
+      "groups": [
+        "2peakms",
+        "ok"
+      ]
+    },
+    "20,6": {
+      "groups": [
+        "5-13",
+        "good",
+        "msconn"
+      ]
+    },
+    "20,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "20,14": {
+      "groups": [
+        "best",
+        "rhythm"
+      ]
+    },
+    "20,19": {
+      "groups": [
+        "2peakms",
+        "ok",
+        "rift"
+      ]
+    },
+    "20,36": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "20,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "20,51": {
+      "groups": [
+        "5-13",
+        "good",
+        "rhythm"
+      ]
+    },
+    "21,55": {
+      "groups": [
+        "2peakms",
+        "good",
+        "rift"
+      ]
+    },
+    "21,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "22,55": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "22,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "24,56": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
+    "26,56": {
+      "groups": [
+        "good"
+      ]
+    },
+    "28,34": {
+      "groups": [
+        "?"
+      ]
+    },
+    "28,51": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "29,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "29,14": {
+      "groups": [
+        "rift"
+      ]
+    },
+    "29,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "29,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "30,53": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
+    "30,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "31,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "32,10": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "32,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "33,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "33,6": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "33,10": {
+      "groups": [
+        "2peakms",
+        "5-13",
+        "good"
+      ]
+    },
+    "33,14": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "33,50": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "33,51": {
+      "groups": [
+        "msconn",
+        "rhythm"
+      ]
+    },
+    "35,0": {
+      "groups": [
+        "2peakms",
+        "good"
+      ]
+    },
+    "35,6": {
+      "groups": [
+        "msconn"
+      ]
+    },
+    "35,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "35,14": {
+      "groups": [
+        "2peakms",
+        "Interesting",
+        "good",
+        "rhythm"
+      ]
+    },
+    "35,19": {
+      "groups": [
+        "2peakms"
+      ]
+    },
+    "35,36": {
+      "groups": [
+        "?",
+        "msconn"
+      ]
+    },
+    "35,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "35,51": {
+      "groups": [
+        "Disinhib",
+        "ok"
+      ]
+    },
+    "37,14": {
+      "groups": [
+        "refractory"
+      ]
+    },
+    "38,0": {
+      "groups": [
+        "msconn",
+        "rhythm"
+      ]
+    },
+    "38,14": {
+      "groups": [
+        "Disinhib",
+        "refractory"
+      ]
+    },
+    "38,36": {
+      "groups": [
+        "Disinhib",
+        "refractory"
+      ]
+    },
+    "38,51": {
+      "groups": [
+        "?",
+        "rhythm"
+      ]
+    },
+    "39,0": {
+      "groups": [
+        "2peakms",
+        "burst"
+      ]
+    },
+    "39,14": {
+      "groups": [
+        "rhythm",
+        "rift"
+      ]
+    },
+    "39,36": {
+      "groups": [
+        "refractory"
+      ]
+    },
+    "39,51": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "40,51": {
+      "groups": [
+        "msconn",
+        "ok"
+      ]
+    },
+    "42,53": {
+      "groups": [
+        "?"
+      ]
+    },
+    "42,56": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "43,56": {
+      "groups": [
+        "good"
+      ]
+    },
+    "46,36": {
+      "groups": [
+        "?"
+      ]
+    },
+    "46,53": {
+      "groups": [
+        "Disinhib",
+        "Interesting",
+        "msconn",
+        "ok"
+      ]
+    },
+    "46,56": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "47,53": {
+      "groups": [
+        "Disinhib",
+        "ok",
+        "wideMs"
+      ]
+    },
+    "47,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "48,53": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "48,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "49,53": {
+      "groups": [
+        "Disinhib",
+        "msconn"
+      ]
+    },
+    "49,56": {
+      "groups": [
+        "ok",
+        "rhythm"
+      ]
+    },
+    "52,53": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "54,53": {
+      "groups": [
+        "?",
+        "Disinhib"
+      ]
+    },
+    "57,14": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "57,51": {
+      "groups": [
+        "msconn",
+        "rhythm"
+      ]
+    }
+  },
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day2SD.ex_E.type_pyr-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-inter": [],
+    "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
+  }
+}

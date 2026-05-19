@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:49.017551",
+  "saved_at": "2026-05-19T00:24:04.882015",
   "session": "RatS_Day3SD",
   "selections": {
     "sess_RatS_Day3SD.ex_E.type_pyr-pyr": [],
@@ -397,6 +397,7 @@
     },
     "55,50": {
       "groups": [
+        "good",
         "rhythm"
       ]
     },
@@ -574,8 +575,7 @@
         "2side_dips",
         "good",
         "leak",
-        "msconn",
-        "ok"
+        "msconn"
       ]
     },
     "69,35": {
@@ -674,7 +674,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatS_Day3SD.ex_E.type_pyr-pyr": [],
     "sess_RatS_Day3SD.ex_E.type_pyr-inter": [],

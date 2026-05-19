@@ -1,0 +1,24 @@
+{
+  "version": "4.0",
+  "name": "latest",
+  "saved_at": "2026-05-18T21:48:17.387860",
+  "session": "RatS_Day2NSD",
+  "selections": {
+    "sess_RatS_Day2NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatS_Day2NSD.ex_E.type_pyr-inter": [],
+    "sess_RatS_Day2NSD.ex_I.type_inter-inter": [],
+    "sess_RatS_Day2NSD.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    }
+  },
+  "deleted": [],
+  "deleted_by_type": {
+    "sess_RatS_Day2NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatS_Day2NSD.ex_E.type_pyr-inter": [],
+    "sess_RatS_Day2NSD.ex_I.type_inter-inter": [],
+    "sess_RatS_Day2NSD.ex_I.type_inter-pyr": []
+  }
+}

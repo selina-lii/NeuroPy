@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.708363",
+  "saved_at": "2026-05-19T00:24:04.609993",
   "session": "RatN_Day2",
   "selections": {
     "sess_RatN_Day2.ex_E.type_pyr-pyr": [],
@@ -90,7 +90,6 @@
     },
     "3,9": {
       "groups": [
-        "5-13",
         "good",
         "leak",
         "msconn"
@@ -122,7 +121,6 @@
     },
     "5,12": {
       "groups": [
-        "5-13",
         "good",
         "leak"
       ]
@@ -318,7 +316,6 @@
     },
     "13,12": {
       "groups": [
-        "5-13",
         "Disinhib",
         "best",
         "leak"
@@ -538,8 +535,7 @@
     },
     "20,133": {
       "groups": [
-        "0rhythm",
-        "rhythm"
+        "good"
       ]
     },
     "21,12": {
@@ -620,7 +616,6 @@
     "23,22": {
       "groups": [
         "2side_dips",
-        "5-13",
         "leak",
         "ok"
       ]
@@ -2041,7 +2036,6 @@
     },
     "78,92": {
       "groups": [
-        "5-13",
         "good",
         "leak"
       ]
@@ -2107,7 +2101,6 @@
     },
     "79,92": {
       "groups": [
-        "5-13",
         "good",
         "leak",
         "triple"
@@ -2142,7 +2135,6 @@
     },
     "80,92": {
       "groups": [
-        "5-13",
         "best",
         "leak"
       ]
@@ -2618,7 +2610,6 @@
     "96,133": {
       "groups": [
         "2peakms",
-        "5-13",
         "Disinhib",
         "good",
         "leak",
@@ -2999,7 +2990,6 @@
     "113,133": {
       "groups": [
         "2peakms",
-        "5-13",
         "Disinhib",
         "good",
         "rhythm"
@@ -3517,7 +3507,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatN_Day2.ex_E.type_pyr-pyr": [],
     "sess_RatN_Day2.ex_E.type_pyr-inter": [],

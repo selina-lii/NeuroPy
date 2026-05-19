@@ -140,6 +140,15 @@ class RenderContext:
     test_window_alpha:  Optional[float]
     pval_line_color:    Optional[str]
     alpha_line_color:   Optional[str]
+    cs_annotation_lines: list[str]
+    # Title / ylabel visibility flags
+    title_show_shanks:      bool
+    title_show_inds:        bool
+    title_show_type:        bool
+    title_show_seg:         bool
+    title_show_norm_details: bool
+    title_show_session:     bool
+    title_session_label:    str   # precomputed "session=NSD 2" string
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +275,8 @@ class CCGRenderEngine:
         pval_arg     = d['pval']
         pval_c_arg   = d['pval_corrected']
         seg_label    = d['seg_label']
+        if segment == ui.n_segments:
+            seg_label = ""
 
         window_size_eff = float(conf.duration)
         try:
@@ -508,6 +519,25 @@ class CCGRenderEngine:
         _exp_test_window_alpha = _eo.get('test_window_alpha')
         _exp_pval_line_color   = _eo.get('pval_line_color')
         _exp_alpha_line_color  = _eo.get('alpha_line_color')
+        _print_stg  = bool(_eo.get('print_cs_stg',  False))
+        _print_jbsi = bool(_eo.get('print_cs_jbsi', False))
+        _title_show_shanks       = bool(_eo.get('title_show_shanks',       True))
+        _title_show_inds         = bool(_eo.get('title_show_inds',         True))
+        _title_show_type         = bool(_eo.get('title_show_type',         True))
+        _title_show_seg          = bool(_eo.get('title_show_seg',          True))
+        _title_show_norm_details = bool(_eo.get('title_show_norm_details', True))
+        _title_show_session      = bool(_eo.get('title_show_session',      False))
+        try:
+            _sess_str = str(getattr(ui.key, 'session', ''))
+            _title_sess_label = ui._sess_title_label(_sess_str) if _title_show_session else ""
+        except Exception:
+            _title_sess_label = ""
+        try:
+            _cs_lines = (ui._cs_annotation_lines(ref, tgt, segment, highres,
+                                                  _print_stg, _print_jbsi)
+                         if (_print_stg or _print_jbsi) else [])
+        except Exception:
+            _cs_lines = []
 
         return RenderContext(
             ccg             = ccg_out,
@@ -559,6 +589,14 @@ class CCGRenderEngine:
             test_window_alpha  = _exp_test_window_alpha,
             pval_line_color    = _exp_pval_line_color,
             alpha_line_color   = _exp_alpha_line_color,
+            cs_annotation_lines      = _cs_lines,
+            title_show_shanks        = _title_show_shanks,
+            title_show_inds          = _title_show_inds,
+            title_show_type          = _title_show_type,
+            title_show_seg           = _title_show_seg,
+            title_show_norm_details  = _title_show_norm_details,
+            title_show_session       = _title_show_session,
+            title_session_label      = _title_sess_label,
         )
 
     # ----------------------------------------------------------------
@@ -612,6 +650,13 @@ class CCGRenderEngine:
             test_window_alpha  = ctx.test_window_alpha,
             pval_line_color    = ctx.pval_line_color,
             alpha_line_color   = ctx.alpha_line_color,
+            title_show_shanks       = ctx.title_show_shanks,
+            title_show_inds         = ctx.title_show_inds,
+            title_show_type         = ctx.title_show_type,
+            title_show_seg          = ctx.title_show_seg,
+            title_show_norm_details = ctx.title_show_norm_details,
+            title_show_session      = ctx.title_show_session,
+            title_session_label     = ctx.title_session_label,
         )
 
         # Extend view: readable x-ticks on long windows
@@ -657,6 +702,14 @@ class CCGRenderEngine:
                 if ctx.mirror_xticks:
                     ticks = sorted(set(ticks + [-t for t in ticks]))
                 ax.set_xticks(ticks)
+            except Exception:
+                pass
+
+        # CS annotation lines below x-axis label
+        if ctx.cs_annotation_lines:
+            try:
+                cur_xlabel = ax.get_xlabel() or ''
+                ax.set_xlabel(cur_xlabel + '\n' + '\n'.join(ctx.cs_annotation_lines))
             except Exception:
                 pass
 

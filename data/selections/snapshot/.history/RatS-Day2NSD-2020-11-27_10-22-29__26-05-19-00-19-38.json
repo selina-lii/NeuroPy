@@ -1,0 +1,19 @@
+{
+  "version": "4.0",
+  "name": "latest",
+  "saved_at": "2026-05-19T00:19:38.679599",
+  "session": "RatS-Day2NSD-2020-11-27_10-22-29",
+  "selections": {
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-pyr": []
+  },
+  "pair_tags": {},
+  "deleted_by_type": {
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-inter": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-pyr": []
+  }
+}

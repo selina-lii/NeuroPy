@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.963759",
+  "saved_at": "2026-05-19T00:24:04.828228",
   "session": "RatN_Day1",
   "selections": {
     "sess_RatN_Day1.ex_E.type_pyr-pyr": [],
@@ -1596,7 +1596,8 @@
     "65,68": {
       "groups": [
         "2peakms",
-        "2side_dips"
+        "2side_dips",
+        "good"
       ]
     },
     "65,71": {
@@ -1614,7 +1615,6 @@
     "66,60": {
       "groups": [
         "2peakms",
-        "best",
         "good"
       ]
     },
@@ -2894,7 +2894,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatN_Day1.ex_E.type_pyr-pyr": [],
     "sess_RatN_Day1.ex_E.type_pyr-inter": [],

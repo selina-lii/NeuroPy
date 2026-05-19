@@ -337,6 +337,9 @@ class SetOp():
         """
         if x is None or y is None:
             return np.array([])
+        if x.size == 0 or y.size == 0:
+            ncols = x.shape[1] if x.ndim > 1 else (y.shape[1] if y.ndim > 1 else 0)
+            return np.empty((0, ncols), dtype=int) if ncols else np.array([])
         return SetOp.__set_op(x, y, np.intersect1d)
 
     @staticmethod
@@ -347,6 +350,10 @@ class SetOp():
         # Set difference of coordinate lists
         if x is None or y is None:
             return x if x is not None else np.array([])
+        if x.size == 0:
+            return np.array([])
+        if y.size == 0:
+            return x
         return SetOp.__set_op(x, y, np.setdiff1d)
 
     @staticmethod
@@ -359,6 +366,10 @@ class SetOp():
             return y if y is not None else np.array([])
         elif y is None:
             return x if x is not None else np.array([])
+        if x.size == 0:
+            return y
+        if y.size == 0:
+            return x
         return SetOp.__set_op(x, y, np.union1d)
 
     @staticmethod

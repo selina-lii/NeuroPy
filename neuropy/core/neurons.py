@@ -11,7 +11,6 @@ from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from typing import Self, Union
 
-#TODO should we complicate Neurons with cuda?
 import numpy as np
 
 

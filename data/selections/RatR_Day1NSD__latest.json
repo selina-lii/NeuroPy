@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.785712",
+  "saved_at": "2026-05-19T00:24:04.670789",
   "session": "RatR_Day1NSD",
   "selections": {
     "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
@@ -48,7 +48,6 @@
     },
     "7,9": {
       "groups": [
-        "5-13",
         "good",
         "msconn"
       ]
@@ -95,6 +94,7 @@
       "groups": [
         "2peakms",
         "Disinhib",
+        "good",
         "leak",
         "refractory"
       ]
@@ -120,8 +120,7 @@
     "19,11": {
       "groups": [
         "Disinhib",
-        "good",
-        "ok"
+        "good"
       ]
     },
     "20,11": {
@@ -352,7 +351,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatR_Day1NSD.ex_E.type_pyr-pyr": [],
     "sess_RatR_Day1NSD.ex_E.type_pyr-inter": [],

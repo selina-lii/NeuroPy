@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.627560",
+  "saved_at": "2026-05-19T00:24:04.547444",
   "session": "RatJ_Day2",
   "selections": {
     "sess_RatJ_Day2.ex_E.type_pyr-pyr": [],
@@ -14,7 +14,6 @@
       "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatJ_Day2.ex_E.type_pyr-pyr": [],
     "sess_RatJ_Day2.ex_E.type_pyr-inter": [],

@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:49.066786",
+  "saved_at": "2026-05-19T00:24:04.920354",
   "session": "RatU_Day1SD",
   "selections": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
@@ -199,7 +199,6 @@
     },
     "25,14": {
       "groups": [
-        "5-13",
         "good",
         "msconn"
       ]
@@ -1115,7 +1114,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
     "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],

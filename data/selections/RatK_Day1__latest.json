@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-13T20:13:48.929140",
+  "saved_at": "2026-05-19T00:24:04.802471",
   "session": "RatK_Day1",
   "selections": {
     "sess_RatK_Day1.ex_E.type_pyr-pyr": [],
@@ -57,9 +57,6 @@
     "3,29": {
       "groups": [
         "2peakms",
-        "5-13",
-        "?",
-        "acgPattern",
         "good",
         "rhythm"
       ]
@@ -105,6 +102,7 @@
     "10,29": {
       "groups": [
         "2side_dips",
+        "good",
         "leak"
       ]
     },
@@ -112,8 +110,7 @@
       "groups": [
         "2side_dips",
         "good",
-        "leak",
-        "ok"
+        "leak"
       ]
     },
     "12,1": {
@@ -259,7 +256,8 @@
     "25,29": {
       "groups": [
         "2peakms",
-        "2side_dips"
+        "2side_dips",
+        "best"
       ],
       "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
@@ -352,7 +350,6 @@
       ]
     }
   },
-  "deleted": [],
   "deleted_by_type": {
     "sess_RatK_Day1.ex_E.type_pyr-pyr": [],
     "sess_RatK_Day1.ex_E.type_pyr-inter": [],
