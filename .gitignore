@@ -168,7 +168,7 @@ data/custom_ccg/**/*.npz
 
 data/images/random/
 
-# Claude's next steps
+# Claude Code
 plan.md
 .claude/
 .agents/
