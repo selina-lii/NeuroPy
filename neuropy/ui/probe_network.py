@@ -555,8 +555,9 @@ class NetworkPanel:
                     continue
                 # Shank visibility filter
                 if hidden_shanks and shank_ids is not None:
-                    if (int(shank_ids[ref]) in hidden_shanks
-                            or int(shank_ids[tgt]) in hidden_shanks):
+                    if (ref < len(shank_ids) and tgt < len(shank_ids)
+                            and (int(shank_ids[ref]) in hidden_shanks
+                                 or int(shank_ids[tgt]) in hidden_shanks)):
                         continue
                 key_t = (ref, tgt)
                 if key_t not in pair_entries:
@@ -581,6 +582,7 @@ class NetworkPanel:
             if fn is not None and ref != fn and tgt != fn:
                 continue
             if (hidden_shanks and shank_ids is not None
+                    and ref < len(shank_ids) and tgt < len(shank_ids)
                     and (int(shank_ids[ref]) in hidden_shanks
                          or int(shank_ids[tgt]) in hidden_shanks)):
                 continue
@@ -824,12 +826,14 @@ class NetworkPanel:
         # concentric arc-circles at the channel's probe position.  All entries
         # for that channel (across all pairs and all conn types) are stacked as
         # concentric rings growing outward, each colored by connection type.
-        if peak_channels is not None and ui._net_show_arrows:
+        _hide_same_ch    = self._net_hide_same_channel_var.get()
+        _hide_same_shank = self._net_hide_same_shank_var.get()
+        if peak_channels is not None and ui._net_show_arrows and not _hide_same_ch:
             from matplotlib.patches import Arc as _Arc
             import math as _math
 
             BASE_R = 7    # innermost ring radius (data units)
-            R_STEP = 4    # radius increment per additional ring
+            R_STEP = 5    # radius increment per additional ring
             GAP    = BASE_R + 4  # offset from channel x so circles don't cover neuron dot
 
             # Collect all same-channel entries grouped by channel value
@@ -842,6 +846,11 @@ class NetworkPanel:
                         continue
                 except (IndexError, TypeError):
                     continue
+                # Also skip when same-shank is hidden and they share a shank
+                if (_hide_same_shank and shank_ids is not None
+                        and ref < len(shank_ids) and tgt < len(shank_ids)
+                        and int(shank_ids[ref]) == int(shank_ids[tgt])):
+                    continue
                 ch = int(peak_channels[ref])
                 for entry in entries:
                     _chan_entries.setdefault(ch, []).append((ref, tgt, entry))
@@ -852,11 +861,14 @@ class NetworkPanel:
                 cy = y_pos[ref0]
                 for k, (ref, tgt, entry) in enumerate(ch_ents):
                     ct  = entry.get('conn_type')
-                    col = self._NET_TYPE_COLOR.get(ct, '#888888')
+                    is_cpair_arc = (entry.get('is_current') and (ref, tgt) == current_pair)
+                    col = ('black' if is_cpair_arc
+                           else self._NET_TYPE_COLOR.get(ct, '#888888'))
+                    lw  = 2.5 if is_cpair_arc else 1.4
                     r   = BASE_R + k * R_STEP
                     arc = _Arc((cx, cy), 2 * r, 2 * r,
                                angle=0, theta1=20, theta2=340,
-                               color=col, linewidth=1.4,
+                               color=col, linewidth=lw,
                                alpha=0.85 * line_alpha, zorder=4)
                     arc.set_gid(f"{ref}_{tgt}_{entry.get('key', '')}")
                     arc.set_picker(6)
@@ -872,6 +884,14 @@ class NetworkPanel:
                                 arrowprops=dict(arrowstyle='->', color=col,
                                                 lw=1.0, mutation_scale=6),
                                 zorder=5)
+                    # Index label at top of arc so user knows which ring = which pair
+                    lbl_x = cx + r * _math.cos(_math.radians(90))
+                    lbl_y = cy + r * _math.sin(_math.radians(90))
+                    ax.text(lbl_x, lbl_y, str(k + 1),
+                            ha='center', va='center', fontsize=5,
+                            color=col, zorder=6,
+                            bbox=dict(boxstyle='round,pad=0.1', fc='white',
+                                      ec='none', alpha=0.6))
 
         # ── Legend ───────────────────────────────────────────────────────
         shown_types = set()
@@ -942,6 +962,16 @@ class NetworkPanel:
                 f"{ui._session_label(_sess_nk)}  {self._net_any_idx + 1}/{n_sess}{nav}",
                 fontsize=8, pad=3, color='#222')
 
+        if getattr(ui, '_dark', False):
+            _bg, _fg = '#2b2b2b', 'white'
+            self.net_fig.set_facecolor(_bg)
+            ax.set_facecolor(_bg)
+            ax.tick_params(colors=_fg)
+            ax.xaxis.label.set_color(_fg)
+            ax.yaxis.label.set_color(_fg)
+            ax.title.set_color(_fg)
+            for sp in ax.spines.values():
+                sp.set_edgecolor('#666666')
         self.net_fig.tight_layout(pad=0.5)
         self.net_canvas.draw()
 

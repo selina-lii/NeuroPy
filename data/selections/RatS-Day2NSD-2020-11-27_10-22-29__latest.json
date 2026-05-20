@@ -1,10 +1,23 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T10:02:29.731407",
+  "saved_at": "2026-05-20T00:56:18.428088",
   "session": "RatS-Day2NSD-2020-11-27_10-22-29",
   "selections": {
-    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [],
+    "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-pyr": [
+      [
+        28,
+        21
+      ],
+      [
+        46,
+        100
+      ],
+      [
+        92,
+        41
+      ]
+    ],
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_E.type_pyr-inter": [],
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-inter": [],
     "sess_RatS-Day2NSD-2020-11-27_10-22-29.ex_I.type_inter-pyr": []
@@ -457,9 +470,6 @@
         "0rhythm",
         "rhythm"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,34": {
       "groups": [

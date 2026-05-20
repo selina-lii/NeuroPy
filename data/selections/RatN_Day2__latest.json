@@ -1,13 +1,84 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T10:02:29.706704",
+  "saved_at": "2026-05-20T00:56:18.420794",
   "session": "RatN_Day2",
   "selections": {
-    "sess_RatN_Day2.ex_E.type_pyr-pyr": [],
+    "sess_RatN_Day2.ex_E.type_pyr-pyr": [
+      [
+        5,
+        63
+      ],
+      [
+        5,
+        94
+      ],
+      [
+        64,
+        1
+      ]
+    ],
     "sess_RatN_Day2.ex_E.type_pyr-inter": [],
-    "sess_RatN_Day2.ex_I.type_inter-inter": [],
-    "sess_RatN_Day2.ex_I.type_inter-pyr": []
+    "sess_RatN_Day2.ex_I.type_inter-inter": [
+      [
+        9,
+        12
+      ],
+      [
+        9,
+        14
+      ],
+      [
+        9,
+        22
+      ],
+      [
+        22,
+        14
+      ],
+      [
+        32,
+        9
+      ],
+      [
+        32,
+        14
+      ],
+      [
+        34,
+        43
+      ],
+      [
+        91,
+        69
+      ],
+      [
+        92,
+        67
+      ]
+    ],
+    "sess_RatN_Day2.ex_I.type_inter-pyr": [
+      [
+        22,
+        24
+      ],
+      [
+        22,
+        33
+      ],
+      [
+        88,
+        105
+      ],
+      [
+        88,
+        129
+      ],
+      [
+        91,
+        70
+      ]
+    ]
   },
   "pair_tags": {
     "0,9": {
@@ -722,9 +793,6 @@
       "groups": [
         "ok"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,34": {
       "groups": [

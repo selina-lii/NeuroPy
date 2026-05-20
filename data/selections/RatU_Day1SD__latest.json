@@ -1,10 +1,79 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T10:02:29.916519",
+  "saved_at": "2026-05-20T00:56:18.460817",
   "session": "RatU_Day1SD",
   "selections": {
-    "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [],
+    "sess_RatU_Day1SD.ex_E.type_pyr-pyr": [
+      [
+        6,
+        35
+      ],
+      [
+        14,
+        75
+      ],
+      [
+        18,
+        16
+      ],
+      [
+        25,
+        14
+      ],
+      [
+        35,
+        16
+      ],
+      [
+        40,
+        32
+      ],
+      [
+        40,
+        49
+      ],
+      [
+        45,
+        56
+      ],
+      [
+        52,
+        14
+      ],
+      [
+        58,
+        27
+      ],
+      [
+        58,
+        65
+      ],
+      [
+        59,
+        31
+      ],
+      [
+        62,
+        52
+      ],
+      [
+        63,
+        81
+      ],
+      [
+        64,
+        56
+      ],
+      [
+        75,
+        34
+      ],
+      [
+        80,
+        30
+      ]
+    ],
     "sess_RatU_Day1SD.ex_E.type_pyr-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-inter": [],
     "sess_RatU_Day1SD.ex_I.type_inter-pyr": []
@@ -207,9 +276,6 @@
       "groups": [
         "rift"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,35": {
       "groups": [

@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T10:02:29.881524",
+  "saved_at": "2026-05-20T00:56:18.456508",
   "session": "RatS_Day3SD",
   "selections": {
     "sess_RatS_Day3SD.ex_E.type_pyr-pyr": [],
@@ -220,9 +220,6 @@
         "leak",
         "rhythm"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "26,35": {
       "groups": [

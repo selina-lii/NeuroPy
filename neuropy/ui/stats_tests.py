@@ -199,10 +199,13 @@ class StatsTestPanel:
         # Top: text + scrollbar
         text_frame = ttk.Frame(res_pane)
         _txt_fs = max(9, self.ui._min_font_size())
+        _dark = getattr(self.ui, '_dark', False)
+        _txt_bg = '#1e1e1e' if _dark else '#FAFAFA'
+        _txt_fg = '#cccccc' if _dark else 'black'
         self._result_text = tk.Text(
             text_frame, height=10, wrap=tk.WORD,
             font=('Courier', _txt_fs), state=tk.DISABLED,
-            relief=tk.FLAT, bg='#FAFAFA')
+            relief=tk.FLAT, bg=_txt_bg, fg=_txt_fg)
         sb = ttk.Scrollbar(text_frame, command=self._result_text.yview)
         self._result_text.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)

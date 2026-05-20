@@ -32,8 +32,9 @@ _ALL_SEGS = "All"
 
 JitterTask = collections.namedtuple(
     'JitterTask',
-    ['tag', 'ref', 'tgt', 'njitter', 'res_key', 'bin_size_eff', 'seg_arg', 't0', 't1'],
-    defaults=[None, None, None],
+    ['tag', 'ref', 'tgt', 'njitter', 'res_key', 'bin_size_eff', 'seg_arg', 't0', 't1',
+     'nd_key'],
+    defaults=[None, None, None, None],
 )
 """Task tuple queued for jitter computation.
 
@@ -72,9 +73,10 @@ class JitterWorker:
 
     def enqueue(self, tag: str, ref: int, tgt: int, njitter: int,
                 res_key: str, bin_size_eff: float,
-                seg_arg=None, t0=None, t1=None):
+                seg_arg=None, t0=None, t1=None, nd_key=None):
         self._pending.append(
-            JitterTask(tag, ref, tgt, njitter, res_key, bin_size_eff, seg_arg, t0, t1))
+            JitterTask(tag, ref, tgt, njitter, res_key, bin_size_eff, seg_arg, t0, t1,
+                       nd_key))
 
     def pending_count(self) -> int:
         return len(self._pending)
@@ -183,7 +185,13 @@ class JitterController:
             jitter_t1 = float(et.iloc[seg_arg]['stop'])
         else:
             jitter_t0, jitter_t1 = None, None
+        # In Any mode the current pair may belong to a different session than
+        # ui.key; look up the pair's session key from the handle list.
         nd_key = ui.key.nd()
+        if getattr(ui, '_session_any_mode', False):
+            hl = getattr(ui, '_any_pair_handle_list', None) or []
+            if ui.current_pair_idx < len(hl):
+                nd_key = hl[ui.current_pair_idx][0].nd()
         enqueued_res_keys = []
         if run_lo:
             lo_ccg_data = (ui.cd._ccg.get(nd_key)
@@ -194,7 +202,7 @@ class JitterController:
                             if lo_n_bins > 1 else lo_conf.bin_size)
             self.jitter_worker.enqueue(
                 'jitter', ref, tgt, njitter, 'lo', bin_size_eff,
-                seg_arg, jitter_t0, jitter_t1)
+                seg_arg, jitter_t0, jitter_t1, nd_key)
             enqueued_res_keys.append('lo')
         if run_hi:
             hi_ccg_data = None
@@ -210,7 +218,7 @@ class JitterController:
                                 if hi_n_bins > 1 else hi_conf.bin_size)
                 self.jitter_worker.enqueue(
                     'jitter', ref, tgt, njitter, 'hi', bin_size_eff,
-                    seg_arg, jitter_t0, jitter_t1)
+                    seg_arg, jitter_t0, jitter_t1, nd_key)
                 enqueued_res_keys.append('hi')
         ui._dbg_log("H3", "jitter.py:on_run_jitter:enqueue", "Enqueued jitter task(s)", {
             "pair": [int(ref), int(tgt)],
@@ -230,7 +238,8 @@ class JitterController:
         if not self.jitter_worker.pending_count():
             self.update_btn_text()
             return
-        nd_key = ui.key.nd()
+        task = self.jitter_worker._pending[0]
+        nd_key = task.nd_key if task.nd_key is not None else ui.key.nd()
         ccg_data_lo = (ui.cd._ccg.get(nd_key)
                        if hasattr(ui.cd, '_ccg') else ui.ccg_data)
         ccg_data_hi = (ui.cd._ccg_highres.get(nd_key)

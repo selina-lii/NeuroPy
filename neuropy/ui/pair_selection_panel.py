@@ -1021,11 +1021,11 @@ class LeftPanel:
         else:
             self.data.selected_inds.discard(inds)
             self.data.unselected_inds.add(inds)
-        ui._highlight_changed_pairs({inds})
         next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
         ui.current_pair_idx = next_idx
         self.refresh_lists()
         self._select_pair_in_list(self._pair_at_all_inds_idx(next_idx))
+        ui._highlight_changed_pairs({inds})
         ui.update_plot()
         ui.network_panel.draw()
 

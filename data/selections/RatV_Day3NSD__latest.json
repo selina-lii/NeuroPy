@@ -1,10 +1,19 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T12:43:22.910585",
+  "saved_at": "2026-05-20T02:10:58.188172",
   "session": "RatV_Day3NSD",
   "selections": {
-    "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [],
+    "sess_RatV_Day3NSD.ex_E.type_pyr-pyr": [
+      [
+        50,
+        32
+      ],
+      [
+        65,
+        36
+      ]
+    ],
     "sess_RatV_Day3NSD.ex_E.type_pyr-inter": [
       [
         1,
@@ -285,7 +294,8 @@
   "pair_tags": {
     "1,18": {
       "groups": [
-        "burst"
+        "burst",
+        "refractory"
       ]
     },
     "2,10": {
@@ -380,9 +390,6 @@
       "groups": [
         "msconn"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "27,10": {
       "groups": [
@@ -491,6 +498,11 @@
         "ok"
       ]
     },
+    "50,32": {
+      "groups": [
+        "good"
+      ]
+    },
     "53,15": {
       "groups": [
         "rhythm"
@@ -575,6 +587,11 @@
     "64,15": {
       "groups": [
         "rhythm"
+      ]
+    },
+    "65,36": {
+      "groups": [
+        "good"
       ]
     },
     "65,37": {

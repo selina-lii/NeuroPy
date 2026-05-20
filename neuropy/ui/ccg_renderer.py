@@ -149,6 +149,7 @@ class RenderContext:
     title_show_norm_details: bool
     title_show_session:     bool
     title_session_label:    str   # precomputed "session=NSD 2" string
+    dark_mode:              bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +486,10 @@ class CCGRenderEngine:
             cs_baseline_arg = None
 
         # ── ACG overlay arrays ───────────────────────────────────────
-        acg_ref_out = acg_ref_raw if show_acg_ref and acg_ref_raw is not None else None
-        acg_tgt_out = acg_tgt_raw if show_acg_tgt and acg_tgt_raw is not None else None
+        # When extend is active, ACG bin count may differ from extended CCG — suppress to avoid mismatch.
+        _acg_bins_ok = (acg_ref_raw is None or len(acg_ref_raw) == n_bins)
+        acg_ref_out = acg_ref_raw if show_acg_ref and acg_ref_raw is not None and _acg_bins_ok else None
+        acg_tgt_out = acg_tgt_raw if show_acg_tgt and acg_tgt_raw is not None and _acg_bins_ok else None
 
         # ── Waveform ─────────────────────────────────────────────────
         wf_peak_ms, wf_peak_amp = self._load_waveform(ref, render_cfg, bool(highres))
@@ -498,9 +501,17 @@ class CCGRenderEngine:
         _min_lag_plot = eff_min_lag if (_tw_active or cs_show) else None
         _max_lag_plot = eff_max_lag if (_tw_active or cs_show) else None
 
-        ids = (ui.network_panel._shank_label(ref), ui.network_panel._shank_label(tgt))
-        nt  = ((ui.neurons.neuron_type[ref], ui.neurons.neuron_type[tgt])
-               if ui.neurons is not None else ('', ''))
+        _nt = ui.neurons.neuron_type if ui.neurons is not None else None
+        if _nt is not None and ref < len(_nt) and tgt < len(_nt):
+            nt = (_nt[ref], _nt[tgt])
+        else:
+            ct = getattr(ui.key, 'conn_type', None)
+            nt = tuple(ct) if ct is not None else None
+        _sh = getattr(ui.neurons, 'shank_ids', None) if ui.neurons is not None else None
+        if _sh is not None and ref < len(_sh) and tgt < len(_sh):
+            ids = (str(int(_sh[ref])), str(int(_sh[tgt])))
+        else:
+            ids = None
 
         # Export/preview style overrides — read from ui._export_overrides if set
         _eo = getattr(ui, '_export_overrides', None) or {}
@@ -597,6 +608,7 @@ class CCGRenderEngine:
             title_show_norm_details  = _title_show_norm_details,
             title_show_session       = _title_show_session,
             title_session_label      = _title_sess_label,
+            dark_mode                = getattr(ui, '_dark', False),
         )
 
     # ----------------------------------------------------------------
@@ -727,5 +739,19 @@ class CCGRenderEngine:
             except Exception:
                 pass
 
-        fig.savefig(png_path, dpi=dpi, bbox_inches='tight')
+        if ctx.dark_mode:
+            _bg = '#2b2b2b'
+            _fg = 'white'
+            _sp = '#666666'
+            fig.set_facecolor(_bg)
+            ax.set_facecolor(_bg)
+            ax.tick_params(colors=_fg)
+            ax.xaxis.label.set_color(_fg)
+            ax.yaxis.label.set_color(_fg)
+            ax.title.set_color(_fg)
+            for sp in ax.spines.values():
+                sp.set_edgecolor(_sp)
+
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
+                    facecolor=fig.get_facecolor())
         matplotlib.pyplot.close(fig)

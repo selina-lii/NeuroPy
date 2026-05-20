@@ -625,7 +625,7 @@ class CSPanel:
         ttk.Checkbutton(row1, text="Show CS overlay",
                         variable=self._conn_str_show_var,
                         command=lambda: (self._ui._on_conn_str_toggle(),
-                                        self._ui._build_sig_ccs())).pack(
+                                        self._ui._build_sig_chips())).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Label(row1, text="Measure:").pack(side=tk.LEFT, padx=(8, 2))
         for val in ("STG", "JBSI"):

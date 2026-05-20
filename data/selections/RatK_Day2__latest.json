@@ -1,13 +1,140 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-19T10:02:29.665726",
+  "saved_at": "2026-05-20T00:56:18.417037",
   "session": "RatK_Day2",
   "selections": {
-    "sess_RatK_Day2.ex_E.type_pyr-pyr": [],
+    "sess_RatK_Day2.ex_E.type_pyr-pyr": [
+      [
+        8,
+        25
+      ],
+      [
+        10,
+        11
+      ],
+      [
+        16,
+        25
+      ],
+      [
+        17,
+        25
+      ],
+      [
+        22,
+        25
+      ],
+      [
+        30,
+        27
+      ],
+      [
+        34,
+        25
+      ]
+    ],
     "sess_RatK_Day2.ex_E.type_pyr-inter": [],
-    "sess_RatK_Day2.ex_I.type_inter-inter": [],
-    "sess_RatK_Day2.ex_I.type_inter-pyr": []
+    "sess_RatK_Day2.ex_I.type_inter-inter": [
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        70
+      ],
+      [
+        1,
+        119
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        21
+      ],
+      [
+        4,
+        186
+      ],
+      [
+        5,
+        156
+      ],
+      [
+        28,
+        2
+      ]
+    ],
+    "sess_RatK_Day2.ex_I.type_inter-pyr": [
+      [
+        0,
+        11
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        2,
+        8
+      ],
+      [
+        2,
+        24
+      ],
+      [
+        2,
+        26
+      ],
+      [
+        28,
+        3
+      ],
+      [
+        28,
+        4
+      ],
+      [
+        28,
+        19
+      ],
+      [
+        28,
+        20
+      ],
+      [
+        28,
+        24
+      ],
+      [
+        28,
+        26
+      ],
+      [
+        28,
+        27
+      ],
+      [
+        28,
+        29
+      ],
+      [
+        28,
+        30
+      ],
+      [
+        28,
+        35
+      ]
+    ]
   },
   "pair_tags": {
     "0,2": {
@@ -727,9 +854,6 @@
         "rhythm",
         "wideMs"
       ]
-    },
-    "25,29": {
-      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,39": {
       "groups": [
