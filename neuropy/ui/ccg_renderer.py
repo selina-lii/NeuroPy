@@ -501,17 +501,19 @@ class CCGRenderEngine:
         _min_lag_plot = eff_min_lag if (_tw_active or cs_show) else None
         _max_lag_plot = eff_max_lag if (_tw_active or cs_show) else None
 
-        _nt = ui.neurons.neuron_type if ui.neurons is not None else None
-        if _nt is not None and ref < len(_nt) and tgt < len(_nt):
-            nt = (_nt[ref], _nt[tgt])
-        else:
-            ct = getattr(ui.key, 'conn_type', None)
-            nt = tuple(ct) if ct is not None else None
         _sh = getattr(ui.neurons, 'shank_ids', None) if ui.neurons is not None else None
-        if _sh is not None and ref < len(_sh) and tgt < len(_sh):
-            ids = (str(int(_sh[ref])), str(int(_sh[tgt])))
-        else:
-            ids = None
+        def _shank_label(idx):
+            if _sh is not None:
+                try:
+                    return str(int(_sh[idx]))
+                except Exception:
+                    pass
+            return str(idx)
+        ids = (_shank_label(ref), _shank_label(tgt))
+        try:
+            nt = (ui.neurons.neuron_type[ref], ui.neurons.neuron_type[tgt])
+        except Exception:
+            nt = None
 
         # Export/preview style overrides — read from ui._export_overrides if set
         _eo = getattr(ui, '_export_overrides', None) or {}

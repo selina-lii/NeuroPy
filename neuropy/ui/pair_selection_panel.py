@@ -566,10 +566,8 @@ class LeftPanel:
         hide_same_shank   = (hasattr(ui, 'network_panel')
                              and ui.network_panel._net_hide_same_shank_var.get())
 
-        # Reuse shank_ids computed by probe_network (already derived from ProbeGroup,
-        # position-indexed to match ref/tgt pair indices).
-        _net_panel = getattr(ui, 'network_panel', None)
-        _sids = getattr(_net_panel, '_last_shank_ids', None) if _net_panel is not None else None
+        _neurons_for_sids = getattr(ui, 'neurons', None)
+        _sids = getattr(_neurons_for_sids, 'shank_ids', None) if _neurons_for_sids is not None else None
 
         _neurons_obj = getattr(ui, 'neurons', None)
         peak_channels = (getattr(_neurons_obj, 'peak_channels', None)

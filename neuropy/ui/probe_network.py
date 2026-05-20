@@ -45,7 +45,7 @@ class NetworkPanel:
         self._net_any_idx: int = 0
         self._net_focused: bool = False
         self._net_any_sessions_cache: list = []
-        self._last_shank_ids = None  # cached after each draw; used by pair_selection gray-out
+        self._last_shank_ids = None  # kept for backward compat; prefer ui.neurons.shank_ids
         self._setup(parent)
 
     def _highlighted_ct_labels(self) -> set[str]:
@@ -471,20 +471,7 @@ class NetworkPanel:
         from neuropy.plotting.probe import plot_probe
         pg = getattr(getattr(ui.cd, 'nd', None), 'probegroups', {}).get(_nd_key)
 
-        # Always derive shank_ids from ProbeGroup via peak_channels (position-indexed)
-        # so indices align with ref/tgt pair indices. Fall back to neurons.shank_ids
-        # only if ProbeGroup derivation fails.
-        if peak_channels is not None and pg is not None:
-            try:
-                _pg_df = pg.to_dataframe()
-                _ch2s = {int(r['channel_id']): int(r['shank_id'])
-                         for _, r in _pg_df.iterrows()}
-                shank_ids = np.array([_ch2s.get(int(c), -1) for c in peak_channels],
-                                     dtype=int)
-            except Exception as _e:
-                print(f"[ProbeNetwork] ProbeGroup shank derivation failed: {_e}")
-
-        self._last_shank_ids = shank_ids  # cached for pair_selection_panel gray-out
+        self._last_shank_ids = shank_ids  # kept for backward compat
 
         hidden_shanks = {s for s, v in self._net_shank_vars.items() if not v.get()}
         if pg is not None:
@@ -1086,11 +1073,11 @@ class NetworkPanel:
         self.draw()
 
     def _on_toggle_hide_same_channel(self):
-        self.draw()           # _last_shank_ids must be current for refresh_lists
+        self.draw()
         self.ui.refresh_lists()
 
     def _on_toggle_hide_same_shank(self):
-        self.draw()           # _last_shank_ids must be current for refresh_lists
+        self.draw()
         self.ui.refresh_lists()
 
     def _on_group_toggle(self, group_name):
