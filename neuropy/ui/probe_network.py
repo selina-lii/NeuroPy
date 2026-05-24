@@ -42,6 +42,12 @@ class NetworkPanel:
 
     def __init__(self, parent: tk.Widget, ui: 'CCGReviewUI'):
         self.ui = ui
+        ui._focused_neuron: int = None
+        ui._focused_pair: tuple = None
+        ui._net_show_arrows: bool = True
+        ui._net_hide_unconnected: bool = False
+        ui._net_group_filter_vars: dict = {}
+        ui._net_grp_items: list = []
         self._net_any_idx: int = 0
         self._net_focused: bool = False
         self._net_any_sessions_cache: list = []
@@ -325,14 +331,39 @@ class NetworkPanel:
             variable=self._net_line_alpha_var, command=self._on_zoom)
         self._net_line_alpha.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
+        # Canvas area: three-column layout so vertical nav bars flank the plot
+        _canvas_row = ttk.Frame(parent)
+        _canvas_row.pack(fill=tk.BOTH, expand=True)
+
+        # Left nav bar (◀) — hidden until any-mode
+        self._net_nav_left_bar = tk.Label(
+            _canvas_row, text='◀', font=('Arial', 14, 'bold'),
+            fg='#555', bg='#DDEEFF', cursor='hand2', width=2,
+            relief=tk.FLAT)
+        self._net_nav_left_bar.bind('<Button-1>', self._on_net_arrow_left)
+
+        # Right nav bar (▶) — hidden until any-mode
+        self._net_nav_right_bar = tk.Label(
+            _canvas_row, text='▶', font=('Arial', 14, 'bold'),
+            fg='#555', bg='#DDEEFF', cursor='hand2', width=2,
+            relief=tk.FLAT)
+        self._net_nav_right_bar.bind('<Button-1>', self._on_net_arrow_right)
+
         self.net_fig = Figure(figsize=(2.8, 6.5))
         self.net_ax = self.net_fig.add_subplot(111)
-        self.net_canvas = FigureCanvasTkAgg(self.net_fig, master=parent)
+        self.net_canvas = FigureCanvasTkAgg(self.net_fig, master=_canvas_row)
         self.net_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Bottom label showing session index (hidden until any-mode)
+        self._net_nav_frame = ttk.Frame(parent)
+        self._net_nav_label = ttk.Label(self._net_nav_frame, text='', font=('Arial', 8))
+        self._net_nav_label.pack(fill=tk.X, expand=True)
         self._net_pick_cid = self.net_canvas.mpl_connect(
             'pick_event', self._on_network_pick)
         self._net_scroll_cid = self.net_canvas.mpl_connect(
             'scroll_event', self._on_net_scroll)
+        self._scale_initialized = False
+
         ui.root.after(200, self.draw)
         _cw = self.net_canvas.get_tk_widget()
         _cw.bind('<Button-1>', self._on_canvas_click, add='+')
@@ -405,6 +436,31 @@ class NetworkPanel:
         except Exception as ex:
             print(f"[NetworkPanel] ERROR in draw: {ex}")
             traceback.print_exc()
+        self._update_nav_bar()
+
+    def _update_nav_bar(self):
+        any_mode = getattr(self.ui, '_session_any_mode', False)
+        was_visible = getattr(self, '_nav_bar_visible', False)
+        if any_mode:
+            sessions = self._net_any_sessions_cache or self._net_any_sessions()
+            n = len(sessions)
+            idx = max(0, min(self._net_any_idx, n - 1)) if n else 0
+            lbl = self.ui._session_label(sessions[idx]) if sessions else ''
+            self._net_nav_label.config(text=f'{idx + 1}/{n}  {lbl}')
+            _dim = '#cccccc'
+            self._net_nav_left_bar.config(fg='#333' if idx > 0 else _dim)
+            self._net_nav_right_bar.config(fg='#333' if idx < n - 1 else _dim)
+            if not was_visible:
+                self._net_nav_left_bar.pack(side=tk.LEFT, fill=tk.Y)
+                self._net_nav_right_bar.pack(side=tk.RIGHT, fill=tk.Y)
+                self._net_nav_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 2))
+                self._nav_bar_visible = True
+        else:
+            if was_visible:
+                self._net_nav_left_bar.pack_forget()
+                self._net_nav_right_bar.pack_forget()
+                self._net_nav_frame.pack_forget()
+                self._nav_bar_visible = False
 
     # ------------------------------------------------------------------
     # Internal draw implementation
@@ -414,6 +470,8 @@ class NetworkPanel:
         ui = self.ui
         ax = self.net_ax
         ax.clear()
+        for txt in self.net_fig.texts[:]:
+            txt.remove()
 
         # ── Any-mode: resolve per-session overrides ──────────────────────
         any_mode = getattr(ui, '_session_any_mode', False)
@@ -439,7 +497,7 @@ class NetworkPanel:
             _nd_key = ui.key.nd()
             _neurons = ui.neurons
             _type_key = ui.key
-            _ptr = ui.ccg_pointer
+            _ptr = ui.ccg_ptr
             _deleted_inds = ui.deleted_inds
             _sess_nk = None
             _sessions = None
@@ -479,8 +537,7 @@ class NetworkPanel:
             plot_probe(pg, channel_id=show_chid, disconnected=True,
                        x_scale=h_scale, y_scale=v_scale,
                        hidden_shanks=hidden_shanks or None, ax=ax)
-            if not any_mode:
-                ax.set_title('')
+            ax.set_title('')
 
         fn = ui._focused_neuron
         fp = ui._focused_pair
@@ -525,9 +582,9 @@ class NetworkPanel:
             else:
                 _other_ptr = ui.cd.data.get(tk_)
                 if (_other_ptr is not None
-                        and hasattr(_other_ptr, 'manually_selected_inds')
-                        and _other_ptr.manually_selected_inds is not None):
-                    _ptr_sel = set(map(tuple, _other_ptr.manually_selected_inds))
+                        and hasattr(_other_ptr, 'selected_inds')
+                        and _other_ptr.selected_inds is not None):
+                    _ptr_sel = set(map(tuple, _other_ptr.selected_inds))
 
             for ref, tgt in map(tuple, arr):
                 # Focus neuron filter (always applied when set)
@@ -582,10 +639,28 @@ class NetworkPanel:
         cur_arr = (_ptr.inds[:, -2:] if _ptr is not None and _ptr.inds is not None
                    else np.empty((0, 2), dtype=int))
         cluster_neurons = set(int(v) for v in np.unique(cur_arr))
+        # Build all_involved from pairs that actually pass the focus/filter checks,
+        # so hide-unconnected correctly hides neurons with no *visible* arrow.
         all_involved = set()
-        for ref, tgt in pair_entries:
-            all_involved.add(ref)
-            all_involved.add(tgt)
+        for (ref, tgt), entries in pair_entries.items():
+            for entry in entries:
+                ct_e = entry['conn_type']
+                if ct_e is not None and not self._net_ct_vars.get(
+                        ct_e, tk.BooleanVar(value=True)).get():
+                    continue
+                if (self._net_hide_same_shank_var.get()
+                        and shank_ids is not None
+                        and ref < len(shank_ids) and tgt < len(shank_ids)
+                        and int(shank_ids[ref]) == int(shank_ids[tgt])):
+                    continue
+                if (self._net_hide_same_channel_var.get()
+                        and peak_channels is not None
+                        and ref < len(peak_channels) and tgt < len(peak_channels)
+                        and int(peak_channels[ref]) == int(peak_channels[tgt])):
+                    continue
+                all_involved.add(ref)
+                all_involved.add(tgt)
+                break  # one passing entry is enough
 
         nt = (_neurons.neuron_type
               if _neurons is not None and
@@ -703,6 +778,7 @@ class NetworkPanel:
                 # Skip same-channel pairs when toggle is on
                 if (self._net_hide_same_channel_var.get()
                         and peak_channels is not None
+                        and ref < len(peak_channels) and tgt < len(peak_channels)
                         and int(peak_channels[ref]) == int(peak_channels[tgt])):
                     continue
 
@@ -728,7 +804,7 @@ class NetworkPanel:
                     alpha, lw, zo = 0.35, 0.6, 2
                 elif is_cpair:
                     alpha, lw, zo = 1.00, 3.0, 7
-                    ec = 'black'
+                    # ec stays as type color; black overlay drawn separately below
                 elif is_sel:
                     alpha, lw, zo = 0.90, 1.8, 4
                 else:
@@ -754,6 +830,20 @@ class NetworkPanel:
                 # Encode ref_tgt_keystr so pick handler can switch type
                 arrow.set_gid(f"{ref}_{tgt}_{entry['key']}")
                 ax.add_patch(arrow)
+                # Current pair: black overlay at narrower lw to give type-color edge
+                if is_cpair:
+                    _black = FancyArrowPatch(
+                        (x_pos[ref], y_pos[ref]),
+                        (x_pos[tgt], y_pos[tgt]),
+                        arrowstyle='->', color='black',
+                        linewidth=1.5, alpha=alpha,
+                        mutation_scale=mutation,
+                        connectionstyle=f'arc3,rad={rad}',
+                        shrinkA=5, shrinkB=5,
+                        zorder=zo + 1,
+                        picker=False,
+                    )
+                    ax.add_patch(_black)
 
         # ── Deleted pairs — flat light-gray lines (20% opacity) ─────────────
         if ui._net_show_arrows:
@@ -796,17 +886,34 @@ class NetworkPanel:
                 and ui._net_show_arrows
                 and 0 <= current_pair[0] < n_neurons
                 and 0 <= current_pair[1] < n_neurons):
-            cp_arrow = FancyArrowPatch(
+            _cp_ct = None
+            if current_pair in pair_entries:
+                _cp_ents = pair_entries[current_pair]
+                _cp_e = next((e for e in _cp_ents if e.get('is_current')), _cp_ents[0])
+                _cp_ct = _cp_e.get('conn_type')
+            _cp_type_col = self._NET_TYPE_COLOR.get(_cp_ct, '#888888')
+            cp_color_arrow = FancyArrowPatch(
                 (x_pos[current_pair[0]], y_pos[current_pair[0]]),
                 (x_pos[current_pair[1]], y_pos[current_pair[1]]),
-                arrowstyle='->', color='black',
-                linewidth=3.0, alpha=1.0 * line_alpha,
+                arrowstyle='->', color=_cp_type_col,
+                linewidth=5.0, alpha=1.0 * line_alpha,
                 mutation_scale=10,
                 connectionstyle='arc3,rad=0',
                 shrinkA=5, shrinkB=5,
                 zorder=8,
             )
-            ax.add_patch(cp_arrow)
+            ax.add_patch(cp_color_arrow)
+            cp_black_arrow = FancyArrowPatch(
+                (x_pos[current_pair[0]], y_pos[current_pair[0]]),
+                (x_pos[current_pair[1]], y_pos[current_pair[1]]),
+                arrowstyle='->', color='black',
+                linewidth=2.5, alpha=1.0 * line_alpha,
+                mutation_scale=10,
+                connectionstyle='arc3,rad=0',
+                shrinkA=5, shrinkB=5,
+                zorder=9,
+            )
+            ax.add_patch(cp_black_arrow)
 
         # ── Same-channel circle loops ─────────────────────────────────────
         # Pairs where ref and tgt share the same peak_channel are drawn as
@@ -823,9 +930,16 @@ class NetworkPanel:
             R_STEP = 5    # radius increment per additional ring
             GAP    = BASE_R + 4  # offset from channel x so circles don't cover neuron dot
 
-            # Collect all same-channel entries grouped by channel value
-            _chan_entries: dict = {}  # ch → [(ref, tgt, entry)]
+            # Deduplicate pair_entries: one arc entry per (ref,tgt) direction.
+            # Prefer the is_current entry; otherwise take the first.
+            _arc_entry_for: dict = {}
             for (ref, tgt), entries in pair_entries.items():
+                cur = next((e for e in entries if e.get('is_current')), entries[0])
+                _arc_entry_for[(ref, tgt)] = cur
+
+            # Collect same-channel entries grouped by channel value
+            _chan_entries: dict = {}  # ch → [(ref, tgt, entry)]
+            for (ref, tgt), entry in _arc_entry_for.items():
                 if ref >= n_neurons or tgt >= n_neurons:
                     continue
                 try:
@@ -833,14 +947,17 @@ class NetworkPanel:
                         continue
                 except (IndexError, TypeError):
                     continue
+                # Filter by conn_type checkbox
+                ct_e = entry.get('conn_type')
+                if ct_e is not None and not self._net_ct_vars.get(ct_e, tk.BooleanVar(value=True)).get():
+                    continue
                 # Also skip when same-shank is hidden and they share a shank
                 if (_hide_same_shank and shank_ids is not None
                         and ref < len(shank_ids) and tgt < len(shank_ids)
                         and int(shank_ids[ref]) == int(shank_ids[tgt])):
                     continue
                 ch = int(peak_channels[ref])
-                for entry in entries:
-                    _chan_entries.setdefault(ch, []).append((ref, tgt, entry))
+                _chan_entries.setdefault(ch, []).append((ref, tgt, entry))
 
             for ch, ch_ents in _chan_entries.items():
                 ref0 = ch_ents[0][0]
@@ -848,17 +965,28 @@ class NetworkPanel:
                 cy = y_pos[ref0]
                 for k, (ref, tgt, entry) in enumerate(ch_ents):
                     ct  = entry.get('conn_type')
-                    is_cpair_arc = (entry.get('is_current') and (ref, tgt) == current_pair)
-                    col = ('black' if is_cpair_arc
-                           else self._NET_TYPE_COLOR.get(ct, '#888888'))
-                    lw  = 2.5 if is_cpair_arc else 1.4
+                    is_cpair_arc = ((ref, tgt) == current_pair)
+                    if is_cpair_arc:
+                        arc_alpha = 1.0
+                        lw = 2.5
+                    elif fp is not None and (ref, tgt) != fp:
+                        arc_alpha = 0.12
+                        lw = 0.5
+                    elif fn is not None and ref != fn and tgt != fn:
+                        arc_alpha = 0.12
+                        lw = 0.5
+                    else:
+                        arc_alpha = 0.85
+                        lw = 1.4
+                    arc_alpha *= line_alpha
+                    col = self._NET_TYPE_COLOR.get(ct, '#888888')
                     r   = BASE_R + k * R_STEP
                     arc = _Arc((cx, cy), 2 * r, 2 * r,
                                angle=0, theta1=20, theta2=340,
                                color=col, linewidth=lw,
-                               alpha=0.85 * line_alpha, zorder=4)
+                               alpha=arc_alpha, zorder=4)
                     arc.set_gid(f"{ref}_{tgt}_{entry.get('key', '')}")
-                    arc.set_picker(6)
+                    arc.set_picker(3)
                     ax.add_patch(arc)
                     # Clockwise arrowhead at theta=20
                     t_r = _math.radians(20)
@@ -937,17 +1065,41 @@ class NetworkPanel:
             pad_y = max((max(ys_all) - min(ys_all)) * 0.06, 20)
             ax.set_xlim(min(xs_all) - pad_x, max(xs_all) + pad_x)
             ax.set_ylim(min(ys_all) - pad_y, max(ys_all) + pad_y)
+            if not self._scale_initialized:
+                self._scale_initialized = True
+                data_w = (max(xs_all) - min(xs_all)) + 2 * pad_x
+                data_h = (max(ys_all) - min(ys_all)) + 2 * pad_y
+                if data_w > 0 and data_h > 0:
+                    canvas_aspect = 6.5 / 2.8  # fig height / fig width
+                    data_aspect = data_h / data_w
+                    if data_aspect > canvas_aspect:
+                        # data taller than canvas → shrink V or expand H
+                        target_h = self._net_hzoom_var.get()
+                        target_v = self._net_vzoom_var.get() * canvas_aspect / data_aspect
+                        target_v = max(0.2, min(1.5, target_v))
+                        self._net_vzoom_var.set(target_v)
+                    else:
+                        # data wider than canvas → shrink H or expand V
+                        target_h = self._net_hzoom_var.get() * data_aspect / canvas_aspect
+                        target_h = max(0.2, min(1.5, target_h))
+                        self._net_hzoom_var.set(target_h)
 
         ax.axis('off')
         ax.set_aspect('equal')
 
-        # Any-mode: session title + navigation hint
+        # Any-mode: session title + pair title drawn in figure space (avoids overlap with shank labels)
         if any_mode and _sess_nk is not None:
             n_sess = len(_sessions)
-            nav = " [← →]" if self._net_focused else " (click+arrows)"
-            ax.set_title(
-                f"{ui._session_label(_sess_nk)}  {self._net_any_idx + 1}/{n_sess}{nav}",
-                fontsize=8, pad=3, color='#222')
+            sess_lbl = f"{ui._session_label(_sess_nk)}  {self._net_any_idx + 1}/{n_sess}"
+            self.net_fig.text(0.5, 0.985, sess_lbl,
+                              fontsize=8, ha='center', va='top', color='#222')
+            try:
+                pair_title = ui.get_plot_title()
+            except Exception:
+                pair_title = ''
+            if pair_title:
+                self.net_fig.text(0.5, 0.002, pair_title,
+                                  fontsize=6, ha='center', va='bottom', color='#444')
 
         if getattr(ui, '_dark', False):
             _bg, _fg = '#2b2b2b', 'white'
@@ -956,7 +1108,10 @@ class NetworkPanel:
             ax.tick_params(colors=_fg)
             ax.xaxis.label.set_color(_fg)
             ax.yaxis.label.set_color(_fg)
-            ax.title.set_color(_fg)
+            for txt in self.net_fig.texts:
+                txt.set_color(_fg)
+            for txt in ax.texts:
+                txt.set_color(_fg)
             for sp in ax.spines.values():
                 sp.set_edgecolor('#666666')
         self.net_fig.tight_layout(pad=0.5)
@@ -967,6 +1122,12 @@ class NetworkPanel:
     # ------------------------------------------------------------------
 
     def _on_network_pick(self, event):
+        # Deduplicate: only process the first pick per mouse event
+        me = getattr(event, 'mouseevent', None)
+        if me is not None:
+            if getattr(self, '_last_pick_mouseevent', None) is me:
+                return
+            self._last_pick_mouseevent = me
         gid = getattr(event.artist, 'get_gid', lambda: None)()
         if not gid:
             return
@@ -980,55 +1141,28 @@ class NetworkPanel:
         ui = self.ui
         pair = (ref, tgt)
 
-        # ── Any-mode: dispatch to the displayed session first ─────────────
+        # ── Any-mode: navigate probe to the session that owns this pair ─────
         if getattr(ui, '_session_any_mode', False):
             sessions = self._net_any_sessions_cache or self._net_any_sessions()
-            idx_s = max(0, min(self._net_any_idx, len(sessions) - 1))
-            target_nk = sessions[idx_s] if sessions else None
-            if target_nk is not None:
-                target_key = ui._type_key_for_nd(target_nk)
-                # Prefer the key that matches key_str (clicked arrow's type)
-                if key_str is not None and target_key is not None:
-                    match = next(
-                        (k for k in ui._available_type_keys(target_nk)
-                         if str(k) == key_str),
-                        None)
-                    if match is not None:
-                        target_key = match
-                if target_key is not None:
-                    try:
-                        ui._autosave_all_sessions_for_current_type()
-                    except Exception:
-                        pass
-                    try:
-                        if ui._sel_data._groups:
-                            ui._save_groups_export()
-                    except Exception:
-                        pass
-                    ui._exit_all_session_mode()
-                    nd_key = target_key.nd()
-                    # Update session combo
-                    if hasattr(ui, '_nd_keys_list') and hasattr(ui, '_session_var'):
-                        for i, k in enumerate(ui._nd_keys_list):
-                            if k == nd_key:
-                                try:
-                                    ui._session_var.set(ui._session_combo['values'][i])
-                                except Exception:
-                                    pass
-                                break
-                    def _do_dispatch(tk_=target_key, p=pair):
-                        if ui._switch_key(tk_):
-                            type_labels = [ui._type_label(k) for k in ui._type_keys_list]
-                            ui._type_var.set(ui._type_label(tk_))
-                            ui._refresh_after_key_switch()
-                            ui._autoload_session_latest()
-                            pidx = ui.get_pair_index(p)
-                            if pidx < len(ui.all_inds):
-                                ui.current_pair_idx = pidx
-                                ui._select_pair_in_list(p)
-                            self.draw()
-                            ui.update_plot()
-                    ui._ensure_session_loaded(nd_key, on_loaded=_do_dispatch)
+            # Find the session index in the probe nav list that matches key_str
+            target_idx = self._net_any_idx
+            if key_str is not None:
+                for si, nk in enumerate(sessions):
+                    ckey = ui._type_key_for_nd(nk)
+                    if ckey is not None:
+                        avail = ui._available_type_keys(nk)
+                        if any(str(k) == key_str for k in avail):
+                            target_idx = si
+                            break
+            if target_idx != self._net_any_idx:
+                self._net_any_idx = target_idx
+            # Select the pair in the any-mode list
+            pidx = ui.get_pair_index(pair)
+            if pidx < len(ui.all_inds):
+                ui.current_pair_idx = pidx
+                ui._select_pair_in_list(pair)
+            self.draw()
+            ui.update_plot()
             return
 
         # ── Normal mode: optionally switch type key, then select pair ─────
@@ -1486,7 +1620,7 @@ class NetworkPanel:
         ui = self.ui
         if ui.active_segment_filter is None:
             return set(map(tuple, ui.all_inds))
-        pt = ui.ccg_pointer
+        pt = ui.ccg_ptr
         if pt.stored_by_segment:
             seg_i = ui.active_segment_filter
             mask = pt.inds[:, 0] == seg_i

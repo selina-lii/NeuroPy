@@ -66,6 +66,8 @@ class StatsTestPanel:
         self.root.geometry("1100x580")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if getattr(ui, '_dark', False):
+            self.root.configure(bg='#2b2b2b')
 
         self._export_btn: ttk.Button | None = None
         self._result_text: tk.Text | None = None
@@ -438,11 +440,11 @@ class StatsTestPanel:
         ui = self.ui
         saved = (
             ui.key,
-            ui.ccg_pointer,
+            ui.ccg_ptr,
             ui.ccg_data,
             ui.neurons,
             ui.n_segments,
-            tuple(ui.segment_names),
+            tuple(ui.ccg_ptr.segment_names),
         )
         nd_key = ui._nd_key_for_session_str(session_str)
         tk = ui._type_key_for_nd(nd_key) if nd_key is not None else None
@@ -456,11 +458,10 @@ class StatsTestPanel:
             if bound:
                 k, ptr, cd, neu, ns, sn = saved
                 ui.key = k
-                ui.ccg_pointer = ptr
+                ui.ccg_ptr = ptr
                 ui.ccg_data = cd
                 ui.neurons = neu
                 ui.n_segments = ns
-                ui.segment_names = list(sn)
                 if getattr(ui, '_session_any_mode', False):
                     try:
                         ui._sync_any_plot_context(int(ui.current_pair_idx))
@@ -590,7 +591,7 @@ class StatsTestPanel:
             if 0 <= ci < len(cs_list):
                 return cs_list[ci]['name']
             return _ALL_SEGS
-        names = ui.segment_names
+        names = ui.ccg_ptr.segment_names
         return names[seg] if seg < len(names) else _ALL_SEGS
 
     def _add_row(self):
@@ -740,8 +741,8 @@ class StatsTestPanel:
         ui = self.ui
         if name == _ALL_SEGS:
             return ui.n_segments
-        if name in ui.segment_names:
-            return ui.segment_names.index(name)
+        if name in ui.ccg_ptr.segment_names:
+            return ui.ccg_ptr.segment_names.index(name)
         for ci, cs in enumerate(getattr(ui, '_custom_segments', [])):
             if isinstance(cs, dict) and cs.get('name') == name:
                 return ui.n_segments + 1 + ci
@@ -756,7 +757,7 @@ class StatsTestPanel:
         if session_str == 'All':
             return set()
         if group_name == '(all pairs)':
-            ptr = ui.ccg_pointer
+            ptr = ui.ccg_ptr
             if ptr is None or getattr(ptr, 'inds2', None) is None:
                 base_pairs: set = set()
             else:
@@ -1489,6 +1490,12 @@ class StatsTestPanel:
             alternative = "greater" if self._dir_var.get().strip() == "A > B" else "less"
         nonparametric = bool(getattr(self, '_nonparam_var', None) and self._nonparam_var.get())
         log_transform = bool(getattr(self, '_log_var', None) and self._log_var.get())
+
+        # Auto-load any custom CCG segments specified in the rows that aren't in memory yet
+        seg_names = [r['seg'].get() for r in active if r.get('seg') is not None]
+        custom_segs = [s for s in seg_names if s and s not in (getattr(self._ui.ccg_ptr, 'segment_names', []) or [])]
+        if custom_segs:
+            self._ensure_custom_segments_loaded(list(dict.fromkeys(custom_segs)))
 
         # Collect lo-res data (or single pass for non-CS)
         groups_lo = [self._collect_group_data(r, highres=False) for r in active]

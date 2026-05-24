@@ -1112,6 +1112,17 @@ class LeftPanel:
             except (ValueError, TypeError):
                 return
 
+        if widget is self.selected_list:
+            try:
+                ui2 = self._ui
+                row = ui2.all_inds[ui2.current_pair_idx]
+                ref, tgt = int(row[0]), int(row[1])
+                id_pos = {int(n): i for i, n in enumerate(ui2.neurons.neuron_ids)}
+                rp, tp = id_pos[ref], id_pos[tgt]
+                print(f"[on_pair_select] inds=({ref},{tgt}) shanks=({int(ui2.neurons.shank_ids[rp])},{int(ui2.neurons.shank_ids[tp])})")
+            except Exception:
+                pass
+
         _ctrl = event.state & 0x4
         _cmd  = event.state & 0x8
         if _ctrl or _cmd:
@@ -1183,6 +1194,14 @@ class LeftPanel:
     def _do_pair_select_update(self):
         ui = self._ui
         ui._select_after = None
+        try:
+            row = ui.all_inds[ui.current_pair_idx]
+            ref, tgt = int(row[0]), int(row[1])
+            id_pos = {int(n): i for i, n in enumerate(ui.neurons.neuron_ids)}
+            rp, tp = id_pos[ref], id_pos[tgt]
+            print(f"[_do_pair_select_update] inds=({ref},{tgt}) shanks=({int(ui.neurons.shank_ids[rp])},{int(ui.neurons.shank_ids[tp])})")
+        except Exception:
+            pass
         try:
             ui._exit_spike_attribution_view()
         except Exception:
@@ -2195,26 +2214,15 @@ class LeftPanel:
         if not hasattr(ui, '_groups_menu'):
             return
         try:
-            while ui._groups_menu.index('end') >= 8:
-                ui._groups_menu.delete(8)
+            while ui._groups_menu.index('end') >= 7:
+                ui._groups_menu.delete(7)
         except tk.TclError:
             pass
-        ui._groups_menu.add_separator()
         current_pairs = (set(map(tuple, ui.all_inds))
                          if len(ui.all_inds) else set())
-        special_groups = []
-        for gname in sorted(self.data._groups):
-            if gname.startswith(_SPECIAL_PREFIX):
-                special_groups.append(gname)
-                continue
-            if gname.startswith('__'):
-                continue
-            hk = self.data._group_hotkeys.get(gname, '')
-            label = gname + (f" [{hk}]" if hk else "")
-            ui._groups_menu.add_command(
-                label=label,
-                command=lambda g=gname: self._select_group(g))
+        special_groups = [g for g in self.data._groups if g.startswith(_SPECIAL_PREFIX)]
         if special_groups:
+            ui._groups_menu.add_separator()
             special_menu = tk.Menu(ui._groups_menu, tearoff=0)
             for gname in special_groups:
                 display = gname[len(_SPECIAL_PREFIX):]

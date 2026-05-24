@@ -573,6 +573,7 @@ class CCGPointer(Savable):
         self,
         key,
         inds,
+        selected_inds=None,
         conf: CCGConfig = None,
         significant=None,
         edge_times=None,
@@ -583,6 +584,7 @@ class CCGPointer(Savable):
         self.edge_times = edge_times
         self.conf = conf
         self.significant = significant
+        self.selected_inds = selected_inds
 
     # def __repr__(self):
     #     printstr = "CCG name: " + str(self.key) + "\n===\n"
@@ -605,6 +607,10 @@ class CCGPointer(Savable):
         for ind in inds:
             a.loc[tuple(ind), conn[tuple(ind)]] = 1
         return a
+
+    @property
+    def segment_names(self) -> list:
+        return list(self.edge_times['label'].values)
 
     @property
     def segment_labels(self):
@@ -659,6 +665,14 @@ class CCGPointer(Savable):
             return SetOp.unique(self._inds[:, -2:])
         else:
             return self.inds
+
+    @property
+    def unselected_inds(self) -> set:
+        all_pairs = set(map(tuple, self.inds2))
+        sel = getattr(self, 'selected_inds', None)
+        if sel is None:
+            return all_pairs
+        return all_pairs - set(map(tuple, sel))
 
     @property
     def inds3(self):
@@ -808,23 +822,6 @@ class CCGData(Savable):
                            ((0, shape[-3] - n_auto), (0, shape[-2] - n_auto)))
         autocorr_locations = np.broadcast_to(auto_mask, shape[:-1])
         return autocorr_locations
-
-    def get_conn_strength(self, method: ConnStrengthMethod, **kwargs):
-        """
-        Wrapper
-        """
-        if self.ccg is None:
-            return  # no connection
-        if method == ConnStrengthMethod.PEAKSIZE:
-            self.__get_conn_strength_peaksize(**kwargs)
-        elif method == ConnStrengthMethod.TAILED:
-            self.__get_conn_strength_tailed(**kwargs)
-        else:
-            raise NotImplementedError("Unknown connection strength method")
-
-    @property
-    def conn_strength_change(self):
-        return self.conn_strength[-1, ...] - self.conn_strength[0, ...]
 
     def save_plots(self,
                    pt: CCGPointer,
@@ -1610,7 +1607,7 @@ class CCGDataset(AnalysisDataset):
             edge_times = self.nd.edge_times[nd_key]
 
             conv = EranConv(self.conf)
-            _, _, _, ccg_pointers, spur_pointers, printstr = conv.eranconv(
+            _, _, _, ccg_ptrs, spur_pointers, printstr = conv.eranconv(
                 neurons_key=nd_key,
                 ccg=ccg_data.ccg,
                 edge_times=edge_times,
@@ -1622,7 +1619,7 @@ class CCGDataset(AnalysisDataset):
             ccg_data.qval_corrected = conv._qvals
             ccg_data.significant    = conv._significant
 
-            self._attr_append(nd_key, ccg_pointers, 'data')
+            self._attr_append(nd_key, ccg_ptrs, 'data')
             self._attr_append(nd_key, spur_pointers, 'spurious')
             print(printstr)
 
@@ -1890,15 +1887,15 @@ class CCGDataset(AnalysisDataset):
         if itergroup is None:
             return
 
-        for key, ccg_pointer in itergroup.items():
+        for key, ccg_ptr in itergroup.items():
             print(f"ccg {key.session} {key.conn_type}")
 
             self._ccg[key.nd()].save_plots(
-                pt=ccg_pointer,
+                pt=ccg_ptr,
                 neurons=self.nd.data[key.nd()],
                 frates_cut=self.nd.segment_firing_rates[key.nd()],
                 neurons_config=self.nd.conf,
-                plotdir=ccg_pointer.plotdir(plot_folder),
+                plotdir=ccg_ptr.plotdir(plot_folder),
                 overwrite=overwrite,
             )
         print(f"Done! Plots saved to: {plot_folder}")
@@ -1965,7 +1962,7 @@ class CCGDataset(AnalysisDataset):
         neurons = self.nd.data[nd_key]
         edge_times = self.nd.edge_times[nd_key]
 
-        pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
+        pvals, pred, qvals, ccg_ptrs, spur_pointers, printstr = conv.eranconv(
             neurons_key=nd_key,
             ccg=ccg_data.ccg,
             edge_times=edge_times,
@@ -1979,7 +1976,7 @@ class CCGDataset(AnalysisDataset):
         ccg_data.qval_corrected = conv._qvals
         ccg_data.significant    = conv._significant
 
-        self._attr_append(nd_key, ccg_pointers, 'data')
+        self._attr_append(nd_key, ccg_ptrs, 'data')
         self._attr_append(nd_key, spur_pointers, 'spurious')
         print(printstr)
 
@@ -2011,7 +2008,7 @@ class CCGDataset(AnalysisDataset):
             edge_times=edge_times if use_segments else None,
         )
 
-        pvals, pred, qvals, ccg_pointers, spur_pointers, printstr = conv.eranconv(
+        pvals, pred, qvals, ccg_ptrs, spur_pointers, printstr = conv.eranconv(
             neurons_key=key,
             ccg=ccg,
             edge_times=edge_times,
@@ -2031,7 +2028,7 @@ class CCGDataset(AnalysisDataset):
                            norm_factors=None)
 
         self._ccg[key] = ccg_data
-        self._attr_append(key, ccg_pointers, 'data')
+        self._attr_append(key, ccg_ptrs, 'data')
         self._attr_append(key, spur_pointers, 'spurious')
 
         print(self._session_summary(key))
@@ -2284,13 +2281,13 @@ class EranConv:
             for conn_type in self.conf.conn_types[EI]:
                 inds = inds_E[conn_type] if EI == 'E' else inds_I[conn_type]
                 ccg_key = key.add(conn_type=conn_type, excitability=EI)
-                ccg_pointer = CCGPointer(key=ccg_key,
+                ccg_ptr = CCGPointer(key=ccg_key,
                                          conf=self.conf,
                                          inds=inds if _hasvalue(inds) else None,
                                          edge_times=edge_times)
-                for i, ccg in enumerate(ccg_pointer.split()):
+                for i, ccg in enumerate(ccg_ptr.split()):
                     count[i, j] = ccg.n_pairs if ccg is not None else 0
-                ccg_inds_by_type[ccg_key] = ccg_pointer
+                ccg_inds_by_type[ccg_key] = ccg_ptr
                 spurious = SetOp.setdiff(
                     spurious, inds)  # remove these pairs from spurious
                 j += 1

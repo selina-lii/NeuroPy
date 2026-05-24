@@ -1,33 +1,13 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-20T00:56:18.458814",
+  "saved_at": "2026-05-13T20:13:49.036889",
   "session": "RatR_Day2SD",
   "selections": {
     "sess_RatR_Day2SD.ex_E.type_pyr-pyr": [
       [
         12,
         14
-      ],
-      [
-        13,
-        10
-      ],
-      [
-        29,
-        8
-      ],
-      [
-        29,
-        15
-      ],
-      [
-        36,
-        33
-      ],
-      [
-        38,
-        10
       ]
     ],
     "sess_RatR_Day2SD.ex_E.type_pyr-inter": [],
@@ -391,6 +371,9 @@
         "ok"
       ]
     },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
     "25,35": {
       "groups": [
         "Disinhib",
@@ -705,6 +688,7 @@
       ]
     }
   },
+  "deleted": [],
   "deleted_by_type": {
     "sess_RatR_Day2SD.ex_E.type_pyr-pyr": [],
     "sess_RatR_Day2SD.ex_E.type_pyr-inter": [],

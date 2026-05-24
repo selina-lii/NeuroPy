@@ -180,7 +180,7 @@ class JitterController:
             return
         seg_arg = self.seg()
         if seg_arg is not None:
-            et = ui.ccg_pointer.edge_times
+            et = ui.ccg_ptr.edge_times
             jitter_t0 = float(et.iloc[seg_arg]['start'])
             jitter_t1 = float(et.iloc[seg_arg]['stop'])
         else:
@@ -246,7 +246,7 @@ class JitterController:
                        if hasattr(ui.cd, '_ccg_highres') else None)
         started = self.jitter_worker.start_next(
             ui.key, ui.neurons, ccg_data_lo, ccg_data_hi,
-            ui.ccg_pointer.edge_times)
+            ui.ccg_ptr.edge_times)
         self.update_btn_text()
         if started and self._poll_id is None:
             self._poll_id = ui.root.after(300, self.poll)
@@ -264,7 +264,7 @@ class JitterController:
                 seg_name = _ALL_SEGS
             else:
                 try:
-                    seg_name = str(ui.segment_names[int(seg_arg)])
+                    seg_name = str(ui.ccg_ptr.segment_names[int(seg_arg)])
                 except Exception:
                     seg_name = f"seg{seg_arg}"
             label = f"Jitter [{ref},{tgt}] {seg_name}…"

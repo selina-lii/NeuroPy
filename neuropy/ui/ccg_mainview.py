@@ -571,6 +571,13 @@ class CorrelogramPanel:
             min_bms = 1000.0 / fs
             bms = max(min_bms, min(100.0, raw_bms))
             self._extend_bin_ms_var.set(round(bms, 4))
+            if raw_bms < min_bms:
+                from tkinter import messagebox
+                messagebox.showerror(
+                    "Resolution too small",
+                    f"Minimum resolution is {min_bms:.4f} ms (1 sample at {fs:.0f} Hz).\n"
+                    f"Value set to {round(bms, 4)} ms."
+                )
         except Exception:
             pass
         if bool(self._extend_enable_var.get()):
@@ -714,6 +721,13 @@ class BaselinePanel:
 
         self._cs_pval_row = ttk.Frame(parent)
         self._cs_pval_row.pack(fill=tk.X, anchor='w', pady=(2, 0))
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(6, 2))
+        wf_row = ttk.Frame(parent)
+        wf_row.pack(fill=tk.X, anchor='w')
+        ttk.Checkbutton(wf_row, text="Waveform",
+                        variable=self._ui._panel_vars['Waveforms'],
+                        command=self._ui._toggle_waveforms_panel).pack(side=tk.LEFT)
 
     def get_config(self) -> BaselineConfig:
         return BaselineConfig(
@@ -862,9 +876,6 @@ class JitterPanel:
                         variable=self._jitter_run_hi_var).pack(side=tk.LEFT)
         ttk.Separator(jitter_inner, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=(8, 4), pady=2)
-        ttk.Checkbutton(jitter_inner, text="Waveform",
-                        variable=self._ui._panel_vars['Waveforms'],
-                        command=self._ui._toggle_waveforms_panel).pack(side=tk.LEFT)
 
 
 # ---------------------------------------------------------------------------
@@ -962,7 +973,7 @@ class SpikeAttributionPanel:
         seg = ui.current_segment
         t0 = t1 = None
         if seg < ui.n_segments:
-            et = ui.ccg_pointer.edge_times
+            et = ui.ccg_ptr.edge_times
             t0 = float(et.iloc[seg]['start']) if 'start' in et.columns else None
             t1 = float(et.iloc[seg]['stop']) if 'stop' in et.columns else None
         pairs = SpikeAttributionEngine.compute_pairs(
@@ -1068,13 +1079,14 @@ class SegmentChipsPanel:
         self._ui = ui
         self.frame = ttk.Frame(parent)
         self.frame.pack(side=tk.BOTTOM, pady=2, fill=tk.X)
+        self._chip_scroll_offset = 0  # number of custom CCG chips hidden on the left
 
     def rebuild(self):
         """Rebuild all chip widgets — call whenever segment list changes."""
         ui = self._ui
         for widget in self.frame.winfo_children():
             widget.destroy()
-        ui.seg_sig_labels = []
+        ui.seg_sig_labels = {}
 
         _fs = max(8, ui._min_font_size())
 
@@ -1104,74 +1116,111 @@ class SegmentChipsPanel:
         sbs_btn.pack(side=tk.RIGHT, padx=(2, 6))
         sbs_btn.bind('<Button-1>', lambda e: self._toggle_sbs_mode())
 
-        ttk.Label(self.frame, text="Segments:").pack(side=tk.LEFT, padx=(4, 2))
+        _dark = getattr(ui, '_dark', False)
+        _dim    = '#777777' if _dark else '#cccccc'
+        _active = '#dddddd' if _dark else '#333333'
 
-        # "All" chip — appended to seg_sig_labels AFTER real segs (index = n_segments)
-        lbl_all = tk.Label(
-            self.frame, text="All",
-            relief=tk.RAISED, font=('Arial', _fs, 'bold'),
-            bg='#E0E0E0', padx=4, pady=2, cursor='hand2')
-        lbl_all.pack(side=tk.LEFT, padx=(2, 0))
-        lbl_all.bind(
-            '<Button-1>',
-            lambda e: self._on_segment_chip_primary_click(ui.n_segments))
-        for _seq in ('<Control-Button-1>', '<Command-Button-1>'):
-            lbl_all.bind(
-                _seq,
-                lambda e: (self._toggle_segment_chip_multi(ui.n_segments), 'break')[1])
-        for _btn in ('<Button-2>', '<Button-3>'):
-            lbl_all.bind(
-                _btn,
-                lambda e: self._segment_chip_ctx_menu(e, ui.n_segments))
+        # Build ordered chip list: All (idx=n_segments), real segs (0..n-1), custom segs
+        _custom = getattr(ui, '_custom_segments', [])
+        n_custom = len(_custom)
+        # total scrollable chips = 1 (All) + n_segments (real) + n_custom
+        n_total = 1 + ui.n_segments + n_custom
+        self._chip_scroll_offset = max(0, min(self._chip_scroll_offset, max(0, n_total - 1)))
+        offset = self._chip_scroll_offset
 
-        # Separator
-        tk.Frame(self.frame, width=1, bg='#AAAAAA').pack(
-            side=tk.LEFT, fill=tk.Y, padx=3, pady=2)
+        # ▶ at right edge
+        _btn_r = tk.Label(self.frame, text="▶", font=('Arial', _fs), cursor='hand2',
+                          padx=3, fg=_active if offset < n_total - 1 else _dim)
+        _btn_r.pack(side=tk.RIGHT, padx=(0, 2))
+        _btn_r.bind('<Button-1>', self._on_seg_arrow_right)
 
-        # Real segment chips
-        for i, name in enumerate(ui.segment_names):
-            lbl = tk.Label(
-                self.frame, text=name,
-                relief=tk.RAISED, font=('Arial', _fs),
-                bg='#E0E0E0', padx=4, pady=2)
-            lbl.pack(side=tk.LEFT, padx=2)
+        ttk.Label(self.frame, text="Segments:").pack(side=tk.LEFT, padx=(4, 0))
+        # ◀ at left edge
+        _btn_l = tk.Label(self.frame, text="◀", font=('Arial', _fs), cursor='hand2',
+                          padx=3, fg=_active if offset > 0 else _dim)
+        _btn_l.pack(side=tk.LEFT, padx=(2, 2))
+        _btn_l.bind('<Button-1>', self._on_seg_arrow_left)
+
+        # Build all chips in order, then slice from offset
+        # Each entry: (widget_factory_fn,) — we pack only chips[offset:]
+        def _make_all_chip():
+            lbl = tk.Label(self.frame, text="All",
+                           relief=tk.RAISED, font=('Arial', _fs, 'bold'),
+                           bg='#E0E0E0', padx=4, pady=2, cursor='hand2')
+            lbl.bind('<Button-1>',
+                     lambda e: self._on_segment_chip_primary_click(ui.n_segments))
+            for _seq in ('<Control-Button-1>', '<Command-Button-1>'):
+                lbl.bind(_seq,
+                         lambda e: (self._toggle_segment_chip_multi(ui.n_segments), 'break')[1])
+            for _b in ('<Button-2>', '<Button-3>'):
+                lbl.bind(_b, lambda e: self._segment_chip_ctx_menu(e, ui.n_segments))
+            return lbl, ui.n_segments  # (widget, seg_idx)
+
+        def _make_real_chip(i, name):
+            lbl = tk.Label(self.frame, text=name,
+                           relief=tk.RAISED, font=('Arial', _fs),
+                           bg='#E0E0E0', padx=4, pady=2)
             lbl.bind('<Button-1>',
                      lambda e, idx=i: self._on_segment_chip_primary_click(idx))
             for _seq in ('<Control-Button-1>', '<Command-Button-1>'):
                 lbl.bind(_seq,
                          lambda e, idx=i: (self._toggle_segment_chip_multi(idx), 'break')[1])
-            for _btn in ('<Button-2>', '<Button-3>'):
-                lbl.bind(_btn, lambda e, idx=i: self._segment_chip_ctx_menu(e, idx))
-            ui.seg_sig_labels.append(lbl)
+            for _b in ('<Button-2>', '<Button-3>'):
+                lbl.bind(_b, lambda e, idx=i: self._segment_chip_ctx_menu(e, idx))
+            return lbl, i
 
-        # Append All chip at index n_segments
-        ui.seg_sig_labels.append(lbl_all)
-
-        # Custom segment chips
-        for ci, cs in enumerate(getattr(ui, '_custom_segments', [])):
+        def _make_custom_chip(ci, cs):
             seg_idx = ui.n_segments + 1 + ci
-            lbl_cust = tk.Label(
-                self.frame, text=cs['name'],
-                relief=tk.SUNKEN, font=('Arial', _fs, 'italic'),
-                bg='#FFF9C4', fg='#5D4037', padx=4, pady=2)
-            lbl_cust.pack(side=tk.LEFT, padx=(4, 2))
-            lbl_cust.bind('<Button-1>',
-                          lambda e, idx=seg_idx: self._on_segment_chip_primary_click(idx))
+            lbl = tk.Label(self.frame, text=cs['name'],
+                           relief=tk.SUNKEN, font=('Arial', _fs, 'italic'),
+                           bg='#FFF9C4', fg='#5D4037', padx=4, pady=2)
+            lbl.bind('<Button-1>',
+                     lambda e, idx=seg_idx: self._on_segment_chip_primary_click(idx))
             for _seq in ('<Control-Button-1>', '<Command-Button-1>'):
-                lbl_cust.bind(_seq,
-                              lambda e, idx=seg_idx: (self._toggle_segment_chip_multi(idx), 'break')[1])
-            for _btn in ('<Button-2>', '<Button-3>'):
-                lbl_cust.bind(_btn,
-                              lambda e, idx=seg_idx: self._segment_chip_ctx_menu(e, idx))
-            lbl_cust.bind('<Double-Button-1>',
-                          lambda e, idx=ci: ui._remove_custom_segment(idx))
-            ui.seg_sig_labels.append(lbl_cust)
+                lbl.bind(_seq,
+                         lambda e, idx=seg_idx: (self._toggle_segment_chip_multi(idx), 'break')[1])
+            for _b in ('<Button-2>', '<Button-3>'):
+                lbl.bind(_b, lambda e, idx=seg_idx: self._segment_chip_ctx_menu(e, idx))
+            lbl.bind('<Double-Button-1>',
+                     lambda e, idx=ci: ui._remove_custom_segment(idx))
+            return lbl, seg_idx
+
+        # Display order: All → real segs → custom
+        # seg_sig_labels is a dict keyed by seg_idx so _update_sig_indicators
+        # works regardless of display position.
+        display_chips = []  # [(lbl, seg_idx)] in display order
+        display_chips.append(_make_all_chip())   # All first (index = n_segments)
+        for i, name in enumerate(ui.ccg_ptr.segment_names):
+            display_chips.append(_make_real_chip(i, name))
+        for ci, cs in enumerate(_custom):
+            display_chips.append(_make_custom_chip(ci, cs))
+
+        # seg_sig_labels: dict seg_idx → label widget
+        ui.seg_sig_labels = {seg_idx: lbl for lbl, seg_idx in display_chips}
+
+        # Separator (always visible)
+        tk.Frame(self.frame, width=1, bg='#AAAAAA').pack(
+            side=tk.LEFT, fill=tk.Y, padx=3, pady=2)
+
+        # Pack only chips from offset onward
+        for lbl, _ in display_chips[offset:]:
+            lbl.pack(side=tk.LEFT, padx=2)
 
     def _toggle_sbs_mode(self):
         ui = self._ui
         ui._sbs_mode = not ui._sbs_mode
         self.rebuild()
         ui.update_plot()
+
+    def _on_seg_arrow_left(self, event=None):
+        self._chip_scroll_offset = max(0, self._chip_scroll_offset - 1)
+        self.rebuild()
+
+    def _on_seg_arrow_right(self, event=None):
+        ui = self._ui
+        n_total = 1 + ui.n_segments + len(getattr(ui, '_custom_segments', []))
+        self._chip_scroll_offset = min(self._chip_scroll_offset + 1, max(0, n_total - 1))
+        self.rebuild()
 
     def _on_segment_chip_primary_click(self, idx: int):
         ui = self._ui

@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-20T00:56:18.469041",
+  "saved_at": "2026-05-13T20:13:49.141093",
   "session": "RatV_Day2SD",
   "selections": {
     "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
@@ -10,6 +10,40 @@
     "sess_RatV_Day2SD.ex_I.type_inter-pyr": []
   },
   "pair_tags": {
+    "1,53": {
+      "groups": [
+        "2peakms",
+        "Disinhib",
+        "rhythm",
+        "rift"
+      ]
+    },
+    "1,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "2,53": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "3,53": {
+      "groups": [
+        "2peakms",
+        "Disinhib"
+      ]
+    },
+    "3,56": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "4,0": {
+      "groups": [
+        "rhythm"
+      ]
+    },
     "4,10": {
       "groups": [
         "rhythm"
@@ -20,9 +54,26 @@
         "rhythm"
       ]
     },
+    "4,50": {
+      "groups": [
+        "msconn"
+      ]
+    },
     "4,51": {
       "groups": [
         "rhythm"
+      ]
+    },
+    "4,56": {
+      "groups": [
+        "?",
+        "ok"
+      ]
+    },
+    "5,6": {
+      "groups": [
+        "pos_skew",
+        "rift"
       ]
     },
     "5,14": {
@@ -45,11 +96,28 @@
         "rhythm"
       ]
     },
+    "8,53": {
+      "groups": [
+        "Disinhib",
+        "good",
+        "rift"
+      ]
+    },
+    "8,56": {
+      "groups": [
+        "ok"
+      ]
+    },
     "11,0": {
       "groups": [
         "2peakms",
         "leak",
         "ok"
+      ]
+    },
+    "11,10": {
+      "groups": [
+        "rhythm"
       ]
     },
     "11,36": {
@@ -65,6 +133,13 @@
     "12,6": {
       "groups": [
         "2peakms"
+      ]
+    },
+    "12,14": {
+      "groups": [
+        "leak",
+        "pos_skew",
+        "rift"
       ]
     },
     "12,36": {
@@ -208,6 +283,14 @@
         "rhythm"
       ]
     },
+    "24,56": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
+    },
     "26,56": {
       "groups": [
         "good"
@@ -218,12 +301,42 @@
         "?"
       ]
     },
+    "28,51": {
+      "groups": [
+        "ok"
+      ]
+    },
+    "29,10": {
+      "groups": [
+        "rhythm"
+      ]
+    },
     "29,14": {
       "groups": [
         "rift"
       ]
     },
+    "29,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "29,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "30,53": {
+      "groups": [
+        "Disinhib"
+      ]
+    },
     "30,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "31,56": {
       "groups": [
         "rhythm"
       ]
@@ -232,6 +345,16 @@
       "groups": [
         "2peakms",
         "good"
+      ]
+    },
+    "32,51": {
+      "groups": [
+        "rhythm"
+      ]
+    },
+    "33,0": {
+      "groups": [
+        "rhythm"
       ]
     },
     "33,6": {
@@ -243,6 +366,11 @@
       "groups": [
         "2peakms",
         "good"
+      ]
+    },
+    "33,14": {
+      "groups": [
+        "rhythm"
       ]
     },
     "33,50": {
@@ -291,11 +419,15 @@
         "msconn"
       ]
     },
+    "35,50": {
+      "groups": [
+        "rhythm"
+      ]
+    },
     "35,51": {
       "groups": [
         "Disinhib",
-        "ok",
-        "rhythm"
+        "ok"
       ]
     },
     "37,14": {
@@ -397,6 +529,11 @@
         "wideMs"
       ]
     },
+    "47,56": {
+      "groups": [
+        "rhythm"
+      ]
+    },
     "48,53": {
       "groups": [
         "ok",
@@ -438,12 +575,12 @@
     },
     "57,51": {
       "groups": [
-        "good",
         "msconn",
         "rhythm"
       ]
     }
   },
+  "deleted": [],
   "deleted_by_type": {
     "sess_RatV_Day2SD.ex_E.type_pyr-pyr": [],
     "sess_RatV_Day2SD.ex_E.type_pyr-inter": [],

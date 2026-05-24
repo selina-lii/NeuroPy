@@ -102,7 +102,7 @@ class Jitter:
     """
 
     def __init__(self, key, neurons, conf: JitterConfig,
-                 ccg_pointer, ccg_data):
+                 ccg_ptr, ccg_data):
         """
         Parameters
         ----------
@@ -111,7 +111,7 @@ class Jitter:
         neurons : Neurons
             Neuron object for this session (spike trains, IDs, etc.)
         conf : JitterConfig
-        ccg_pointer : CCGPointer
+        ccg_ptr : CCGPointer
             Holds the selected pair indices (from EranConv).
         ccg_data : CCGData
             Holds the raw CCG array for this session
@@ -120,7 +120,7 @@ class Jitter:
         self.key = key
         self.conf = conf
         self.neurons = neurons
-        self.ccg_pointer = ccg_pointer
+        self.ccg_ptr = ccg_ptr
         self.ccg_data = ccg_data
 
         # Filled by run()
@@ -139,7 +139,7 @@ class Jitter:
 
     def _group_by_target(self):
         """Group pair indices by target neuron for efficient computation."""
-        inds = self.ccg_pointer.inds
+        inds = self.ccg_ptr.inds
         if inds is None or len(inds) == 0:
             self.jtgt_inds = np.array([], dtype=int)
             self.jref_inds = []
@@ -157,7 +157,7 @@ class Jitter:
 
     @property
     def n_pairs(self):
-        inds = self.ccg_pointer.inds
+        inds = self.ccg_ptr.inds
         return len(inds) if inds is not None else 0
 
     # ------------------------------------------------------------------
@@ -166,7 +166,7 @@ class Jitter:
 
     def run(self):
         """Run jitter and populate self.j_sig, self.pval, self.JBSI."""
-        inds = self.ccg_pointer.inds
+        inds = self.ccg_ptr.inds
         if inds is None or len(inds) == 0:
             self.j_sig = np.array([], dtype=bool)
             self.pval = np.array([], dtype=float)
@@ -179,7 +179,7 @@ class Jitter:
         self.pval_bins = np.ones((n_pairs, self.conf.ccg.nbins), dtype=float)
         self.JBSI = np.zeros((n_pairs, self.conf.ccg.nbins))
 
-        stored_by_segment = self.ccg_pointer.stored_by_segment
+        stored_by_segment = self.ccg_ptr.stored_by_segment
         ccg_conf = self.conf.ccg
         lb, ub = ccg_conf.min_lag_bin, ccg_conf.max_lag_bin
 
@@ -473,7 +473,7 @@ def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale
         """
         if self.j_sig is None or not self.j_sig.any():
             return None
-        return self.ccg_pointer.inds[self.j_sig]
+        return self.ccg_ptr.inds[self.j_sig]
 
     # ------------------------------------------------------------------
     # Save / inspect intermediates
@@ -507,14 +507,14 @@ def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale
             save_dir = str(_REPO_ROOT / "data" / "jitter" / key_str)
         os.makedirs(save_dir, exist_ok=True)
 
-        np.save(os.path.join(save_dir, 'jitter_inds.npy'), self.ccg_pointer.inds)
+        np.save(os.path.join(save_dir, 'jitter_inds.npy'), self.ccg_ptr.inds)
         np.save(os.path.join(save_dir, 'jitter_pval.npy'), self.pval)
         np.save(os.path.join(save_dir, 'jitter_jsig.npy'), self.j_sig)
         np.save(os.path.join(save_dir, 'jitter_JBSI.npy'), self.JBSI)
 
         # Save null distribution cache if available
         if self._j_ccg_cache:
-            n_pairs = len(self.ccg_pointer.inds)
+            n_pairs = len(self.ccg_ptr.inds)
             n_bins = self.conf.ccg.nbins
             j_avg_arr = np.full((n_pairs, n_bins), np.nan)
             j_lo_arr  = np.full((n_pairs, n_bins), np.nan)
@@ -535,7 +535,7 @@ def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale
             f"alpha:      {self.conf.alpha}\n"
             f"n_pairs:    {self.n_pairs}\n"
             f"n_sig:      {int(self.j_sig.sum()) if self.j_sig is not None else 'n/a'}\n"
-            f"inds_shape: {self.ccg_pointer.inds.shape}\n"
+            f"inds_shape: {self.ccg_ptr.inds.shape}\n"
             f"null_cache: {'yes (jitter_null_avg/lo/hi.npy)' if has_null else 'no'}\n"
         )
         with open(os.path.join(save_dir, 'jitter_meta.txt'), 'w') as fh:
@@ -620,7 +620,7 @@ def plot_jitter_verification(jitter_obj,
     import matplotlib.pyplot as plt
 
     j = jitter_obj
-    inds = j.ccg_pointer.inds
+    inds = j.ccg_ptr.inds
     if inds is None or len(inds) == 0:
         print("[plot_jitter_verification] No pairs to plot.")
         return None
@@ -644,7 +644,7 @@ def plot_jitter_verification(jitter_obj,
 
     # Retrieve real CCG and jitter cache
     cd = j.ccg_data
-    stored_by_seg = j.ccg_pointer.stored_by_segment
+    stored_by_seg = j.ccg_ptr.stored_by_segment
     j_ccg_cache = getattr(j, '_j_ccg_cache', None)  # populated by patched run()
 
     for plot_i, pair_i in enumerate(order):
@@ -732,12 +732,12 @@ class JitterDataset(AnalysisDataset):
         self.data = {}   # Key → Jitter
 
     def run_jitter(self, save_progress=False):
-        for key, ccg_pointer in self.cd.data.items():
+        for key, ccg_ptr in self.cd.data.items():
             nd_key = key.nd()
             neurons = self.nd.data[nd_key]
             ccg_data = self.cd._ccg[nd_key]
 
-            if ccg_pointer.n_pairs == 0:
+            if ccg_ptr.n_pairs == 0:
                 self.data[key] = None
                 continue
 
@@ -745,7 +745,7 @@ class JitterDataset(AnalysisDataset):
                 key=key,
                 neurons=neurons,
                 conf=self.conf,
-                ccg_pointer=ccg_pointer,
+                ccg_ptr=ccg_ptr,
                 ccg_data=ccg_data,
             )
             j.run()
@@ -776,12 +776,12 @@ class JitterManager:
     VIEWED_BG   = '#FFF9C4'
     VIEWED_FG   = '#333333'
 
-    def __init__(self, key, neurons, ccg_data, ccg_pointer,
+    def __init__(self, key, neurons, ccg_data, ccg_ptr,
                  compute_custom_fn, on_jitter_done, on_custom_done):
         self.key = key
         self.neurons = neurons
         self.ccg_data = ccg_data
-        self.ccg_pointer = ccg_pointer
+        self.ccg_ptr = ccg_ptr
         self._compute_custom = compute_custom_fn
         self._on_jitter_done = on_jitter_done
         self._on_custom_done = on_custom_done
@@ -867,7 +867,7 @@ class JitterManager:
             self._proc = _mp.Process(
                 target=jitter_worker,
                 args=(self._result_queue, self.key, self.neurons,
-                      self.ccg_data, self.ccg_pointer.edge_times,
+                      self.ccg_data, self.ccg_ptr.edge_times,
                       ref, tgt, njitter, bin_size_eff),
                 daemon=True,
             )

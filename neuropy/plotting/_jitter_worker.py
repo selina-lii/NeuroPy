@@ -45,7 +45,7 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
                 n_pairs=1,
             )
         j = Jitter(key=key, neurons=neurons_eff, conf=jconf,
-                    ccg_pointer=ptr, ccg_data=ccg_data)
+                    ccg_ptr=ptr, ccg_data=ccg_data)
         j.run()
 
         j_avg, j_lo, j_hi = j._j_ccg_cache.get(0, (None, None, None))

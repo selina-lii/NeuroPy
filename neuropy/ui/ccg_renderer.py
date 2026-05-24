@@ -1,11 +1,7 @@
-"""
-CCGRenderEngine: data preparation and PNG rendering for CCGReviewUI.
+"""CCGRenderEngine: data prep and PNG rendering for CCGReviewUI.
 
-CCGRenderEngine.build_context() resolves all display parameters, loads and
-transforms data (deconvolution, normalization, CS/baseline, jitter, waveform).
-CCGRenderEngine.write_png() handles only figure creation and saving.
-
-This keeps _render_png in ccg_ui.py as a thin ~12-line coordinator.
+build_context() resolves display params and transforms data (deconv, norm, CS, jitter, waveform).
+write_png() creates and saves the figure.
 """
 from __future__ import annotations
 
@@ -159,9 +155,8 @@ class RenderContext:
 class CCGRenderEngine:
     """Builds RenderContext objects and writes PNG files for CCGReviewUI.
 
-    Holds a back-reference to the UI so data sources and display state are
-    accessible, but write_png() is a pure function of RenderContext — no UI
-    state reads happen there.
+    Holds a UI back-reference for data/state access; write_png() is a pure
+    function of RenderContext with no UI reads.
     """
 
     def __init__(self, ui):
@@ -458,10 +453,14 @@ class CCGRenderEngine:
                       f"({ref},{tgt}) seg={segment}: {reason}")
         elif method == 'jitter':
             if not highres:
-                show_j_ccg    = j_ccg_arg
-                show_j_pval   = j_pval_arg if self._rsig('jitter_pc', render_cfg) else None
-                show_j_ccg_lo = j_ccg_lo_arg
-                show_j_ccg_hi = j_ccg_hi_arg
+                _j_len = len(j_ccg_arg) if j_ccg_arg is not None else None
+                _bins_match = (_j_len == n_bins)
+                show_j_ccg    = j_ccg_arg    if _bins_match else None
+                show_j_pval   = (j_pval_arg  if self._rsig('jitter_pc', render_cfg) else None) if _bins_match else None
+                show_j_ccg_lo = j_ccg_lo_arg if _bins_match else None
+                show_j_ccg_hi = j_ccg_hi_arg if _bins_match else None
+                if not _bins_match and j_ccg_arg is not None:
+                    print(f"[jitter] bin mismatch ({_j_len} vs {n_bins}) — overlay suppressed")
             ui._dbg_log(
                 "H2",
                 "ccg_render_engine.py:build_context:jitter_show",
@@ -501,7 +500,15 @@ class CCGRenderEngine:
         _min_lag_plot = eff_min_lag if (_tw_active or cs_show) else None
         _max_lag_plot = eff_max_lag if (_tw_active or cs_show) else None
 
-        _sh = getattr(ui.neurons, 'shank_ids', None) if ui.neurons is not None else None
+        _neurons_obj = ui.neurons
+        if _neurons_obj is None:
+            try:
+                _nd = getattr(ui.cd, 'nd', None)
+                if _nd is not None:
+                    _neurons_obj = _nd.data[ui.key.nd()]
+            except Exception:
+                pass
+        _sh = getattr(_neurons_obj, 'shank_ids', None) if _neurons_obj is not None else None
         def _shank_label(idx):
             if _sh is not None:
                 try:
@@ -511,7 +518,7 @@ class CCGRenderEngine:
             return str(idx)
         ids = (_shank_label(ref), _shank_label(tgt))
         try:
-            nt = (ui.neurons.neuron_type[ref], ui.neurons.neuron_type[tgt])
+            nt = (_neurons_obj.neuron_type[ref], _neurons_obj.neuron_type[tgt])
         except Exception:
             nt = None
 
@@ -753,6 +760,13 @@ class CCGRenderEngine:
             ax.title.set_color(_fg)
             for sp in ax.spines.values():
                 sp.set_edgecolor(_sp)
+            for _child_ax in fig.get_axes():
+                leg = _child_ax.get_legend()
+                if leg is not None:
+                    leg.get_frame().set_facecolor(_bg)
+                    leg.get_frame().set_edgecolor(_sp)
+                    for _lt in leg.get_texts():
+                        _lt.set_color(_fg)
 
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
                     facecolor=fig.get_facecolor())

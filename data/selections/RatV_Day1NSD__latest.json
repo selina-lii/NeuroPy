@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-20T00:56:18.443678",
+  "saved_at": "2026-05-13T20:13:48.836395",
   "session": "RatV_Day1NSD",
   "selections": {
     "sess_RatV_Day1NSD.ex_E.type_pyr-pyr": [],
@@ -144,6 +144,9 @@
       "groups": [
         "good"
       ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,32": {
       "groups": [
@@ -338,6 +341,7 @@
     "63,73": {
       "groups": [
         "2peakms",
+        "5-13",
         "Disinhib",
         "good"
       ]
@@ -378,6 +382,7 @@
     "69,14": {
       "groups": [
         "2peakms",
+        "5-13",
         "good"
       ]
     },
@@ -463,6 +468,7 @@
       ]
     }
   },
+  "deleted": [],
   "deleted_by_type": {
     "sess_RatV_Day1NSD.ex_E.type_pyr-pyr": [],
     "sess_RatV_Day1NSD.ex_E.type_pyr-inter": [],

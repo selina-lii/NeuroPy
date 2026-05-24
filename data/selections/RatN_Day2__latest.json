@@ -1,7 +1,7 @@
 {
   "version": "4.0",
   "name": "latest",
-  "saved_at": "2026-05-20T00:56:18.420794",
+  "saved_at": "2026-05-20T10:22:00.291437",
   "session": "RatN_Day2",
   "selections": {
     "sess_RatN_Day2.ex_E.type_pyr-pyr": [
@@ -19,66 +19,8 @@
       ]
     ],
     "sess_RatN_Day2.ex_E.type_pyr-inter": [],
-    "sess_RatN_Day2.ex_I.type_inter-inter": [
-      [
-        9,
-        12
-      ],
-      [
-        9,
-        14
-      ],
-      [
-        9,
-        22
-      ],
-      [
-        22,
-        14
-      ],
-      [
-        32,
-        9
-      ],
-      [
-        32,
-        14
-      ],
-      [
-        34,
-        43
-      ],
-      [
-        91,
-        69
-      ],
-      [
-        92,
-        67
-      ]
-    ],
-    "sess_RatN_Day2.ex_I.type_inter-pyr": [
-      [
-        22,
-        24
-      ],
-      [
-        22,
-        33
-      ],
-      [
-        88,
-        105
-      ],
-      [
-        88,
-        129
-      ],
-      [
-        91,
-        70
-      ]
-    ]
+    "sess_RatN_Day2.ex_I.type_inter-inter": [],
+    "sess_RatN_Day2.ex_I.type_inter-pyr": []
   },
   "pair_tags": {
     "0,9": {
@@ -161,6 +103,7 @@
     },
     "3,9": {
       "groups": [
+        "5-13",
         "good",
         "leak",
         "msconn"
@@ -192,6 +135,7 @@
     },
     "5,12": {
       "groups": [
+        "5-13",
         "good",
         "leak"
       ]
@@ -387,6 +331,7 @@
     },
     "13,12": {
       "groups": [
+        "5-13",
         "Disinhib",
         "best",
         "leak"
@@ -606,7 +551,8 @@
     },
     "20,133": {
       "groups": [
-        "good"
+        "0rhythm",
+        "rhythm"
       ]
     },
     "21,12": {
@@ -687,6 +633,7 @@
     "23,22": {
       "groups": [
         "2side_dips",
+        "5-13",
         "leak",
         "ok"
       ]
@@ -793,6 +740,9 @@
       "groups": [
         "ok"
       ]
+    },
+    "25,29": {
+      "notes": "qualifies as 'best', but completely drops off in post2, making it an outlier"
     },
     "25,34": {
       "groups": [
@@ -2104,6 +2054,7 @@
     },
     "78,92": {
       "groups": [
+        "5-13",
         "good",
         "leak"
       ]
@@ -2169,6 +2120,7 @@
     },
     "79,92": {
       "groups": [
+        "5-13",
         "good",
         "leak",
         "triple"
@@ -2203,6 +2155,7 @@
     },
     "80,92": {
       "groups": [
+        "5-13",
         "best",
         "leak"
       ]
@@ -2678,6 +2631,7 @@
     "96,133": {
       "groups": [
         "2peakms",
+        "5-13",
         "Disinhib",
         "good",
         "leak",
@@ -3058,6 +3012,7 @@
     "113,133": {
       "groups": [
         "2peakms",
+        "5-13",
         "Disinhib",
         "good",
         "rhythm"
@@ -3575,6 +3530,7 @@
       ]
     }
   },
+  "deleted": [],
   "deleted_by_type": {
     "sess_RatN_Day2.ex_E.type_pyr-pyr": [],
     "sess_RatN_Day2.ex_E.type_pyr-inter": [],
