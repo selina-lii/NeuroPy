@@ -6,12 +6,15 @@ The UI layer (ccg_ui.py) wraps them with error dialogs and widget updates.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from neuropy.analyses.correlations import spike_correlations
-from neuropy.analyses.ms_connectivity import EranConv, _CCG_RESOLUTION
+from neuropy.analyses.ms_connectivity import (CCGConfig, CCGData, CustomCCGMeta,
+                                               EranConv, _CCG_RESOLUTION)
 
 
 def compute_custom_ccg(
@@ -25,7 +28,8 @@ def compute_custom_ccg(
     active_duration: float | None = None,
     excitability: str = 'E',
     metadata: dict | None = None,
-) -> dict:
+    filter_state: dict | None = None,
+) -> tuple[CCGData, CCGData | None]:
     """Compute the full CCG pipeline for an arbitrary time window.
 
     Runs spike_correlations → EranConv._conv → multiple_correction at low-res
@@ -37,7 +41,7 @@ def compute_custom_ccg(
     t0, t1 : float
         Window boundaries in seconds.
     name : str
-        Segment label stored in the result dict.
+        Segment label stored in the result.
     neurons_slice : Neurons
         Already time-sliced Neurons object (caller does time_slice(t0, t1)).
     conf : CCGConfig
@@ -49,14 +53,16 @@ def compute_custom_ccg(
     excitability : str
         'E' (use pvals) or 'I' (use qvals) for significance selection.
     metadata : dict or None
-        Arbitrary metadata stored verbatim in the result dict.
+        Arbitrary metadata stored verbatim on the result.
+    filter_state : dict or None
+        Time-slider filter state at the time the segment was created.
 
     Returns
     -------
-    dict
-        Keys: name, t0, t1, ccg, ccg_null, pval, pval_corrected, firing_rates,
-        active_duration, total_time_hours, metadata.
-        Plus ccg_hi / ccg_null_hi / pval_hi / pval_corrected_hi when has_highres.
+    (lo, hi)
+        ``lo`` is always a ``CCGData`` with ``custom_meta`` populated.
+        ``hi`` is a ``CCGData`` (arrays only, no custom_meta) when
+        *has_highres* is True, else ``None``.
 
     Raises
     ------
@@ -70,7 +76,7 @@ def compute_custom_ccg(
     neuron_inds = np.arange(n_neurons)
     method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
 
-    def _run_pipeline(bin_size: float, label: str):
+    def _run_pipeline(bin_size: float, label: str) -> CCGData:
         print(f"[CustomSegment] computing {label} CCG for {name} "
               f"({t1-t0:.1f}s, {n_neurons} neurons, "
               f"bin={bin_size*1e3:.2f}ms) ...")
@@ -83,98 +89,279 @@ def compute_custom_ccg(
             use_acceleration=conf.use_acceleration,
         )
         ccg = ccg[np.newaxis, ...]
-        # Compute W from the actual bin_size used, not from conf
-        # (conf.bin_size may be mutated to high-res)
         W = conf.conv_window / bin_size
         pvals, pred, qvals = EranConv._conv(ccg, W=W, wintype="gauss", hollow_frac=None)
         p_raw = pvals if excitability == 'E' else qvals
         _, pval_corrected = EranConv.multiple_correction(p_raw, conf.alpha, method=method)
         print(f"[CustomSegment] {label} done. shape={ccg.shape}")
-        return ccg, pred, p_raw, pval_corrected
+        conf_res = CCGConfig(
+            name=name,
+            bin_size=bin_size,
+            duration=conf.duration,
+            conv_window=conf.conv_window,
+            alpha=conf.alpha,
+            multiple_correction=method,
+        )
+        return CCGData(
+            key=None, _conf=conf_res,
+            ccg=ccg, ccg_null=pred,
+            pval=p_raw, qval=None,
+            pval_corrected=pval_corrected, qval_corrected=None,
+            significant=None, norm_factors=None, conn_strength=None,
+        )
 
-    lo_bs = _CCG_RESOLUTION['lowres']
-    ccg_lo, pred_lo, pval_lo, pvalc_lo = _run_pipeline(lo_bs, 'lowres')
+    lo = _run_pipeline(_CCG_RESOLUTION['lowres'], 'lowres')
 
     firing_rates = np.array(
         [len(st) for st in neurons_slice.spiketrains],
         dtype=float) / max(active_duration, 1e-9)
 
+    lo.custom_meta = CustomCCGMeta(
+        name=name,
+        t0=t0,
+        t1=t1,
+        active_duration=active_duration,
+        total_time_hours=active_duration / 3600.0,
+        firing_rates=firing_rates,
+        filter_state=filter_state or {},
+        metadata=metadata or {},
+    )
+
+    hi = _run_pipeline(_CCG_RESOLUTION['highres'], 'highres') if has_highres else None
+
+    return lo, hi
+
+
+# ---------------------------------------------------------------------------
+# CustomSegmentNpz — schema-driven NPZ serialisation
+# ---------------------------------------------------------------------------
+
+class CustomSegmentNpz:
+    """Schema-driven NPZ serialiser for ``CCGData`` custom segments.
+
+    Field schema is defined once; ``dump`` and ``load`` both derive from it so
+    the two cannot drift.  All metadata lives on ``lo.custom_meta``
+    (a ``CustomCCGMeta``); ``hi`` carries only the CCG arrays.
+    """
+
+    # (CustomCCGMeta attribute, python type, default when absent in npz)
+    _SCALAR = [
+        ('name',             str,   ''),
+        ('t0',               float, 0.0),
+        ('t1',               float, 0.0),
+        ('compute_sec',      float, float('nan')),
+        ('active_duration',  float, float('nan')),
+        ('total_time_hours', float, float('nan')),
+    ]
+    # JSON-encoded scalar fields
+    _JSON = [('filter_state', {}), ('metadata', {})]
+    # lo / hi array field names
+    _LO  = ('ccg', 'ccg_null', 'pval', 'pval_corrected')
+    _HI  = ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi')
+
+    @classmethod
+    def dump(cls, lo: CCGData, path: str, hi: CCGData | None = None) -> None:
+        """Write *lo* (and optionally *hi*) to a compressed NumPy archive."""
+        m = lo.custom_meta or CustomCCGMeta(
+            name='', t0=0.0, t1=0.0, active_duration=0.0, total_time_hours=0.0)
+        arrays = {}
+        for attr, typ, _ in cls._SCALAR:
+            arrays[attr + '_'] = np.array(typ(getattr(m, attr)))
+        for attr, default in cls._JSON:
+            arrays[attr + '_'] = np.array(json.dumps(getattr(m, attr) or default))
+        for attr in cls._LO:
+            arrays[attr] = getattr(lo, attr)
+        if hi is not None:
+            for lo_k, hi_k in zip(cls._LO, cls._HI):
+                val = getattr(hi, lo_k, None)
+                if val is not None:
+                    arrays[hi_k] = val
+        if m.firing_rates is not None:
+            arrays['firing_rates'] = m.firing_rates
+        np.savez_compressed(path, **arrays)
+
+    @classmethod
+    def load(cls, path: str) -> tuple[CCGData, CCGData | None]:
+        """Load from a compressed NumPy archive.
+
+        Returns ``(lo, hi)`` where ``lo.custom_meta`` is populated and
+        ``hi`` is ``None`` if no high-res data was stored.
+
+        Raises on failure — caller should catch and skip the file.
+        """
+        npz = np.load(path, allow_pickle=False)
+        meta_kw: dict = {}
+        for attr, typ, default in cls._SCALAR:
+            k = attr + '_'
+            meta_kw[attr] = typ(npz[k]) if k in npz else default
+        for attr, default in cls._JSON:
+            k = attr + '_'
+            meta_kw[attr] = json.loads(str(npz[k])) if k in npz else default
+        meta_kw['firing_rates'] = npz['firing_rates'] if 'firing_rates' in npz else None
+        meta_kw['src_path'] = path
+        meta = CustomCCGMeta(**meta_kw)
+        lo = CCGData(
+            key=None, _conf=None,
+            ccg=npz['ccg'], ccg_null=npz['ccg_null'],
+            pval=npz['pval'], qval=None,
+            pval_corrected=npz['pval_corrected'], qval_corrected=None,
+            significant=None, norm_factors=None, conn_strength=None,
+            custom_meta=meta,
+        )
+        hi = None
+        if 'ccg_hi' in npz:
+            hi = CCGData(
+                key=None, _conf=None,
+                ccg=npz['ccg_hi'],
+                ccg_null=npz.get('ccg_null_hi'),
+                pval=npz.get('pval_hi'), qval=None,
+                pval_corrected=npz.get('pval_corrected_hi'), qval_corrected=None,
+                significant=None, norm_factors=None, conn_strength=None,
+            )
+        return lo, hi
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible module-level aliases (dict ↔ CCGData conversion)
+#
+# Callers that still use the old dict format (ccg_ui.py, time_slider.py,
+# custom_ccg_manager.py) continue to work unchanged.  New code should use
+# ``CustomSegmentNpz.dump / .load`` directly with ``CCGData`` objects.
+# ---------------------------------------------------------------------------
+
+def _dict_to_lo_hi(segment: dict) -> tuple[CCGData, 'CCGData | None']:
+    """Build (lo, hi) CCGData pair from the legacy segment dict format."""
+    meta = CustomCCGMeta(
+        name=str(segment.get('name', '')),
+        t0=float(segment.get('t0', 0.0)),
+        t1=float(segment.get('t1', 0.0)),
+        active_duration=float(segment.get('active_duration', float('nan'))),
+        total_time_hours=float(segment.get('total_time_hours', float('nan'))),
+        firing_rates=segment.get('firing_rates'),
+        filter_state=segment.get('filter_state') or {},
+        metadata=segment.get('metadata') or {},
+        compute_sec=float(segment.get('compute_sec', float('nan'))),
+        src_path=segment.get('src_path'),
+    )
+    lo = CCGData(
+        key=None, _conf=None,
+        ccg=segment['ccg'], ccg_null=segment['ccg_null'],
+        pval=segment['pval'], qval=None,
+        pval_corrected=segment['pval_corrected'], qval_corrected=None,
+        significant=None, norm_factors=None, conn_strength=None,
+        custom_meta=meta,
+    )
+    hi = None
+    if 'ccg_hi' in segment:
+        hi = CCGData(
+            key=None, _conf=None,
+            ccg=segment['ccg_hi'],
+            ccg_null=segment.get('ccg_null_hi'),
+            pval=segment.get('pval_hi'), qval=None,
+            pval_corrected=segment.get('pval_corrected_hi'), qval_corrected=None,
+            significant=None, norm_factors=None, conn_strength=None,
+        )
+    return lo, hi
+
+
+def _lo_hi_to_dict(lo: CCGData, hi: 'CCGData | None') -> dict:
+    """Convert (lo, hi) CCGData pair back to the legacy segment dict format."""
+    m = lo.custom_meta or CustomCCGMeta(
+        name='', t0=0.0, t1=0.0, active_duration=0.0, total_time_hours=0.0)
     result = {
-        'name':             name,
-        't0':               t0,
-        't1':               t1,
-        'ccg':              ccg_lo,
-        'ccg_null':         pred_lo,
-        'pval':             pval_lo,
-        'pval_corrected':   pvalc_lo,
-        'firing_rates':     firing_rates,
-        'active_duration':  active_duration,
-        # active recording time in hours — needed for TIME_SPAN normalisation
-        'total_time_hours': active_duration / 3600.0,
-        'metadata':         metadata or {},
+        'name':             m.name,
+        't0':               m.t0,
+        't1':               m.t1,
+        'ccg':              lo.ccg,
+        'ccg_null':         lo.ccg_null,
+        'pval':             lo.pval,
+        'pval_corrected':   lo.pval_corrected,
+        'firing_rates':     m.firing_rates,
+        'active_duration':  m.active_duration,
+        'total_time_hours': m.total_time_hours,
+        'filter_state':     m.filter_state,
+        'metadata':         m.metadata,
+        'compute_sec':      m.compute_sec,
+        'src_path':         m.src_path,
     }
-
-    if has_highres:
-        hi_bs = _CCG_RESOLUTION['highres']
-        ccg_hi, pred_hi, pval_hi, pvalc_hi = _run_pipeline(hi_bs, 'highres')
-        result['ccg_hi'] = ccg_hi
-        result['ccg_null_hi'] = pred_hi
-        result['pval_hi'] = pval_hi
-        result['pval_corrected_hi'] = pvalc_hi
-
+    if hi is not None:
+        result['ccg_hi']             = hi.ccg
+        result['ccg_null_hi']        = hi.ccg_null
+        result['pval_hi']            = hi.pval
+        result['pval_corrected_hi']  = hi.pval_corrected
     return result
 
 
 def save_custom_segment_to_npz(segment: dict, path: str) -> None:
-    """Write a custom segment dict to a compressed NumPy archive at *path*."""
-    arrays = dict(
-        name_=np.array(segment['name']),
-        t0_=np.array(segment['t0']),
-        t1_=np.array(segment['t1']),
-        ccg=segment['ccg'],
-        ccg_null=segment['ccg_null'],
-        pval=segment['pval'],
-        pval_corrected=segment['pval_corrected'],
-        compute_sec_=np.array(segment.get('compute_sec', float('nan'))),
-        active_duration_=np.array(segment.get('active_duration', float('nan'))),
-        total_time_hours_=np.array(segment.get('total_time_hours', float('nan'))),
-        filter_state_=np.array(json.dumps(segment.get('filter_state', {}))),
-        metadata_=np.array(json.dumps(segment.get('metadata', {}))),
-        **({'firing_rates': segment['firing_rates']} if 'firing_rates' in segment else {}),
-    )
-    for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-        if k in segment:
-            arrays[k] = segment[k]
-    np.savez_compressed(path, **arrays)
+    """Save a legacy segment dict to a compressed NumPy archive."""
+    lo, hi = _dict_to_lo_hi(segment)
+    CustomSegmentNpz.dump(lo, path, hi)
 
 
 def load_custom_segment_from_npz(path: str) -> dict:
-    """Load a custom segment dict from a compressed NumPy archive.
+    """Load a compressed NumPy archive and return the legacy segment dict."""
+    lo, hi = CustomSegmentNpz.load(path)
+    return _lo_hi_to_dict(lo, hi)
 
-    Raises on failure — caller should catch and skip the file.
-    """
-    npz = np.load(path, allow_pickle=False)
-    cs = dict(
-        name=str(npz['name_']),
-        t0=float(npz['t0_']),
-        t1=float(npz['t1_']),
-        ccg=npz['ccg'],
-        ccg_null=npz['ccg_null'],
-        pval=npz['pval'],
-        pval_corrected=npz['pval_corrected'],
-        compute_sec=(float(npz['compute_sec_']) if 'compute_sec_' in npz else float('nan')),
-        active_duration=(float(npz['active_duration_']) if 'active_duration_' in npz else float('nan')),
-        total_time_hours=(float(npz['total_time_hours_']) if 'total_time_hours_' in npz else None),
-        filter_state=(json.loads(str(npz['filter_state_'])) if 'filter_state_' in npz else {}),
-        metadata=(json.loads(str(npz['metadata_'])) if 'metadata_' in npz else {}),
-        src_path=path,
-        **(({'firing_rates': npz['firing_rates']}) if 'firing_rates' in npz else {}),
-    )
-    for k in ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi'):
-        if k in npz:
-            cs[k] = npz[k]
-    return cs
 
+# ---------------------------------------------------------------------------
+# RawCCGSpec — typed spec container
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RawCCGSpec:
+    """Typed container for a custom CCG spec. t0/t1 may be float or 'start'/'end' sentinel."""
+    name:                str
+    t0:                  float | str
+    t1:                  float | str
+    scope:               str         = ''
+    created_from_session: str        = ''
+    sessions:            list = field(default_factory=list)
+    n_splits:            int         = 1
+    overlap_sec:         float       = 0.0
+    filter_state:        dict        = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: dict, *, default_session: str = '') -> 'RawCCGSpec':
+        """Build from a raw spec dict, normalising values via normalize_custom_spec."""
+        nd = normalize_custom_spec(d, default_session=default_session)
+        return cls(
+            name=nd['name'], t0=nd['t0'], t1=nd['t1'],
+            scope=nd['scope'], created_from_session=nd['created_from_session'],
+            sessions=nd['sessions'], n_splits=nd['n_splits'],
+            overlap_sec=nd['overlap_sec'], filter_state=nd.get('filter_state', {}),
+        )
+
+    @classmethod
+    def from_npz(cls, npz, session: str) -> 'RawCCGSpec':
+        """Build from a loaded NPZ archive (standard CCG npz field names)."""
+        fs = json.loads(str(npz['filter_state_'])) if 'filter_state_' in npz else {}
+        return cls(
+            name=str(npz['name_']),
+            t0=float(npz['t0_']),
+            t1=float(npz['t1_']),
+            scope=session,
+            created_from_session=session,
+            sessions=[session],
+            filter_state=fs,
+        )
+
+    @staticmethod
+    def infer_scope(sessions: list[str], all_sessions: list[str]) -> str:
+        """Return 'All', a single session string, or 'By session' based on coverage."""
+        if all_sessions and sorted(sessions) == sorted(all_sessions):
+            return 'All'
+        if len(sessions) == 1:
+            return sessions[0]
+        return 'By session'
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Spec helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def custom_spec_key(spec: dict) -> tuple:
     """Return a hashable key that uniquely identifies a custom CCG spec."""

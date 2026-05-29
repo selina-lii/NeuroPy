@@ -52,7 +52,6 @@ for _d in (
 ):
     os.makedirs(_d, exist_ok=True)
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -70,7 +69,6 @@ def _detect_dark_mode(root) -> bool:
     except Exception:
         return False
 
-
 def _random_color() -> str:
     hues = [
         '#e63946', '#f4a261', '#2a9d8f', '#457b9d', '#9b5de5',
@@ -78,7 +76,6 @@ def _random_color() -> str:
         '#3a86ff', '#8338ec', '#06d6a0', '#ef476f', '#ffd166',
     ]
     return random.choice(hues)
-
 
 def _lighten_color(hex_color: str, factor: float = 0.85) -> str:
     try:
@@ -91,13 +88,11 @@ def _lighten_color(hex_color: str, factor: float = 0.85) -> str:
     except Exception:
         return '#f0f0f0'
 
-
 def _make_color_image(color: str, size: int = 28) -> Optional[object]:
     if _HAS_PIL:
         img = Image.new('RGB', (size, size), color)
         return ImageTk.PhotoImage(img)
     return None
-
 
 def _load_avatar(hyp_id: str, size: int = 28) -> Optional[object]:
     path = os.path.join(_IMAGES_DIR, f'{hyp_id}.png')
@@ -108,7 +103,6 @@ def _load_avatar(hyp_id: str, size: int = 28) -> Optional[object]:
         except Exception:
             pass
     return None
-
 
 def _assign_avatar(hyp_id: str) -> bool:
     unused = glob(os.path.join(_UNUSED_DIR, '*.png'))
@@ -121,7 +115,6 @@ def _assign_avatar(hyp_id: str) -> bool:
         return True
     except Exception:
         return False
-
 
 def _atomic_write_json(path: str, data: dict):
     """Write JSON atomically using a temp file + rename."""
@@ -137,7 +130,6 @@ def _atomic_write_json(path: str, data: dict):
         except OSError:
             pass
         raise
-
 
 # ---------------------------------------------------------------------------
 # _TicketSection
@@ -243,7 +235,6 @@ class _TicketSection(ttk.Frame):
         self._items.clear()
         for text in texts:
             self._add_item(text)
-
 
 # ---------------------------------------------------------------------------
 # _TicketPriorityPanel  — multi-file wrapper around _TicketSection
@@ -533,7 +524,6 @@ class _TicketPriorityPanel(ttk.Frame):
                 self._active_idx = 0
                 self._name_var.set(self._files[0]['name'])
 
-
 # ---------------------------------------------------------------------------
 # _HypothesisCard
 # ---------------------------------------------------------------------------
@@ -580,7 +570,6 @@ class _HypothesisCard(tk.Frame):
         text_lbl.bind('<Button-1>', lambda e, d=data: on_select(d))
         title_lbl.bind('<Double-Button-1>', lambda e, d=data: on_edit(d))
         text_lbl.bind('<Double-Button-1>', lambda e, d=data: on_edit(d))
-
 
 # ---------------------------------------------------------------------------
 # PromptSpace

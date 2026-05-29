@@ -16,7 +16,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 _ALL_SEGS = "All segments"
-_ADMITTED_GROUP = "__admitted__"
+from neuropy.ui.utils import _admitted_pairs, UITheme
 
 _BAR_COLORS = ['#8FB3FF', '#FFB3B3', '#B3FFB3', '#FFD9B3', '#E0B3FF',
                '#B3F0FF', '#FFB3E6']
@@ -46,7 +46,6 @@ def _fmt_pair(p) -> str:
             return f"{p[0]}-{p[1]}"
     return str(p)
 
-
 class StatsTestPanel:
     """Toplevel window for running statistical comparisons of CCG connection strengths.
 
@@ -66,7 +65,7 @@ class StatsTestPanel:
         self.root.geometry("1100x580")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        if getattr(ui, '_dark', False):
+        if ui.theme.dark:
             self.root.configure(bg='#2b2b2b')
 
         self._export_btn: ttk.Button | None = None
@@ -201,9 +200,7 @@ class StatsTestPanel:
         # Top: text + scrollbar
         text_frame = ttk.Frame(res_pane)
         _txt_fs = max(9, self.ui._min_font_size())
-        _dark = getattr(self.ui, '_dark', False)
-        _txt_bg = '#1e1e1e' if _dark else '#FAFAFA'
-        _txt_fg = '#cccccc' if _dark else 'black'
+        _txt_bg, _txt_fg = self.ui.theme.bg, self.ui.theme.fg
         self._result_text = tk.Text(
             text_frame, height=10, wrap=tk.WORD,
             font=('Courier', _txt_fs), state=tk.DISABLED,
@@ -280,11 +277,6 @@ class StatsTestPanel:
                 seen.append(str(s))
         return seen or [str(self.ui._current_session_str())]
 
-    def _available_sessions(self) -> list[str]:
-        """Backward-compat: ``All`` + concrete sessions (unused by session picker rows)."""
-        concrete = self._concrete_sessions()
-        return ['All'] + concrete if 'All' not in concrete else concrete
-
     def _format_list_summary(self, items: list[str], all_fn, noun: str,
                              short_threshold: int) -> str:
         if not items:
@@ -300,76 +292,58 @@ class StatsTestPanel:
     def _format_sess_list_summary(self, sess_list: list[str]) -> str:
         return self._format_list_summary(sess_list, self._concrete_sessions, "sessions", 3)
 
-    def _pooling_mode(self, sess_list: list[str]) -> tuple[str, str | list[str] | None]:
-        """``('all', None)`` | ``('one', session)`` | ``('multi', [sessions...])``."""
-        concrete = self._concrete_sessions()
-        sl = [s for s in (sess_list or []) if s in concrete]
-        if not sl:
-            sl = [concrete[0]] if concrete else []
-        if set(sl) == set(concrete):
-            return 'all', None
-        if len(sl) == 1:
-            return 'one', sl[0]
-        return 'multi', sl
-
-    def _pick_stats_sessions_dialog(
+    def _pick_multiselect_dialog(
             self,
+            items: list[str],
             *,
-            title: str = 'Sessions for stats group',
+            title: str,
+            noun: str,
+            geometry: str = '400x340',
+            highlight: str | None = None,
             initial: list[str] | None = None,
-            current_session: str | None = None,
     ) -> list[str] | None:
-        """Multi-select session list (same pattern as custom CCG apply-to-sessions)."""
-        sessions = self._concrete_sessions()
-        if not sessions:
-            messagebox.showinfo('Sessions', 'No sessions available.', parent=self.root)
+        """Generic multi-select listbox dialog. Returns selected items or None on cancel."""
+        if not items:
+            messagebox.showinfo(noun.capitalize(), f'No {noun} available.', parent=self.root)
             return None
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry('400x340')
+        win.geometry(geometry)
         win.resizable(True, True)
         win.transient(self.root)
         win.grab_set()
-
-        ttk.Label(
-            win,
-            text='Select sessions  (Shift / Ctrl+click for multi-select):',
-        ).pack(anchor='w', padx=8, pady=(8, 2))
-
-        list_frame = ttk.Frame(win)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        lb = tk.Listbox(
-            list_frame, selectmode=tk.EXTENDED, exportselection=False,
-            height=14, activestyle='dotbox',
-        )
-        vsb = ttk.Scrollbar(list_frame, orient='vertical', command=lb.yview)
+        ttk.Label(win, text=f'Select {noun}  (Shift / Ctrl+click for multi-select):').pack(
+            anchor='w', padx=8, pady=(8, 2))
+        lf = ttk.Frame(win)
+        lf.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        lb = tk.Listbox(lf, selectmode=tk.EXTENDED, exportselection=False,
+                        height=14, activestyle='dotbox')
+        vsb = ttk.Scrollbar(lf, orient='vertical', command=lb.yview)
         lb.configure(yscrollcommand=vsb.set)
         lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        for i, sess in enumerate(sessions):
-            lb.insert(tk.END, sess)
-            if current_session and sess == current_session:
+        for i, item in enumerate(items):
+            lb.insert(tk.END, item)
+            if highlight and item == highlight:
                 lb.itemconfigure(i, foreground='#1E5FBB')
-
-        init = [s for s in (initial or sessions) if s in sessions]
+        init = [x for x in (initial if initial is not None else items) if x in items]
         if not init:
-            init = list(sessions)
+            init = list(items)
         lb.selection_clear(0, tk.END)
-        for i, sess in enumerate(sessions):
-            if sess in init:
+        for i, item in enumerate(items):
+            if item in init:
                 lb.select_set(i)
-
         result: list[str] | None = None
+        noun_sg = noun[:-1] if noun.endswith('s') else noun
 
         def _ok():
             nonlocal result
             sels = lb.curselection()
             if not sels:
-                messagebox.showwarning(
-                    'Sessions', 'Select at least one session.', parent=win)
+                messagebox.showwarning(noun.capitalize(),
+                                       f'Select at least one {noun_sg}.', parent=win)
                 return
-            result = [sessions[i] for i in sels]
+            result = [items[i] for i in sels]
             win.destroy()
 
         def _cancel():
@@ -377,17 +351,16 @@ class StatsTestPanel:
             result = None
             win.destroy()
 
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Button(btn_frame, text='Select All',
-                   command=lambda: lb.select_set(0, tk.END)).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text='Select None',
-                   command=lambda: lb.selection_clear(0, tk.END)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text='Cancel', command=_cancel).pack(side=tk.RIGHT)
-        ttk.Button(btn_frame, text='Apply', command=_ok).pack(side=tk.RIGHT, padx=4)
-
+        bf = ttk.Frame(win)
+        bf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(bf, text='Select All',  command=lambda: lb.select_set(0, tk.END)).pack(side=tk.LEFT)
+        ttk.Button(bf, text='Select None', command=lambda: lb.selection_clear(0, tk.END)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text='Cancel', command=_cancel).pack(side=tk.RIGHT)
+        ttk.Button(bf, text='Apply',  command=_ok).pack(side=tk.RIGHT, padx=4)
         win.bind('<Return>', lambda e: _ok())
+        win.bind('<KP_Enter>', lambda e: _ok())
         win.bind('<Escape>', lambda e: _cancel())
+        lb.focus_set()
         win.wait_window()
         return result
 
@@ -500,80 +473,13 @@ class StatsTestPanel:
 
     def _resolve_cs_method(self) -> str:
         ui = self.ui
-        if ui.center_container.cs_panel._conn_str_metric_var.get() == 'JBSI':
+        if ui.center_container.cs_panel._conn_str_metric.get() == 'JBSI':
             return "JBSI"
-        return ui.center_container.baseline_panel._conn_str_method_var.get()
+        return ui.center_container.baseline_panel._conn_str_method.get()
 
     def _format_grp_list_summary(self, grp_list: list[str]) -> str:
         return self._format_list_summary(grp_list, self._available_groups, "groups", 2)
 
-    def _pick_stats_groups_dialog(self, *, initial: list[str] | None = None) -> list[str] | None:
-        """Multi-select group list (same UX as session picker)."""
-        groups = self._available_groups()
-        if not groups:
-            messagebox.showinfo('Groups', 'No groups available.', parent=self.root)
-            return None
-        win = tk.Toplevel(self.root)
-        win.title('Groups for stats row')
-        win.geometry('360x300')
-        win.resizable(True, True)
-        win.transient(self.root)
-        win.grab_set()
-
-        ttk.Label(win,
-                  text='Select groups  (Shift / Ctrl+click for multi-select):').pack(
-            anchor='w', padx=8, pady=(8, 2))
-
-        list_frame = ttk.Frame(win)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        lb = tk.Listbox(list_frame, selectmode=tk.EXTENDED, exportselection=False,
-                        height=12, activestyle='dotbox')
-        vsb = ttk.Scrollbar(list_frame, orient='vertical', command=lb.yview)
-        lb.configure(yscrollcommand=vsb.set)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        for g in groups:
-            lb.insert(tk.END, g)
-
-        init = [g for g in (initial or groups) if g in groups]
-        if not init:
-            init = list(groups)
-        lb.selection_clear(0, tk.END)
-        for i, g in enumerate(groups):
-            if g in init:
-                lb.select_set(i)
-
-        result: list[str] | None = None
-
-        def _ok():
-            nonlocal result
-            sels = lb.curselection()
-            if not sels:
-                messagebox.showwarning('Groups', 'Select at least one group.', parent=win)
-                return
-            result = [groups[i] for i in sels]
-            win.destroy()
-
-        def _cancel():
-            nonlocal result
-            result = None
-            win.destroy()
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Button(btn_frame, text='Select All',
-                   command=lambda: lb.select_set(0, tk.END)).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text='Select None',
-                   command=lambda: lb.selection_clear(0, tk.END)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text='Cancel', command=_cancel).pack(side=tk.RIGHT)
-        ttk.Button(btn_frame, text='Apply', command=_ok).pack(side=tk.RIGHT, padx=4)
-
-        win.bind('<Return>', lambda e: _ok())
-        win.bind('<KP_Enter>', lambda e: _ok())
-        lb.focus_set()
-        win.wait_window(win)
-        return result
 
     # ------------------------------------------------------------------
     # Row management
@@ -709,17 +615,17 @@ class StatsTestPanel:
         self._sync_test_type_to_group_count()
 
     def _on_row_pick_sessions(self, row: dict):
-        """Open multi-select session dialog (same UX as custom CCG apply-to-sessions)."""
+        """Open multi-select session dialog."""
         try:
             if not row['frame'].winfo_exists():
                 return
         except Exception:
             return
+        sessions = self._concrete_sessions()
         cur = row['sess_list'][0] if len(row['sess_list']) == 1 else None
-        sel = self._pick_stats_sessions_dialog(
-            initial=list(row['sess_list']),
-            current_session=cur,
-        )
+        sel = self._pick_multiselect_dialog(
+            sessions, title='Sessions for stats group', noun='sessions',
+            highlight=cur, initial=list(row['sess_list']))
         if sel:
             row['sess_list'] = sel
             row['sess'].set(self._format_sess_list_summary(sel))
@@ -731,7 +637,9 @@ class StatsTestPanel:
                 return
         except Exception:
             return
-        sel = self._pick_stats_groups_dialog(initial=list(row['grp_list']))
+        sel = self._pick_multiselect_dialog(
+            self._available_groups(), title='Groups for stats row', noun='groups',
+            geometry='360x300', initial=list(row['grp_list']))
         if sel:
             row['grp_list'] = sel
             row['grp'].set(self._format_grp_list_summary(sel))
@@ -764,8 +672,8 @@ class StatsTestPanel:
                 base = ptr.inds2
                 base = base[base[:, 0] != base[:, 1]]
                 base_pairs = set(map(tuple, base))
-            admitted = ui._group_pairs(_ADMITTED_GROUP, session=session_str)
-            pairs = base_pairs | {tuple(p) for p in admitted if len(p) >= 2 and p[0] != p[1]}
+            admitted = _admitted_pairs(ui._sel_data)
+            pairs = base_pairs | {p for p in admitted if p[0] != p[1]}
         else:
             pairs = ui._group_pairs(group_name, session=session_str)
 
@@ -780,55 +688,9 @@ class StatsTestPanel:
                 pass
         return pairs
 
-    def _get_cs_values(self, session_str, ct_str, seg_name, group_name,
-                       highres: bool = False):
-        """Return (pairs, cs_vals) for Conn Strength data.
-
-        When *session_str* is ``'All'``, pools sessions that have *seg_name* (builtin or
-        custom), using each session's own CCG / custom segment; pair keys are
-        ``(session, ref, tgt)`` for pairwise alignment across groups.
-        """
-        if session_str == 'All':
-            return self._get_cs_values_all_sessions(ct_str, seg_name, group_name, highres)
-        with self._stats_session_context(session_str) as ok:
-            if not ok:
-                return [], []
-            return self._get_cs_values_bound(ct_str, seg_name, group_name, highres)
-
-    def _get_cs_values_all_sessions(self, ct_str, seg_name, group_name, highres: bool):
-        ui = self.ui
-        method = self._resolve_cs_method()
-        cs_vals: list[float] = []
-        valid_pairs: list[tuple] = []
-        for sess in self._sessions_with_segment(seg_name):
-            with self._stats_session_context(sess) as ok:
-                if not ok:
-                    continue
-                seg_idx = self._seg_name_to_idx(seg_name)
-                if seg_idx is None:
-                    continue
-                conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
-                eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
-                eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
-                pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
-                for ref, tgt in pairs:
-                    try:
-                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
-                                               highres, eff_min_lag, eff_max_lag)
-                        if key not in ui._conn_strength_cache:
-                            ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
-                                                           highres=highres)
-                        entry = ui._conn_strength_cache.get(key)
-                        if entry is not None and entry[0] is not None:
-                            cs_vals.append(float(entry[0]))
-                            valid_pairs.append((sess, int(ref), int(tgt)))
-                    except Exception as exc:
-                        print(f"[StatsPanel] CS error ({sess},{ref},{tgt}): {exc}")
-        return valid_pairs, cs_vals
-
-    def _get_cs_values_session_subset(
-            self, sessions: list[str], ct_str, seg_name, group_name, highres: bool):
-        """Pool Conn Strength like ``All``, but only over *sessions* (order preserved)."""
+    def _get_cs_values_multi(self, sessions: list[str], ct_str, seg_name,
+                             group_name, highres: bool):
+        """Pool Conn Strength across *sessions* that have *seg_name*."""
         have = set(self._sessions_with_segment(seg_name))
         ui = self.ui
         method = self._resolve_cs_method()
@@ -846,8 +708,7 @@ class StatsTestPanel:
                 conf = getattr(getattr(ui, 'ccg_data', None), 'conf', None)
                 eff_min_lag = getattr(conf, 'min_lag', None) if conf else None
                 eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
-                pairs = sorted(self._get_pairs_for_group(group_name, sess, ct_str))
-                for ref, tgt in pairs:
+                for ref, tgt in sorted(self._get_pairs_for_group(group_name, sess, ct_str)):
                     try:
                         key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
                                                highres, eff_min_lag, eff_max_lag)
@@ -897,35 +758,8 @@ class StatsTestPanel:
 
         return valid_pairs, cs_vals
 
-    def _get_firing_rate_values(self, session_str, neuron_type_str, seg_name, group_name):
-        """Return (ids, fr_vals) for Firing Rate data.
-
-        neuron_type_str is 'pyr', 'int', or 'all'.
-        For 'pyr'/'int', returns rates for neurons matching that type.
-        For 'all', returns all neurons.
-        """
-        if session_str == 'All':
-            return self._get_firing_rate_values_all(neuron_type_str, seg_name, group_name)
-        with self._stats_session_context(session_str) as ok:
-            if not ok:
-                return [], []
-            return self._get_firing_rate_values_bound(neuron_type_str)
-
-    def _get_firing_rate_values_all(self, neuron_type_str, seg_name, group_name):
-        ui = self.ui
-        ids: list[tuple] = []
-        vals: list[float] = []
-        for sess in [str(nk.session) for nk in ui._real_nd_keys_ordered()]:
-            with self._stats_session_context(sess) as ok:
-                if not ok:
-                    continue
-                id2, v2 = self._get_firing_rate_values_bound(neuron_type_str)
-                for i, v in zip(id2, v2):
-                    ids.append((sess, i))
-                    vals.append(v)
-        return ids, vals
-
-    def _get_firing_rate_session_subset(self, sessions: list[str], neuron_type_str: str):
+    def _get_firing_rate_multi(self, sessions: list[str], neuron_type_str: str):
+        """Return (ids, fr_vals) for Firing Rate across *sessions*."""
         ids: list[tuple] = []
         vals: list[float] = []
         for sess in sessions:
@@ -962,30 +796,9 @@ class StatsTestPanel:
                 pass
         return ids, vals
 
-    def _get_role_firing_rate_values(self, session_str, ct_str, group_name, role: int):
-        """Return (ids, fr_vals) for ref (role=0) or tgt (role=1) neurons in the pair selection."""
-        if session_str == 'All':
-            return self._get_role_fr_values_all(ct_str, group_name, role)
-        with self._stats_session_context(session_str) as ok:
-            if not ok:
-                return [], []
-            return self._get_role_fr_values_bound(ct_str, group_name, role)
-
-    def _get_role_fr_values_all(self, ct_str: str, group_name: str, role: int):
-        ids: list[tuple] = []
-        vals: list[float] = []
-        for sess in [str(nk.session) for nk in self.ui._real_nd_keys_ordered()]:
-            with self._stats_session_context(sess) as ok:
-                if not ok:
-                    continue
-                id2, v2 = self._get_role_fr_values_bound(ct_str, group_name, role)
-                for i, v in zip(id2, v2):
-                    ids.append((sess, i))
-                    vals.append(v)
-        return ids, vals
-
-    def _get_role_fr_session_subset(self, sessions: list[str], ct_str: str,
-                                    group_name: str, role: int):
+    def _get_role_fr_multi(self, sessions: list[str], ct_str: str,
+                           group_name: str, role: int):
+        """Return (ids, fr_vals) for ref (role=0) or tgt (role=1) neurons across *sessions*."""
         ids: list[tuple] = []
         vals: list[float] = []
         for sess in sessions:
@@ -1024,31 +837,8 @@ class StatsTestPanel:
                 pass
         return ids, vals
 
-    def _get_baseline_values(self, session_str, ct_str, seg_name, group_name):
-        """Return (pairs, baseline_vals) — avg CCG outside ±5 ms."""
-        if session_str == 'All':
-            return self._get_baseline_values_all_sessions(ct_str, seg_name, group_name)
-        with self._stats_session_context(session_str) as ok:
-            if not ok:
-                return [], []
-            return self._get_baseline_values_bound(ct_str, seg_name, group_name)
-
-    def _get_baseline_values_all_sessions(self, ct_str, seg_name, group_name):
-        from neuropy.analyses.ms_connectivity import apply_norms_to_ccg  # noqa: PLC0415
-        ui = self.ui
-        bl_vals: list[float] = []
-        valid_pairs: list[tuple] = []
-        for sess in self._sessions_with_segment(seg_name):
-            with self._stats_session_context(sess) as ok:
-                if not ok:
-                    continue
-                p2, v2 = self._get_baseline_values_bound(ct_str, seg_name, group_name)
-                for (ref, tgt), v in zip(p2, v2):
-                    valid_pairs.append((sess, ref, tgt))
-                    bl_vals.append(v)
-        return valid_pairs, bl_vals
-
-    def _get_baseline_session_subset(self, sessions: list[str], ct_str, seg_name, group_name):
+    def _get_baseline_multi(self, sessions: list[str], ct_str, seg_name, group_name):
+        """Return (pairs, baseline_vals) pooled across *sessions* that have *seg_name*."""
         have = set(self._sessions_with_segment(seg_name))
         bl_vals: list[float] = []
         valid_pairs: list[tuple] = []
@@ -1129,11 +919,8 @@ class StatsTestPanel:
         """Collect values for one row dict."""
         name = row.get('name').get() if row.get('name') is not None else ''
         concrete = self._concrete_sessions()
-        sl = [s for s in (row.get('sess_list') or []) if s in concrete]
-        if not sl and concrete:
-            sl = [concrete[0]]
+        sl = [s for s in (row.get('sess_list') or []) if s in concrete] or ([concrete[0]] if concrete else [])
         row['sess_list'] = sl
-        mode, arg = self._pooling_mode(sl)
         disp = self._format_sess_list_summary(sl)
 
         ct = row['ct'].get()
@@ -1146,27 +933,21 @@ class StatsTestPanel:
 
         def _collect_for_grp(grp):
             if dtype in {"Conn Strength"} | _CS_NORM_TYPES:
-                if mode == 'all':
-                    return self._get_cs_values('All', ct, seg, grp, highres=highres)
-                elif mode == 'one':
-                    return self._get_cs_values(arg, ct, seg, grp, highres=highres)
-                else:
-                    return self._get_cs_values_session_subset(arg, ct, seg, grp, highres)
+                if len(sl) == 1:
+                    with self._stats_session_context(sl[0]) as ok:
+                        return self._get_cs_values_bound(ct, seg, grp, highres) if ok else ([], [])
+                return self._get_cs_values_multi(sl, ct, seg, grp, highres)
             elif dtype in ("Ref Firing Rate", "Tgt Firing Rate"):
                 role = 0 if dtype == "Ref Firing Rate" else 1
-                if mode == 'all':
-                    return self._get_role_firing_rate_values('All', ct, grp, role)
-                elif mode == 'one':
-                    return self._get_role_firing_rate_values(arg, ct, grp, role)
-                else:
-                    return self._get_role_fr_session_subset(arg, ct, grp, role)
+                if len(sl) == 1:
+                    with self._stats_session_context(sl[0]) as ok:
+                        return self._get_role_fr_values_bound(ct, grp, role) if ok else ([], [])
+                return self._get_role_fr_multi(sl, ct, grp, role)
             elif dtype == "Baseline":
-                if mode == 'all':
-                    return self._get_baseline_values('All', ct, seg, grp)
-                elif mode == 'one':
-                    return self._get_baseline_values(arg, ct, seg, grp)
-                else:
-                    return self._get_baseline_session_subset(arg, ct, seg, grp)
+                if len(sl) == 1:
+                    with self._stats_session_context(sl[0]) as ok:
+                        return self._get_baseline_values_bound(ct, seg, grp) if ok else ([], [])
+                return self._get_baseline_multi(sl, ct, seg, grp)
             return [], []
 
         # Union across selected groups; deduplicate by pair key (first occurrence wins)
@@ -1184,7 +965,7 @@ class StatsTestPanel:
 
         if dtype in {"Conn Strength"} | _CS_NORM_TYPES:
             try:
-                if self.ui.center_container.cs_panel._conn_str_nonneg_var.get():
+                if self.ui.center_container.cs_panel._conn_str_nonneg.get():
                     vals = [max(float(v), 0.0) for v in (vals or [])]
             except Exception:
                 pass
@@ -1197,6 +978,11 @@ class StatsTestPanel:
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
+
+    def _apply_log_transform_to_groups(self, groups: list[dict]) -> list[dict]:
+        """Return new group dicts with vals log-transformed via ``_maybe_log_transform``."""
+        return [dict(g, vals=list(self._maybe_log_transform(
+            np.asarray(g.get('vals', []) or [], dtype=float)))) for g in groups]
 
     def _maybe_log_transform(self, x: np.ndarray) -> np.ndarray:
         """Apply log transform for skewed data (stable for zeros/negatives)."""
@@ -1493,7 +1279,7 @@ class StatsTestPanel:
 
         # Auto-load any custom CCG segments specified in the rows that aren't in memory yet
         seg_names = [r['seg'].get() for r in active if r.get('seg') is not None]
-        custom_segs = [s for s in seg_names if s and s not in (getattr(self._ui.ccg_ptr, 'segment_names', []) or [])]
+        custom_segs = [s for s in seg_names if s and s not in (getattr(self.ui.ccg_ptr, 'segment_names', []) or [])]
         if custom_segs:
             self._ensure_custom_segments_loaded(list(dict.fromkeys(custom_segs)))
 
@@ -1581,16 +1367,9 @@ class StatsTestPanel:
             self._result_data['is_one_sample'] = True
             self._update_result_plot(plot_lo, plot_hi)
         else:
-            def _tx(groups):
-                out = []
-                for g in groups:
-                    gg = dict(g)
-                    gg['vals'] = list(self._maybe_log_transform(
-                        np.asarray(g.get('vals', []) or [], dtype=float)))
-                    out.append(gg)
-                return out
-            self._update_result_plot(_tx(groups_lo),
-                                     _tx(groups_hi) if groups_hi is not None else None)
+            self._update_result_plot(
+                self._apply_log_transform_to_groups(groups_lo),
+                self._apply_log_transform_to_groups(groups_hi) if groups_hi is not None else None)
         if self._export_btn:
             self._export_btn.config(state=tk.NORMAL)
 
@@ -2017,7 +1796,7 @@ class StatsTestPanel:
             seg_str = "segments: " + ", ".join(segments)
 
         if dtype == "Conn Strength":
-            method  = ui.center_container.baseline_panel._conn_str_method_var.get()
+            method  = ui.center_container.baseline_panel._conn_str_method.get()
             anorms  = getattr(ui, 'active_norms', set())
             method_map = {
                 'conv':   'convolution (EranConv)',
@@ -2328,15 +2107,7 @@ class StatsTestPanel:
                 r['sess_list'] = sl
                 r['sess'].set(self._format_sess_list_summary(sl))
                 ct = snap_row.get('conn_type', '')
-                ct_combo = None
-                for child in r['frame'].winfo_children():
-                    if isinstance(child, ttk.Combobox) and child.cget('width') == 14:
-                        ct_combo = child
-                        break
-                if ct in (r.get('ct_combo_values') or [ct]):
-                    r['ct'].set(ct)
-                else:
-                    r['ct'].set(ct)
+                r['ct'].set(ct)
                 segs = self._available_segments()
                 seg = snap_row.get('segment', '')
                 r['seg'].set(seg if seg in segs else (segs[0] if segs else ''))
@@ -2434,17 +2205,9 @@ class StatsTestPanel:
                 d = result
                 groups_lo = d.get('groups') or []
                 groups_hi = d.get('groups_hi')
-                def _tx(groups):
-                    out = []
-                    for g in groups:
-                        gg = dict(g)
-                        gg['vals'] = list(self._maybe_log_transform(
-                            np.asarray(g.get('vals', []) or [], dtype=float)))
-                        out.append(gg)
-                    return out
                 self._update_result_plot(
-                    _tx(groups_lo),
-                    _tx(groups_hi) if groups_hi else None)
+                    self._apply_log_transform_to_groups(groups_lo),
+                    self._apply_log_transform_to_groups(groups_hi) if groups_hi else None)
             except Exception as exc:
                 print(f"[StatsPanel] load plot restore: {exc}")
             if self._export_btn:

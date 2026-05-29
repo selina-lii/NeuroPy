@@ -7,13 +7,14 @@ Reads a JSON job file, loads CCG data from disk, and renders PNGs to the
 cache directory.  Prints progress lines to stdout; the parent UI polls them.
 
 Usage:
-    python pregen.py <job_file.json>
+    python pre_generate_images.py <job_file.json>
 """
 from __future__ import annotations
 import sys
 import os
 import json
 import traceback
+import types
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # headless — must be set before any other matplotlib import
@@ -22,6 +23,7 @@ import matplotlib.pyplot as _plt
 
 from neuropy.plotting import ccg as plot_ccg
 from neuropy.analyses.ms_connectivity import NormalizeBy, apply_norms_to_ccg
+from neuropy.ui.utils import get_png_filename
 
 _ALL_SEGS_LABEL = "All_segments"
 
@@ -33,28 +35,19 @@ _ALL_SEGS_LABEL = "All_segments"
 class _NeuronsProxy:
     def __init__(self, firing_rate, shank_ids):
         self.firing_rate = np.asarray(firing_rate, dtype=float) if firing_rate is not None else None
-        self.shank_ids   = np.asarray(shank_ids,   dtype=int)   if shank_ids   is not None else None
-
+        self.shank_ids   = np.asarray(shank_ids, dtype=int)
 
 class _NDProxy:
     """Minimal nd proxy supporting nd.edge_times[nd_key].iloc[seg][col]."""
     def __init__(self, edge_times_by_key: dict):
         self.edge_times = _EdgeTimesLookup(edge_times_by_key)
 
-
 class _EdgeTimesLookup:
     def __init__(self, d):
         self._d = d
 
     def __getitem__(self, nd_key):
-        times = self._d.get(str(nd_key), [])
-        return _EdgeTimesDF(times)
-
-
-class _EdgeTimesDF:
-    def __init__(self, times):
-        self.iloc = _ILocProxy(times)
-
+        return types.SimpleNamespace(iloc=_ILocProxy(self._d.get(str(nd_key), [])))
 
 class _ILocProxy:
     def __init__(self, times):
@@ -63,7 +56,6 @@ class _ILocProxy:
     def __getitem__(self, seg):
         val = float(self._t[seg]) if seg < len(self._t) else 1.0
         return {'effective_time_hours': val}
-
 
 # ---------------------------------------------------------------------------
 # Renderer
@@ -100,7 +92,7 @@ class CCGRenderer:
         self.nd_key = nd_key
 
     def png_path(self, ref: int, tgt: int, segment: int, hires: bool) -> str:
-        """Return canonical cache path — must match CCGReviewUI._png_path output."""
+        """Return canonical cache path — delegates to shared build_canonical_png_filename."""
         seg_name = (
             _ALL_SEGS_LABEL if segment == self.n_segments
             else self.segment_names[segment]
@@ -116,7 +108,7 @@ class CCGRenderer:
         res_key = '_hi' if hires else '_lo'
         return os.path.join(
             self.tmp_dir,
-            f"pair_{ref}_{tgt}_{seg_name}_{norm_key}{alpha_key}{res_key}.png"
+            get_png_filename(ref, tgt, seg_name, norm_key, alpha_key, res_key)
         )
 
     def _resolve(self, ref: int, tgt: int, segment: int, hires: bool):
@@ -166,17 +158,13 @@ class CCGRenderer:
         show_pval   = pval   if cfg.get('_sig_conv_p_var')  else None
         show_pval_c = pval_c if cfg.get('_sig_conv_pc_var') else None
         alpha = cfg.get('active_alpha', 0.001)
-        ids = (
-            str(int(self.neurons.shank_ids[ref]))
-            if (self.neurons and self.neurons.shank_ids is not None) else str(ref),
-            str(int(self.neurons.shank_ids[tgt]))
-            if (self.neurons and self.neurons.shank_ids is not None) else str(tgt),
-        )
+        shank_ids = (str(int(self.neurons.shank_ids[ref])),
+                     str(int(self.neurons.shank_ids[tgt])))
         fig = Figure(figsize=(7, 5))
         ax  = fig.add_subplot(111)
         nt = (self.neurons.neuron_type[ref], self.neurons.neuron_type[tgt])
         plot_ccg.plot_ccg_panel(
-            ax=ax, ccg=ccg, ids=ids, inds=(ref, tgt),
+            ax=ax, ccg=ccg, shank_ids=shank_ids, inds=(ref, tgt),
             neuron_type=nt,
             window_size=conf.duration, bin_size=bin_size_eff,
             pval=show_pval, pval_corrected=show_pval_c,
@@ -204,7 +192,6 @@ class CCGRenderer:
         _plt.close(fig)
         return path
 
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -219,7 +206,6 @@ def _load_ccg_data(hkl_path: str, nd_key: str):
     except Exception as exc:
         print(f"[pregen] Could not load {hkl_path}: {exc}", flush=True)
         return None
-
 
 def main(job_path: str) -> None:
     with open(job_path, encoding='utf-8') as f:
@@ -259,8 +245,7 @@ def main(job_path: str) -> None:
     if neurons_fr is not None:
         neurons = _NeuronsProxy(
             firing_rate=np.array(neurons_fr, dtype=float),
-            shank_ids=(np.array(neurons_shank, dtype=int)
-                       if neurons_shank is not None else None),
+            shank_ids=np.array(neurons_shank, dtype=int),
         )
 
     renderer = CCGRenderer(
@@ -300,7 +285,6 @@ def main(job_path: str) -> None:
                     traceback.print_exc(file=sys.stdout)
 
     print(f"[pregen] done {n_done} rendered, {n_skip} skipped", flush=True)
-
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

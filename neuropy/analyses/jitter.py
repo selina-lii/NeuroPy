@@ -17,6 +17,15 @@ except ImportError:
     cp = None
 
 
+import collections as _collections
+
+JitterTask = _collections.namedtuple(
+    'JitterTask',
+    ['tag', 'ref', 'tgt', 'njitter', 'res_key', 'bin_size_eff', 'seg_arg', 't0', 't1', 'nd_key'],
+    defaults=[None, None, None, None],
+)
+
+
 class JitterType(Enum):
     SPIKE_TIMING = 0
     INTERVAL = 1
@@ -41,22 +50,15 @@ class JitterConfig:
         njitter : int
             Number of jitter repetitions.
         jitter_type : JitterType
-            INTERVAL (Agmon 2012) or SPIKE_TIMING (uniform spike shift).
-            See Platkiewicz et al., Neural Comput 2017; 29(3): 783–803
-            (doi:10.1162/NECO_a_00927) for caveats on interval jitter.
+            INTERVAL (shift spikes within jscale-wide intervals) or SPIKE_TIMING (uniform spike shift).
         jscale : float
-            Full jitter interval width in seconds (default 5 ms intervals).
-            Spikes are placed uniformly within the jscale-wide interval they
-            belong to.  To match the paper (Agmon 2012, 20 ms intervals) set
-            jscale=20e-3.
+            Jitter interval width in seconds. Spikes placed uniformly within each interval.
         alpha : float
             Significance threshold.
         use_acceleration : bool
             Use CuPy GPU acceleration where available.
         ccg_batch_bytes : int
-            Soft memory budget (bytes) used to choose how many jitter trials
-            to compute per call to ``spike_correlations``. Larger values run
-            more jitter trials in parallel but use more memory.
+            Memory budget (bytes) for jitter trials per batch. Larger = more parallelism.
         """
         self.ccg = ccg
         self.njitter = njitter
@@ -84,21 +86,10 @@ class JitterConfig:
 
 class Jitter:
     """
-    Jitter-based significance test for a set of selected neuron pairs (one session).
+    Jitter significance test over CCGPointer pairs (one session).
 
-    Uses only the pairs identified by EranConv (the "selected indices" stored in a
-    CCGPointer) rather than all N² pairs, making it much faster.  Pairs are grouped
-    by target neuron so that each target's spike train is jittered only once.
-
-    Significance test (per pair, per segment when inds are segment-stored):
-        1. Generate `njitter` interval-jittered spike trains for the target neuron.
-        2. Compute CCG between each ref neuron and each jittered train
-           → j_ccg shape [n_ref, njitter, n_bins].
-        3. For each (seg?, ref, tgt) in the pointer's inds:
-             real_val  = sum of real CCG in the test window (from ccg_data)
-             j_vals    = sum of jitter CCG in the test window across njitter trials
-             p-value   = fraction of j_vals ≥ real_val
-             significant if p-value ≤ alpha.
+    Groups pairs by target so each target is jittered once. Per (seg, ref, tgt):
+    p = fraction of njitter jitter-CCG window sums ≥ real CCG window sum.
     """
 
     def __init__(self, key, neurons, conf: JitterConfig,
@@ -231,105 +222,62 @@ class Jitter:
                 self.JBSI[pair_idx] = self._jbsi(
                     ref, tgt, real_ccg, j_ccg_avg)
 
-    @staticmethod
-    def _fast_ccg_pair(ref_spikes, tgt_spikes, bin_size: float, window_size: float) -> np.ndarray:
-        """Single-pair CCG via searchsorted — O(n_spikes log n_spikes + n_lags).
+    def _compute_jitter_ccg_one(self, ref_ind, tgt_ind, j_trains):
+        """Single-ref jitter CCG via spike_correlations. Returns shape [1, njitter, n_bins].
 
-        Faster than the shift-based algorithm when there are only 2 spike trains
-        because it avoids scanning the full spike array for every shift step.
+        Used by jitter_worker (always n_ref=1). Builds one combined Neurons
+        object with all njitter jittered trains and calls spike_correlations once.
         """
-        half_w = window_size / 2.0
-        n_bins = 2 * int(round(half_w / bin_size))
-        if n_bins < 1:
-            return np.zeros(1, dtype=np.float64)
-        bin_edges = np.linspace(-half_w, half_w, n_bins + 1)
-
-        ref = np.sort(ref_spikes)
-        tgt = np.sort(tgt_spikes)
-
-        lo = np.searchsorted(tgt, ref - half_w, side='left')
-        hi = np.searchsorted(tgt, ref + half_w, side='right')
-        counts = hi - lo
-        total = int(counts.sum())
-        if total == 0:
-            return np.zeros(n_bins, dtype=np.float64)
-
-        # Build all lags fully vectorised: for ref spike i, include tgt[lo[i]+k] - ref[i]
-        # for k in range(counts[i]).  Use cumsum to avoid Python loop.
-        cum = np.empty(len(counts) + 1, dtype=np.intp)
-        cum[0] = 0
-        np.cumsum(counts, out=cum[1:])
-        row_idx = np.repeat(np.arange(len(ref), dtype=np.intp), counts)
-        local_k = np.arange(total, dtype=np.intp) - cum[row_idx]
-        tgt_idx = lo[row_idx] + local_k
-        lags = tgt[tgt_idx] - ref[row_idx]
-        return np.histogram(lags, bins=bin_edges)[0].astype(np.float64)
-
-    def _compute_jitter_ccg(self, refs, tgt_ind, j_trains):
-        """
-        Compute CCG between ref neurons and njitter jittered target spike trains.
-
-        Returns j_ccg of shape [n_ref, njitter, n_bins].
-
-        For the common single-ref case (n_ref == 1) uses a fast searchsorted-based
-        pairwise CCG that avoids building a large merged Neurons object.  For
-        multi-ref, falls back to the existing batch spike_correlations path.
-        """
-        njitter = int(self.conf.njitter)
         ccg_conf = self.conf.ccg
-        n_ref = len(refs)
-
-        # Normalize j_trains to a list for easy slicing
-        if isinstance(j_trains, np.ndarray):
-            j_list = [j_trains[i] for i in range(j_trains.shape[0])]
-        else:
-            j_list = list(j_trains)
-        njitter = min(njitter, len(j_list))
-
-        # ── Fast path: single ref neuron ────────────────────────────────────
-        # Use direct searchsorted-based pairwise CCG, which avoids building a
-        # large merged Neurons object (200 jitter targets × n_tgt_spikes spikes)
-        # and eliminates the expensive shift-scan loop over the full spike array.
-        if n_ref == 1 and not ccg_conf.use_acceleration:
-            ref_spikes = np.asarray(self.neurons.spiketrains[int(refs[0])], dtype=float)
-            trial_ccgs = [
-                self._fast_ccg_pair(
-                    ref_spikes,
-                    np.asarray(j_list[j], dtype=float),
-                    float(ccg_conf.bin_size),
-                    float(ccg_conf.duration),
-                )
-                for j in range(njitter)
-            ]
-            n_bins = trial_ccgs[0].shape[0] if trial_ccgs else 1
-            out_2d = np.stack(trial_ccgs, axis=0)   # (njitter, n_bins)
-            return out_2d[np.newaxis]                 # (1, njitter, n_bins)
-
-        # ── Batch path: multi-ref or GPU acceleration ────────────────────────
-        # Choose batch size from a soft memory budget.
-        try:
-            n_bins_est = int(round(float(ccg_conf.duration) / float(ccg_conf.bin_size))) + 1
-        except Exception:
-            n_bins_est = 0
-        bytes_per_est = max(1, n_ref) * max(1, n_bins_est) * 8
-        budget = int(getattr(self.conf, 'ccg_batch_bytes', 256_000_000) or 256_000_000)
-        batch = max(1, min(njitter, budget // max(1, bytes_per_est)))
-        out = None
-        n_bins = None
-
+        j_list = j_trains if isinstance(j_trains, list) else list(j_trains)
+        njitter = min(int(self.conf.njitter), len(j_list))
         tgt_id_base = int(self.neurons.neuron_ids[tgt_ind])
         tgt_type = (self.neurons.neuron_type[tgt_ind][0]
                     if getattr(self.neurons, 'neuron_type', None) is not None else None)
+        ref_neurons = self.neurons.neuron_slice(neuron_inds=np.array([ref_ind]))
+        j_neurons = Neurons(
+            spiketrains=j_list[:njitter],
+            t_start=self.neurons.t_start,
+            t_stop=self.neurons.t_stop,
+            neuron_ids=[tgt_id_base * 100000 + i for i in range(njitter)],
+            neuron_type=([tgt_type] * njitter) if tgt_type is not None else None,
+        )
+        combined = ref_neurons
+        combined.merge(j_neurons)
+        return correlations.spike_correlations(
+            neurons=combined,
+            ref_neuron_inds=np.array([0]),
+            neuron_inds=np.arange(1, 1 + njitter),
+            bin_size=ccg_conf.bin_size,
+            window_size=ccg_conf.duration,
+            use_acceleration=ccg_conf.use_acceleration,
+            symmetrize=ccg_conf.symmetrize_ccg,
+            one_to_many=True,
+        )  # shape [1, njitter, n_bins]
 
+    def _compute_jitter_ccg_batch(self, refs, tgt_ind, j_trains):
+        """Multi-ref jitter CCG with memory-bounded batching. Returns [n_ref, njitter, n_bins]."""
+        ccg_conf = self.conf.ccg
+        j_list = j_trains if isinstance(j_trains, list) else list(j_trains)
+        njitter = min(int(self.conf.njitter), len(j_list))
+        n_ref = len(refs)
+        tgt_id_base = int(self.neurons.neuron_ids[tgt_ind])
+        tgt_type = (self.neurons.neuron_type[tgt_ind][0]
+                    if getattr(self.neurons, 'neuron_type', None) is not None else None)
+        try:
+            n_bins_est = int(round(ccg_conf.duration / ccg_conf.bin_size)) + 1
+        except Exception:
+            n_bins_est = 64
+        budget = int(getattr(self.conf, 'ccg_batch_bytes', 256_000_000) or 256_000_000)
+        batch = max(1, min(njitter, budget // max(1, n_ref * n_bins_est * 8)))
+        out = None
+        n_bins = None
         done = 0
         while done < njitter:
             b = min(batch, njitter - done)
-            ref_neurons = self.neurons.neuron_slice(neuron_inds=refs)
-
-            # Batch of jittered target neurons appended after refs
-            batch_trains = j_list[done:done + b]
+            ref_neurons = self.neurons.neuron_slice(neuron_inds=np.asarray(refs))
             j_neurons = Neurons(
-                spiketrains=batch_trains,
+                spiketrains=j_list[done:done + b],
                 t_start=self.neurons.t_start,
                 t_stop=self.neurons.t_stop,
                 neuron_ids=[tgt_id_base * 100000 + (done + i) for i in range(b)],
@@ -337,8 +285,6 @@ class Jitter:
             )
             combined = ref_neurons
             combined.merge(j_neurons)
-
-            # refs = 0..n_ref-1, targets = n_ref..n_ref+b-1
             ccg_j = correlations.spike_correlations(
                 neurons=combined,
                 ref_neuron_inds=np.arange(n_ref),
@@ -349,23 +295,22 @@ class Jitter:
                 symmetrize=ccg_conf.symmetrize_ccg,
                 one_to_many=(n_ref == 1),
             )
-            # ccg_j: [n_ref, b, n_bins_actual]
             if out is None:
-                try:
-                    n_bins = int(ccg_j.shape[-1])
-                except Exception:
-                    n_bins = None
+                n_bins = int(ccg_j.shape[-1])
                 if not n_bins:
                     raise ValueError("spike_correlations returned empty CCG")
                 out = np.empty((n_ref, njitter, n_bins), dtype=float)
-            elif n_bins is not None and int(ccg_j.shape[-1]) != int(n_bins):
+            elif int(ccg_j.shape[-1]) != n_bins:
                 raise ValueError(f"jitter CCG bin mismatch: expected {n_bins}, got {ccg_j.shape[-1]}")
             out[:, done:done + b, :] = ccg_j
             done += b
-            if done % max(1, njitter // 5) == 0 or done == njitter:
-                print(f"[Jitter] trial {done}/{njitter} done (batch={b})")
-
         return out
+
+    def _compute_jitter_ccg(self, refs, tgt_ind, j_trains):
+        """Dispatch to one- or batch-ref jitter CCG computation."""
+        if len(refs) == 1:
+            return self._compute_jitter_ccg_one(refs[0], tgt_ind, j_trains)
+        return self._compute_jitter_ccg_batch(refs, tgt_ind, j_trains)
 
     def _jbsi(self, ref, tgt, real_ccg, j_ccg_avg):
         """
@@ -391,15 +336,8 @@ class Jitter:
 
     def _jitter_trains(self, tgt_ind):
         """
-        Generate self.conf.njitter jittered spike trains for neuron tgt_ind.
-
-        INTERVAL jitter (Agmon 2012): the recording is partitioned into
-        non-overlapping windows of width ``jscale``.  Each spike is placed
-        uniformly at random within the window it originally fell in.
-        ``jscale`` is the full interval width (not a half-width).
-
-        SPIKE_TIMING: each spike is shifted by a uniform draw over
-        [-jscale, +jscale].
+        INTERVAL: each spike placed uniformly within its jscale-wide window.
+        SPIKE_TIMING: each spike shifted by uniform draw over [-jscale, +jscale].
         """
         spiketrain = np.asarray(self.neurons.spiketrains[tgt_ind])
         n_spikes = len(spiketrain)
@@ -461,129 +399,6 @@ def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale
     tj = float(jscale)
     b = tj / (tj - ts) if tj / ts > 2 else 2.0
     return b / (n1 + 1e-12) * (real_ccg - j_ccg_avg)
-
-    # ------------------------------------------------------------------
-    # Results
-    # ------------------------------------------------------------------
-
-    def significant_inds(self):
-        """
-        Return the subset of CCGPointer.inds that passed jitter.
-        Returns None if nothing survived.
-        """
-        if self.j_sig is None or not self.j_sig.any():
-            return None
-        return self.ccg_ptr.inds[self.j_sig]
-
-    # ------------------------------------------------------------------
-    # Save / inspect intermediates
-    # ------------------------------------------------------------------
-
-    def save(self, save_dir: str = None) -> str:
-        """Save all jitter result arrays to *save_dir* as .npy files.
-
-        Files written
-        -------------
-        ``jitter_inds.npy``   — pair indices, shape ``[n_pairs, 2 or 3]``
-        ``jitter_pval.npy``   — empirical p-values, shape ``[n_pairs]``
-        ``jitter_jsig.npy``   — significance flags, shape ``[n_pairs]``
-        ``jitter_JBSI.npy``   — JBSI traces, shape ``[n_pairs, n_bins]``
-        ``jitter_meta.txt``   — text summary (key, conf, n_sig / n_pairs)
-
-        Parameters
-        ----------
-        save_dir : str, optional
-            Destination directory.  Defaults to
-            ``<repo>/data/jitter/<key_str>``.
-
-        Returns
-        -------
-        str  — the directory where files were written.
-        """
-        import os
-
-        if save_dir is None:
-            key_str = str(self.key).replace(' ', '_').replace('/', '-')
-            save_dir = str(_REPO_ROOT / "data" / "jitter" / key_str)
-        os.makedirs(save_dir, exist_ok=True)
-
-        np.save(os.path.join(save_dir, 'jitter_inds.npy'), self.ccg_ptr.inds)
-        np.save(os.path.join(save_dir, 'jitter_pval.npy'), self.pval)
-        np.save(os.path.join(save_dir, 'jitter_jsig.npy'), self.j_sig)
-        np.save(os.path.join(save_dir, 'jitter_JBSI.npy'), self.JBSI)
-
-        # Save null distribution cache if available
-        if self._j_ccg_cache:
-            n_pairs = len(self.ccg_ptr.inds)
-            n_bins = self.conf.ccg.nbins
-            j_avg_arr = np.full((n_pairs, n_bins), np.nan)
-            j_lo_arr  = np.full((n_pairs, n_bins), np.nan)
-            j_hi_arr  = np.full((n_pairs, n_bins), np.nan)
-            for idx, (avg, lo, hi) in self._j_ccg_cache.items():
-                j_avg_arr[idx] = avg
-                j_lo_arr[idx]  = lo
-                j_hi_arr[idx]  = hi
-            np.save(os.path.join(save_dir, 'jitter_null_avg.npy'), j_avg_arr)
-            np.save(os.path.join(save_dir, 'jitter_null_lo.npy'),  j_lo_arr)
-            np.save(os.path.join(save_dir, 'jitter_null_hi.npy'),  j_hi_arr)
-
-        has_null = bool(self._j_ccg_cache)
-        meta = (
-            f"key:        {self.key}\n"
-            f"njitter:    {self.conf.njitter}\n"
-            f"jscale:     {self.conf.jscale * 1e3:.1f} ms\n"
-            f"alpha:      {self.conf.alpha}\n"
-            f"n_pairs:    {self.n_pairs}\n"
-            f"n_sig:      {int(self.j_sig.sum()) if self.j_sig is not None else 'n/a'}\n"
-            f"inds_shape: {self.ccg_ptr.inds.shape}\n"
-            f"null_cache: {'yes (jitter_null_avg/lo/hi.npy)' if has_null else 'no'}\n"
-        )
-        with open(os.path.join(save_dir, 'jitter_meta.txt'), 'w') as fh:
-            fh.write(meta)
-
-        print(f"[Jitter.save] Saved to {save_dir}")
-        print(meta)
-        return save_dir
-
-    def plot_verification(self,
-                          max_pairs: int = 16,
-                          sort_by_pval: bool = True,
-                          figsize_per_panel: tuple = (3.5, 2.8),
-                          ncols: int = 4,
-                          save_path: str = None):
-        """Plot real CCG vs mean jitter CCG for every pair — for eyeballing.
-
-        Each panel shows:
-        - Blue bars  : real CCG
-        - Orange line: mean jitter CCG (null model)
-        - Grey region: 5–95 % percentile band of jitter CCGs
-        - Title      : ``ref→tgt  p={:.3f}  {'*' if sig}``
-
-        Parameters
-        ----------
-        max_pairs : int
-            Cap the number of panels (sorted by p-value, lowest first).
-        sort_by_pval : bool
-            Show most-significant pairs first.
-        figsize_per_panel : tuple
-            (width, height) in inches per panel.
-        ncols : int
-            Grid columns.
-        save_path : str, optional
-            If given, save the figure to this path.
-
-        Returns
-        -------
-        matplotlib.figure.Figure
-        """
-        return plot_jitter_verification(
-            self,
-            max_pairs=max_pairs,
-            sort_by_pval=sort_by_pval,
-            figsize_per_panel=figsize_per_panel,
-            ncols=ncols,
-            save_path=save_path,
-        )
 
 
 def plot_jitter_verification(jitter_obj,
@@ -861,7 +676,7 @@ class JitterManager:
             return
         task = self._pending[0]
         if task[0] == 'jitter':
-            from neuropy.plotting._jitter_worker import jitter_worker
+            from neuropy.analyses._jitter_worker import jitter_worker
             _, ref, tgt, njitter, res_key, bin_size_eff = task
             self._result_queue = _mp.Queue()
             self._proc = _mp.Process(

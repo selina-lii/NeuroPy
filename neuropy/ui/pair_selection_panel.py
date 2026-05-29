@@ -24,44 +24,35 @@ from typing import Callable
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Constants (mirrored in ccg_ui.py — keep in sync)
-# ---------------------------------------------------------------------------
-
-_ADMITTED_GROUP   = "__admitted__"
-_SPECIAL_PREFIX   = "__special_"
-_AVAIL_GROUP_HDR  = "__avail_group_hdr__"
+from neuropy.ui.utils import (
+    _SPECIAL_PREFIX, _SEPARATOR_ROW,
+    is_special_group, is_separator_row,
+)
 
 # ---------------------------------------------------------------------------
 # SelectionData — owns all pair / group / tag state
 # ---------------------------------------------------------------------------
 
+def _combo_sort_key(combo):
+    """Sort key: empty combo (untagged) last, then alphabetical."""
+    return (1, []) if not combo else (0, list(combo))
+
+
 class SelectionData:
-    """Single source of truth for pair selection and group/tag annotations.
-
-    Owned by CCGReviewUI; passed read-only to ProbeNetworkPanel and
-    read-write to LeftPanel. No Tk dependency.
-
-    Notes
-    -----
-    selected_inds / unselected_inds are sets of (ref, tgt) tuples in
-    single-session mode; in any-mode they contain (Key, ref, tgt) triples.
-    """
+    """Pair selection and group/tag state."""
 
     def __init__(self):
         self.selected_inds:   set = set()
         self.unselected_inds: set = set()
+        self.deleted_inds:    set = set()
 
         # Group state  {group_name -> {session_str -> set((ref,tgt))}}
         self._groups: dict = {}
-        self._groups.setdefault(_ADMITTED_GROUP, {})
 
         # {(ref, tgt): {"notes": str, "tags": [str,...], "groups": [...]}}
         self._pair_tags: dict = {}
 
-        # group_name -> hotkey char (e.g. '1', 'a')
         self._group_hotkeys: dict = {}
-        # group_name -> notes string
         self._group_notes: dict = {}
 
         # v4.0 schema: int_id -> {name, hotkey, notes}
@@ -69,37 +60,46 @@ class SelectionData:
         self._next_group_id: int = 1
 
     # ------------------------------------------------------------------
-    # Serialization (groups / tags portion only)
-    # SelectionData owns serializing its own data.
-    # Full session save (selections-by-type etc.) is handled by CCGReviewUI.
+    # Pair state interface
     # ------------------------------------------------------------------
 
-    def serialize_groups(self, session_str: str | None = None) -> dict:
-        """Return a groups-export.json-compatible dict for this data."""
+    def set_state(self, pair: tuple, state: str):
+        pair = tuple(pair)
+        self.selected_inds.discard(pair)
+        self.unselected_inds.discard(pair)
+        self.deleted_inds.discard(pair)
+        if state == 'sel':
+            self.selected_inds.add(pair)
+        elif state == 'unsel':
+            self.unselected_inds.add(pair)
+        elif state == 'del':
+            self.deleted_inds.add(pair)
+
+    def populate(self, all_pairs, selected=(), deleted=()):
+        """Rebuild pair state from scratch for a new session."""
+        all_set  = {tuple(p) for p in all_pairs}
+        sel_set  = {tuple(p) for p in selected}
+        del_set  = {tuple(p) for p in deleted}
+        self.selected_inds   = sel_set & all_set
+        self.deleted_inds    = del_set & all_set
+        self.unselected_inds = all_set - self.selected_inds - self.deleted_inds
+
+    def save_groups(self) -> dict:
         groups = {}
         for g, sessions_dict in self._groups.items():
-            if isinstance(sessions_dict, set):
-                sess = session_str or '__default__'
-                groups[g] = {sess: [[int(r), int(c)]
-                                    for r, c in sorted(sessions_dict)]}
-            else:
-                groups[g] = {
-                    sess: [[int(r), int(c)] for r, c in sorted(pairs)]
-                    for sess, pairs in sessions_dict.items()
-                    if pairs
-                }
+            groups[g] = {
+                sess: [[int(r), int(c)] for r, c in sorted(pairs)]
+                for sess, pairs in sessions_dict.items()
+                if pairs
+            }
         return {
             'groups':  groups,
             'hotkeys': dict(self._group_hotkeys),
             'notes':   dict(self._group_notes),
         }
 
-    def deserialize_groups(self, data: dict, file_session: str,
-                           restore_hotkeys: bool = False):
-        """Merge group data from *data* into self._groups (never overwrites).
-
-        Replaces ``CCGReviewUI._restore_groups_from_data``.
-        """
+    def load_groups(self, data: dict, file_session: str,
+                    restore_hotkeys: bool = False):
         raw_groups = data.get('groups', {})
         for g, val in raw_groups.items():
             if isinstance(val, list):
@@ -111,7 +111,7 @@ class SelectionData:
                     for sess, pp in val.items()
                 }
             else:
-                pairs = {}
+                continue
 
             if g not in self._groups:
                 self._groups[g] = pairs
@@ -120,17 +120,11 @@ class SelectionData:
                     if sess not in self._groups[g]:
                         self._groups[g][sess] = sp
 
-        self._groups.setdefault(_ADMITTED_GROUP, {})
         if restore_hotkeys:
             self._group_hotkeys.update(data.get('hotkeys', {}))
         for k, v in data.get('notes', {}).items():
             if k not in self._group_notes:
                 self._group_notes[k] = v
-
-
-# ---------------------------------------------------------------------------
-# SearchBar — search widget hidden until Ctrl+F
-# ---------------------------------------------------------------------------
 
 class SearchBar:
     """Search bar that filters both pair listboxes.
@@ -177,9 +171,9 @@ class SearchBar:
                    command=self.hide).pack(side=tk.LEFT, padx=(1, 0))
 
         self._var.trace_add('write', lambda *_: self._update())
-        self._entry.bind('<Return>',       lambda e: self.go(1))
-        self._entry.bind('<Shift-Return>', lambda e: self.go(-1))
-        self._entry.bind('<Escape>',       lambda e: self.hide())
+        self._entry.bind('<Return>',       lambda _: self.go(1))
+        self._entry.bind('<Shift-Return>', lambda _: self.go(-1))
+        self._entry.bind('<Escape>',       lambda _: self.hide())
 
     def toggle(self):
         """Ctrl+F: show bar and focus entry if hidden; hide otherwise."""
@@ -197,7 +191,6 @@ class SearchBar:
         self._frame.pack_forget()
         self._visible = False
         try:
-            # return focus to root
             self._frame.winfo_toplevel().focus_set()
         except tk.TclError:
             pass
@@ -282,11 +275,6 @@ class SearchBar:
     def active(self) -> bool:
         return bool(self._var.get())
 
-
-# ---------------------------------------------------------------------------
-# LeftPanel — pair selection UI
-# ---------------------------------------------------------------------------
-
 class LeftPanel:
     """Left column of the 3-column CCGReviewUI layout.
 
@@ -352,11 +340,6 @@ class LeftPanel:
         _avail_hdr.pack(fill=tk.X)
         ttk.Label(_avail_hdr, textvariable=self._avail_label,
                   font=('Arial', 10)).pack(side=tk.LEFT)
-        self._clear_spec_btn = ttk.Button(
-            _avail_hdr, text="✕ predictions",
-            command=self._clear_speculated, width=12)
-        # packed lazily in refresh_lists when speculated pairs exist
-
         unsel_scroll = ttk.Scrollbar(unsel_frame)
         unsel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.unselected_list = tk.Listbox(
@@ -380,9 +363,9 @@ class LeftPanel:
         self.unselected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
         self.unselected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
         self.unselected_list.bind('<Left>',
-            lambda e: (self._ui.change_segment(-1), 'break')[1])
+            lambda _: (self._ui.change_segment(-1), 'break')[1])
         self.unselected_list.bind('<Right>',
-            lambda e: (self._ui.change_segment(1),  'break')[1])
+            lambda _: (self._ui.change_segment(1),  'break')[1])
 
         # ── Selected pairs ───────────────────────────────────────────────
         sel_frame = ttk.Frame(columns_pane)
@@ -414,9 +397,9 @@ class LeftPanel:
         self.selected_list.bind('<KeyRelease-Up>',   self._on_arrow_key)
         self.selected_list.bind('<KeyRelease-Down>', self._on_arrow_key)
         self.selected_list.bind('<Left>',
-            lambda e: (self._ui.change_segment(-1), 'break')[1])
+            lambda _: (self._ui.change_segment(-1), 'break')[1])
         self.selected_list.bind('<Right>',
-            lambda e: (self._ui.change_segment(1),  'break')[1])
+            lambda _: (self._ui.change_segment(1),  'break')[1])
 
         # ── Search bar ────────────────────────────────────────────────
         self.search_bar = SearchBar(
@@ -450,7 +433,6 @@ class LeftPanel:
             side=tk.LEFT, padx=2)
 
         # ── Spike Pairs tab (populated by SpikePairsPanel) ───────────────
-        # listbox widget exposed for SpikePairsPanel to bind
         self._spike_pairs_tab_index: int = 1
 
     def _build_spike_pairs_tab(self):
@@ -458,7 +440,6 @@ class LeftPanel:
         spike_tab = ttk.Frame(self.notebook)
         self.notebook.add(spike_tab, text="Spike Pairs", state='disabled')
         self._spike_pairs_tab = spike_tab
-        # listbox / count are created by SpikePairsPanel in __init__
         # and stored as self._spike_pairs_listbox / self._spike_pairs_count
 
     # ------------------------------------------------------------------
@@ -526,30 +507,30 @@ class LeftPanel:
             return 1.0
 
     # ------------------------------------------------------------------
-    # List population
+    # List population helpers
     # ------------------------------------------------------------------
 
-    def refresh_lists(self):
-        ui = self._ui
-        data = self.data
+    def _save_scroll_positions(self):
+        try: unsel = self.unselected_list.yview()[0]
+        except Exception: unsel = None
+        try: sel = self.selected_list.yview()[0]
+        except Exception: sel = None
+        return unsel, sel
 
+    def _restore_scroll_positions(self, unsel_top, sel_top):
         try:
-            _unsel_top = self.unselected_list.yview()[0]
+            if unsel_top is not None:
+                self.unselected_list.yview_moveto(unsel_top)
         except Exception:
-            _unsel_top = None
+            pass
         try:
-            _sel_top = self.selected_list.yview()[0]
+            if sel_top is not None:
+                self.selected_list.yview_moveto(sel_top)
         except Exception:
-            _sel_top = None
+            pass
 
-        self.unselected_list.delete(0, tk.END)
-        self.selected_list.delete(0, tk.END)
-
-        if getattr(ui, '_session_any_mode', False):
-            ui._any_rebuild_pair_handles()
-            ui._any_sync_selection_from_universe()
-
-        # Focus-mode gray-out set
+    def _build_should_gray(self, ui):
+        """Return a predicate `should_gray(inds) -> bool` for the current render state."""
         gray_out = None
         fn = getattr(ui, '_focused_neuron', None)
         fp = getattr(ui, '_focused_pair', None)
@@ -568,12 +549,9 @@ class LeftPanel:
 
         _neurons_for_sids = getattr(ui, 'neurons', None)
         _sids = getattr(_neurons_for_sids, 'shank_ids', None) if _neurons_for_sids is not None else None
+        peak_channels = (getattr(_neurons_for_sids, 'peak_channels', None)
+                         if _neurons_for_sids is not None else None)
 
-        _neurons_obj = getattr(ui, 'neurons', None)
-        peak_channels = (getattr(_neurons_obj, 'peak_channels', None)
-                         if _neurons_obj is not None else None)
-
-        # Per-session channel lookups for any-mode gray-out
         _pchan_by_sess: dict = {}
         _nd_obj = getattr(getattr(ui, 'cd', None), 'nd', None)
         if _nd_obj is not None:
@@ -594,7 +572,7 @@ class LeftPanel:
                         str(getattr(inds[0], 'session', inds[0])), peak_channels)
                 except (IndexError, TypeError, ValueError, AttributeError):
                     return False
-                sids_use = _sids  # any-mode uses same session's shank_ids
+                sids_use = _sids
             else:
                 try:
                     ref2 = int(inds[0])
@@ -617,54 +595,97 @@ class LeftPanel:
                     pass
             return False
 
-        # ── Available list ───────────────────────────────────────────────
-        self._avail_list_pairs = []   # parallel: (inds, tag) or _AVAIL_GROUP_HDR tuple
+        return _should_gray
 
+    def _populate_avail_list(self, ui, data, should_gray):
+        """Populate the Available (unselected) listbox."""
+        self._avail_list_pairs = []
         if getattr(ui, '_session_any_mode', False):
-            # In All/Any mode, pairs live under Selected group tags only.
-            # Keep Available intentionally empty even after expanding/collapsing groups.
-            pass
-        else:
-            # Normal mode: unselected first, then deleted (greyed)
-            spec_groups = getattr(ui, '_speculated_groups', {})
-            pairs_to_show = sorted(data.unselected_inds)
-            for inds in pairs_to_show:
-                pred_group = spec_groups.get(tuple(inds))
-                lbl_prefix = self._bookmark_label_prefix(inds)
-                label = f"{lbl_prefix}[{inds[0]}, {inds[1]}]"
-                grp = self._pair_group_label(inds)
-                if grp:
-                    label += f" {grp}"
-                if pred_group:
-                    label += f"  ~{pred_group}"
-                self.unselected_list.insert(tk.END, label)
-                self._avail_list_pairs.append((inds, pred_group))
-                if _should_gray(inds):
-                    self.unselected_list.itemconfig(
-                        self.unselected_list.size() - 1, foreground='#AAAAAA')
-
-            deleted_inds = getattr(ui, 'deleted_inds', set())
-            if deleted_inds:
-                sep_idx = self.unselected_list.size()
-                self.unselected_list.insert(tk.END, '── deleted ──')
+            return  # any-mode: available list intentionally empty
+        for inds in sorted(data.unselected_inds):
+            lbl_prefix = self._bookmark_label_prefix(inds)
+            label = f"{lbl_prefix}[{inds[0]}, {inds[1]}]"
+            grp = self._pair_group_label(inds)
+            if grp:
+                label += f" {grp}"
+            self.unselected_list.insert(tk.END, label)
+            self._avail_list_pairs.append((inds, None))
+            if should_gray(inds):
                 self.unselected_list.itemconfig(
-                    sep_idx,
-                    foreground='#AAAAAA',
-                    selectforeground='#AAAAAA',
-                    background='#EEEEEE',
-                    selectbackground='#DDDDDD',
-                )
-                self._avail_list_pairs.append((_AVAIL_GROUP_HDR, 'deleted'))
-                for inds in sorted(deleted_inds):
-                    label = f"[{inds[0]}, {inds[1]}]"
-                    self.unselected_list.insert(tk.END, label)
-                    self.unselected_list.itemconfig(
-                        self.unselected_list.size() - 1, foreground='#AAAAAA')
-                    self._avail_list_pairs.append((inds, 'deleted'))
+                    self.unselected_list.size() - 1, foreground='#AAAAAA')
 
-        # ── Selected list ────────────────────────────────────────────────
-        self._sel_list_pairs      = []
+        deleted_inds = getattr(ui, 'deleted_inds', set())
+        if deleted_inds:
+            sep_idx = self.unselected_list.size()
+            self.unselected_list.insert(tk.END, '── deleted ──')
+            self.unselected_list.itemconfig(
+                sep_idx,
+                foreground='#AAAAAA',
+                selectforeground='#AAAAAA',
+                background='#EEEEEE',
+                selectbackground='#DDDDDD',
+            )
+            self._avail_list_pairs.append((_SEPARATOR_ROW, 'deleted'))
+            for inds in sorted(deleted_inds):
+                label = f"[{inds[0]}, {inds[1]}]"
+                self.unselected_list.insert(tk.END, label)
+                self.unselected_list.itemconfig(
+                    self.unselected_list.size() - 1, foreground='#AAAAAA')
+                self._avail_list_pairs.append((inds, 'deleted'))
+
+    def _sel_insert_pair(self, inds, should_gray, any_mode):
+        """Insert one pair row into the selected listbox."""
+        if any_mode:
+            sess_lbl = (str(inds[0].session)
+                        if hasattr(inds[0], 'session') else str(inds[0]))
+            label = (f"{self._bookmark_label_prefix(inds)}"
+                     f"{sess_lbl} [{inds[1]}, {inds[2]}]")
+        else:
+            label = (f"{self._bookmark_label_prefix(inds)}"
+                     f"[{inds[0]}, {inds[1]}]")
+        grp = self._pair_group_label(inds)
+        if grp:
+            label += f" {grp}"
+        self.selected_list.insert(tk.END, label)
+        self._sel_list_pairs.append(inds)
+        self._sel_list_header_keys.append(None)
+        if should_gray(inds):
+            self.selected_list.itemconfig(
+                self.selected_list.size() - 1, foreground='#AAAAAA')
+
+    def _sel_insert_header(self, text, count, collapsed_set):
+        """Insert a collapsible group header into the selected listbox. Returns is_collapsed."""
+        is_collapsed = text in collapsed_set
+        display = f"── {text} ({count}) ──" + (" >>" if is_collapsed else "")
+        hdr_idx = self.selected_list.size()
+        self.selected_list.insert(tk.END, display)
+        self.selected_list.itemconfig(
+            hdr_idx,
+            foreground='#444444', selectforeground='#444444',
+            background='#CCCCCC', selectbackground='#BBBBBB',
+        )
+        self._sel_list_pairs.append(None)
+        self._sel_list_header_keys.append(text)
+        return is_collapsed
+
+    def _populate_selected_list(self, ui, data, should_gray):
+        """Populate the Selected listbox for all sort modes. Returns total_any_count."""
+        self._sel_list_pairs       = []
         self._sel_list_header_keys = []
+
+        any_mode   = getattr(ui, '_session_any_mode', False)
+        sort_group = self._sort_selected.get()
+        sort_tag   = self._sort_by_tag.get()
+        sort_mean  = self._sort_by_mean.get() and not any_mode
+        sort_minp  = self._sort_by_min_p.get() and not any_mode
+
+        collapsed_set = getattr(ui, '_sel_collapsed_headers', set())
+
+        def _ins(inds):
+            self._sel_insert_pair(inds, should_gray, any_mode)
+
+        def _ins_hdr(text, count):
+            return self._sel_insert_header(text, count, collapsed_set)
 
         def _pair_group_combo(inds):
             sess, pair = ui._pair_sess_rt(inds)
@@ -675,59 +696,16 @@ class LeftPanel:
                 and pair in self._group_pairs(g, session=sess)
             ))
 
-        def _insert_sel_pair(inds):
-            if getattr(ui, '_session_any_mode', False):
-                sess_lbl = (str(inds[0].session)
-                            if hasattr(inds[0], 'session') else str(inds[0]))
-                label = (f"{self._bookmark_label_prefix(inds)}"
-                         f"{sess_lbl} [{inds[1]}, {inds[2]}]")
-            else:
-                label = (f"{self._bookmark_label_prefix(inds)}"
-                         f"[{inds[0]}, {inds[1]}]")
-            grp = self._pair_group_label(inds)
-            if grp:
-                label += f" {grp}"
-            self.selected_list.insert(tk.END, label)
-            self._sel_list_pairs.append(inds)
-            self._sel_list_header_keys.append(None)
-            if _should_gray(inds):
-                self.selected_list.itemconfig(
-                    self.selected_list.size() - 1, foreground='#AAAAAA')
-
-        _collapsed = getattr(ui, '_sel_collapsed_headers', set())
-
-        def _insert_sel_header(text, count):
-            is_collapsed = text in _collapsed
-            display = f"── {text} ({count}) ──" + (" >>" if is_collapsed else "")
-            hdr_idx = self.selected_list.size()
-            self.selected_list.insert(tk.END, display)
-            self.selected_list.itemconfig(
-                hdr_idx,
-                foreground='#444444', selectforeground='#444444',
-                background='#CCCCCC', selectbackground='#BBBBBB',
-            )
-            self._sel_list_pairs.append(None)
-            self._sel_list_header_keys.append(text)
-            return is_collapsed
-
-        _any = getattr(ui, '_session_any_mode', False)
-        sort_group = self._sort_selected.get()
-        sort_tag   = self._sort_by_tag.get()
-        # sort by mean / min-p require per-session CCG data, skip in All mode
-        sort_mean  = self._sort_by_mean.get() and not _any
-        sort_minp  = self._sort_by_min_p.get() and not _any
-
-        _total_any_count = 0
-        if _any:
+        total_any_count = 0
+        if any_mode:
             dead      = getattr(ui, 'deleted_inds', set())
             _expanded = getattr(ui, '_any_expanded_group_tags', set())
             all_gnames = ui._any_group_header_names()
 
-            # Count unique pairs across all groups for the tally
             _all_trips: set = set()
             for _gn in all_gnames:
                 _all_trips |= (ui._any_triples_in_group(_gn) - dead)
-            _total_any_count = len(_all_trips)
+            total_any_count = len(_all_trips)
 
             def _any_insert_hdr(hdr_text, n, key=None):
                 exp_hdr = hdr_text in _expanded
@@ -744,7 +722,6 @@ class LeftPanel:
                 return exp_hdr
 
             if sort_group:
-                # Build pair → tag-combo buckets (combo = sorted tuple of all tags)
                 pair_tags: dict = {}
                 for gname in all_gnames:
                     for trip in ui._any_triples_in_group(gname):
@@ -753,10 +730,6 @@ class LeftPanel:
                 combo_buckets: dict = _defaultdict(list)
                 for trip, tags in sorted(pair_tags.items()):
                     combo_buckets[tuple(sorted(tags))].append(trip)
-
-                def _combo_sort_key(combo):
-                    return (1, []) if not combo else (0, list(combo))
-
                 for combo in sorted(combo_buckets.keys(), key=_combo_sort_key):
                     hdr_text = ', '.join(combo) if combo else '(untagged)'
                     trips_combo = combo_buckets[combo]
@@ -769,48 +742,42 @@ class LeftPanel:
                             ckey = ui._type_key_for_nd(nd_key)
                             if ckey is None:
                                 continue
-                            _insert_sel_pair((ckey, r, t))
+                            _ins((ckey, r, t))
             else:
-                # Per-tag headers (sort_tag or no sort)
                 for gname in all_gnames:
                     trips_g = ui._any_triples_in_group(gname)
                     n_tag = len(trips_g - dead)
                     exp_hdr = _any_insert_hdr(gname, n_tag)
                     if exp_hdr:
                         for row in ui._any_iter_pairs_for_group(gname):
-                            _insert_sel_pair(row)
+                            _ins(row)
 
         elif sort_mean:
             for inds in sorted(data.selected_inds,
                                key=self._pair_mean_ccg, reverse=True):
-                _insert_sel_pair(inds)
+                _ins(inds)
 
         elif sort_minp:
             for inds in sorted(data.selected_inds, key=self._pair_min_pval):
-                _insert_sel_pair(inds)
+                _ins(inds)
 
         elif sort_group:
             buckets = _defaultdict(list)
             for inds in sorted(data.selected_inds):
                 buckets[_pair_group_combo(inds)].append(inds)
-
-            def _combo_sort_key(combo):
-                return (1, []) if not combo else (0, list(combo))
-
             for combo in sorted(buckets.keys(), key=_combo_sort_key):
                 pairs_in_combo = buckets[combo]
                 hdr_text = ', '.join(combo) if combo else '(untagged)'
-                collapsed = _insert_sel_header(hdr_text, len(pairs_in_combo))
-                if not collapsed:
+                if not _ins_hdr(hdr_text, len(pairs_in_combo)):
                     for inds in pairs_in_combo:
-                        _insert_sel_pair(inds)
+                        _ins(inds)
 
         elif sort_tag:
             tag_buckets: dict = _defaultdict(list)
             untagged = []
             non_internal = [g for g in data._groups
                             if not g.startswith('__')
-                            and not g.startswith(_SPECIAL_PREFIX)]
+                            and not is_special_group(g)]
             for inds in sorted(data.selected_inds):
                 _s, _p = ui._pair_sess_rt(inds)
                 _p = tuple(int(x) for x in _p)
@@ -822,48 +789,34 @@ class LeftPanel:
                 else:
                     untagged.append(inds)
             for tag in sorted(tag_buckets.keys()):
-                collapsed = _insert_sel_header(tag, len(tag_buckets[tag]))
-                if not collapsed:
+                if not _ins_hdr(tag, len(tag_buckets[tag])):
                     for inds in tag_buckets[tag]:
-                        _insert_sel_pair(inds)
+                        _ins(inds)
             if untagged:
-                collapsed = _insert_sel_header('(untagged)', len(untagged))
-                if not collapsed:
+                if not _ins_hdr('(untagged)', len(untagged)):
                     for inds in untagged:
-                        _insert_sel_pair(inds)
+                        _ins(inds)
         else:
             for inds in sorted(data.selected_inds):
-                _insert_sel_pair(inds)
+                _ins(inds)
 
-        # Sync avail/sel maps back to ui so undo/highlight code can read them
-        ui._avail_list_pairs      = self._avail_list_pairs
-        ui._sel_list_pairs        = self._sel_list_pairs
-        ui._sel_list_header_keys  = self._sel_list_header_keys
+        return total_any_count
 
-        # Tally labels
-        n_spec = len({p for p in getattr(ui, '_speculated_groups', {})
-                      if p in data.unselected_inds})
+    def _update_list_labels(self, ui, data, total_any_count):
+        """Update avail/selected count labels, jitter colors, stats."""
         if getattr(ui, '_session_any_mode', False):
             self._avail_label.set("Available (0) — Any mode")
         else:
             parts = [f"Available ({len(data.unselected_inds)}"]
-            if n_spec:
-                parts.append(f", {n_spec} predicted")
             deleted_inds = getattr(ui, 'deleted_inds', set())
             if deleted_inds:
                 parts.append(f", {len(deleted_inds)} deleted")
             parts.append(")")
             self._avail_label.set(''.join(parts))
 
-        if hasattr(self, '_clear_spec_btn'):
-            if n_spec and not getattr(ui, '_session_any_mode', False):
-                self._clear_spec_btn.pack(side=tk.RIGHT, padx=2)
-            else:
-                self._clear_spec_btn.pack_forget()
-
         try:
             if getattr(ui, '_session_any_mode', False):
-                self._sel_label.set(f"Selected ({_total_any_count})")
+                self._sel_label.set(f"Selected ({total_any_count})")
             else:
                 sess = ui._current_session_str()
                 ct_lbl = ui._conn_type_label(getattr(ui.key, 'conn_type', None))
@@ -876,21 +829,31 @@ class LeftPanel:
         ui._apply_jitter_list_colors()
         ui._refresh_stats()
 
+    # ------------------------------------------------------------------
+    # List population
+    # ------------------------------------------------------------------
+
+    def refresh_lists(self):
+        ui, data = self._ui, self.data
+        unsel_top, sel_top = self._save_scroll_positions()
+        self.unselected_list.delete(0, tk.END)
+        self.selected_list.delete(0, tk.END)
+
+        if getattr(ui, '_session_any_mode', False):
+            ui._any_rebuild_pair_handles()
+            ui._any_sync_selection_from_universe()
+
+        should_gray = self._build_should_gray(ui)
+        self._populate_avail_list(ui, data, should_gray)
+        total_any = self._populate_selected_list(ui, data, should_gray)
+        self._update_list_labels(ui, data, total_any)
+
         if self.search_bar.active:
             self.search_bar._refresh()
         else:
             self._reapply_bookmark_list_styles()
 
-        try:
-            if _unsel_top is not None:
-                self.unselected_list.yview_moveto(_unsel_top)
-        except Exception:
-            pass
-        try:
-            if _sel_top is not None:
-                self.selected_list.yview_moveto(_sel_top)
-        except Exception:
-            pass
+        self._restore_scroll_positions(unsel_top, sel_top)
 
     # ------------------------------------------------------------------
     # Pair movement
@@ -932,8 +895,7 @@ class LeftPanel:
                 self.refresh_lists()
             return
         ui._push_undo()
-        self.data.unselected_inds.discard(inds)
-        self.data.selected_inds.add(inds)
+        self.data.set_state(inds, 'sel')
         if pred_group is not None:
             if getattr(ui, '_session_any_mode', False):
                 self._group_add_pair(pred_group, (inds[1], inds[2]),
@@ -994,8 +956,7 @@ class LeftPanel:
             return
         scroll_top = self.selected_list.yview()[0]
         ui._push_undo()
-        self.data.selected_inds.discard(inds)
-        self.data.unselected_inds.add(inds)
+        self.data.set_state(inds, 'unsel')
         self.refresh_lists()
         self.selected_list.yview_moveto(scroll_top)
         ui._highlight_changed_pairs({inds})
@@ -1014,11 +975,9 @@ class LeftPanel:
         inds = tuple(row)
         ui._push_undo()
         if inds in self.data.unselected_inds:
-            self.data.unselected_inds.discard(inds)
-            self.data.selected_inds.add(inds)
+            self.data.set_state(inds, 'sel')
         else:
-            self.data.selected_inds.discard(inds)
-            self.data.unselected_inds.add(inds)
+            self.data.set_state(inds, 'unsel')
         next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
         ui.current_pair_idx = next_idx
         self.refresh_lists()
@@ -1086,7 +1045,7 @@ class LeftPanel:
             if mp and idx < len(mp):
                 e = mp[idx]
                 if e is not None:
-                    if e[0] == _AVAIL_GROUP_HDR:
+                    if is_separator_row(e):
                         return
                     inds_from_map = e[0]
         elif widget is self.selected_list:
@@ -1111,17 +1070,6 @@ class LeftPanel:
                 self._ui.current_pair_idx = self._ui.get_pair_index(inds)
             except (ValueError, TypeError):
                 return
-
-        if widget is self.selected_list:
-            try:
-                ui2 = self._ui
-                row = ui2.all_inds[ui2.current_pair_idx]
-                ref, tgt = int(row[0]), int(row[1])
-                id_pos = {int(n): i for i, n in enumerate(ui2.neurons.neuron_ids)}
-                rp, tp = id_pos[ref], id_pos[tgt]
-                print(f"[on_pair_select] inds=({ref},{tgt}) shanks=({int(ui2.neurons.shank_ids[rp])},{int(ui2.neurons.shank_ids[tp])})")
-            except Exception:
-                pass
 
         _ctrl = event.state & 0x4
         _cmd  = event.state & 0x8
@@ -1164,7 +1112,7 @@ class LeftPanel:
             mp = getattr(self, '_avail_list_pairs', None)
             if mp and idx < len(mp) and mp[idx] is not None:
                 ent = mp[idx]
-                if ent[0] == _AVAIL_GROUP_HDR:
+                if is_separator_row(ent):
                     return 'break'
                 inds = ent[0]
         else:
@@ -1194,14 +1142,6 @@ class LeftPanel:
     def _do_pair_select_update(self):
         ui = self._ui
         ui._select_after = None
-        try:
-            row = ui.all_inds[ui.current_pair_idx]
-            ref, tgt = int(row[0]), int(row[1])
-            id_pos = {int(n): i for i, n in enumerate(ui.neurons.neuron_ids)}
-            rp, tp = id_pos[ref], id_pos[tgt]
-            print(f"[_do_pair_select_update] inds=({ref},{tgt}) shanks=({int(ui.neurons.shank_ids[rp])},{int(ui.neurons.shank_ids[tp])})")
-        except Exception:
-            pass
         try:
             ui._exit_spike_attribution_view()
         except Exception:
@@ -1242,7 +1182,7 @@ class LeftPanel:
                 if entry is None:
                     continue
                 raw = entry[0]
-                if raw == _AVAIL_GROUP_HDR:
+                if is_separator_row(raw):
                     continue
                 if getattr(self._ui, '_session_any_mode', False):
                     ti = (int(raw[1]), int(raw[2]))  # (ref, tgt) — session-agnostic
@@ -1333,14 +1273,27 @@ class LeftPanel:
     # List helpers
     # ------------------------------------------------------------------
 
+    def _resolve_list_entry(self, entry):
+        """Resolve one listbox map entry to a pair tuple, or None if invalid."""
+        if entry is None or is_separator_row(entry):
+            return None
+        inds = (entry[0] if isinstance(entry, tuple) and len(entry) == 2
+                and isinstance(entry[0], (tuple, list, np.ndarray)) else entry)
+        try:
+            if getattr(self._ui, '_session_any_mode', False):
+                sess = str(inds[0].session) if hasattr(inds[0], 'session') else str(inds[0])
+                return (sess, int(inds[1]), int(inds[2]))
+            return (int(inds[0]), int(inds[1]))
+        except Exception:
+            return None
+
     def _selected_pair_from_lists(self):
         """Return (ref,tgt) or (sess,ref,tgt) in any-mode; else None."""
-        ui = self._ui
         for lb, mp in [
             (getattr(self, 'unselected_list', None), getattr(self, '_avail_list_pairs', None)),
             (getattr(self, 'selected_list', None), getattr(self, '_sel_list_pairs', None)),
         ]:
-            if lb is None:
+            if lb is None or mp is None:
                 continue
             try:
                 sel = list(lb.curselection())
@@ -1348,37 +1301,17 @@ class LeftPanel:
                 sel = []
             if not sel:
                 continue
-            i = sel[-1]
-            if mp is None:
-                continue
             try:
-                entry = mp[i]
+                pair = self._resolve_list_entry(mp[sel[-1]])
             except Exception:
                 continue
-            if entry is None:
-                continue
-            if isinstance(entry, tuple) and entry and entry[0] == _AVAIL_GROUP_HDR:
-                continue
-            if (isinstance(entry, tuple) and len(entry) == 2
-                    and isinstance(entry[0], (tuple, list, np.ndarray))):
-                inds = entry[0]
-            else:
-                inds = entry
-            try:
-                if getattr(ui, '_session_any_mode', False):
-                    sess = (str(inds[0].session) if hasattr(inds[0], 'session')
-                            else str(inds[0]))
-                    return (sess, int(inds[1]), int(inds[2]))
-                return (int(inds[0]), int(inds[1]))
-            except Exception:
-                continue
+            if pair is not None:
+                return pair
         return None
 
     def _selected_pairs_from_lists(self) -> list:
         """Return all selected (ref,tgt) pairs across both lists (deduped)."""
-        ui = self._ui
-        out: list = []
-        seen: set = set()
+        out, seen = [], set()
         for lb, mp in [
             (getattr(self, 'unselected_list', None), getattr(self, '_avail_list_pairs', None)),
             (getattr(self, 'selected_list', None), getattr(self, '_sel_list_pairs', None)),
@@ -1391,61 +1324,38 @@ class LeftPanel:
                 sel = []
             for i in sel:
                 try:
-                    entry = mp[i]
+                    pair = self._resolve_list_entry(mp[i])
                 except Exception:
                     continue
-                if entry is None:
-                    continue
-                if isinstance(entry, tuple) and entry and entry[0] == _AVAIL_GROUP_HDR:
-                    continue
-                if (isinstance(entry, tuple) and len(entry) == 2
-                        and isinstance(entry[0], (tuple, list, np.ndarray))):
-                    inds = entry[0]
-                else:
-                    inds = entry
-                try:
-                    if getattr(ui, '_session_any_mode', False):
-                        sess = (str(inds[0].session) if hasattr(inds[0], 'session')
-                                else str(inds[0]))
-                        pair = (sess, int(inds[1]), int(inds[2]))
-                    else:
-                        pair = (int(inds[0]), int(inds[1]))
-                except Exception:
-                    continue
-                if pair in seen:
+                if pair is None or pair in seen:
                     continue
                 seen.add(pair)
                 out.append(pair)
-        out.sort(key=lambda x: (str(x[0]), x[1], x[2]) if len(x) == 3
-                               else ('', x[0], x[1]))
+        out.sort(key=lambda x: (str(x[0]), x[1], x[2]) if len(x) == 3 else ('', x[0], x[1]))
         return out
 
     def _select_all(self):
         """Toggle between Select All and Deselect All."""
-        ui = self._ui
-        if getattr(ui, '_session_any_mode', False):
+        if getattr(self._ui, '_session_any_mode', False):
             return
         if self.data.unselected_inds:
             for inds in list(self.data.unselected_inds):
-                self.data.selected_inds.add(inds)
-            self.data.unselected_inds.clear()
+                self.data.set_state(inds, 'sel')
         else:
             for inds in list(self.data.selected_inds):
-                self.data.unselected_inds.add(inds)
-            self.data.selected_inds.clear()
+                self.data.set_state(inds, 'unsel')
         self.refresh_lists()
-        ui.network_panel.draw()
+        self._ui.network_panel.draw()
 
     def _pair_at_all_inds_idx(self, idx: int):
         """Canonical pair key matching list rows / selection sets."""
-        ui = self._ui
-        if getattr(ui, '_session_any_mode', False):
-            hl = getattr(ui, '_any_pair_handle_list', None) or []
+        if getattr(self._ui, '_session_any_mode', False):
+            hl = getattr(self._ui, '_any_pair_handle_list', None) or []
             if idx < 0 or idx >= len(hl):
                 return None
             ck, r, t = hl[idx]
             return (str(ck.session), int(r), int(t))
-        row = ui.all_inds[idx]
+        row = self._ui.all_inds[idx]
         return tuple(int(x) for x in row)
 
     # ------------------------------------------------------------------
@@ -1460,8 +1370,7 @@ class LeftPanel:
         scroll_top = self.unselected_list.yview()[0]
         ui._push_undo()
         for p in pairs:
-            ui.deleted_inds.discard(p)
-            ui.unselected_inds.add(p)
+            ui._sel_data.set_state(p, 'unsel')
         self.refresh_lists()
         self.unselected_list.yview_moveto(scroll_top)
         ui._highlight_changed_pairs(set(pairs))
@@ -1475,8 +1384,7 @@ class LeftPanel:
         scroll_top = self.unselected_list.yview()[0]
         ui._push_undo()
         for p in pairs:
-            ui.unselected_inds.discard(p)
-            ui.deleted_inds.add(p)
+            ui._sel_data.set_state(p, 'del')
         self.refresh_lists()
         self.unselected_list.yview_moveto(scroll_top)
         ui._flush_deleted_to_store()
@@ -1490,8 +1398,7 @@ class LeftPanel:
         ui._push_undo()
         for p in pairs:
             trip = ui._pair_row_selected_trip(p)
-            ui.selected_inds.discard(trip)
-            ui.deleted_inds.add(trip)
+            ui._sel_data.set_state(trip, 'del')
         self.refresh_lists()
         self.selected_list.yview_moveto(scroll_top)
         ui._flush_deleted_to_store()
@@ -1585,7 +1492,7 @@ class LeftPanel:
             grp_menu.add_separator()
         special_items = []
         for gname in sorted(self.data._groups):
-            if gname.startswith(_SPECIAL_PREFIX):
+            if is_special_group(gname):
                 special_items.append(gname)
                 continue
             if gname.startswith('__'):
@@ -1657,8 +1564,7 @@ class LeftPanel:
         scroll_top = self.unselected_list.yview()[0]
         self._ui._push_undo()
         for p in pairs:
-            self._ui.unselected_inds.discard(p)
-            self._ui.selected_inds.add(p)
+            self._ui._sel_data.set_state(p, 'sel')
         self.refresh_lists()
         self.unselected_list.yview_moveto(scroll_top)
         self._ui._highlight_changed_pairs(set(pairs))
@@ -1677,8 +1583,7 @@ class LeftPanel:
         scroll_top = self.selected_list.yview()[0]
         self._ui._push_undo()
         for p in pairs:
-            self._ui.selected_inds.discard(p)
-            self._ui.unselected_inds.add(p)
+            self._ui._sel_data.set_state(p, 'unsel')
         self.refresh_lists()
         self.selected_list.yview_moveto(scroll_top)
         self._ui._highlight_changed_pairs(set(pairs))
@@ -1697,8 +1602,7 @@ class LeftPanel:
                 return
             scroll_top = self.selected_list.yview()[0]
             ui._push_undo()
-            ui.selected_inds.discard(trip)
-            ui.deleted_inds.add(trip)
+            ui._sel_data.set_state(trip, 'del')
             hl_old = list(getattr(ui, '_any_pair_handle_list', ()) or ())
             next_trip = None
             for i in range(ui.current_pair_idx + 1, len(hl_old)):
@@ -1736,8 +1640,7 @@ class LeftPanel:
         if inds in ui.selected_inds:
             scroll_top = self.selected_list.yview()[0]
             ui._push_undo()
-            ui.selected_inds.discard(inds)
-            ui.deleted_inds.add(inds)
+            ui._sel_data.set_state(inds, 'del')
             n = len(ui.all_inds)
             next_idx = None
             for i in range(ui.current_pair_idx + 1, n):
@@ -1765,14 +1668,12 @@ class LeftPanel:
         scroll_top = self.unselected_list.yview()[0]
         ui._push_undo()
         if inds in ui.deleted_inds:
-            ui.deleted_inds.discard(inds)
-            ui.unselected_inds.add(inds)
+            ui._sel_data.set_state(inds, 'unsel')
             self.refresh_lists()
             self.unselected_list.yview_moveto(scroll_top)
             self._select_pair_in_list(inds)
         else:
-            ui.unselected_inds.discard(inds)
-            ui.deleted_inds.add(inds)
+            ui._sel_data.set_state(inds, 'del')
             n = len(ui.all_inds)
             next_idx = None
             for i in range(ui.current_pair_idx + 1, n):
@@ -1795,59 +1696,28 @@ class LeftPanel:
         ui.update_plot()
 
     # ------------------------------------------------------------------
-    # Group helpers
-    # TODO: GroupsManager — all methods below in this section belong in
-    #   a future GroupsManager class that owns group CRUD, hotkeys, and
-    #   registry management. LeftPanel will hold a GroupsManager instance.
+    # Group helpers — delegate to GroupManager
     # ------------------------------------------------------------------
 
     def _group_pairs(self, gname, session=None):
-        """Return pairs set for group in the given session (default: current)."""
-        # TODO: GroupsManager
-        g = self.data._groups.get(gname, {})
-        if isinstance(g, set):
-            return g
-        sess = session or self._ui._current_session_str()
-        return g.get(sess, set())
-
+        return self._ui._group_mgr._group_pairs(gname, session)
     def _group_pairs_all_sessions(self, gname):
-        # TODO: GroupsManager
-        g = self.data._groups.get(gname, {})
-        if isinstance(g, set):
-            return g
-        all_pairs = set()
-        for pairs in g.values():
-            all_pairs |= pairs
-        return all_pairs
-
+        return self._ui._group_mgr._group_pairs_all_sessions(gname)
     def _group_add_pair(self, gname, pair, session=None):
-        # TODO: GroupsManager
-        sess = session or self._ui._current_session_str()
-        self.data._groups.setdefault(gname, {}).setdefault(sess, set()).add(pair)
-
+        self._ui._group_mgr._group_add_pair(gname, pair, session)
     def _group_discard_pair(self, gname, pair, session=None):
-        # TODO: GroupsManager
-        sess = session or self._ui._current_session_str()
-        g = self.data._groups.get(gname, {})
-        if isinstance(g, set):
-            g.discard(pair)
-        elif sess in g:
-            g[sess].discard(pair)
-
+        self._ui._group_mgr._group_discard_pair(gname, pair, session)
     def _pair_in_group(self, pair, group_name: str) -> bool:
-        # TODO: GroupsManager
-        sess, p2 = self._ui._pair_sess_rt(pair)
-        return p2 in self._group_pairs(group_name, session=sess)
+        return self._ui._group_mgr._pair_in_group(pair, group_name)
 
     def _pair_group_label(self, inds) -> str:
-        # TODO: GroupsManager
         sess, pair = self._ui._pair_sess_rt(inds)
         pair = tuple(int(x) for x in pair)
         labels = []
         for gname in self.data._groups:
             if pair not in self._group_pairs(gname, session=sess):
                 continue
-            if gname.startswith(_SPECIAL_PREFIX):
+            if is_special_group(gname):
                 labels.append('*' + gname[len(_SPECIAL_PREFIX):])
             elif not gname.startswith('__'):
                 labels.append(gname)
@@ -1856,23 +1726,7 @@ class LeftPanel:
         group_str = f"[{','.join(labels)}]" if labels else ""
         return tag_mark + group_str
 
-    def _toggle_pair_group(self, pair, group_name):
-        # TODO: GroupsManager
-        if group_name not in self.data._groups:
-            self.data._groups[group_name] = {}
-        sess, p2 = self._ui._pair_sess_rt(pair)
-        if p2 in self._group_pairs(group_name, session=sess):
-            self._group_discard_pair(group_name, p2, session=sess)
-        else:
-            self._group_add_pair(group_name, p2, session=sess)
-        unsel_scroll = self.unselected_list.yview()[0]
-        sel_scroll   = self.selected_list.yview()[0]
-        self.refresh_lists()
-        self.unselected_list.yview_moveto(unsel_scroll)
-        self.selected_list.yview_moveto(sel_scroll)
-
     def _toggle_pairs_group(self, pairs, group_name):
-        # TODO: GroupsManager
         if group_name not in self.data._groups:
             self.data._groups[group_name] = {}
         all_in = all(self._pair_in_group(p, group_name) for p in pairs)
@@ -1890,50 +1744,18 @@ class LeftPanel:
         self.unselected_list.yview_moveto(unsel_scroll)
         self.selected_list.yview_moveto(sel_scroll)
 
-    # ------------------------------------------------------------------
-    # Group registry helpers
-    # TODO: GroupsManager
-    # ------------------------------------------------------------------
-
     def _ensure_group_registered(self, name: str) -> int:
-        # TODO: GroupsManager
-        data = self.data
-        for gid, g in data._group_registry.items():
-            if g['name'] == name:
-                return gid
-        gid = data._next_group_id
-        data._group_registry[gid] = {
-            'name':   name,
-            'hotkey': data._group_hotkeys.get(name),
-            'notes':  data._group_notes.get(name, ''),
-        }
-        data._next_group_id += 1
-        return gid
-
+        return self._ui._group_mgr._ensure_group_registered(name)
     def _group_id_for(self, name: str) -> int | None:
-        # TODO: GroupsManager
-        for gid, g in self.data._group_registry.items():
-            if g['name'] == name:
-                return gid
-        return None
-
+        return self._ui._group_mgr._group_id_for(name)
     def _sync_registry_from_groups(self):
-        # TODO: GroupsManager
-        data = self.data
-        for name in list(data._groups.keys()):
-            self._ensure_group_registered(name)
-        for gid, g in data._group_registry.items():
-            name = g['name']
-            g['hotkey'] = data._group_hotkeys.get(name)
-            g['notes']  = data._group_notes.get(name, '')
+        self._ui._group_mgr._sync_registry_from_groups()
 
     # ------------------------------------------------------------------
     # Group dialogs
-    # TODO: GroupsManager
     # ------------------------------------------------------------------
 
     def _create_group_dialog(self):
-        # TODO: GroupsManager
         name = simpledialog.askstring(
             "Create group", "Group name:", parent=self._ui.root)
         if not name:
@@ -1950,7 +1772,6 @@ class LeftPanel:
         self.refresh_lists()
 
     def _create_special_group_dialog(self):
-        # TODO: GroupsManager
         name = simpledialog.askstring(
             "Create special group", "Special group name:",
             parent=self._ui.root)
@@ -1969,7 +1790,6 @@ class LeftPanel:
         self.refresh_lists()
 
     def _manage_groups_dialog(self):
-        # TODO: GroupsManager
         data = self.data
         if not data._groups:
             messagebox.showinfo("Manage groups",
@@ -2066,7 +1886,7 @@ class LeftPanel:
                 continue
             _add_group_tab(nb, gname, is_special=False)
         special_names = sorted(g for g in data._groups
-                               if g.startswith(_SPECIAL_PREFIX))
+                               if is_special_group(g))
         if special_names:
             special_frame = ttk.Frame(nb)
             nb.add(special_frame, text="Special")
@@ -2077,7 +1897,6 @@ class LeftPanel:
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=4)
 
     def _rename_group(self, old_name, new_name, win=None):
-        # TODO: GroupsManager
         data = self.data
         new_name = new_name.strip()
         if not new_name or new_name == old_name:
@@ -2093,7 +1912,7 @@ class LeftPanel:
             pass
         data._groups[new_name] = data._groups.pop(old_name)
         if old_name in data._group_hotkeys:
-            if new_name.startswith(_SPECIAL_PREFIX):
+            if is_special_group(new_name):
                 # Special groups don't use hotkeys — drop it on conversion
                 data._group_hotkeys.pop(old_name)
                 try:
@@ -2113,7 +1932,6 @@ class LeftPanel:
             self._manage_groups_dialog()
 
     def _delete_group(self, name, win=None):
-        # TODO: GroupsManager
         if not messagebox.askyesno("Delete group", f"Delete group '{name}'?"):
             return
         data = self.data
@@ -2128,7 +1946,6 @@ class LeftPanel:
                 self._manage_groups_dialog()
 
     def _merge_groups_dialog(self):
-        # TODO: GroupsManager
         data = self.data
         if len(data._groups) < 2:
             messagebox.showinfo("Merge groups", "Need at least 2 groups to merge.")
@@ -2186,11 +2003,9 @@ class LeftPanel:
 
     # ------------------------------------------------------------------
     # Hotkey methods
-    # TODO: GroupsManager
     # ------------------------------------------------------------------
 
     def _set_group_hotkey(self, group_name, key_str):
-        # TODO: GroupsManager
         key_str = key_str.strip().lower()
         if not key_str:
             self.data._group_hotkeys.pop(group_name, None)
@@ -2209,7 +2024,6 @@ class LeftPanel:
         self._rebuild_groups_menu()
 
     def _rebuild_groups_menu(self):
-        # TODO: GroupsManager
         ui = self._ui
         if not hasattr(ui, '_groups_menu'):
             return
@@ -2220,7 +2034,7 @@ class LeftPanel:
             pass
         current_pairs = (set(map(tuple, ui.all_inds))
                          if len(ui.all_inds) else set())
-        special_groups = [g for g in self.data._groups if g.startswith(_SPECIAL_PREFIX)]
+        special_groups = [g for g in self.data._groups if is_special_group(g)]
         if special_groups:
             ui._groups_menu.add_separator()
             special_menu = tk.Menu(ui._groups_menu, tearoff=0)
@@ -2238,7 +2052,6 @@ class LeftPanel:
             ui._refresh_hotkeys_bar()
 
     def _select_group(self, group_name):
-        # TODO: GroupsManager
         pairs = self._group_pairs(group_name)
         if not pairs:
             return
@@ -2248,7 +2061,6 @@ class LeftPanel:
         self._ui._draw_network()
 
     def _group_hotkey_handler(self, key_str: str, advance: bool = True):
-        # TODO: GroupsManager
         """Toggle the current pair in/out of the group assigned to key_str."""
         ui = self._ui
         current_pair = self._selected_pair_from_lists()
@@ -2276,7 +2088,7 @@ class LeftPanel:
                 for i in self.unselected_list.curselection():
                     if avail_map and i < len(avail_map):
                         entry = avail_map[i]
-                        if entry is None or entry[0] == _AVAIL_GROUP_HDR:
+                        if entry is None or is_separator_row(entry):
                             continue
                         if entry[1] != 'deleted':
                             highlighted.append(entry[0])
@@ -2302,14 +2114,17 @@ class LeftPanel:
 
             for pair in highlighted:
                 was_in_group = self._pair_in_group(pair, gname)
-                self._toggle_pair_group(pair, gname)
+                sess, p2 = self._ui._pair_sess_rt(pair)
+                if was_in_group:
+                    self._group_discard_pair(gname, p2, session=sess)
+                else:
+                    self._group_add_pair(gname, p2, session=sess)
                 if getattr(ui, '_session_any_mode', False):
                     changed.add(pair)
                     continue
                 if not was_in_group:
                     if pair in self.data.unselected_inds:
-                        self.data.unselected_inds.discard(pair)
-                        self.data.selected_inds.add(pair)
+                        self.data.set_state(pair, 'sel')
                         changed.add(pair)
                 else:
                     if pair in self.data.selected_inds:
@@ -2319,8 +2134,7 @@ class LeftPanel:
                             if not g.startswith('__')
                         )
                         if not has_groups:
-                            self.data.selected_inds.discard(pair)
-                            self.data.unselected_inds.add(pair)
+                            self.data.set_state(pair, 'unsel')
                             changed.add(pair)
 
             self.refresh_lists()
@@ -2337,7 +2151,6 @@ class LeftPanel:
         ui._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
 
     def _export_groups(self):
-        # TODO: GroupsManager
         data = self.data
         if not data._groups:
             messagebox.showinfo("Export groups", "No groups to export.")
@@ -2351,13 +2164,12 @@ class LeftPanel:
         )
         if not path:
             return
-        export_data = data.serialize_groups(self._ui._current_session_str())
+        export_data = data.save_groups()
         with open(path, 'w') as f:
             json.dump(export_data, f, indent=2, default=_json_default)
         print(f"[LeftPanel] groups exported → {path}")
 
     def _import_groups(self):
-        # TODO: GroupsManager
         path = filedialog.askopenfilename(
             title="Import groups",
             filetypes=[('JSON files', '*.json')],
@@ -2371,7 +2183,7 @@ class LeftPanel:
         except (json.JSONDecodeError, OSError) as exc:
             messagebox.showerror("Import groups", f"Failed to read file:\n{exc}")
             return
-        self.data.deserialize_groups(
+        self.data.load_groups(
             raw, self._ui._current_session_str(), restore_hotkeys=False)
         for gname, hk in raw.get('hotkeys', {}).items():
             if gname not in self.data._group_hotkeys:
@@ -2429,18 +2241,6 @@ class LeftPanel:
                    command=win.destroy).pack(side=tk.RIGHT)
 
     # ------------------------------------------------------------------
-    # Speculated predictions
-    # ------------------------------------------------------------------
-
-    def _clear_speculated(self):
-        """Discard all pending speculated predictions and refresh."""
-        getattr(self._ui, '_speculated_groups', {}).clear()
-        self.refresh_lists()
-
-
-# ---------------------------------------------------------------------------
-# SpikePairsPanel — Spike Pairs tab content
-# ---------------------------------------------------------------------------
 
 class SpikePairsPanel:
     """Content of the 'Spike Pairs' tab.
@@ -2520,11 +2320,6 @@ class SpikePairsPanel:
         self._selected_idx = idx
         self._ui.center_container.spike_attribution_panel._draw_spike_pairs_raster(idx, self._spike_pairs)
 
-
-# ---------------------------------------------------------------------------
-# LeftPanelContainer — wires LeftPanel and SpikePairsPanel
-# ---------------------------------------------------------------------------
-
 class LeftPanelContainer:
     """Thin wrapper that owns LeftPanel and SpikePairsPanel.
 
@@ -2542,14 +2337,8 @@ class LeftPanelContainer:
             data, ui)
         self.widget = self.left_panel.notebook
 
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
 def _json_default(obj):
     """JSON encoder for numpy scalar types."""
-    import numpy as np
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):

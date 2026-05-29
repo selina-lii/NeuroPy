@@ -1,7 +1,556 @@
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+
 import matplotlib.pyplot as plt
-from ..core import ProbeGroup
 import matplotlib.patches as patches
+from matplotlib.patches import FancyArrowPatch, Arc
+from matplotlib.lines import Line2D
 import numpy as np
+
+from ..core import ProbeGroup
+
+
+# ---------------------------------------------------------------------------
+# ProbeNetworkConfig
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProbeNetworkConfig:
+    """Display toggles for probe network render — no Tk dependency."""
+    # Focus
+    focused_neuron: int | None = None
+    focused_pair: tuple | None = None
+    current_pair: tuple | None = None
+    show_current_pair: bool = False
+    # Display toggles
+    show_arrows: bool = True
+    hide_unconnected: bool = False
+    hide_same_channel: bool = False
+    hide_same_shank: bool = False
+    # Style
+    line_alpha: float = 1.0
+    h_scale: float = 1.0
+    v_scale: float = 1.0
+    hidden_shanks: frozenset = field(default_factory=frozenset)
+    enabled_conn_types: frozenset | None = None   # None = all enabled
+    # Group filter
+    group_pairs: frozenset = field(default_factory=frozenset)
+    gf_active: bool = False
+    # Appearance
+    dark_mode: bool = False
+    type_colors: dict = field(default_factory=lambda: {
+        ('pyr', 'pyr'):     '#D32F2F',
+        ('pyr', 'inter'):   '#DAA520',
+        ('inter', 'pyr'):   '#2E7D32',
+        ('inter', 'inter'): '#1565C0',
+    })
+    show_ch_ids: bool = False
+    session_label: str = ''
+    any_mode: bool = False
+    n_sessions: int = 1
+    sess_idx: int = 0
+    pair_title: str = ''
+
+
+# ---------------------------------------------------------------------------
+# Module-level render helpers (no Tk)
+# ---------------------------------------------------------------------------
+
+_NET_DEFAULT_E = '#D32F2F'
+_NET_DEFAULT_I = '#1565C0'
+
+
+def _ct_enabled(ct, cfg: ProbeNetworkConfig) -> bool:
+    return cfg.enabled_conn_types is None or ct in cfg.enabled_conn_types
+
+
+def _should_skip_pair(ref: int, tgt: int, shank_ids, peak_channels,
+                      cfg: ProbeNetworkConfig) -> bool:
+    if (cfg.hide_same_shank
+            and shank_ids is not None
+            and ref < len(shank_ids) and tgt < len(shank_ids)
+            and int(shank_ids[ref]) == int(shank_ids[tgt])):
+        return True
+    if (cfg.hide_same_channel
+            and peak_channels is not None
+            and ref < len(peak_channels) and tgt < len(peak_channels)
+            and int(peak_channels[ref]) == int(peak_channels[tgt])):
+        return True
+    return False
+
+
+def _arrow_style(is_fp: bool, fp, in_filt: bool,
+                 is_cur: bool, is_sel: bool, is_cpair: bool,
+                 ec_default: str) -> tuple:
+    if is_fp:                 return 1.00, 3.0, 7, ec_default
+    if fp is not None:        return 0.12, 0.3, 1, '#CCCCCC'
+    if not in_filt:           return 0.20, 0.4, 1, '#CCCCCC'
+    if not is_cur and is_sel: return 0.70, 1.4, 3, ec_default
+    if not is_cur:            return 0.35, 0.6, 2, ec_default
+    if is_cpair:              return 1.00, 3.0, 7, ec_default
+    if is_sel:                return 0.90, 1.8, 4, ec_default
+    return                          0.55, 0.9, 3, ec_default
+
+
+def _arc_style(ref: int, tgt: int, current_pair, fp, fn) -> tuple:
+    if (ref, tgt) == current_pair:                return 1.0, 2.5
+    if fp is not None and (ref, tgt) != fp:        return 0.12, 0.5
+    if fn is not None and ref != fn and tgt != fn: return 0.12, 0.5
+    return 0.85, 1.4
+
+
+# ---------------------------------------------------------------------------
+# Vectorized position lookup
+# ---------------------------------------------------------------------------
+
+def _compute_positions(neurons, pg):
+    """Return (x_pos, y_pos, peak_channels) vectorized via pandas reindex."""
+    peak_ch = np.asarray(neurons.peak_channels, dtype=int)
+    pg_df = pg.to_dataframe().set_index('channel_id')
+    x_pos = pg_df['x'].reindex(peak_ch).fillna(0.0).to_numpy(dtype=float)
+    y_pos = pg_df['y'].reindex(peak_ch).fillna(0.0).to_numpy(dtype=float)
+    return x_pos, y_pos, peak_ch
+
+
+# ---------------------------------------------------------------------------
+# Draw functions — notebook-callable, no Tk dependency
+# ---------------------------------------------------------------------------
+
+def _draw_neurons(ax, x_pos, y_pos, peak_channels, shank_ids, neuron_type, n_neurons,
+                  cluster_neurons, pair_entries, deleted_pair_entries,
+                  cfg: ProbeNetworkConfig):
+    """Scatter-plot neurons, applying focus/hide-unconnected at render time."""
+    fn            = cfg.focused_neuron
+    fp            = cfg.focused_pair
+    nt            = neuron_type
+
+    fp_neurons = {fp[0], fp[1]} if fp is not None else set()
+
+    all_involved: set = set()
+    for (ref, tgt), entries in pair_entries.items():
+        if fn is not None and ref != fn and tgt != fn:
+            continue
+        if fp is not None and ref not in fp_neurons and tgt not in fp_neurons:
+            continue
+        if cfg.gf_active and (ref, tgt) not in cfg.group_pairs:
+            continue
+        for entry in entries:
+            if not _ct_enabled(entry['conn_type'], cfg):
+                continue
+            if _should_skip_pair(ref, tgt, shank_ids, peak_channels, cfg):
+                continue
+            all_involved.add(ref)
+            all_involved.add(tgt)
+            break
+
+    _MARKER_SIZE = 50
+    _marker_diam_pt = np.sqrt(_MARKER_SIZE / np.pi) * 2.0
+    try:
+        pt_to_px   = ax.get_figure().dpi / 72.0
+        marker_px  = _marker_diam_pt * pt_to_px
+        inv        = ax.transData.inverted()
+        origin_d   = inv.transform((0.0, 0.0))
+        step_d     = inv.transform((marker_px, 0.0))
+        _step      = abs(step_d[0] - origin_d[0]) * 0.5
+    except Exception:
+        _step = 5.0
+
+    _GRAYS = [f'#{int(v*255):02x}{int(v*255):02x}{int(v*255):02x}'
+              for v in [0.0, 0.2, 0.4, 0.6, 0.8]]
+    _ch_slots = defaultdict(list)
+    for i, ch in enumerate(peak_channels):
+        _ch_slots[int(ch)].append(i)
+
+    x_spread = x_pos.copy()
+    neuron_colors = np.empty(n_neurons, dtype=object)
+    neuron_colors[:] = '#000000'
+    for ch, idxs in _ch_slots.items():
+        n_ch = len(idxs)
+        offsets = (np.arange(n_ch) - (n_ch - 1) / 2.0) * _step
+        for slot, ni in enumerate(idxs):
+            x_spread[ni] += offsets[slot]
+            neuron_colors[ni] = _GRAYS[slot % len(_GRAYS)]
+
+    hide_unconnected = cfg.hide_unconnected
+    unconnected, connected_list = [], []
+    for idx in range(n_neurons):
+        if fn is not None and idx == fn:
+            continue
+        if idx in fp_neurons:
+            continue
+        if cfg.hidden_shanks and shank_ids is not None and idx < len(shank_ids):
+            if int(shank_ids[idx]) in cfg.hidden_shanks:
+                continue
+        ntype    = nt[idx] if nt is not None else None
+        is_inter = (ntype == 'inter')
+        if hide_unconnected:
+            in_any = idx in all_involved
+        else:
+            in_any = idx in all_involved or idx in cluster_neurons
+        if in_any:
+            connected_list.append((idx, is_inter))
+        else:
+            unconnected.append(idx)
+
+    if not hide_unconnected and unconnected:
+        ax.scatter(x_spread[unconnected], y_pos[unconnected],
+                   s=_MARKER_SIZE, marker='o', color='#9E9E9E',
+                   zorder=1, linewidths=0, edgecolors='none', alpha=0.25)
+
+    _base_alpha = 1.0 if fp is None else 0.3
+    for idx, is_inter in connected_list:
+        c      = '#9E9E9E' if fp is not None else neuron_colors[idx]
+        marker = 'o' if is_inter else '^'
+        ax.scatter([x_spread[idx]], [y_pos[idx]],
+                   s=_MARKER_SIZE, marker=marker, color=c,
+                   zorder=4, linewidths=0, edgecolors='none', alpha=_base_alpha)
+
+    if fn is not None and 0 <= fn < n_neurons:
+        fn_ntype  = nt[fn] if nt is not None else None
+        fn_marker = 'o' if fn_ntype == 'inter' else '^'
+        ax.scatter([x_pos[fn]], [y_pos[fn]], s=140, marker=fn_marker,
+                   color='#FF6F00', zorder=6, linewidths=2.0, edgecolors='black')
+    if fp is not None:
+        for nid, clr in [(fp[0], '#FF6F00'), (fp[1], '#1E88E5')]:
+            if 0 <= nid < n_neurons:
+                ntype = nt[nid] if nt is not None else None
+                m = 'o' if ntype == 'inter' else '^'
+                ax.scatter([x_pos[nid]], [y_pos[nid]], s=140, marker=m,
+                           color=clr, zorder=6, linewidths=2.0, edgecolors='black')
+
+
+def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
+                      pair_entries, deleted_pair_entries, cfg: ProbeNetworkConfig):
+    """Draw FancyArrowPatch arrows, deleted-pair lines, same-channel arcs, current-pair overlay."""
+    fn           = cfg.focused_neuron
+    fp           = cfg.focused_pair
+    current_pair = cfg.current_pair
+
+    fp_neurons   = {fp[0], fp[1]} if fp is not None else set()
+    show_arrows  = cfg.show_arrows
+    all_pair_set = set(pair_entries.keys())
+
+    for (ref, tgt), entries in pair_entries.items():
+        if not show_arrows:
+            break
+        if not (0 <= ref < n_neurons and 0 <= tgt < n_neurons):
+            continue
+        if fn is not None and ref != fn and tgt != fn:
+            continue
+        if fp is not None and ref not in fp_neurons and tgt not in fp_neurons:
+            continue
+        if cfg.gf_active and (ref, tgt) not in cfg.group_pairs:
+            continue
+        if cfg.hidden_shanks and shank_ids is not None:
+            if (ref < len(shank_ids) and tgt < len(shank_ids)
+                    and (int(shank_ids[ref]) in cfg.hidden_shanks
+                         or int(shank_ids[tgt]) in cfg.hidden_shanks)):
+                continue
+
+        has_reverse = (tgt, ref) in all_pair_set
+        rad = 0.18 if has_reverse else 0.0
+
+        for entry in entries:
+            ct       = entry['conn_type']
+            ei       = entry['ei']
+            is_cur   = entry['is_current']
+            in_filt  = entry['in_filter']
+            is_sel   = entry['is_selected']
+            is_cpair = (is_cur and (ref, tgt) == current_pair)
+
+            if not _ct_enabled(ct, cfg):
+                continue
+            if _should_skip_pair(ref, tgt, shank_ids, peak_channels, cfg):
+                continue
+
+            ec_default = cfg.type_colors.get(
+                ct, _NET_DEFAULT_E if ei == 'E' else _NET_DEFAULT_I)
+            is_fp = (fp is not None and (ref, tgt) == fp)
+
+            alpha, lw, zo, ec = _arrow_style(
+                is_fp, fp, in_filt, is_cur, is_sel, is_cpair, ec_default)
+            alpha *= cfg.line_alpha
+
+            mutation = 10 if is_cpair else 7
+            pickable = in_filt and alpha >= 0.30
+
+            arrow = FancyArrowPatch(
+                (x_pos[ref], y_pos[ref]), (x_pos[tgt], y_pos[tgt]),
+                arrowstyle='->', color=ec,
+                linewidth=lw, alpha=alpha, mutation_scale=mutation,
+                connectionstyle=f'arc3,rad={rad}',
+                shrinkA=5, shrinkB=5, zorder=zo,
+                picker=6 if pickable else False,
+            )
+            arrow.set_gid(f"{ref}_{tgt}_{entry['key']}")
+            ax.add_patch(arrow)
+            if is_cpair:
+                ax.add_patch(FancyArrowPatch(
+                    (x_pos[ref], y_pos[ref]), (x_pos[tgt], y_pos[tgt]),
+                    arrowstyle='->', color='black',
+                    linewidth=1.5, alpha=alpha, mutation_scale=mutation,
+                    connectionstyle=f'arc3,rad={rad}',
+                    shrinkA=5, shrinkB=5, zorder=zo + 1, picker=False,
+                ))
+
+    if show_arrows:
+        for (ref, tgt) in deleted_pair_entries:
+            if fn is not None and ref != fn and tgt != fn:
+                continue
+            if cfg.hidden_shanks and shank_ids is not None:
+                if (ref < len(shank_ids) and tgt < len(shank_ids)
+                        and (int(shank_ids[ref]) in cfg.hidden_shanks
+                             or int(shank_ids[tgt]) in cfg.hidden_shanks)):
+                    continue
+            has_reverse = (tgt, ref) in deleted_pair_entries
+            rad = 0.18 if has_reverse else 0.0
+            ax.add_patch(FancyArrowPatch(
+                (x_pos[ref], y_pos[ref]), (x_pos[tgt], y_pos[tgt]),
+                arrowstyle='->', color='#333333',
+                linewidth=0.5, alpha=0.20 * cfg.line_alpha, mutation_scale=5,
+                connectionstyle=f'arc3,rad={rad}',
+                shrinkA=5, shrinkB=5, zorder=1, picker=False,
+            ))
+
+    if (fp is not None and fp not in pair_entries
+            and show_arrows
+            and 0 <= fp[0] < n_neurons and 0 <= fp[1] < n_neurons):
+        ax.add_patch(FancyArrowPatch(
+            (x_pos[fp[0]], y_pos[fp[0]]), (x_pos[fp[1]], y_pos[fp[1]]),
+            arrowstyle='->', color='#888888',
+            linewidth=1.5, alpha=0.7 * cfg.line_alpha, linestyle='--',
+            mutation_scale=8, connectionstyle='arc3,rad=0',
+            shrinkA=5, shrinkB=5, zorder=7,
+        ))
+
+    cur_pair_on = cfg.show_current_pair
+    if (cur_pair_on and current_pair is not None
+            and show_arrows
+            and 0 <= current_pair[0] < n_neurons
+            and 0 <= current_pair[1] < n_neurons):
+        _cp_ct = None
+        if current_pair in pair_entries:
+            _cp_ents = pair_entries[current_pair]
+            _cp_e = next((e for e in _cp_ents if e.get('is_current')), _cp_ents[0])
+            _cp_ct = _cp_e.get('conn_type')
+        _cp_col = cfg.type_colors.get(_cp_ct, '#888888')
+        ax.add_patch(FancyArrowPatch(
+            (x_pos[current_pair[0]], y_pos[current_pair[0]]),
+            (x_pos[current_pair[1]], y_pos[current_pair[1]]),
+            arrowstyle='->', color=_cp_col,
+            linewidth=5.0, alpha=1.0 * cfg.line_alpha, mutation_scale=10,
+            connectionstyle='arc3,rad=0', shrinkA=5, shrinkB=5, zorder=8,
+        ))
+        ax.add_patch(FancyArrowPatch(
+            (x_pos[current_pair[0]], y_pos[current_pair[0]]),
+            (x_pos[current_pair[1]], y_pos[current_pair[1]]),
+            arrowstyle='->', color='black',
+            linewidth=2.5, alpha=1.0 * cfg.line_alpha, mutation_scale=10,
+            connectionstyle='arc3,rad=0', shrinkA=5, shrinkB=5, zorder=9,
+        ))
+
+    _hide_same_ch    = cfg.hide_same_channel
+    _hide_same_shank = cfg.hide_same_shank
+    if peak_channels is not None and show_arrows and not _hide_same_ch:
+        BASE_R, R_STEP, GAP = 7, 5, 11
+
+        _arc_entry_for: dict = {}
+        for (ref, tgt), entries in pair_entries.items():
+            _arc_entry_for[(ref, tgt)] = next(
+                (e for e in entries if e.get('is_current')), entries[0])
+
+        _chan_entries: dict = {}
+        for (ref, tgt), entry in _arc_entry_for.items():
+            if ref >= n_neurons or tgt >= n_neurons:
+                continue
+            try:
+                if peak_channels[ref] != peak_channels[tgt]:
+                    continue
+            except (IndexError, TypeError):
+                continue
+            if not _ct_enabled(entry.get('conn_type'), cfg):
+                continue
+            if (_hide_same_shank and shank_ids is not None
+                    and ref < len(shank_ids) and tgt < len(shank_ids)
+                    and int(shank_ids[ref]) == int(shank_ids[tgt])):
+                continue
+            _chan_entries.setdefault(int(peak_channels[ref]), []).append((ref, tgt, entry))
+
+        for ch, ch_ents in _chan_entries.items():
+            ref0 = ch_ents[0][0]
+            cx, cy = x_pos[ref0] + GAP, y_pos[ref0]
+            for k, (ref, tgt, entry) in enumerate(ch_ents):
+                ct = entry.get('conn_type')
+                arc_alpha, lw = _arc_style(ref, tgt, current_pair, fp, fn)
+                arc_alpha *= cfg.line_alpha
+                col = cfg.type_colors.get(ct, '#888888')
+                r   = BASE_R + k * R_STEP
+                arc = Arc((cx, cy), 2 * r, 2 * r, angle=0, theta1=20, theta2=340,
+                          color=col, linewidth=lw, alpha=arc_alpha, zorder=4)
+                arc.set_gid(f"{ref}_{tgt}_{entry.get('key', '')}")
+                arc.set_picker(3)
+                ax.add_patch(arc)
+                t_r = math.radians(20)
+                px, py = cx + r * math.cos(t_r), cy + r * math.sin(t_r)
+                eps = r * 0.22
+                ax.annotate('', xy=(px + math.sin(t_r) * eps, py - math.cos(t_r) * eps),
+                            xytext=(px, py),
+                            arrowprops=dict(arrowstyle='->', color=col, lw=1.0, mutation_scale=6),
+                            zorder=5)
+                lbl_x = cx + r * math.cos(math.radians(90))
+                lbl_y = cy + r * math.sin(math.radians(90))
+                ax.text(lbl_x, lbl_y, str(k + 1), ha='center', va='center',
+                        fontsize=5, color=col, zorder=6,
+                        bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.6))
+
+
+def _draw_labels(ax, x_pos, y_pos, pg, shank_ids, n_neurons, pair_entries,
+                 cfg: ProbeNetworkConfig):
+    """Draw legend, shank labels, axis limits, session title, dark mode.
+
+    Returns (xs_all, ys_all) so the caller can do zoom init.
+    """
+    fig = ax.get_figure()
+    h_scale      = cfg.h_scale
+    v_scale      = cfg.v_scale
+    hidden_shanks = cfg.hidden_shanks
+
+    # ── Legend ────────────────────────────────────────────────────────
+    shown_types: set = set()
+    for entries in pair_entries.values():
+        for entry in entries:
+            if entry['conn_type'] is not None:
+                shown_types.add(entry['conn_type'])
+    _ct_label = {
+        ('pyr', 'pyr'):     'pyr→pyr',
+        ('pyr', 'inter'):   'pyr→int',
+        ('inter', 'inter'): 'int→int',
+        ('inter', 'pyr'):   'int→pyr',
+    }
+    legend_handles = [
+        Line2D([0], [0], color=cfg.type_colors[ct], lw=2, label=_ct_label[ct])
+        for ct in [('pyr', 'pyr'), ('pyr', 'inter'), ('inter', 'inter'), ('inter', 'pyr')]
+        if ct in shown_types and _ct_enabled(ct, cfg)
+    ]
+    if legend_handles:
+        ax.legend(handles=legend_handles, fontsize=6, loc='lower left',
+                  framealpha=0.75, handlelength=1.4)
+
+    # ── Shank labels ──────────────────────────────────────────────────
+    if pg is not None:
+        y_top = np.max(pg.y) * v_scale + 20
+        for sk in pg._data['shank_id'].unique():
+            if int(sk) in hidden_shanks:
+                continue
+            shank_data = pg._data[pg._data['shank_id'] == sk]
+            sx = shank_data['x'].mean() * h_scale
+            ax.text(sx, y_top, f"S{int(sk)}", ha='center', va='bottom',
+                    fontsize=8, fontweight='bold', color='#555555')
+
+    # ── Axis limits ───────────────────────────────────────────────────
+    xs_all, ys_all = [], []
+    if pg is not None:
+        df = pg._data
+        if hidden_shanks:
+            df = df[~df['shank_id'].apply(lambda s: int(s) in hidden_shanks)]
+        if not df.empty:
+            xs_all.extend((df['x'] * h_scale).tolist())
+            ys_all.extend((df['y'] * v_scale).tolist())
+    if shank_ids is not None:
+        for idx in range(n_neurons):
+            if idx < len(shank_ids) and int(shank_ids[idx]) not in hidden_shanks:
+                xs_all.append(x_pos[idx])
+                ys_all.append(y_pos[idx])
+    if xs_all and ys_all:
+        pad_x = max((max(xs_all) - min(xs_all)) * 0.08, 20)
+        pad_y = max((max(ys_all) - min(ys_all)) * 0.06, 20)
+        ax.set_xlim(min(xs_all) - pad_x, max(xs_all) + pad_x)
+        ax.set_ylim(min(ys_all) - pad_y, max(ys_all) + pad_y)
+
+    ax.axis('off')
+    ax.set_aspect('equal')
+
+    # ── Any-mode session / pair title ─────────────────────────────────
+    if cfg.session_label:
+        sess_lbl = f"{cfg.session_label}  {cfg.sess_idx + 1}/{cfg.n_sessions}"
+        fig.text(0.5, 0.985, sess_lbl,
+                 fontsize=8, ha='center', va='top', color='#222')
+        if cfg.pair_title:
+            fig.text(0.5, 0.002, cfg.pair_title,
+                     fontsize=6, ha='center', va='bottom', color='#444')
+
+    # ── Dark mode ─────────────────────────────────────────────────────
+    if cfg.dark_mode:
+        _bg, _fg = '#2b2b2b', 'white'
+        fig.set_facecolor(_bg)
+        ax.set_facecolor(_bg)
+        ax.tick_params(colors=_fg)
+        ax.xaxis.label.set_color(_fg)
+        ax.yaxis.label.set_color(_fg)
+        for txt in fig.texts:
+            txt.set_color(_fg)
+        for txt in ax.texts:
+            txt.set_color(_fg)
+        for sp in ax.spines.values():
+            sp.set_edgecolor('#666666')
+
+    return xs_all, ys_all
+
+
+# ---------------------------------------------------------------------------
+# Notebook entry point
+# ---------------------------------------------------------------------------
+
+def plot_probe_network(ax, neurons, ptrs, pg, cfg=None):
+    """Draw probe network on *ax*. Notebook-callable, no Tk dependency.
+
+    Parameters
+    ----------
+    neurons : Neurons
+    ptrs    : CCGPointer or list of CCGPointer
+    pg      : ProbeGroup
+    cfg     : ProbeNetworkConfig or None (uses defaults)
+    """
+    if cfg is None:
+        cfg = ProbeNetworkConfig()
+    if not isinstance(ptrs, (list, tuple)):
+        ptrs = [ptrs]
+
+    x_pos, y_pos, peak_ch = _compute_positions(neurons, pg)
+    n = len(x_pos)
+
+    pair_entries: dict = {}
+    for ptr in ptrs:
+        if ptr is None or ptr.inds is None:
+            continue
+        ct = getattr(getattr(ptr, 'key', None), 'conn_type', None)
+        ei = getattr(getattr(ptr, 'key', None), 'excitability', 'E')
+        sel = set(map(tuple, ptr.inds2)) if hasattr(ptr, 'inds2') else set()
+        for ref, tgt in map(tuple, ptr.inds[:, -2:]):
+            pair_entries.setdefault((ref, tgt), []).append({
+                'key': f'{ref}_{tgt}',
+                'conn_type': ct, 'ei': ei,
+                'is_current': True, 'in_filter': True,
+                'is_selected': (ref, tgt) in sel,
+            })
+
+    shank_ids   = getattr(neurons, 'shank_ids',  None)
+    neuron_type = getattr(neurons, 'neuron_type', None)
+    cur_arr = np.vstack([ptr.inds[:, -2:] for ptr in ptrs
+                         if ptr is not None and ptr.inds is not None]) \
+              if any(p is not None and p.inds is not None for p in ptrs) \
+              else np.empty((0, 2), dtype=int)
+    cluster_neurons = set(int(v) for v in np.unique(cur_arr))
+
+    _draw_neurons(ax, x_pos, y_pos, peak_ch, shank_ids, neuron_type, n,
+                  cluster_neurons, pair_entries, {}, cfg)
+    _draw_connections(ax, x_pos, y_pos, peak_ch, shank_ids, n,
+                      pair_entries, {}, cfg)
+    _draw_labels(ax, x_pos, y_pos, pg, shank_ids, n, pair_entries, cfg)
+    return ax
 
 def plot_probe(
     probe: ProbeGroup,

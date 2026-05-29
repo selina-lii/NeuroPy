@@ -1,162 +1,34 @@
-"""CCGRenderEngine: data prep and PNG rendering for CCGReviewUI.
+"""CCGContextBuilder — data prep for CCG PNGs (UI layer).
 
-build_context() resolves display params and transforms data (deconv, norm, CS, jitter, waveform).
-write_png() creates and saves the figure.
+Pure rendering (RenderContext, render_ccg_png) lives in neuropy.plotting.ccg.
+Pure computation (deconvolve_ccg) lives in neuropy.analyses.ms_connectivity.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+import traceback
 
 import numpy as np
-from matplotlib.figure import Figure
-import matplotlib.pyplot
 
 from neuropy.analyses.ms_connectivity import (
-    NormalizeBy, apply_norms_to_ccg, compute_ccg_panel_data, deconv_autocorr,
+    NormalizeBy, apply_norms_to_ccg, compute_ccg_panel_data,
+    deconvolve_ccg,
+)
+from neuropy.plotting.ccg import (
+    JitterOverlay, PlotStyle, TitleConfig, RenderContext,
+    _fill_waveform, render_ccg_png,
 )
 import neuropy.plotting.ccg as plot_ccg
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers (no UI dependency)
+# CCGContextBuilder (formerly CCGRenderEngine)
 # ---------------------------------------------------------------------------
 
-def deconvolve_ccg(
-    ccg_raw, null_raw,
-    acg_ref, nspks_ref,
-    acg_tgt, nspks_tgt,
-    dref: bool, dtgt: bool,
-):
-    """Apply ACG deconvolution to CCG and null arrays.  Returns (ccg_out, null_out)."""
-    def _deconv_1d(x):
-        if x is None:
-            return None
-        x = x.copy().astype(float)
-        if dref and dtgt:
-            return deconv_autocorr(x, acg_ref, nspks_ref, acg_tgt, nspks_tgt)
-        if dref:
-            return deconv_autocorr(x, acg_ref, nspks_ref,
-                                   np.zeros_like(acg_tgt, dtype=float), 1.0)
-        return deconv_autocorr(x, np.zeros_like(acg_ref, dtype=float), 1.0,
-                               acg_tgt, nspks_tgt)
+class CCGContextBuilder:
+    """Resolves UI display state, loads and transforms data, returns a RenderContext.
 
-    try:
-        return _deconv_1d(ccg_raw), _deconv_1d(null_raw)
-    except Exception:
-        return ccg_raw, null_raw
-
-
-def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded):
-    """Expand a (possibly trimmed) per-neuron waveform to a full (ch_per_shank, T) array.
-
-    Discarded channels are filled with np.nan.
-    """
-    if wf_neuron.ndim == 1:
-        return np.tile(wf_neuron, (ch_per_shank, 1))
-    sid = int(shank_id)
-    channel_ids = ch_per_shank * sid + np.arange(ch_per_shank)
-    if discarded is None:
-        start  = int(ch_per_shank * sid)
-        length = ch_per_shank
-        mask   = np.ones(ch_per_shank, dtype=bool)
-    else:
-        mask   = ~np.isin(channel_ids, discarded)
-        start  = int(ch_per_shank * sid - np.sum(discarded < ch_per_shank * sid))
-        length = int(np.sum(mask))
-    clean = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
-    clean[mask] = wf_neuron[start:start + length]
-    return clean
-
-
-# ---------------------------------------------------------------------------
-# RenderContext — everything write_png needs, no UI state
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RenderContext:
-    """All processed data and parameters for rendering one CCG PNG."""
-    # Core CCG
-    ccg: np.ndarray
-    ccg_null_plot: Optional[np.ndarray]       # None when baseline hidden
-    pval: Optional[np.ndarray]
-    pval_corrected: Optional[np.ndarray]
-    # Jitter overlay
-    j_ccg: Optional[np.ndarray]
-    j_pval: Optional[np.ndarray]
-    j_ccg_lo: Optional[np.ndarray]
-    j_ccg_hi: Optional[np.ndarray]
-    # ACG overlays
-    acg_ref: Optional[np.ndarray]
-    acg_tgt: Optional[np.ndarray]
-    # Peak waveform inset
-    wf_peak_ms: Optional[np.ndarray]
-    wf_peak_amp: Optional[np.ndarray]
-    # CS baseline overlay
-    cs_baseline_arg: Optional[np.ndarray]
-    # Timing
-    window_size_eff: float
-    bin_size_eff: float
-    # Display metadata
-    alpha: float
-    norm_info: Optional[str]
-    seg_id_display: str
-    min_lag_plot: Optional[float]
-    max_lag_plot: Optional[float]
-    extend_on: bool
-    # Pair identity
-    inds: tuple
-    ids: tuple                    # (shank_label_ref, shank_label_tgt)
-    neuron_type: tuple
-    is_significant_pair: bool
-    # Style
-    show_ccg: bool
-    line_ccg: bool
-    line_baseline: bool
-    line_ref: bool
-    line_tgt: bool
-    line_jitter: bool
-    acg_yscale_ref: float
-    acg_yscale_tgt: float
-    acg_match_ccg: bool
-    # Y-axis scale (None = auto)
-    ylim: Optional[tuple]
-    # Export/preview style overrides (None = use plot_ccg_panel defaults)
-    ccg_color:          Optional[str]
-    baseline_color:     Optional[str]
-    ccg_alpha:          Optional[float]
-    baseline_alpha:     Optional[float]
-    cs_shade_color:     Optional[str]
-    show_legend:        bool
-    xticks_ms:          Optional[list]
-    mirror_xticks:      bool
-    min_text_size:      Optional[float]
-    show_test_window:   Optional[bool]   # None = legacy (show when lags provided)
-    test_window_color:  Optional[str]
-    test_window_alpha:  Optional[float]
-    pval_line_color:    Optional[str]
-    alpha_line_color:   Optional[str]
-    cs_annotation_lines: list[str]
-    # Title / ylabel visibility flags
-    title_show_shanks:      bool
-    title_show_inds:        bool
-    title_show_type:        bool
-    title_show_seg:         bool
-    title_show_norm_details: bool
-    title_show_session:     bool
-    title_session_label:    str   # precomputed "session=NSD 2" string
-    dark_mode:              bool = False
-
-
-# ---------------------------------------------------------------------------
-# CCGRenderEngine
-# ---------------------------------------------------------------------------
-
-class CCGRenderEngine:
-    """Builds RenderContext objects and writes PNG files for CCGReviewUI.
-
-    Holds a UI back-reference for data/state access; write_png() is a pure
-    function of RenderContext with no UI reads.
+    Holds a back-reference to CCGReviewUI; all methods read from self._ui.
+    Pure rendering is delegated to render_ccg_png() in neuropy.plotting.ccg.
     """
 
     def __init__(self, ui):
@@ -168,24 +40,22 @@ class CCGRenderEngine:
 
     def _rsig(self, name: str, render_cfg) -> bool:
         _map = {
-            'conv_p':      '_sig_conv_p_var',
-            'conv_pc':     '_sig_conv_pc_var',
-            'test_window': '_sig_test_window_var',
-            'jitter_pc':   '_sig_jitter_pc_var',
+            'conv_p':      '_sig_conv_p',
+            'conv_pc':     '_sig_conv_pc',
+            'test_window': '_sig_test_window',
+            'jitter_pc':   '_sig_jitter_pc',
         }
         if render_cfg:
             return bool(render_cfg.get(_map[name], False))
         return self._ui._sig(name)
 
     def _rline(self, attr: str, render_cfg) -> bool:
-        """Read a line-mode bool from render_cfg or correlogram panel var."""
         if render_cfg:
             return bool(render_cfg.get(attr, False))
         v = getattr(self._ui.center_container.correlogram_panel, attr, None)
         return bool(v.get()) if v is not None else False
 
     def _racg(self, attr: str, render_cfg, default=None):
-        """Read an ACG/correlogram display var from render_cfg or live UI."""
         if render_cfg:
             return render_cfg.get(attr, default)
         return self._ui._acg_var_get(attr, default)
@@ -195,8 +65,7 @@ class CCGRenderEngine:
     # ----------------------------------------------------------------
 
     def _load_waveform(self, ref: int, render_cfg, highres: bool):
-        """Return (wf_ms, wf_amp) for the peak channel of neuron `ref`, or (None, None)."""
-        if not highres or not self._racg('_peak_wf_var', render_cfg, False):
+        if not highres or not self._racg('_peak_wf', render_cfg, False):
             return None, None
         neurons = self._ui.neurons
         if neurons is None:
@@ -219,9 +88,7 @@ class CCGRenderEngine:
         except (IndexError, TypeError, ValueError):
             return None, None
 
-        disc_set = (set(int(x) for x in discarded.ravel())
-                    if discarded is not None and discarded.size else set())
-        if peak_ch in disc_set:
+        if discarded is not None and discarded.size and np.isin(peak_ch, discarded):
             return None, None
         local_idx = peak_ch - ch_ps * rs
         if not (0 <= local_idx < ch_ps):
@@ -251,19 +118,13 @@ class CCGRenderEngine:
         render_cfg,
         ccg_data_override,
     ) -> RenderContext:
-        """Resolve display state, load and transform data, return a RenderContext.
-
-        Side effects on the UI (both match the old _render_png behaviour):
-          - writes _conn_strength_cache when method is conv/tailed/global
-          - writes _display_pair_temp for downstream label/value reads
-        """
+        """Resolve display state, load and transform data, return a RenderContext."""
         ui  = self._ui
         ref = int(inds[0])
         tgt = int(inds[1])
         cd  = ccg_data_override if ccg_data_override is not None else ui.ccg_data
         conf = cd.conf
 
-        # ── Segment data: CCG + pval ────────────────────────────────
         d = ui._resolve_segment_data(ref, tgt, segment, highres=highres,
                                      include_pval=True, include_acg=False, _cd=cd)
         ccg_raw      = d['ccg_raw']
@@ -275,16 +136,12 @@ class CCGRenderEngine:
             seg_label = ""
 
         window_size_eff = float(conf.duration)
-        try:
-            _n0 = int(len(ccg_raw)) if ccg_raw is not None else 0
-            bin_size_eff0 = float(conf.duration) / (_n0 - 1) if _n0 > 1 else float(conf.bin_size)
-        except Exception:
-            bin_size_eff0 = float(conf.bin_size)
+        _n0 = len(ccg_raw) if ccg_raw is not None else 0
+        bin_size_eff0 = conf.duration / (_n0 - 1) if _n0 > 1 else conf.bin_size
 
-        # ── Extend window ───────────────────────────────────────────
-        _extend_on     = bool(self._racg('_extend_enable_var', render_cfg, False))
-        _extend_ms     = self._racg('_extend_ms_var',     render_cfg, 0)
-        _extend_bin_ms = self._racg('_extend_bin_ms_var', render_cfg, None)
+        _extend_on     = bool(self._racg('_extend_enable', render_cfg, False))
+        _extend_ms     = self._racg('_extend_ms',     render_cfg, 0)
+        _extend_bin_ms = self._racg('_extend_bin_ms', render_cfg, None)
         if _extend_on:
             try:
                 bin_ext = (float(_extend_bin_ms) / 1000.0
@@ -300,11 +157,9 @@ class CCGRenderEngine:
                     window_size_eff = float(ext['window_size_s'])
                     bin_size_eff0   = float(ext['bin_size_eff'])
             except Exception as _ext_exc:
-                import traceback as _tb
                 print(f"[CCGRenderer] extend error: {_ext_exc}")
-                _tb.print_exc()
+                traceback.print_exc()
 
-        # ── Norms + alpha ───────────────────────────────────────────
         if render_cfg is not None and NormalizeBy is not None:
             _norms = {n for n in NormalizeBy
                       if n.name in (render_cfg.get('active_norms') or [])}
@@ -321,22 +176,20 @@ class CCGRenderEngine:
         norm_info = (', '.join(nm.name for nm in _norms)
                      if _norms and NormalizeBy is not None else None)
 
-        # ── Method + CS show ────────────────────────────────────────
-        method  = (render_cfg.get('_conn_str_method_var', 'conv')
+        method  = (render_cfg.get('_conn_str_method', 'conv')
                    if render_cfg else
-                   ui.center_container.baseline_panel._conn_str_method_var.get())
-        cs_show = (render_cfg.get('_conn_str_show_var', False)
+                   ui.center_container.baseline_panel._conn_str_method.get())
+        cs_show = (render_cfg.get('_conn_str_show', False)
                    if render_cfg else
-                   ui.center_container.cs_panel._conn_str_show_var.get())
+                   ui.center_container.cs_panel._conn_str_show.get())
 
         eff_min_lag, eff_max_lag = ui._effective_lags(ref, tgt)
         _tw_active = self._rsig('test_window', render_cfg)
 
-        # ── ACG data ────────────────────────────────────────────────
-        show_acg_ref = self._racg('_acg_ref_var',        render_cfg, False)
-        show_acg_tgt = self._racg('_acg_tgt_var',        render_cfg, False)
-        _dref        = bool(self._racg('_acg_deconv_ref_var', render_cfg, False))
-        _dtgt        = bool(self._racg('_acg_deconv_tgt_var', render_cfg, False))
+        show_acg_ref = self._racg('_acg_ref',        render_cfg, False)
+        show_acg_tgt = self._racg('_acg_tgt',        render_cfg, False)
+        _dref        = bool(self._racg('_acg_deconv_ref', render_cfg, False))
+        _dtgt        = bool(self._racg('_acg_deconv_tgt', render_cfg, False))
         _need_acg    = (method == 'tailed') or show_acg_ref or show_acg_tgt or _dref or _dtgt
         acg_ref_raw = acg_tgt_raw = None
         nspks_ref = nspks_tgt = 1.0
@@ -348,7 +201,6 @@ class CCGRenderEngine:
             nspks_ref   = max(float(np.sum(acg_ref_raw)), 1.0)
             nspks_tgt   = max(float(np.sum(acg_tgt_raw)), 1.0)
 
-        # ── Deconvolution ────────────────────────────────────────────
         _deconv_active = _dref or _dtgt
         if _deconv_active and acg_ref_raw is not None and acg_tgt_raw is not None:
             ccg_raw, ccg_null_raw = deconvolve_ccg(
@@ -358,7 +210,6 @@ class CCGRenderEngine:
                 _dref, _dtgt,
             )
 
-        # ── Normalization + CS/baseline computation ──────────────────
         if method in ('conv', 'tailed', 'global'):
             panel_data = compute_ccg_panel_data(
                 ccg_raw, ccg_null_raw, conf, method,
@@ -393,7 +244,6 @@ class CCGRenderEngine:
         n_bins       = len(ccg_out)
         bin_size_eff = window_size_eff / (n_bins - 1) if n_bins > 1 else conf.bin_size
 
-        # ── _display_pair_temp side effect ──────────────────────────
         try:
             resk = 'hi' if bool(highres) else 'lo'
             ui._display_pair_temp[(ref, tgt, int(segment), resk)] = {
@@ -411,7 +261,6 @@ class CCGRenderEngine:
         except Exception:
             pass
 
-        # ── Jitter data ─────────────────────────────────────────────
         resk  = 'hi' if bool(highres) else 'lo'
         _jseg = ui._jitter_seg(segment)
         j_data = ui._jitter_cache.get((ref, tgt, resk, _jseg))
@@ -423,21 +272,16 @@ class CCGRenderEngine:
         j_ccg_hi_arg = j_data[4] if j_data is not None and len(j_data) > 4 else None
 
         ui._dbg_log(
-            "H1",
-            "ccg_render_engine.py:build_context:jitter_lookup",
-            "Jitter lookup before plot",
+            "H1", "ccg_renderer.py:build_context:jitter_lookup", "Jitter lookup before plot",
             {
-                "highres":     bool(highres),
-                "method":      str(method),
-                "segment":     int(segment),
-                "j_key":       [int(ref), int(tgt), "lo", ui._jitter_seg(segment)],
-                "len_ccg":     int(len(ccg_out)) if ccg_out is not None else None,
-                "len_j_ccg":   int(len(j_ccg_arg))   if j_ccg_arg   is not None else None,
-                "len_j_pval":  int(len(j_pval_arg))  if j_pval_arg  is not None else None,
+                "highres": bool(highres), "method": str(method), "segment": int(segment),
+                "j_key": [int(ref), int(tgt), "lo", ui._jitter_seg(segment)],
+                "len_ccg": int(len(ccg_out)) if ccg_out is not None else None,
+                "len_j_ccg": int(len(j_ccg_arg)) if j_ccg_arg is not None else None,
+                "len_j_pval": int(len(j_pval_arg)) if j_pval_arg is not None else None,
             },
         )
 
-        # ── p-value overlay selection ────────────────────────────────
         show_pval = show_pval_c = None
         show_j_ccg = show_j_pval = None
         show_j_ccg_lo = show_j_ccg_hi = None
@@ -462,19 +306,16 @@ class CCGRenderEngine:
                 if not _bins_match and j_ccg_arg is not None:
                     print(f"[jitter] bin mismatch ({_j_len} vs {n_bins}) — overlay suppressed")
             ui._dbg_log(
-                "H2",
-                "ccg_render_engine.py:build_context:jitter_show",
-                "Jitter overlay selection",
+                "H2", "ccg_renderer.py:build_context:jitter_show", "Jitter overlay selection",
                 {
-                    "highres":       bool(highres),
-                    "show_j_ccg":    bool(show_j_ccg    is not None),
-                    "show_j_pval":   bool(show_j_pval   is not None),
-                    "len_ccg":       int(len(ccg_out))    if ccg_out    is not None else None,
+                    "highres": bool(highres),
+                    "show_j_ccg": bool(show_j_ccg is not None),
+                    "show_j_pval": bool(show_j_pval is not None),
+                    "len_ccg": int(len(ccg_out)) if ccg_out is not None else None,
                     "len_show_j_ccg": int(len(show_j_ccg)) if show_j_ccg is not None else None,
                 },
             )
 
-        # ── CS baseline overlay argument ─────────────────────────────
         if cs_show:
             _has_bl_norm = NormalizeBy.BASELINE in _norms
             if _has_bl_norm and baseline_1d is not None:
@@ -484,78 +325,46 @@ class CCGRenderEngine:
         else:
             cs_baseline_arg = None
 
-        # ── ACG overlay arrays ───────────────────────────────────────
-        # When extend is active, ACG bin count may differ from extended CCG — suppress to avoid mismatch.
         _acg_bins_ok = (acg_ref_raw is None or len(acg_ref_raw) == n_bins)
         acg_ref_out = acg_ref_raw if show_acg_ref and acg_ref_raw is not None and _acg_bins_ok else None
         acg_tgt_out = acg_tgt_raw if show_acg_tgt and acg_tgt_raw is not None and _acg_bins_ok else None
 
-        # ── Waveform ─────────────────────────────────────────────────
         wf_peak_ms, wf_peak_amp = self._load_waveform(ref, render_cfg, bool(highres))
 
-        # ── Baseline visibility ──────────────────────────────────────
-        ccg_null_plot = show_null if bool(self._racg('_baseline_show_var', render_cfg, True)) else None
+        ccg_null_plot = show_null if bool(self._racg('_baseline_show', render_cfg, True)) else None
 
-        # ── lag plot range ───────────────────────────────────────────
         _min_lag_plot = eff_min_lag if (_tw_active or cs_show) else None
         _max_lag_plot = eff_max_lag if (_tw_active or cs_show) else None
 
         _neurons_obj = ui.neurons
         if _neurons_obj is None:
             try:
-                _nd = getattr(ui.cd, 'nd', None)
-                if _nd is not None:
-                    _neurons_obj = _nd.data[ui.key.nd()]
+                _neurons_obj = ui.cd.nd.data[ui.key.nd()]
             except Exception:
                 pass
         _sh = getattr(_neurons_obj, 'shank_ids', None) if _neurons_obj is not None else None
-        def _shank_label(idx):
-            if _sh is not None:
-                try:
-                    return str(int(_sh[idx]))
-                except Exception:
-                    pass
-            return str(idx)
-        ids = (_shank_label(ref), _shank_label(tgt))
+        def _sh_label(idx):
+            try: return str(int(_sh[idx]))
+            except Exception: return str(idx)
+        shank_ids = tuple(_sh_label(i) for i in (ref, tgt)) if _sh is not None else (str(ref), str(tgt))
         try:
             nt = (_neurons_obj.neuron_type[ref], _neurons_obj.neuron_type[tgt])
         except Exception:
             nt = None
 
-        # Export/preview style overrides — read from ui._export_overrides if set
         _eo = getattr(ui, '_export_overrides', None) or {}
-        _exp_ccg_color        = _eo.get('ccg_color')
-        _exp_base_color       = _eo.get('baseline_color')
-        _exp_ccg_alpha        = _eo.get('ccg_alpha')
-        _exp_base_alpha       = _eo.get('baseline_alpha')
-        _exp_cs_shade         = _eo.get('cs_shade_color')
-        _exp_show_legend      = bool(_eo.get('show_legend', True))
-        _exp_xticks_ms        = _eo.get('xticks_ms')
-        _exp_mirror_xticks    = bool(_eo.get('mirror_xticks', True))
-        _exp_min_text_size    = _eo.get('min_text_size')
-        # test_window visibility: always driven by _tw_active (not export overrides),
-        # but color/alpha can be customised for export.
-        _exp_test_window_color = _eo.get('test_window_color')
-        _exp_test_window_alpha = _eo.get('test_window_alpha')
-        _exp_pval_line_color   = _eo.get('pval_line_color')
-        _exp_alpha_line_color  = _eo.get('alpha_line_color')
-        _print_stg  = bool(_eo.get('print_cs_stg',  False))
-        _print_jbsi = bool(_eo.get('print_cs_jbsi', False))
-        _title_show_shanks       = bool(_eo.get('title_show_shanks',       True))
-        _title_show_inds         = bool(_eo.get('title_show_inds',         True))
-        _title_show_type         = bool(_eo.get('title_show_type',         True))
-        _title_show_seg          = bool(_eo.get('title_show_seg',          True))
-        _title_show_norm_details = bool(_eo.get('title_show_norm_details', True))
-        _title_show_session      = bool(_eo.get('title_show_session',      False))
+        print_stg  = bool(_eo.get('print_cs_stg',  False))
+        print_jbsi = bool(_eo.get('print_cs_jbsi', False))
+        title_show_session = bool(_eo.get('title_show_session', False))
         try:
-            _sess_str = str(getattr(ui.key, 'session', ''))
-            _title_sess_label = ui._sess_title_label(_sess_str) if _title_show_session else ""
+            _title_sess_label = (ui._sess_title_label(str(getattr(ui.key, 'session', '')))
+                                 if title_show_session else "")
         except Exception:
             _title_sess_label = ""
+
         try:
-            _cs_lines = (ui._cs_annotation_lines(ref, tgt, segment, highres,
-                                                  _print_stg, _print_jbsi)
-                         if (_print_stg or _print_jbsi) else [])
+            _cs_lines = (ui._cs_annotation_lines(ref, tgt, segment, highres, print_stg, print_jbsi)
+                         if (print_stg or print_jbsi) else [])
         except Exception:
             _cs_lines = []
 
@@ -564,10 +373,9 @@ class CCGRenderEngine:
             ccg_null_plot   = ccg_null_plot,
             pval            = show_pval,
             pval_corrected  = show_pval_c,
-            j_ccg           = show_j_ccg,
-            j_pval          = show_j_pval,
-            j_ccg_lo        = show_j_ccg_lo,
-            j_ccg_hi        = show_j_ccg_hi,
+            jitter          = JitterOverlay(
+                j_ccg=show_j_ccg, j_pval=show_j_pval,
+                j_ccg_lo=show_j_ccg_lo, j_ccg_hi=show_j_ccg_hi),
             acg_ref         = acg_ref_out,
             acg_tgt         = acg_tgt_out,
             wf_peak_ms      = wf_peak_ms,
@@ -581,193 +389,50 @@ class CCGRenderEngine:
             min_lag_plot    = _min_lag_plot,
             max_lag_plot    = _max_lag_plot,
             extend_on       = _extend_on,
+            cs_annotation_lines = _cs_lines,
             inds            = tuple(inds),
-            ids             = ids,
+            shank_ids       = shank_ids,
             neuron_type     = nt,
             is_significant_pair = ui._is_significant(ref, tgt, segment),
-            show_ccg        = bool(self._racg('_ccg_show_var',    render_cfg, True)),
-            line_ccg        = self._rline('_line_ccg_var',        render_cfg),
-            line_baseline   = self._rline('_line_baseline_var',   render_cfg),
-            line_ref        = self._rline('_line_ref_var',        render_cfg),
-            line_tgt        = self._rline('_line_tgt_var',        render_cfg),
-            line_jitter     = self._rline('_line_jitter_var',     render_cfg),
-            acg_yscale_ref  = float(self._racg('_acg_yscale_ref_var', render_cfg, 1.0)),
-            acg_yscale_tgt  = float(self._racg('_acg_yscale_tgt_var', render_cfg, 1.0)),
-            acg_match_ccg   = bool(self._racg('_acg_match_ccg_var',   render_cfg, False)),
+            show_ccg        = bool(self._racg('_ccg_show',    render_cfg, True)),
+            line_ccg        = self._rline('_line_ccg',        render_cfg),
+            line_baseline   = self._rline('_line_baseline',   render_cfg),
+            line_ref        = self._rline('_line_ref',        render_cfg),
+            line_tgt        = self._rline('_line_tgt',        render_cfg),
+            line_jitter     = self._rline('_line_jitter',     render_cfg),
+            acg_yscale_ref  = float(self._racg('_acg_yscale_ref', render_cfg, 1.0)),
+            acg_yscale_tgt  = float(self._racg('_acg_yscale_tgt', render_cfg, 1.0)),
+            acg_match_ccg   = bool(self._racg('_acg_match_ccg',   render_cfg, False)),
             ylim            = ui._get_current_scale_ylim(ref, tgt),
-            ccg_color          = _exp_ccg_color,
-            baseline_color     = _exp_base_color,
-            ccg_alpha          = _exp_ccg_alpha,
-            baseline_alpha     = _exp_base_alpha,
-            cs_shade_color     = _exp_cs_shade,
-            show_legend        = _exp_show_legend,
-            xticks_ms          = _exp_xticks_ms,
-            mirror_xticks      = _exp_mirror_xticks,
-            min_text_size      = _exp_min_text_size,
-            show_test_window   = bool(_tw_active),
-            test_window_color  = _exp_test_window_color,
-            test_window_alpha  = _exp_test_window_alpha,
-            pval_line_color    = _exp_pval_line_color,
-            alpha_line_color   = _exp_alpha_line_color,
-            cs_annotation_lines      = _cs_lines,
-            title_show_shanks        = _title_show_shanks,
-            title_show_inds          = _title_show_inds,
-            title_show_type          = _title_show_type,
-            title_show_seg           = _title_show_seg,
-            title_show_norm_details  = _title_show_norm_details,
-            title_show_session       = _title_show_session,
-            title_session_label      = _title_sess_label,
-            dark_mode                = getattr(ui, '_dark', False),
+            style           = PlotStyle(
+                ccg_color          = _eo.get('ccg_color'),
+                baseline_color     = _eo.get('baseline_color'),
+                ccg_alpha          = _eo.get('ccg_alpha'),
+                baseline_alpha     = _eo.get('baseline_alpha'),
+                cs_shade_color     = _eo.get('cs_shade_color'),
+                show_legend        = bool(_eo.get('show_legend', True)),
+                xticks_ms          = _eo.get('xticks_ms'),
+                mirror_xticks      = bool(_eo.get('mirror_xticks', True)),
+                min_text_size      = _eo.get('min_text_size'),
+                show_test_window   = bool(_tw_active),
+                test_window_color  = _eo.get('test_window_color'),
+                test_window_alpha  = _eo.get('test_window_alpha'),
+                pval_line_color    = _eo.get('pval_line_color'),
+                alpha_line_color   = _eo.get('alpha_line_color')),
+            title           = TitleConfig(
+                title_show_shanks        = bool(_eo.get('title_show_shanks',       True)),
+                title_show_inds          = bool(_eo.get('title_show_inds',         True)),
+                title_show_type          = bool(_eo.get('title_show_type',         True)),
+                title_show_seg           = bool(_eo.get('title_show_seg',          True)),
+                title_show_norm_details  = bool(_eo.get('title_show_norm_details', True)),
+                title_show_session       = title_show_session,
+                title_session_label      = _title_sess_label),
+            dark_mode       = ui.theme.dark,
         )
-
-    # ----------------------------------------------------------------
-    # Rendering
-    # ----------------------------------------------------------------
 
     def write_png(self, ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
-        """Create figure, call plot_ccg_panel, apply post-processing, save PNG."""
-        fig = Figure(figsize=(7, 5))
-        ax  = fig.add_subplot(111)
+        render_ccg_png(ctx, png_path, dpi)
 
-        plot_ccg.plot_ccg_panel(
-            ax               = ax,
-            ccg              = ctx.ccg,
-            ids              = ctx.ids,
-            inds             = ctx.inds,
-            neuron_type      = ctx.neuron_type,
-            window_size      = ctx.window_size_eff,
-            bin_size         = ctx.bin_size_eff,
-            pval             = ctx.pval,
-            pval_corrected   = ctx.pval_corrected,
-            alpha            = ctx.alpha,
-            ccg_null         = ctx.ccg_null_plot,
-            j_ccg            = ctx.j_ccg,
-            j_pval           = ctx.j_pval,
-            segment_id       = ctx.seg_id_display,
-            is_significant_pair = ctx.is_significant_pair,
-            min_lag          = ctx.min_lag_plot,
-            max_lag          = ctx.max_lag_plot,
-            normalize_info   = ctx.norm_info,
-            acg_ref          = ctx.acg_ref,
-            acg_tgt          = ctx.acg_tgt,
-            acg_yscale_ref   = ctx.acg_yscale_ref,
-            acg_yscale_tgt   = ctx.acg_yscale_tgt,
-            acg_match_ccg    = ctx.acg_match_ccg,
-            show_ccg         = ctx.show_ccg,
-            line_ccg         = ctx.line_ccg,
-            line_baseline    = ctx.line_baseline,
-            line_ref         = ctx.line_ref,
-            line_tgt         = ctx.line_tgt,
-            line_jitter      = ctx.line_jitter,
-            conn_strength_baseline = ctx.cs_baseline_arg,
-            ccg_color          = ctx.ccg_color,
-            baseline_color     = ctx.baseline_color,
-            ccg_alpha          = ctx.ccg_alpha,
-            baseline_alpha     = ctx.baseline_alpha,
-            cs_shade_color     = ctx.cs_shade_color,
-            show_legend        = ctx.show_legend,
-            show_test_window   = ctx.show_test_window,
-            test_window_color  = ctx.test_window_color,
-            test_window_alpha  = ctx.test_window_alpha,
-            pval_line_color    = ctx.pval_line_color,
-            alpha_line_color   = ctx.alpha_line_color,
-            title_show_shanks       = ctx.title_show_shanks,
-            title_show_inds         = ctx.title_show_inds,
-            title_show_type         = ctx.title_show_type,
-            title_show_seg          = ctx.title_show_seg,
-            title_show_norm_details = ctx.title_show_norm_details,
-            title_show_session      = ctx.title_show_session,
-            title_session_label     = ctx.title_session_label,
-        )
 
-        # Extend view: readable x-ticks on long windows
-        if ctx.extend_on:
-            try:
-                half_ms = float(ctx.window_size_eff) * 1000.0 / 2.0
-                nice    = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
-                step    = next((s for s in nice if (2 * half_ms / s) <= 10.5), nice[-1])
-                start   = -np.floor(half_ms / step) * step
-                ticks   = np.arange(start, half_ms + 0.5 * step, step)
-                if not np.any(np.isclose(ticks, 0.0)):
-                    ticks = np.sort(np.append(ticks, 0.0))
-                ax.set_xticks(ticks)
-            except Exception:
-                pass
-
-        # Jitter 95% confidence band
-        if ctx.j_ccg_lo is not None and ctx.j_ccg_hi is not None:
-            try:
-                jlo = np.asarray(ctx.j_ccg_lo, dtype=float)
-                jhi = np.asarray(ctx.j_ccg_hi, dtype=float)
-                if len(jlo) == len(ctx.ccg) and len(jhi) == len(ctx.ccg):
-                    bs     = ctx.bin_size_eff
-                    ws     = ctx.window_size_eff
-                    bins_s = np.arange(-ws / 2, ws / 2 + bs, bs)
-                    bins   = bins_s * 1000.0
-                    edges  = np.append(bins - bs * 500.0, bins[-1] + bs * 500.0)
-                    x_step = np.repeat(edges, 2)[1:-1]
-                    for arr in (jlo, jhi):
-                        ax.plot(x_step, np.repeat(arr, 2),
-                                color='#C62828', linewidth=1.15,
-                                alpha=0.9, linestyle=(0, (4, 3)), zorder=4)
-            except Exception:
-                pass
-
-        if ctx.ylim is not None:
-            ax.set_ylim(ctx.ylim)
-
-        # Export xtick override
-        if ctx.xticks_ms:
-            try:
-                ticks = list(ctx.xticks_ms)
-                if ctx.mirror_xticks:
-                    ticks = sorted(set(ticks + [-t for t in ticks]))
-                ax.set_xticks(ticks)
-            except Exception:
-                pass
-
-        # CS annotation lines below x-axis label
-        if ctx.cs_annotation_lines:
-            try:
-                cur_xlabel = ax.get_xlabel() or ''
-                ax.set_xlabel(cur_xlabel + '\n' + '\n'.join(ctx.cs_annotation_lines))
-            except Exception:
-                pass
-
-        # Export min text size
-        if ctx.min_text_size is not None:
-            try:
-                ms = float(ctx.min_text_size)
-                for item in ([ax.title, ax.xaxis.label, ax.yaxis.label]
-                             + ax.get_xticklabels() + ax.get_yticklabels()):
-                    try:
-                        if item.get_fontsize() < ms:
-                            item.set_fontsize(ms)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        if ctx.dark_mode:
-            _bg = '#2b2b2b'
-            _fg = 'white'
-            _sp = '#666666'
-            fig.set_facecolor(_bg)
-            ax.set_facecolor(_bg)
-            ax.tick_params(colors=_fg)
-            ax.xaxis.label.set_color(_fg)
-            ax.yaxis.label.set_color(_fg)
-            ax.title.set_color(_fg)
-            for sp in ax.spines.values():
-                sp.set_edgecolor(_sp)
-            for _child_ax in fig.get_axes():
-                leg = _child_ax.get_legend()
-                if leg is not None:
-                    leg.get_frame().set_facecolor(_bg)
-                    leg.get_frame().set_edgecolor(_sp)
-                    for _lt in leg.get_texts():
-                        _lt.set_color(_fg)
-
-        fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
-                    facecolor=fig.get_facecolor())
-        matplotlib.pyplot.close(fig)
+# Backward-compat alias
+CCGRenderEngine = CCGContextBuilder

@@ -55,6 +55,49 @@ class NDBuildUI:
     # UI construction
     # ------------------------------------------------------------------
 
+    # Field specs — used by _setup_ui loops to avoid repetition.
+    #
+    # _ND_ENTRY_FIELDS: (label, attr, default, width, col_span, hint)
+    _ND_ENTRY_FIELDS = [
+        ("Name:",         "_nd_name_var",   "default",                    20, 1, None),
+        ("Neuron types:", "_nd_types_var",  "pyr, inter",                 30, 2, None),
+        ("Epochs:",       "_nd_epochs_var", "pre, maze, post, re-maze",   40, 2, None),
+        ("N segments:",   "_nd_nseg_var",   "",                           20, 1,
+         "(comma-sep, one per epoch, or blank)"),
+    ]
+
+    # _CCG_PAIR_FIELDS: list of rows; each row = two (label, attr, default, kind, width, opts)
+    # kind: 'entry' | 'combo'
+    _CCG_PAIR_FIELDS = [
+        [("Resolution:",       "_ccg_res_var",   "lowres",      "combo", 10, ["lowres", "highres"]),
+         ("Duration (ms):",    "_ccg_dur_var",   "20",          "entry",  8, None)],
+        [("Alpha:",            "_ccg_alpha_var", "0.05",        "entry", 10, None),
+         ("Alpha2:",           "_ccg_alpha2_var","0.1",         "entry", 10, None)],
+        [("Min lag (ms):",     "_ccg_minlag_var","1",           "entry",  8, None),
+         ("Max lag (ms):",     "_ccg_maxlag_var","3",           "entry",  8, None)],
+        [("Conv window (ms):","_ccg_conv_var",   "5",           "entry",  8, None),
+         ("Correction:",       "_ccg_mc_var",    "bonferroni",  "combo", 12, ["bonferroni", "fdr_bh"])],
+    ]
+
+    # _CCG_CHECK_FIELDS: (label, attr, default, col, col_span)
+    _CCG_CHECK_FIELDS = [
+        ("Symmetrize CCG",         "_ccg_symmetrize_var", True,  0, 2),
+        ("GPU acceleration (CuPy)","_ccg_accel_var",      False, 2, 2),
+    ]
+
+    # _CCG_CONN_FIELDS: (label, attr, default)
+    _CCG_CONN_FIELDS = [
+        ("E types:", "_ccg_etypes_var", "pyr-pyr, pyr-inter"),
+        ("I types:", "_ccg_itypes_var", "inter-inter, inter-pyr"),
+    ]
+
+    # _BUTTONS: (text, attr, command_name, initial_state)
+    _BUTTONS = [
+        ("1. Build NeuronsDataset", "_build_nd_btn",  "_on_build_nd",    "normal"),
+        ("2. Generate CCGs",        "_build_ccg_btn", "_on_build_ccg",   "disabled"),
+        ("3. Open Review UI",       "_review_btn",    "_on_open_review", "disabled"),
+    ]
+
     def _setup_ui(self):
         main = ttk.Frame(self.root, padding=8)
         main.pack(fill=tk.BOTH, expand=True)
@@ -66,43 +109,25 @@ class NDBuildUI:
         self._sess_vars = []
         cols = 3
         for i, sess in enumerate(self._sessions):
-            name = self._session_name(sess)
             var = tk.BooleanVar(value=True)
             self._sess_vars.append((var, sess))
-            ttk.Checkbutton(sess_frame, text=name, variable=var).grid(
+            ttk.Checkbutton(sess_frame, text=self._session_name(sess), variable=var).grid(
                 row=i // cols, column=i % cols, sticky='w', padx=4)
 
-        # ── NeuronsDatasetConfig ──
+        # ── NeuronsDataset Config ──
         nd_frame = ttk.LabelFrame(main, text="NeuronsDataset Config", padding=6)
         nd_frame.pack(fill=tk.X, pady=(0, 6))
 
-        r = 0
-        ttk.Label(nd_frame, text="Name:").grid(row=r, column=0, sticky='w')
-        self._nd_name_var = tk.StringVar(value="default")
-        ttk.Entry(nd_frame, textvariable=self._nd_name_var, width=20).grid(
-            row=r, column=1, sticky='w', padx=4)
+        for r, (label, attr, default, width, span, hint) in enumerate(self._ND_ENTRY_FIELDS):
+            ttk.Label(nd_frame, text=label).grid(row=r, column=0, sticky='w')
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            ttk.Entry(nd_frame, textvariable=var, width=width).grid(
+                row=r, column=1, columnspan=span, sticky='w', padx=4)
+            if hint:
+                ttk.Label(nd_frame, text=hint).grid(row=r, column=1 + span, sticky='w')
 
-        r += 1
-        ttk.Label(nd_frame, text="Neuron types:").grid(row=r, column=0, sticky='w')
-        self._nd_types_var = tk.StringVar(value="pyr, inter")
-        ttk.Entry(nd_frame, textvariable=self._nd_types_var, width=30).grid(
-            row=r, column=1, columnspan=2, sticky='w', padx=4)
-
-        r += 1
-        ttk.Label(nd_frame, text="Epochs:").grid(row=r, column=0, sticky='w')
-        self._nd_epochs_var = tk.StringVar(value="pre, maze, post, re-maze")
-        ttk.Entry(nd_frame, textvariable=self._nd_epochs_var, width=40).grid(
-            row=r, column=1, columnspan=2, sticky='w', padx=4)
-
-        r += 1
-        ttk.Label(nd_frame, text="N segments:").grid(row=r, column=0, sticky='w')
-        self._nd_nseg_var = tk.StringVar(value="")
-        ttk.Entry(nd_frame, textvariable=self._nd_nseg_var, width=20).grid(
-            row=r, column=1, sticky='w', padx=4)
-        ttk.Label(nd_frame, text="(comma-sep, one per epoch, or blank)").grid(
-            row=r, column=2, sticky='w')
-
-        r += 1
+        r = len(self._ND_ENTRY_FIELDS)
         self._nd_zerotimes_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(nd_frame, text="Zero spike times",
                         variable=self._nd_zerotimes_var).grid(
@@ -112,8 +137,7 @@ class NDBuildUI:
         r += 1
         self._nd_sleep_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(nd_frame, text="Sleep filter:",
-                        variable=self._nd_sleep_var).grid(
-            row=r, column=0, sticky='w')
+                        variable=self._nd_sleep_var).grid(row=r, column=0, sticky='w')
         self._nd_sleep_labels_var = tk.StringVar(value="NREM, REM")
         ttk.Entry(nd_frame, textvariable=self._nd_sleep_labels_var, width=20).grid(
             row=r, column=1, sticky='w', padx=4)
@@ -126,105 +150,54 @@ class NDBuildUI:
         r += 1
         self._nd_ripple_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(nd_frame, text="Ripple discard:",
-                        variable=self._nd_ripple_var).grid(
-            row=r, column=0, sticky='w')
+                        variable=self._nd_ripple_var).grid(row=r, column=0, sticky='w')
         self._nd_ripple_mindur_var = tk.StringVar(value="0")
         ttk.Label(nd_frame, text="min_dur:").grid(row=r, column=1, sticky='e')
         ttk.Entry(nd_frame, textvariable=self._nd_ripple_mindur_var, width=8).grid(
             row=r, column=2, sticky='w', padx=4)
 
-        # ── CCGConfig ──
+        # ── CCG Config ──
         ccg_frame = ttk.LabelFrame(main, text="CCG Config", padding=6)
         ccg_frame.pack(fill=tk.X, pady=(0, 6))
 
-        cr = 0
-        ttk.Label(ccg_frame, text="Resolution:").grid(row=cr, column=0, sticky='w')
-        self._ccg_res_var = tk.StringVar(value="lowres")
-        ttk.Combobox(ccg_frame, textvariable=self._ccg_res_var,
-                     values=["lowres", "highres"], width=10,
-                     state='readonly').grid(row=cr, column=1, sticky='w', padx=4)
+        for cr, pair in enumerate(self._CCG_PAIR_FIELDS):
+            for col_offset, (label, attr, default, kind, width, opts) in enumerate(pair):
+                ttk.Label(ccg_frame, text=label).grid(
+                    row=cr, column=col_offset * 2, sticky='w')
+                var = tk.StringVar(value=default)
+                setattr(self, attr, var)
+                if kind == 'combo':
+                    ttk.Combobox(ccg_frame, textvariable=var, values=opts,
+                                 width=width, state='readonly').grid(
+                        row=cr, column=col_offset * 2 + 1, sticky='w', padx=4)
+                else:
+                    ttk.Entry(ccg_frame, textvariable=var, width=width).grid(
+                        row=cr, column=col_offset * 2 + 1, sticky='w', padx=4)
 
-        ttk.Label(ccg_frame, text="Duration (ms):").grid(row=cr, column=2, sticky='w')
-        self._ccg_dur_var = tk.StringVar(value="20")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_dur_var, width=8).grid(
-            row=cr, column=3, sticky='w', padx=4)
+        cr = len(self._CCG_PAIR_FIELDS)
+        for label, attr, default, col, span in self._CCG_CHECK_FIELDS:
+            var = tk.BooleanVar(value=default)
+            setattr(self, attr, var)
+            ttk.Checkbutton(ccg_frame, text=label, variable=var).grid(
+                row=cr, column=col, columnspan=span, sticky='w')
 
-        cr += 1
-        ttk.Label(ccg_frame, text="Alpha:").grid(row=cr, column=0, sticky='w')
-        self._ccg_alpha_var = tk.StringVar(value="0.05")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_alpha_var, width=10).grid(
-            row=cr, column=1, sticky='w', padx=4)
-
-        ttk.Label(ccg_frame, text="Alpha2:").grid(row=cr, column=2, sticky='w')
-        self._ccg_alpha2_var = tk.StringVar(value="0.1")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_alpha2_var, width=10).grid(
-            row=cr, column=3, sticky='w', padx=4)
-
-        cr += 1
-        ttk.Label(ccg_frame, text="Min lag (ms):").grid(row=cr, column=0, sticky='w')
-        self._ccg_minlag_var = tk.StringVar(value="1")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_minlag_var, width=8).grid(
-            row=cr, column=1, sticky='w', padx=4)
-
-        ttk.Label(ccg_frame, text="Max lag (ms):").grid(row=cr, column=2, sticky='w')
-        self._ccg_maxlag_var = tk.StringVar(value="3")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_maxlag_var, width=8).grid(
-            row=cr, column=3, sticky='w', padx=4)
-
-        cr += 1
-        ttk.Label(ccg_frame, text="Conv window (ms):").grid(row=cr, column=0, sticky='w')
-        self._ccg_conv_var = tk.StringVar(value="5")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_conv_var, width=8).grid(
-            row=cr, column=1, sticky='w', padx=4)
-
-        ttk.Label(ccg_frame, text="Correction:").grid(row=cr, column=2, sticky='w')
-        self._ccg_mc_var = tk.StringVar(value="bonferroni")
-        ttk.Combobox(ccg_frame, textvariable=self._ccg_mc_var,
-                     values=["bonferroni", "fdr_bh"], width=12,
-                     state='readonly').grid(row=cr, column=3, sticky='w', padx=4)
-
-        cr += 1
-        self._ccg_symmetrize_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ccg_frame, text="Symmetrize CCG",
-                        variable=self._ccg_symmetrize_var).grid(
-            row=cr, column=0, columnspan=2, sticky='w')
-
-        self._ccg_accel_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ccg_frame, text="GPU acceleration (CuPy)",
-                        variable=self._ccg_accel_var).grid(
-            row=cr, column=2, columnspan=2, sticky='w')
-
-        # Connection types
-        cr += 1
-        ttk.Label(ccg_frame, text="E types:").grid(row=cr, column=0, sticky='w')
-        self._ccg_etypes_var = tk.StringVar(value="pyr-pyr, pyr-inter")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_etypes_var, width=30).grid(
-            row=cr, column=1, columnspan=2, sticky='w', padx=4)
-
-        cr += 1
-        ttk.Label(ccg_frame, text="I types:").grid(row=cr, column=0, sticky='w')
-        self._ccg_itypes_var = tk.StringVar(value="inter-inter, inter-pyr")
-        ttk.Entry(ccg_frame, textvariable=self._ccg_itypes_var, width=30).grid(
-            row=cr, column=1, columnspan=2, sticky='w', padx=4)
+        for i, (label, attr, default) in enumerate(self._CCG_CONN_FIELDS):
+            row = cr + 1 + i
+            ttk.Label(ccg_frame, text=label).grid(row=row, column=0, sticky='w')
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            ttk.Entry(ccg_frame, textvariable=var, width=30).grid(
+                row=row, column=1, columnspan=2, sticky='w', padx=4)
 
         # ── Action buttons ──
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(6, 0))
 
-        self._build_nd_btn = ttk.Button(
-            btn_frame, text="1. Build NeuronsDataset",
-            command=self._on_build_nd)
-        self._build_nd_btn.pack(side=tk.LEFT, padx=4)
-
-        self._build_ccg_btn = ttk.Button(
-            btn_frame, text="2. Generate CCGs",
-            command=self._on_build_ccg, state='disabled')
-        self._build_ccg_btn.pack(side=tk.LEFT, padx=4)
-
-        self._review_btn = ttk.Button(
-            btn_frame, text="3. Open Review UI",
-            command=self._on_open_review, state='disabled')
-        self._review_btn.pack(side=tk.LEFT, padx=4)
+        for text, attr, cmd_name, state in self._BUTTONS:
+            btn = ttk.Button(btn_frame, text=text,
+                             command=getattr(self, cmd_name), state=state)
+            btn.pack(side=tk.LEFT, padx=4)
+            setattr(self, attr, btn)
 
         # ── Status bar ──
         self._status_var = tk.StringVar(value="Ready")

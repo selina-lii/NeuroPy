@@ -774,6 +774,24 @@ class CCGPointer(Savable):
 
 
 @dataclass
+class CustomCCGMeta:
+    """Metadata attached to custom time-window CCG segments only.
+
+    Regular ``CCGData`` objects leave ``CCGData.custom_meta = None``.
+    """
+    name: str
+    t0: float
+    t1: float
+    active_duration: float
+    total_time_hours: float
+    firing_rates: np.ndarray = None
+    filter_state: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+    src_path: str = None
+    compute_sec: float = float('nan')
+
+
+@dataclass
 class CCGData(Savable):
     """
     Stores the whole CCG array and its p values
@@ -781,7 +799,7 @@ class CCGData(Savable):
         ccg         [N, Np, Nbins]
         N = number of data segments
         Np = number of neuron pairs
-        Nbins = number of bins per CCG 
+        Nbins = number of bins per CCG
         ccg_null    [N, Np, Nbins]
     """
     key: Key
@@ -799,6 +817,9 @@ class CCGData(Savable):
 
     # [n_seg, n_ref, n_tgt]
     conn_strength: np.ndarray
+
+    # Custom-segment metadata — None for all regular CCGDataset segments
+    custom_meta: CustomCCGMeta = None
 
     def __post_init__(self):
         super().__init__()  # initializes parent attributes
@@ -1092,6 +1113,7 @@ class CCGDataset(AnalysisDataset):
         conf=None,
         nd=None,
     ):
+        import collections as _col
         super().__init__(conf)
         self.nd = nd
         self._ccg = {}
@@ -1100,7 +1122,11 @@ class CCGDataset(AnalysisDataset):
         # Jitter significance testing lives in neuropy.analyses.jitter (Jitter/JitterDataset).
         self._ccg_highres = {}  # nd_key → CCGData (raw only; loaded by load_highres)
         self._jitter_results = {}  # nd_key → {(ref, tgt, res_key): (j_avg, j_pval, j_pval_bins)}
-        self.get_ccg()
+        self._session_access_order: _col.deque = _col.deque()  # LRU tracker (nd_keys)
+        # Load CCGPointers only (fast); raw CCG arrays are loaded on demand per session.
+        ptr_status = self.load_ccgpointers()
+        if ptr_status in ('missing', 'stale'):
+            self.get_ccg()   # first-run or stale significance config: full compute + save
 
     @property
     def filepath(self):
@@ -1224,30 +1250,95 @@ class CCGDataset(AnalysisDataset):
         return True
 
     # ------------------------------------------------------------------
+    # Session LRU / memory eviction helpers
+    # ------------------------------------------------------------------
+
+    def _nd_key_slug(self, nd_key) -> str:
+        """Return a filesystem-safe slug for nd_key (used in per-session sidecar paths)."""
+        import re
+        s = str(nd_key)
+        s = re.sub(r'[^\w\-.]', '_', s)
+        return s[:80]
+
+    def _touch_session(self, nd_key) -> None:
+        """Mark nd_key as most-recently used in the LRU tracker."""
+        try:
+            self._session_access_order.remove(nd_key)
+        except (ValueError, AttributeError):
+            pass
+        self._session_access_order.append(nd_key)
+
+    def _estimated_ccg_mb(self) -> float:
+        """Estimate total MB of numpy arrays held in _ccg + _ccg_highres."""
+        total = 0
+        for d in (self._ccg, self._ccg_highres):
+            for cd_obj in d.values():
+                for arr in (cd_obj.ccg, getattr(cd_obj, 'ccg_null', None)):
+                    if arr is not None:
+                        total += arr.nbytes
+        return total / 1024 ** 2
+
+    def evict_session(self, nd_key) -> None:
+        """Drop raw CCG arrays for nd_key from memory (CCGPointers are kept)."""
+        self._ccg.pop(nd_key, None)
+        self._ccg_highres.pop(nd_key, None)
+        try:
+            self._session_access_order.remove(nd_key)
+        except (ValueError, AttributeError):
+            pass
+
+    def _check_memory_and_evict(self, limit_gb: float = 8.0) -> None:
+        """Evict LRU sessions until estimated raw-array memory is under limit_gb."""
+        order = getattr(self, '_session_access_order', None)
+        if order is None:
+            return
+        while self._estimated_ccg_mb() > limit_gb * 1024 and order:
+            lru_key = order[0]
+            if lru_key not in self._ccg and lru_key not in self._ccg_highres:
+                order.popleft()
+                continue
+            print(f"[CCGDataset] evicting session {lru_key} (memory limit {limit_gb:.1f} GB)")
+            self.evict_session(lru_key)
+
+    # ------------------------------------------------------------------
     # Separate save / load for CCGData (raw arrays) vs CCGPointers (pairs)
     # ------------------------------------------------------------------
 
     def _ccgdata_path(self) -> str:
         return os.path.expanduser(self.save_path()) + '_ccgdata'
 
+    def _ccgdata_session_path(self, nd_key) -> str:
+        """Per-session sidecar path for raw CCG arrays."""
+        return os.path.expanduser(self.save_path()) + f'_ccgdata_{self._nd_key_slug(nd_key)}'
+
+    def _highres_session_path(self, nd_key) -> str:
+        """Per-session sidecar path for high-res CCG arrays."""
+        return os.path.expanduser(self.highres_save_path()) + f'_{self._nd_key_slug(nd_key)}'
+
     def _ccgpointers_path(self) -> str:
         return os.path.expanduser(self.save_path()) + '_ccgpointers'
 
     def save_ccgdata(self):
-        """Save only the raw CCG arrays (``_ccg`` dict) to a separate file.
+        """Save raw CCG arrays to monolithic file + per-session sidecar files.
 
-        This covers the expensive spike_correlations + convolution output.
-        It is invalidated only when COMPUTE_FIELDS change.
+        Per-session sidecars allow on-demand single-session loading without
+        reading the full monolithic file.  Both are written on every save.
         """
-        import hickle as hkl
+        import hickle as hkl, json, datetime as _dt
         p = self._ccgdata_path() + '.hkl'
         os.makedirs(os.path.dirname(p), exist_ok=True)
         hkl.dump(self._ccg, p)
-        # Write compute metadata next to it
-        import json, datetime as _dt
+        # Per-session sidecars
+        for nd_key, cd_obj in self._ccg.items():
+            sp = self._ccgdata_session_path(nd_key) + '.hkl'
+            try:
+                hkl.dump(cd_obj, sp)
+            except Exception as exc:
+                print(f"[CCGDataset] sidecar save failed for {nd_key}: {exc}")
+        # Compute metadata
         _s = self._serialize_conf_value
         meta = {
-            'version': '1.1',
+            'version': '1.2',
             'saved_at': _dt.datetime.now().isoformat(),
             'conf': {f: _s(getattr(self.conf, f, None))
                      for f in CCGConfig.COMPUTE_FIELDS},
@@ -1255,23 +1346,18 @@ class CCGDataset(AnalysisDataset):
         mp = self._ccgdata_path() + '.meta.json'
         with open(mp, 'w') as fh:
             json.dump(meta, fh, indent=2)
-        print(f"[CCGDataset] ccgdata saved → {p}")
+        print(f"[CCGDataset] ccgdata saved → {p} + {len(self._ccg)} sidecar(s)")
 
-    def load_ccgdata(self) -> str:
-        """Load raw CCG arrays from the separate ccgdata file.
+    def _validate_ccgdata_meta(self) -> str:
+        """Check whether the on-disk ccgdata meta matches current config.
 
-        Returns
-        -------
-        'loaded'  — successfully loaded (config matches).
-        'missing' — file does not exist on disk.
-        'stale'   — file exists but compute config has changed.
+        Returns 'ok', 'missing', or 'stale'.
         """
-        import hickle as hkl, json
+        import json
         mp = self._ccgdata_path() + '.meta.json'
         p  = self._ccgdata_path() + '.hkl'
         if not os.path.isfile(p):
             return 'missing'
-        # Validate compute config if metadata exists
         if os.path.isfile(mp):
             try:
                 with open(mp) as fh:
@@ -1288,6 +1374,59 @@ class CCGDataset(AnalysisDataset):
             except Exception as exc:
                 print(f"[CCGDataset] ccgdata metadata error: {exc}")
                 return 'stale'
+        return 'ok'
+
+    def load_ccgdata(self, nd_key=None) -> str:
+        """Load raw CCG arrays from disk.
+
+        Parameters
+        ----------
+        nd_key : optional
+            When given, load only that session from its per-session sidecar
+            file (fast; avoids reading the large monolithic file).  When
+            ``None``, load all sessions from the monolithic file.
+
+        Returns
+        -------
+        'loaded'  — successfully loaded (config matches).
+        'missing' — file does not exist on disk.
+        'stale'   — file exists but compute config has changed.
+        """
+        import hickle as hkl
+        meta_status = self._validate_ccgdata_meta()
+        if meta_status != 'ok':
+            return meta_status
+
+        if nd_key is not None:
+            # Fast path: per-session sidecar
+            sp = self._ccgdata_session_path(nd_key) + '.hkl'
+            if os.path.isfile(sp):
+                try:
+                    self._ccg[nd_key] = hkl.load(sp)
+                    print(f"[CCGDataset] ccgdata[{nd_key}] loaded ← {sp}")
+                    return 'loaded'
+                except Exception as exc:
+                    print(f"[CCGDataset] sidecar load failed for {nd_key}: {exc}")
+            # Sidecar missing: fall back to monolithic, extract, then save sidecar
+            p = self._ccgdata_path() + '.hkl'
+            try:
+                all_data = hkl.load(p)
+                if nd_key in all_data:
+                    self._ccg[nd_key] = all_data[nd_key]
+                    # Save sidecar for fast future access
+                    try:
+                        hkl.dump(all_data[nd_key], sp)
+                    except Exception:
+                        pass
+                    print(f"[CCGDataset] ccgdata[{nd_key}] loaded ← {p} (monolithic fallback)")
+                    return 'loaded'
+                return 'missing'
+            except Exception as exc:
+                print(f"[CCGDataset] ccgdata load failed: {exc}")
+                return 'stale'
+
+        # Load all sessions from monolithic file
+        p = self._ccgdata_path() + '.hkl'
         try:
             self._ccg = hkl.load(p)
             print(f"[CCGDataset] ccgdata loaded ← {p}")
@@ -1371,13 +1510,7 @@ class CCGDataset(AnalysisDataset):
     # ------------------------------------------------------------------
 
     def save_highres(self, path: str = None):
-        """Save self._ccg_highres dict to a separate hickle file.
-
-        Parameters
-        ----------
-        path : str, optional
-            Base path (without extension).  Defaults to ``highres_save_path()``.
-        """
+        """Save high-res CCG arrays to monolithic file + per-session sidecar files."""
         if not self._ccg_highres:
             print("[save_highres] Nothing to save (run load_highres() first).")
             return
@@ -1385,20 +1518,65 @@ class CCGDataset(AnalysisDataset):
         p = os.path.expanduser((path or self.highres_save_path()) + '.hkl')
         os.makedirs(os.path.dirname(p), exist_ok=True)
         hkl.dump(self._ccg_highres, p)
-        print(f"[CCGDataset] highres saved → {p}")
+        for nd_key, cd_obj in self._ccg_highres.items():
+            sp = self._highres_session_path(nd_key) + '.hkl'
+            try:
+                hkl.dump(cd_obj, sp)
+            except Exception as exc:
+                print(f"[CCGDataset] highres sidecar save failed for {nd_key}: {exc}")
+        print(f"[CCGDataset] highres saved → {p} + {len(self._ccg_highres)} sidecar(s)")
 
-    def _load_highres_from_disk(self, path: str = None) -> bool:
-        """Try to load high-res CCGData from a previously saved file.
+    def _load_highres_from_disk(self, nd_key=None) -> bool:
+        """Try to load high-res CCGData from disk.
 
-        Returns True on success, False if the file does not exist.
+        Parameters
+        ----------
+        nd_key : optional
+            When given, load only that session's sidecar (fast path).
+            When ``None``, load all sessions from the monolithic file.
+
+        Returns True on success, False if no file found.
         """
         import hickle as hkl
-        p = os.path.expanduser((path or self.highres_save_path()) + '.hkl')
+        if nd_key is not None:
+            sp = self._highres_session_path(nd_key) + '.hkl'
+            if os.path.isfile(sp):
+                try:
+                    self._ccg_highres[nd_key] = hkl.load(sp)
+                    print(f"[CCGDataset] highres[{nd_key}] loaded ← {sp}")
+                    self._touch_session(nd_key)
+                    return True
+                except Exception as exc:
+                    print(f"[CCGDataset] highres sidecar load failed for {nd_key}: {exc}")
+            # Sidecar missing: fall back to monolithic, extract, save sidecar
+            p = os.path.expanduser(self.highres_save_path() + '.hkl')
+            if not os.path.isfile(p):
+                return False
+            try:
+                all_data = hkl.load(p)
+                if nd_key in all_data:
+                    self._ccg_highres[nd_key] = all_data[nd_key]
+                    try:
+                        hkl.dump(all_data[nd_key], sp)
+                    except Exception:
+                        pass
+                    print(f"[CCGDataset] highres[{nd_key}] loaded ← {p} (monolithic fallback)")
+                    self._touch_session(nd_key)
+                    return True
+                return False
+            except Exception as exc:
+                print(f"[CCGDataset] highres load failed: {exc}")
+                return False
+
+        # Load all from monolithic file
+        p = os.path.expanduser(self.highres_save_path() + '.hkl')
         if not os.path.isfile(p):
             return False
         try:
             data = hkl.load(p)
             self._ccg_highres = data
+            for k in data:
+                self._touch_session(k)
             print(f"[CCGDataset] highres loaded ← {p}")
             return True
         except Exception as exc:
@@ -1446,8 +1624,14 @@ class CCGDataset(AnalysisDataset):
         total = sum(len(v) for v in self._jitter_results.values())
         print(f"[CCGDataset] jitter saved ({total} pairs) → {p}")
 
-    def load_jitter(self, path: str = None) -> bool:
+    def load_jitter(self, nd_key=None, path: str = None) -> bool:
         """Load jitter results from disk into _jitter_results.
+
+        Parameters
+        ----------
+        nd_key : optional
+            When given, load only results for that session.  When ``None``,
+            load all sessions (original behaviour).
 
         Returns True on success, False if file not found.
         """
@@ -1457,23 +1641,30 @@ class CCGDataset(AnalysisDataset):
             return False
         try:
             data = hkl.load(p)
-            nd_key_map = {str(k): k for k in self._ccg}
+            # Build nd_key map from data + CCGPointers (works even when _ccg is empty)
+            known_keys = list(self.data.keys()) + list(self._ccg.keys())
+            nd_key_map = {str(k): k for k in known_keys}
             for nd_str, pairs in data.items():
-                nd_key = nd_key_map.get(nd_str)
-                if nd_key is None:
+                mapped_key = nd_key_map.get(nd_str)
+                if mapped_key is None:
                     continue
-                if nd_key not in self._jitter_results:
-                    self._jitter_results[nd_key] = {}
+                if nd_key is not None and mapped_key != nd_key:
+                    continue   # skip other sessions when filtering
+                if mapped_key not in self._jitter_results:
+                    self._jitter_results[mapped_key] = {}
                 for k, v in pairs.items():
                     ref = int(v['ref'])
                     tgt = int(v['tgt'])
                     res_key = str(v['res_key'])
                     seg_raw = v.get('seg', None)
                     seg = None if (seg_raw is None or int(seg_raw) < 0) else int(seg_raw)
-                    self._jitter_results[nd_key][(ref, tgt, res_key, seg)] = (
+                    self._jitter_results[mapped_key][(ref, tgt, res_key, seg)] = (
                         v['j_avg'], float(v['j_pval']), v['j_pval_bins'])
-            total = sum(len(v) for v in self._jitter_results.values())
-            print(f"[CCGDataset] jitter loaded ({total} pairs) ← {p}")
+            loaded = (sum(len(v) for v in self._jitter_results.values())
+                      if nd_key is None
+                      else len(self._jitter_results.get(nd_key, {})))
+            label = f"[{nd_key}]" if nd_key is not None else "(all sessions)"
+            print(f"[CCGDataset] jitter loaded {label} ({loaded} pairs) ← {p}")
             return True
         except Exception as exc:
             print(f"[CCGDataset] jitter load failed: {exc}")
@@ -1498,9 +1689,16 @@ class CCGDataset(AnalysisDataset):
             answer = ''
         return answer in ('y', 'yes')
 
-    def get_ccg(self, baseline_method="eran_conv", use_segments=True):
-        """
-        main function of the class
+    def get_ccg(self, nd_key=None, baseline_method="eran_conv", use_segments=True):
+        """Load or compute CCG arrays, optionally restricted to one session.
+
+        Parameters
+        ----------
+        nd_key : optional
+            When given, load/compute only that session's raw CCG arrays and
+            update in-memory dicts without touching other sessions.  Pointers
+            (``self.data``) are assumed already loaded by ``__init__``.
+            When ``None``, load/compute all sessions (original behaviour).
 
         Cache strategy (split files):
           1. Try loading ccgdata (raw arrays) — only re-computed when COMPUTE_FIELDS change.
@@ -1518,6 +1716,29 @@ class CCGDataset(AnalysisDataset):
         if baseline_method == "eran_conv":
             conv = EranConv(self.conf)
 
+            # ── Single-session fast path ───────────────────────────────────
+            if nd_key is not None:
+                if nd_key in self._ccg:
+                    self._touch_session(nd_key)
+                    return  # already in memory
+                ccgdata_status = self.load_ccgdata(nd_key=nd_key)
+                if ccgdata_status == 'loaded':
+                    self._touch_session(nd_key)
+                    return
+                # Not cached: compute for this session only
+                if self.nd.edge_times.get(nd_key) is None:
+                    print(f"[CCGDataset] get_ccg: nd_key {nd_key} not in edge_times")
+                    return
+                self.__ccg_eranconv(key=nd_key, conv=conv,
+                                    edge_times=self.nd.edge_times[nd_key],
+                                    use_segments=use_segments)
+                self.save_ccgdata()
+                self.save_ccgpointers()
+                self._save_metadata()
+                self._touch_session(nd_key)
+                return
+
+            # ── All-sessions path (original behaviour) ────────────────────
             # --- Step 1: try loading cached raw CCG arrays ---
             ccgdata_status = self.load_ccgdata()
             if ccgdata_status == 'loaded':
@@ -1525,6 +1746,8 @@ class CCGDataset(AnalysisDataset):
                 ptr_status = self.load_ccgpointers()
                 if ptr_status == 'loaded':
                     print("[CCGDataset] Loaded CCGData + CCGPointers from split cache.")
+                    for k in self._ccg:
+                        self._touch_session(k)
                     return
                 # Pointers stale/missing → re-run significance detection on cached CCGData
                 if ptr_status == 'stale':
@@ -1533,10 +1756,12 @@ class CCGDataset(AnalysisDataset):
                         print("[CCGDataset] Aborted — keeping existing ccgpointers.")
                         return
                 print("[CCGDataset] CCGData cached; re-running significance detection.")
-                for nd_key, ccg_data in self._ccg.items():
-                    self.__run_eranconv_on_ccgdata(nd_key, ccg_data, conv)
+                for k, ccg_data in self._ccg.items():
+                    self.__run_eranconv_on_ccgdata(k, ccg_data, conv)
                 self.save_ccgpointers()
                 self._save_metadata()
+                for k in self._ccg:
+                    self._touch_session(k)
                 return
 
             if ccgdata_status == 'stale':
@@ -1572,6 +1797,8 @@ class CCGDataset(AnalysisDataset):
             self.save_ccgdata()
             self.save_ccgpointers()
             self._save_metadata()
+            for k in self._ccg:
+                self._touch_session(k)
         elif baseline_method == "jitter":
             raise NotImplementedError(
                 "CCG jitter is implemented in neuropy.analyses.jitter. "
@@ -1630,37 +1857,44 @@ class CCGDataset(AnalysisDataset):
         self.save_ccgpointers()
         self._save_metadata()
 
-    def load_highres(self, conf_highres: 'CCGConfig'=None, force_recompute: bool=False):
-        """
-        Load (or compute) high-resolution CCG arrays for all sessions.
-
-        Tries to load from a previously saved highres file first; falls back to
-        computing from spike trains if no file is found or ``force_recompute``
-        is True.
-
-        Only raw CCG spike-count arrays are computed — no significance test is
-        run.  Low-res significance data in ``self._ccg`` and ``self.data``
-        remain the authoritative source for pair selection.
-
-        Results are stored in ``self._ccg_highres[nd_key]`` as :class:`CCGData`
-        objects whose significance fields are all ``None``.
+    def load_highres(self, nd_key=None, conf_highres: 'CCGConfig'=None,
+                     force_recompute: bool=False):
+        """Load (or compute) high-resolution CCG arrays.
 
         Parameters
         ----------
+        nd_key : optional
+            When given, load/compute only that session.  When ``None``, load/
+            compute all sessions (original behaviour).
         conf_highres : CCGConfig, optional
-            Configuration specifying at minimum ``bin_size`` and ``duration``
-            for the high-resolution CCG.
+            Configuration for the high-resolution CCG.
         force_recompute : bool, optional
-            If True, skip the on-disk cache and always recompute from spikes.
+            If True, skip on-disk cache and always recompute from spikes.
         """
         from neuropy.analyses import correlations as _corr
 
+        if self.nd is None:
+            raise RuntimeError(
+                "CCGDataset.load_highres: nd is None — no NeuronsDataset attached.")
+
+        # Determine which sessions to process
+        keys_to_process = ([nd_key] if nd_key is not None
+                           else list(self.nd.data.keys()))
+
         # Try loading from disk first (unless forced to recompute)
         if not force_recompute:
-            if self._load_highres_from_disk():
+            remaining = []
+            for k in keys_to_process:
+                if k in self._ccg_highres:
+                    self._touch_session(k)
+                elif self._load_highres_from_disk(nd_key=k):
+                    pass  # loaded; _touch_session called inside
+                else:
+                    remaining.append(k)
+            keys_to_process = remaining
+            if not keys_to_process:
                 return
         else:
-            # Force recompute requested — check if file exists and ask
             p = os.path.expanduser(self.highres_save_path() + '.hkl')
             if os.path.isfile(p):
                 if not self._ask_overwrite(p, 'High-res CCG'):
@@ -1671,7 +1905,6 @@ class CCGDataset(AnalysisDataset):
             import copy as _copy
             conf_highres = _copy.copy(self.conf)
             conf_highres.bin_size = _CCG_RESOLUTION['highres']
-            # Recompute all bin-index attributes that depend on bin_size
             bs = conf_highres.bin_size
             conf_highres.center_bin   = int(conf_highres.duration / bs // 2)
             conf_highres.nbins        = int(conf_highres.duration / bs) + 1
@@ -1679,13 +1912,10 @@ class CCGDataset(AnalysisDataset):
             conf_highres.min_lag_bin  = conf_highres.center_bin + int(conf_highres.min_lag / bs)
             conf_highres.max_lag_bin  = conf_highres.center_bin + int(conf_highres.max_lag / bs) + 1
 
-        if self.nd is None:
-            raise RuntimeError(
-                "CCGDataset.load_highres: nd is None — no NeuronsDataset attached.")
-
-        for nd_key, neurons in self.nd.data.items():
-            edge_times = self.nd.edge_times[nd_key]
-            print(f"[load_highres] {nd_key} — bin_size="
+        for k in keys_to_process:
+            neurons = self.nd.data[k]
+            edge_times = self.nd.edge_times[k]
+            print(f"[load_highres] {k} — bin_size="
                   f"{conf_highres.bin_size * 1e3:.2f} ms …", flush=True)
             ccg = _corr.spike_correlations(
                 neurons=neurons,
@@ -1696,8 +1926,8 @@ class CCGDataset(AnalysisDataset):
                 symmetrize=conf_highres.symmetrize_ccg,
                 edge_times=edge_times,
             )
-            self._ccg_highres[nd_key] = CCGData(
-                key=nd_key,
+            self._ccg_highres[k] = CCGData(
+                key=k,
                 _conf=conf_highres,
                 ccg=ccg,
                 ccg_null=None,
@@ -1710,27 +1940,35 @@ class CCGDataset(AnalysisDataset):
                 norm_factors=None,
             )
             print(f"[load_highres]   → shape {ccg.shape}")
+            self._touch_session(k)
 
-        n = len(self._ccg_highres)
-        print(f"[CCGDataset] load_highres complete — {n} session(s), "
+        n = len(keys_to_process)
+        print(f"[CCGDataset] load_highres complete — {n} session(s) computed, "
               f"{conf_highres.bin_size * 1e3:.2f} ms bins.")
-        # Run EranConv significance on the freshly computed high-res CCGs
-        self.run_highres_eranconv()
-        # Auto-save so future calls can skip re-computation
+        # Run EranConv significance on the newly computed high-res CCGs
+        self.run_highres_eranconv(nd_keys=keys_to_process)
+        # Auto-save sidecars for future fast access
         self.save_highres()
 
-    def run_highres_eranconv(self):
+    def run_highres_eranconv(self, nd_keys=None):
         """Run EranConv on high-resolution CCG data and store results in _ccg_highres.
 
         Infers bin_size from the actual CCG array shape (robust to conf.bin_size
         mutation in load_highres).  Results are stored directly on each CCGData
         object inside self._ccg_highres so that the high-res plot shows the
         EranConv null distribution and significance.
+
+        Parameters
+        ----------
+        nd_keys : list, optional
+            Restrict to these nd_keys.  When ``None``, process all sessions.
         """
         if not self._ccg_highres:
             print("[run_highres_eranconv] No high-res CCG loaded; call load_highres() first.")
             return
-        for nd_key, ccg_hi in self._ccg_highres.items():
+        items = [(k, v) for k, v in self._ccg_highres.items()
+                 if nd_keys is None or k in nd_keys]
+        for nd_key, ccg_hi in items:
             conf = ccg_hi._conf
             ccg = ccg_hi.ccg  # [n_seg, n_ref, n_tgt, n_bins]
             n_bins = ccg.shape[-1]
@@ -1750,7 +1988,7 @@ class CCGDataset(AnalysisDataset):
             n_sig = int(sig.any(axis=-1).sum()) if sig is not None else 0
             print(f"[run_highres_eranconv]   → null shape {pred.shape}, "
                   f"{n_sig} significant pair-segments")
-        print(f"[run_highres_eranconv] complete — {len(self._ccg_highres)} session(s).")
+        print(f"[run_highres_eranconv] complete — {len(items)} session(s).")
 
     def _session_summary(self, key) -> str:
         """Build the session summary string from stored CCGPointers.
@@ -2314,3 +2552,27 @@ class EranConv:
         return pvals, pred, qvals, ccg_inds_by_type, spur_inds_by_type, printstr
 
 
+
+
+def deconvolve_ccg(
+    ccg_raw, null_raw,
+    acg_ref, nspks_ref,
+    acg_tgt, nspks_tgt,
+    dref: bool, dtgt: bool,
+):
+    """Apply ACG deconvolution to CCG and null arrays. Returns (ccg_out, null_out)."""
+    def _deconv_1d(x):
+        if x is None:
+            return None
+        x = x.copy().astype(float)
+        return deconv_autocorr(
+            x,
+            acg_ref if dref else np.zeros_like(acg_ref, dtype=float),
+            nspks_ref if dref else 1.0,
+            acg_tgt if dtgt else np.zeros_like(acg_tgt, dtype=float),
+            nspks_tgt if dtgt else 1.0,
+        )
+    try:
+        return _deconv_1d(ccg_raw), _deconv_1d(null_raw)
+    except Exception:
+        return ccg_raw, null_raw

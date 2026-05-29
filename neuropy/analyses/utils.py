@@ -378,3 +378,29 @@ class SetOp():
         np.unique by row elements
         """
         return np.unique(x, axis=0)
+
+
+def split_time_range(t0: float, t1: float, n_splits: int, overlap_sec: float,
+                     base_name: str) -> list:
+    """Partition [t0, t1] into n_splits overlapping chunks.
+
+    Returns list of (chunk_t0, chunk_t1, chunk_name) tuples.
+    """
+    n_splits = max(1, int(n_splits))
+    overlap_sec = max(0.0, float(overlap_sec))
+    if n_splits == 1 and overlap_sec == 0.0:
+        return [(t0, t1, base_name)]
+    total = t1 - t0
+    if total <= 0:
+        return [(t0, t1, base_name)]
+    chunk_len = (total + (n_splits - 1) * overlap_sec) / n_splits
+    stride = chunk_len - overlap_sec
+    if stride <= 0:
+        stride = total / n_splits
+        chunk_len = stride
+    chunks = []
+    for i in range(n_splits):
+        cs = t0 + i * stride
+        ce = min(cs + chunk_len, t1)
+        chunks.append((cs, ce, base_name + str(i + 1)))
+    return chunks

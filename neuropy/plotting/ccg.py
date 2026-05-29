@@ -1,15 +1,23 @@
-import seaborn as sns
-import matplotlib.pyplot as plt
+from __future__ import annotations
+
+import dataclasses
 import os
-import neuropy.plotting.probe as probe
-import numpy as np
 import warnings
+from dataclasses import dataclass, field
+from typing import Optional
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from matplotlib.figure import Figure
+
+import neuropy.plotting.probe as probe
 
 
 def plot_ccg_panel(
     ax,
     ccg,
-    ids,
+    shank_ids,
     inds,
     window_size,
     bin_size,
@@ -205,8 +213,8 @@ def plot_ccg_panel(
             title_parts.append(title_session_label)
         if title_show_seg and segment_id:
             title_parts.append(f"{segment_id}:")
-        if title_show_shanks and ids is not None:
-            shank_str = ' '.join(str(x) for x in ids)
+        if title_show_shanks and shank_ids is not None:
+            shank_str = ' '.join(str(x) for x in shank_ids)
             title_parts.append(f"shank=({shank_str})")
         if title_show_inds and inds is not None:
             inds_str = ' '.join(str(x) for x in inds)
@@ -362,7 +370,7 @@ def plot_ccg_figure(
     plot_ccg_panel(
         ax=axs[current_ax],
         ccg=ccg,
-        ids=ids,
+        shank_ids=ids,
         inds=inds,
         window_size=window_size,
         bin_size=bin_size,
@@ -617,3 +625,278 @@ def plot_network(self):
 #             plt.savefig(f"{os.path.expanduser(root)}/{key}.png", bbox_inches='tight')
 #         else:
 #             plt.show()
+
+
+def plot_spike_attribution_raster(
+    fig,
+    ref_spikes: np.ndarray,
+    tgt_spikes: np.ndarray,
+    ref_t: float,
+    tgt_t: float,
+    window: float,
+    ref_label: str,
+    tgt_label: str,
+    pair_idx: int,
+) -> None:
+    """Draw a 2-row eventplot raster around one attributed spike pair.
+
+    Parameters
+    ----------
+    fig : matplotlib Figure (cleared on entry)
+    ref_spikes, tgt_spikes : full spike train arrays (seconds)
+    ref_t, tgt_t : ref and tgt spike times for the selected pair
+    window : half-width of the raster in seconds
+    ref_label, tgt_label : y-axis labels (e.g. "Ref shank0ch3")
+    pair_idx : 0-based index used in title
+    """
+    center = ref_t
+    t0, t1 = center - window, center + window
+    ref_win = ref_spikes[(ref_spikes >= t0) & (ref_spikes <= t1)]
+    tgt_win = tgt_spikes[(tgt_spikes >= t0) & (tgt_spikes <= t1)]
+
+    fig.clear()
+    ax_ref = fig.add_subplot(211)
+    ax_tgt = fig.add_subplot(212, sharex=ax_ref)
+
+    if len(ref_win):
+        ax_ref.eventplot([ref_win - center], lineoffsets=0,
+                         linelengths=0.8, colors='#1565C0')
+    ax_ref.axvline(0, color='#E53935', lw=1.5, ls='--', alpha=0.7)
+    ax_ref.set_ylabel(ref_label, fontsize=9)
+    ax_ref.set_yticks([])
+    ax_ref.set_title(
+        f"Spike pair #{pair_idx + 1}: ref={ref_t:.4f}s  tgt={tgt_t:.4f}s  "
+        f"lag={(tgt_t - ref_t) * 1000:.2f}ms",
+        fontsize=9)
+
+    if len(tgt_win):
+        ax_tgt.eventplot([tgt_win - center], lineoffsets=0,
+                         linelengths=0.8, colors='#2E7D32')
+    ax_tgt.axvline(tgt_t - center, color='#E53935', lw=1.5, ls='--', alpha=0.7)
+    ax_tgt.set_ylabel(tgt_label, fontsize=9)
+    ax_tgt.set_yticks([])
+    ax_tgt.set_xlabel("Time relative to ref spike (s)", fontsize=9)
+    ax_tgt.set_xlim(-window, window)
+    fig.tight_layout()
+
+
+# ---------------------------------------------------------------------------
+# RenderContext and sub-dataclasses (moved from neuropy.ui.ccg_renderer)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class JitterOverlay:
+    j_ccg:    Optional[np.ndarray] = None
+    j_pval:   Optional[np.ndarray] = None
+    j_ccg_lo: Optional[np.ndarray] = None
+    j_ccg_hi: Optional[np.ndarray] = None
+
+
+@dataclass
+class PlotStyle:
+    """Export/preview style overrides — field names match plot_ccg_panel params exactly."""
+    ccg_color:         Optional[str]   = None
+    baseline_color:    Optional[str]   = None
+    ccg_alpha:         Optional[float] = None
+    baseline_alpha:    Optional[float] = None
+    cs_shade_color:    Optional[str]   = None
+    show_legend:       bool            = True
+    xticks_ms:         Optional[list]  = None
+    mirror_xticks:     bool            = True
+    min_text_size:     Optional[float] = None
+    show_test_window:  Optional[bool]  = None
+    test_window_color: Optional[str]   = None
+    test_window_alpha: Optional[float] = None
+    pval_line_color:   Optional[str]   = None
+    alpha_line_color:  Optional[str]   = None
+
+
+@dataclass
+class TitleConfig:
+    """Title visibility flags — field names match plot_ccg_panel params exactly."""
+    title_show_shanks:       bool = True
+    title_show_inds:         bool = True
+    title_show_type:         bool = True
+    title_show_seg:          bool = True
+    title_show_norm_details: bool = True
+    title_show_session:      bool = False
+    title_session_label:     str  = ''
+
+
+@dataclass
+class RenderContext:
+    """Processed data and parameters for rendering one CCG PNG."""
+    ccg:            np.ndarray
+    ccg_null_plot:  Optional[np.ndarray]
+    pval:           Optional[np.ndarray]
+    pval_corrected: Optional[np.ndarray]
+    jitter:          JitterOverlay
+    acg_ref:         Optional[np.ndarray]
+    acg_tgt:         Optional[np.ndarray]
+    wf_peak_ms:      Optional[np.ndarray]
+    wf_peak_amp:     Optional[np.ndarray]
+    cs_baseline_arg: Optional[np.ndarray]
+    window_size_eff: float
+    bin_size_eff:    float
+    alpha:           float
+    norm_info:       Optional[str]
+    seg_id_display:  str
+    min_lag_plot:    Optional[float]
+    max_lag_plot:    Optional[float]
+    extend_on:       bool
+    cs_annotation_lines: list
+    inds:                tuple
+    shank_ids:           tuple
+    neuron_type:         tuple
+    is_significant_pair: bool
+    show_ccg:       bool
+    line_ccg:       bool
+    line_baseline:  bool
+    line_ref:       bool
+    line_tgt:       bool
+    line_jitter:    bool
+    acg_yscale_ref: float
+    acg_yscale_tgt: float
+    acg_match_ccg:  bool
+    ylim:           Optional[tuple]
+    style:  PlotStyle
+    title:  TitleConfig
+    dark_mode: bool = False
+
+
+def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded):
+    """Expand a (possibly trimmed) per-neuron waveform to a full (ch_per_shank, T) array."""
+    if wf_neuron.ndim == 1:
+        return np.tile(wf_neuron, (ch_per_shank, 1))
+    sid  = int(shank_id)
+    disc = np.asarray(discarded, dtype=int) if discarded is not None else np.empty(0, dtype=int)
+    channel_ids = ch_per_shank * sid + np.arange(ch_per_shank)
+    mask   = ~np.isin(channel_ids, disc)
+    start  = int(ch_per_shank * sid - np.sum(disc < ch_per_shank * sid))
+    length = int(np.sum(mask))
+    clean  = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
+    clean[mask] = wf_neuron[start:start + length]
+    return clean
+
+
+def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
+    """Create figure, call plot_ccg_panel, apply post-processing, save PNG."""
+    fig = Figure(figsize=(7, 5))
+    ax  = fig.add_subplot(111)
+
+    plot_ccg_panel(
+        ax                     = ax,
+        ccg                    = ctx.ccg,
+        shank_ids              = ctx.shank_ids,
+        inds                   = ctx.inds,
+        neuron_type            = ctx.neuron_type,
+        window_size            = ctx.window_size_eff,
+        bin_size               = ctx.bin_size_eff,
+        pval                   = ctx.pval,
+        pval_corrected         = ctx.pval_corrected,
+        alpha                  = ctx.alpha,
+        ccg_null               = ctx.ccg_null_plot,
+        j_ccg                  = ctx.jitter.j_ccg,
+        j_pval                 = ctx.jitter.j_pval,
+        segment_id             = ctx.seg_id_display,
+        is_significant_pair    = ctx.is_significant_pair,
+        min_lag                = ctx.min_lag_plot,
+        max_lag                = ctx.max_lag_plot,
+        normalize_info         = ctx.norm_info,
+        acg_ref                = ctx.acg_ref,
+        acg_tgt                = ctx.acg_tgt,
+        acg_yscale_ref         = ctx.acg_yscale_ref,
+        acg_yscale_tgt         = ctx.acg_yscale_tgt,
+        acg_match_ccg          = ctx.acg_match_ccg,
+        show_ccg               = ctx.show_ccg,
+        line_ccg               = ctx.line_ccg,
+        line_baseline          = ctx.line_baseline,
+        line_ref               = ctx.line_ref,
+        line_tgt               = ctx.line_tgt,
+        line_jitter            = ctx.line_jitter,
+        conn_strength_baseline = ctx.cs_baseline_arg,
+        **dataclasses.asdict(ctx.style),
+        **dataclasses.asdict(ctx.title),
+    )
+
+    if ctx.extend_on:
+        try:
+            half_ms = float(ctx.window_size_eff) * 1000.0 / 2.0
+            nice    = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+            step    = next((s for s in nice if (2 * half_ms / s) <= 10.5), nice[-1])
+            start   = -np.floor(half_ms / step) * step
+            ticks   = np.arange(start, half_ms + 0.5 * step, step)
+            if not np.any(np.isclose(ticks, 0.0)):
+                ticks = np.sort(np.append(ticks, 0.0))
+            ax.set_xticks(ticks)
+        except Exception:
+            pass
+
+    if ctx.jitter.j_ccg_lo is not None and ctx.jitter.j_ccg_hi is not None:
+        try:
+            jlo = np.asarray(ctx.jitter.j_ccg_lo, dtype=float)
+            jhi = np.asarray(ctx.jitter.j_ccg_hi, dtype=float)
+            if len(jlo) == len(ctx.ccg) and len(jhi) == len(ctx.ccg):
+                bs     = ctx.bin_size_eff
+                ws     = ctx.window_size_eff
+                bins_s = np.arange(-ws / 2, ws / 2 + bs, bs)
+                bins   = bins_s * 1000.0
+                edges  = np.append(bins - bs * 500.0, bins[-1] + bs * 500.0)
+                x_step = np.repeat(edges, 2)[1:-1]
+                for arr in (jlo, jhi):
+                    ax.plot(x_step, np.repeat(arr, 2),
+                            color='#C62828', linewidth=1.15,
+                            alpha=0.9, linestyle=(0, (4, 3)), zorder=4)
+        except Exception:
+            pass
+
+    if ctx.ylim is not None:
+        ax.set_ylim(ctx.ylim)
+
+    if ctx.style.xticks_ms:
+        try:
+            ticks = list(ctx.style.xticks_ms)
+            if ctx.style.mirror_xticks:
+                ticks = sorted(set(ticks + [-t for t in ticks]))
+            ax.set_xticks(ticks)
+        except Exception:
+            pass
+
+    if ctx.cs_annotation_lines:
+        try:
+            cur_xlabel = ax.get_xlabel() or ''
+            ax.set_xlabel(cur_xlabel + '\n' + '\n'.join(ctx.cs_annotation_lines))
+        except Exception:
+            pass
+
+    if ctx.style.min_text_size is not None:
+        try:
+            ms = float(ctx.style.min_text_size)
+            for item in ([ax.title, ax.xaxis.label, ax.yaxis.label]
+                         + ax.get_xticklabels() + ax.get_yticklabels()):
+                if item.get_fontsize() < ms:
+                    item.set_fontsize(ms)
+        except Exception:
+            pass
+
+    if ctx.dark_mode:
+        _bg, _fg, _sp = '#2b2b2b', 'white', '#666666'
+        fig.set_facecolor(_bg)
+        ax.set_facecolor(_bg)
+        ax.tick_params(colors=_fg)
+        ax.xaxis.label.set_color(_fg)
+        ax.yaxis.label.set_color(_fg)
+        ax.title.set_color(_fg)
+        for sp in ax.spines.values():
+            sp.set_edgecolor(_sp)
+        for _child_ax in fig.get_axes():
+            leg = _child_ax.get_legend()
+            if leg is not None:
+                leg.get_frame().set_facecolor(_bg)
+                leg.get_frame().set_edgecolor(_sp)
+                for _lt in leg.get_texts():
+                    _lt.set_color(_fg)
+
+    fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
