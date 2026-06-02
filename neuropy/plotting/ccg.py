@@ -66,6 +66,9 @@ def plot_ccg_panel(
     title_show_norm_details=True,
     title_show_session=False,
     title_session_label="",
+    xticks_ms=None,
+    mirror_xticks=True,
+    min_text_size=None,
 ):
     """Single CCG plot into provided axis.
 

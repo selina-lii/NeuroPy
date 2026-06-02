@@ -104,6 +104,16 @@ from neuropy.ui.dialogs import (
     SimulationDialog, SettingsDialog, ExportOptionsDialog,
 )
 
+def _merge_groups_into(target: dict, source: dict) -> None:
+    """Merge source groups into target without overwriting existing sessions."""
+    for g, sd in source.items():
+        if g not in target:
+            target[g] = sd
+        elif isinstance(sd, dict):
+            for sess, pairs in sd.items():
+                target[g].setdefault(sess, set()).update(pairs)
+
+
 # Sentinel value for the virtual "All segments" view
 _ALL_SEGS = "All"
 # Virtual session entry: union of all sessions (lazy-loaded per group tag).
@@ -1353,34 +1363,40 @@ class GroupManager:
 
     def _create_group_dialog(self):
         ui = self._ui
-        name = simpledialog.askstring(
-            "Create group", "Group name:", parent=ui.root)
-        if not name:
-            return
-        name = name.strip()
-        if not name:
-            return
-        if name in ui._sel_data._groups:
-            messagebox.showinfo("Create group", f"Group '{name}' already exists.")
-            return
-        ui._sel_data._groups[name] = {}
-        ui._rebuild_groups_menu()
-        ui.refresh_lists()
+        win = tk.Toplevel(ui.root)
+        win.title("Create group")
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Group name:").grid(row=0, column=0, padx=8, pady=(10, 4), sticky='w')
+        name_var = tk.StringVar()
+        entry = ttk.Entry(win, textvariable=name_var, width=26)
+        entry.grid(row=0, column=1, padx=(0, 8), pady=(10, 4))
+        entry.focus_set()
+        special_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text="Create as special group", variable=special_var).grid(
+            row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky='w')
+        btn_frame = ttk.Frame(win)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(0, 8))
 
-    def _create_special_group_dialog(self):
-        ui = self._ui
-        name = simpledialog.askstring(
-            "Create special group", "Special group name:", parent=ui.root)
-        if not name or not (name := name.strip()):
-            return
-        full_name = _SPECIAL_PREFIX + name
-        if full_name in ui._sel_data._groups:
-            messagebox.showinfo("Create special group",
-                                f"Special group '{name}' already exists.")
-            return
-        ui._sel_data._groups[full_name] = {}
-        ui._rebuild_groups_menu()
-        ui.refresh_lists()
+        def _ok():
+            name = name_var.get().strip()
+            if not name:
+                return
+            full = (_SPECIAL_PREFIX + name) if special_var.get() else name
+            if full in ui._sel_data._groups:
+                kind = "special group" if special_var.get() else "group"
+                messagebox.showinfo("Create group", f"{kind.capitalize()} '{name}' already exists.",
+                                    parent=win)
+                return
+            ui._sel_data._groups[full] = {}
+            ui._rebuild_groups_menu()
+            ui.refresh_lists()
+            win.destroy()
+
+        ttk.Button(btn_frame, text="OK", command=_ok, width=8).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy, width=8).pack(side=tk.LEFT, padx=4)
+        entry.bind('<Return>', lambda e: _ok())
+        win.bind('<Escape>', lambda e: win.destroy())
 
     def _rename_group(self, old_name, new_name, win=None):
         ui = self._ui
@@ -1692,8 +1708,6 @@ class GroupManager:
         menubar.add_cascade(label="Groups", menu=ui._groups_menu)
         ui._groups_menu.add_command(label="Create group…",
                                       command=ui._create_group_dialog)
-        ui._groups_menu.add_command(label="Create special group…",
-                                      command=ui._create_special_group_dialog)
         ui._groups_menu.add_command(label="Manage groups…",
                                       command=ui._manage_groups_dialog)
         ui._groups_menu.add_command(label="Merge groups…",
@@ -1838,7 +1852,7 @@ class SelectionPersistenceManager:
         ui._sel_data.populate(state[0] | state[1] | (state[2] if len(state) > 2 else set()),
                               selected=state[0], deleted=state[2] if len(state) > 2 else set())
         if len(state) > 3:
-            ui._sel_data._groups = state[3]
+            _merge_groups_into(ui._sel_data._groups, state[3])
             ui._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         ui.refresh_lists()
@@ -1859,7 +1873,7 @@ class SelectionPersistenceManager:
         ui._sel_data.populate(state[0] | state[1] | (state[2] if len(state) > 2 else set()),
                               selected=state[0], deleted=state[2] if len(state) > 2 else set())
         if len(state) > 3:
-            ui._sel_data._groups = state[3]
+            _merge_groups_into(ui._sel_data._groups, state[3])
             ui._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         ui.refresh_lists()
@@ -4355,6 +4369,11 @@ class PairAnalysisManager:
         if highres is None:
             highres = ui._highres_mode
         cd = _cd if _cd is not None else ui.ccg_data
+        # Map neuron IDs → array positions (CCG array indexed by position, not ID)
+        nmap = ui._nid_to_pos
+        if nmap:
+            ref = nmap.get(int(ref), int(ref))
+            tgt = nmap.get(int(tgt), int(tgt))
         is_custom = ui._is_custom_segment(segment)
         is_all = (segment == ui.n_segments)
         result = {}
@@ -5194,7 +5213,6 @@ class UISetupManager:
         ui.selected_list     = lp.selected_list
         ui._avail_label_var  = lp._avail_label    # LeftPanel uses _avail_label (no _var suffix)
         ui._sel_label_var    = lp._sel_label
-        ui._clear_spec_btn   = lp._clear_spec_btn
         ui._pair_list_pane   = lp._pair_list_pane
 
         # Sort vars — LeftPanel drops the _var suffix; alias under old names
@@ -6193,6 +6211,8 @@ class CCGReviewUI(GenericUI):
         # Significance display toggles live in BooleanVars (created after Tk root).
         # Use _sig(name) helper to read them.
 
+        self._net_draw_after: int | None = None  # debounce handle for network_panel.draw()
+
         # Double-click debounce
         self._select_after: int = None       # after() id for deferred pair update
 
@@ -6205,6 +6225,17 @@ class CCGReviewUI(GenericUI):
     # ------------------------------------------------------------------
     # Derived state
     # ------------------------------------------------------------------
+
+    @property
+    def _nid_to_pos(self) -> dict:
+        """Map neuron_id → array position index for CCG array lookup."""
+        neurons = getattr(self, 'neurons', None)
+        if neurons is None:
+            return {}
+        try:
+            return {int(nid): i for i, nid in enumerate(neurons.neuron_ids)}
+        except Exception:
+            return {}
 
     @property #TODO is this outdated? moved to ccg manager?
     def _res_key(self):
@@ -6221,30 +6252,29 @@ class CCGReviewUI(GenericUI):
 
     @property
     def all_inds(self):
-        """Significant pairs + manually admitted pairs, as Nx2 numpy array.
+        """All pairs shown in the listbox, as Nx2 numpy array (no self-pairs).
 
-        Autocorrelograms (ref == tgt) are always excluded.
-        Returns an empty (0,2) array when data is not yet loaded.
+        sel_data is the single source of truth — guaranteed same set as the
+        listbox. Falls back to ccg_ptr.inds2 only before first populate().
         """
         if getattr(self, '_session_any_mode', False):
             hl = getattr(self, '_any_pair_handle_list', None) or []
             if not hl:
                 return np.empty((0, 2), dtype=int)
             return np.array([[int(r), int(t)] for _, r, t in hl], dtype=int)
-        if self.ccg_ptr is None:
+        sd = getattr(self, '_sel_data', None)
+        if sd is not None:
+            combined = (sd.unselected_inds | sd.selected_inds
+                        | getattr(sd, 'deleted_inds', set()))
+            if combined:
+                base = sorted(p for p in combined if p[0] != p[1])
+                return np.array(base, dtype=int) if base else np.empty((0, 2), dtype=int)
+        # Fallback: sel_data not yet populated (before _finish_initial_draw)
+        if getattr(self, 'ccg_ptr', None) is None:
             return np.empty((0, 2), dtype=int)
         base = self.ccg_ptr.inds2
-        # Filter out self-pairs (autocorrelograms)
         mask = base[:, 0] != base[:, 1]
-        base = base[mask]
-        admitted = _admitted_pairs(self._sel_data)
-        if not admitted:
-            return base
-        base_set = set(map(tuple, base))
-        extra = sorted(set(tuple(p) for p in admitted if p[0] != p[1]) - base_set)
-        if not extra:
-            return base
-        return np.vstack([base, np.array(extra, dtype=base.dtype)])
+        return base[mask]
 
     def _all_inds_set_for_ptr(self, ptr) -> set:
         """set of (ref, tgt) for a CCGPointer — same rules as all_inds, without self.ccg_ptr."""
@@ -6331,6 +6361,8 @@ class CCGReviewUI(GenericUI):
     def _group_add_pair(self, gname, pair, session=None):
         self._group_mgr._group_add_pair(gname, pair, session)
 
+    def _group_discard_pair(self, gname, pair, session=None):
+        self._group_mgr._group_discard_pair(gname, pair, session)
 
     def _dbg_log(self, hypothesis_id: str, location: str, message: str, data: dict):
         """Debug-mode NDJSON logger (session cde521)."""
@@ -6544,8 +6576,6 @@ class CCGReviewUI(GenericUI):
     def _draw_network(self):
         self.network_panel.draw()
 
-    # ── Time slider panel ──────────────────────────────────────────────
-
     # ── Bottom bar ─────────────────────────────────────────────────────
 
     def _toggle_waveforms_panel(self):
@@ -6723,7 +6753,8 @@ class CCGReviewUI(GenericUI):
         """Invalidate PNG cache and redraw current pair."""
         if clear_extend:
             self._extend_cache.clear()
-        self._refresh()
+        self._clear_all_png_cache()
+        self.update_plot()
 
     def _terminate_pregen_proc(self):
         self._pregen_ctrl._terminate_pregen_proc()

@@ -451,8 +451,7 @@ class NormPanel:
         ]
 
         wrap = WrapFrame(norm_inner)
-        wrap.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        wrap.pack_propagate(False)
+        wrap.pack(fill=tk.X)
 
         for nm, label in options:
             if self._ui.neurons is None and nm in (

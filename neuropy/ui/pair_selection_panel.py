@@ -37,7 +37,6 @@ def _combo_sort_key(combo):
     """Sort key: empty combo (untagged) last, then alphabetical."""
     return (1, []) if not combo else (0, list(combo))
 
-
 class SelectionData:
     """Pair selection and group/tag state."""
 
@@ -1050,13 +1049,16 @@ class LeftPanel:
                     inds_from_map = e[0]
         elif widget is self.selected_list:
             mp = getattr(self, '_sel_list_pairs', None)
-            if mp and idx < len(mp) and mp[idx] is not None:
+            if mp and idx < len(mp):
+                if mp[idx] is None:
+                    return
                 inds_from_map = mp[idx]
 
         if inds_from_map is not None:
             try:
                 self._ui.current_pair_idx = self._ui.get_pair_index(inds_from_map)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
+                print(f"[ops] exception: {e}")
                 return
         else:
             item = widget.get(idx)
@@ -1129,7 +1131,7 @@ class LeftPanel:
         except Exception:
             pass
         try:
-            self._ui._focused_pair = None
+            self._ui.network_panel._focused_pair = None
         except Exception:
             pass
         try:
@@ -1146,8 +1148,12 @@ class LeftPanel:
             ui._exit_spike_attribution_view()
         except Exception:
             pass
-        ui._mark_jitter_viewed()
-        ui._focused_pair = None
+        try:
+            ui._mark_jitter_viewed()
+        except Exception:
+            pass
+        if hasattr(ui, 'network_panel'):
+            ui.network_panel._focused_pair = None
         if hasattr(ui, 'network_panel'):
             try:
                 ui.network_panel._focus_pair_var.set("")
@@ -1155,7 +1161,6 @@ class LeftPanel:
             except Exception:
                 pass
         ui.update_plot()
-        ui.network_panel.draw()
 
     def _on_arrow_key(self, event):
         self.on_pair_select(event)
@@ -2032,19 +2037,6 @@ class LeftPanel:
                 ui._groups_menu.delete(7)
         except tk.TclError:
             pass
-        current_pairs = (set(map(tuple, ui.all_inds))
-                         if len(ui.all_inds) else set())
-        special_groups = [g for g in self.data._groups if is_special_group(g)]
-        if special_groups:
-            ui._groups_menu.add_separator()
-            special_menu = tk.Menu(ui._groups_menu, tearoff=0)
-            for gname in special_groups:
-                display = gname[len(_SPECIAL_PREFIX):]
-                n = len(self._group_pairs(gname) & current_pairs)
-                special_menu.add_command(
-                    label=f"{display} ({n})",
-                    command=lambda g=gname: self._select_group(g))
-            ui._groups_menu.add_cascade(label="Special", menu=special_menu)
         if hasattr(ui, 'network_panel'):
             ui.network_panel.refresh_group_buttons()
         if (hasattr(ui, '_hotkeys_bar')

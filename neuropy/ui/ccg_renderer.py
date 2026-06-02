@@ -226,10 +226,10 @@ class CCGContextBuilder:
             baseline_1d = panel_data.baseline_1d
             cs_val      = panel_data.cs_val
             if not _deconv_active:
-                ui._conn_strength_cache[
+                ui._conn_strength_cache.put(
                     ui._cs_cache_key(ref, tgt, segment, method, highres,
-                                     eff_min_lag, eff_max_lag)
-                ] = (cs_val, baseline_1d)
+                                     eff_min_lag, eff_max_lag),
+                    (cs_val, baseline_1d))
         else:
             ccg_out, show_null = apply_norms_to_ccg(
                 ccg_raw, ccg_null_raw, ref, tgt, segment,

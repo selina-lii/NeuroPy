@@ -364,6 +364,8 @@ def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
 
         _chan_entries: dict = {}
         for (ref, tgt), entry in _arc_entry_for.items():
+            if not entry.get('in_filter', True):
+                continue
             if ref >= n_neurons or tgt >= n_neurons:
                 continue
             try:

@@ -720,7 +720,11 @@ class NetworkPanel:
                         if any_mode else ui._current_session_str())
             group_pairs: set = set()
             for g in active_groups:
-                group_pairs |= ui._group_pairs(g, session=_gp_sess)
+                gp = ui._group_pairs(g, session=_gp_sess)
+                if not gp:
+                    stored_keys = list(ui._sel_data._groups.get(g, {}).keys())[:5]
+                    print(f"[probe_network] group={g!r} _gp_sess={_gp_sess!r} stored_keys={stored_keys} → empty")
+                group_pairs |= gp
             gf_active = True
         else:
             group_pairs = set()

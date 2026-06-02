@@ -208,9 +208,14 @@ class SimulationDialog:
     def _build(self):
         ui = self._ui
         win = self.win
+        # Button row anchored to bottom — pack before PanedWindow so it's always visible
+        sim_res_label_var = tk.StringVar(value="Res: lowres")
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 6))
+
         pw = tk.PanedWindow(win, orient=tk.VERTICAL,
                             sashrelief=tk.RAISED, sashwidth=5, bg='#CCCCCC')
-        pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 0))
         param_frame = ttk.Frame(pw, padding=6)
         pw.add(param_frame, stretch='never')
         top = ttk.Frame(param_frame)
@@ -275,9 +280,6 @@ class SimulationDialog:
         sim_ax = sim_fig.add_subplot(111)
         sim_ax.set_title("(no simulation run yet)", fontsize=10)
         sim_canvas = FigureCanvasTkAgg(sim_fig, master=bottom_frame)
-        sim_res_label_var = tk.StringVar(value="Res: lowres")
-        btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(btn_frame, text="Compute CCG", command=lambda: ui._run_simulation(
             win, sim_name_var, sim_dur_var, sim_dur_unit,
             sim_noise_var, sim_sync_var, sim_delay_var,

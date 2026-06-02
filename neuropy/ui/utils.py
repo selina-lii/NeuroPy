@@ -158,9 +158,13 @@ class GenericUI:
             _style = ttk.Style(self.root)
             _raw_bg = _style.lookup('TFrame', 'background') or self.root.cget('bg')
             _rgb = self.root.winfo_rgb(_raw_bg)
-            self._dark = (0.299 * _rgb[0] + 0.587 * _rgb[1] + 0.114 * _rgb[2]) / 65535 < 0.4
+            lum = (0.299 * _rgb[0] + 0.587 * _rgb[1] + 0.114 * _rgb[2]) / 65535
+            self._dark = lum < 0.4
+            print(f"[UITheme] bg={_raw_bg!r} rgb={_rgb} lum={lum:.3f} → {'dark' if self._dark else 'light'}")
         except Exception:
             self._dark = False
+        if self._dark:
+            print("[UITheme] using dark mode")
         self.theme = UITheme.from_dark(self._dark)
         self._heartbeat_id = None
         self._closing = False
@@ -174,9 +178,21 @@ class GenericUI:
             try:
                 if self.root.winfo_exists():
                     self._heartbeat_id = self.root.after(2000, _beat)
-            except tk.TclError:
+            except Exception:
                 pass
         self._heartbeat_id = self.root.after(2000, _beat)
+        self.root.bind('<Destroy>', self._on_root_destroy, '+')
+
+    def _on_root_destroy(self, event):
+        if getattr(event, 'widget', None) is not self.root:
+            return
+        self._closing = True
+        if self._heartbeat_id is not None:
+            try:
+                self.root.after_cancel(self._heartbeat_id)
+            except Exception:
+                pass
+            self._heartbeat_id = None
 
 
 class BackgroundTaskRunner:

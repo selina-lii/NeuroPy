@@ -198,7 +198,7 @@ class CustomCCGManager:
 
     def _custom_ccg_has_unsaved(self) -> bool:
         """True if any in-memory custom segment has no on-disk .npz (or file missing)."""
-        for lst in self._self._by_session.values():
+        for lst in self._by_session.values():
             for cs in lst:
                 if not isinstance(cs, dict):
                     continue
@@ -305,7 +305,7 @@ class CustomCCGManager:
 
     def _custom_ccg_name_session_coverage(self) -> tuple[dict[str, set[str]], int]:
         """Logical custom CCG name -> sessions that have an npz with that name (full cache scan)."""
-        pattern = os.path.join(self._self.cache_dir, "*.npz")
+        pattern = os.path.join(self.cache_dir, "*.npz")
         by_name: dict[str, set[str]] = {}
         for p in sorted(_glob.glob(pattern)):
             base = os.path.basename(p)
@@ -505,7 +505,7 @@ class CustomCCGManager:
     def _purge_timestamped_custom_ccg_npz(self, session: str, seg_name: str):
         """Remove legacy ``session__name__timestamp.npz`` files for this logical segment name."""
         safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(seg_name).replace(' ', '_'))
-        patt = os.path.join(self._self.cache_dir, f"{session}__{safe}__*.npz")
+        patt = os.path.join(self.cache_dir, f"{session}__{safe}__*.npz")
         for p in _glob.glob(patt):
             try:
                 os.remove(p)
@@ -585,7 +585,7 @@ class CustomCCGManager:
         self._save_custom_ccg_suggestions(specs)
 
     def _load_custom_ccg_suggestions(self) -> list[dict]:
-        path = self._self.suggestions_path
+        path = self.suggestions_path
         if not os.path.isfile(path):
             return []
         try:
@@ -600,7 +600,7 @@ class CustomCCGManager:
 
     def _save_custom_ccg_suggestions(self, specs: list[dict]):
         payload = {'version': 1, 'items': [self._normalize_custom_spec(s) for s in specs]}
-        self._ui._atomic_write_json(self._self.suggestions_path, payload)
+        self._ui._atomic_write_json(self.suggestions_path, payload)
 
     def _record_custom_ccg_suggestion(self, spec: dict):
         norm = self._normalize_custom_spec(spec)
@@ -614,7 +614,7 @@ class CustomCCGManager:
         self._update_json_list(_add_if_new)
 
     def _available_custom_ccg_specs(self) -> dict[tuple, dict]:
-        pattern = os.path.join(self._self.cache_dir, "*.npz")
+        pattern = os.path.join(self.cache_dir, "*.npz")
         by_key: dict[tuple, dict] = {}
         for p in sorted(_glob.glob(pattern)):
             try:
@@ -685,7 +685,7 @@ class CustomCCGManager:
         if not name_set:
             return
         unsaved: list = []
-        for lst in self._self._by_session.values():
+        for lst in self._by_session.values():
             for cs in lst or []:
                 if (isinstance(cs, dict) and cs.get('name') in name_set
                         and not cs.get('src_path')):
@@ -749,8 +749,8 @@ class CustomCCGManager:
     def _archive_stale_custom_ccgs(self):
         """Move saved custom CCG files that pre-date the total_time_hours field to _trash/.
         Returns (n_archived, trash_dir) so the caller can notify the user."""
-        pattern = os.path.join(self._self.cache_dir, f"{self._ui.key.session}__*.npz")
-        trash_dir = os.path.join(self._self.cache_dir, '_trash')
+        pattern = os.path.join(self.cache_dir, f"{self._ui.key.session}__*.npz")
+        trash_dir = os.path.join(self.cache_dir, '_trash')
         os.makedirs(trash_dir, exist_ok=True)
         archived = []
         for p in _glob.glob(pattern):
