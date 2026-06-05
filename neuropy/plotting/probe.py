@@ -638,6 +638,7 @@ def plot_waveform_on_channel(
     discarded_channels=None,
     peak_channel_global=None,
 ):
+    # TODO make dataclass
     # units are um (micron)
     # For Cambridge Neurotech F-8. Specs are from their brochure
     # and adjusted based on plotting effects.

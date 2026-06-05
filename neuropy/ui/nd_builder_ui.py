@@ -370,7 +370,7 @@ class NDBuildUI:
             messagebox.showerror("CCG", f"CCG generation failed:\n{self._build_error}")
             return
         n_pairs = sum(
-            p.n_pairs for p in self.cd.data.values() if p is not None)
+            p.n_pairs for p in self.cd.ptr.values() if p is not None)
         self._status_var.set(f"CCGs ready: {n_pairs} significant pairs found")
         self._review_btn.config(state='normal')
         self.root.bell()
@@ -384,7 +384,7 @@ class NDBuildUI:
             return
         from neuropy.plotting.ccg_ui import CCGReviewUI
         # Open review for the first available key
-        keys = list(self.cd.data.keys())
+        keys = list(self.cd.ptr.keys())
         if not keys:
             messagebox.showinfo("Review", "No data keys available.")
             return

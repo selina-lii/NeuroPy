@@ -199,7 +199,7 @@ class StatsTestPanel:
 
         # Top: text + scrollbar
         text_frame = ttk.Frame(res_pane)
-        _txt_fs = max(9, self.ui._min_font_size())
+        _txt_fs = max(9, self.ui._settings_mgr.min_font_size())
         _txt_bg, _txt_fg = self.ui.theme.bg, self.ui.theme.fg
         self._result_text = tk.Text(
             text_frame, height=10, wrap=tk.WORD,
@@ -269,13 +269,13 @@ class StatsTestPanel:
     # ------------------------------------------------------------------
 
     def _concrete_sessions(self) -> list[str]:
-        """Session strings present in ``cd.data`` (stable order), no synthetic ``All``."""
+        """Session strings present in ``cd.ptr`` (stable order), no synthetic ``All``."""
         seen: list[str] = []
-        for k in getattr(self.ui.cd, 'data', {}).keys():
+        for k in getattr(self.ui.cd, 'ptr', {}).keys():
             s = getattr(k, 'session', None)
             if s is not None and str(s) not in seen:
                 seen.append(str(s))
-        return seen or [str(self.ui._current_session_str())]
+        return seen or [str(self.ui._setup_mgr._current_session_str())]
 
     def _format_list_summary(self, items: list[str], all_fn, noun: str,
                              short_threshold: int) -> str:
@@ -387,11 +387,11 @@ class StatsTestPanel:
                 seen.add(nm)
                 ordered.append(nm)
 
-        for nk in ui._real_nd_keys_ordered():
-            tk = ui._type_key_for_nd(nk)
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
+            tk = ui._sess_mgr._type_key_for_nd(nk)
             if tk is None:
                 continue
-            ptr = ui.cd.data.get(tk)
+            ptr = ui.cd.ptr.get(tk)
             if ptr is None or getattr(ptr, 'edge_times', None) is None:
                 continue
             for nm in list(ptr.edge_times['label'].values):
@@ -419,12 +419,12 @@ class StatsTestPanel:
             ui.n_segments,
             tuple(ui.ccg_ptr.segment_names),
         )
-        nd_key = ui._nd_key_for_session_str(session_str)
-        tk = ui._type_key_for_nd(nd_key) if nd_key is not None else None
+        nd_key = ui._sess_mgr._nd_key_for_session_str(session_str)
+        tk = ui._sess_mgr._type_key_for_nd(nd_key) if nd_key is not None else None
         bound = tk is not None
         if bound:
-            ui._bind_context_to_type_key(tk)
-            ui._bind_custom_segments_to_session(str(session_str))
+            ui._sess_mgr._bind_context_to_type_key(tk)
+            ui._custom_mgr._bind_custom_segments_to_session(str(session_str))
         try:
             yield bound
         finally:
@@ -437,25 +437,25 @@ class StatsTestPanel:
                 ui.n_segments = ns
                 if getattr(ui, '_session_any_mode', False):
                     try:
-                        ui._sync_any_plot_context(int(ui.current_pair_idx))
+                        ui._sess_mgr._sync_any_plot_context(int(ui.current_pair_idx))
                     except Exception:
-                        ui._bind_custom_segments_to_session(str(k.session))
+                        ui._custom_mgr._bind_custom_segments_to_session(str(k.session))
                 else:
-                    ui._bind_custom_segments_to_session(str(k.session))
+                    ui._custom_mgr._bind_custom_segments_to_session(str(k.session))
 
     def _sessions_with_segment(self, seg_name: str) -> list[str]:
         """Sessions that have builtin *seg_name* or a loaded custom CCG with that name."""
         ui = self.ui
-        if seg_name == _ALL_SEGS:
-            return [str(nk.session) for nk in ui._real_nd_keys_ordered()]
+        if seg_name in (_ALL_SEGS, "All"):
+            return [str(nk.session) for nk in ui._sess_mgr._real_nd_keys_ordered()]
         out: list[str] = []
         buckets = getattr(ui, '_custom_segments_by_session', None) or {}
-        for nk in ui._real_nd_keys_ordered():
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
             sess = str(nk.session)
-            tk = ui._type_key_for_nd(nk)
+            tk = ui._sess_mgr._type_key_for_nd(nk)
             if tk is None:
                 continue
-            ptr = ui.cd.data.get(tk)
+            ptr = ui.cd.ptr.get(tk)
             if ptr is not None and getattr(ptr, 'edge_times', None) is not None:
                 snames = [str(x) for x in ptr.edge_times['label'].values]
                 if seg_name in snames:
@@ -486,19 +486,7 @@ class StatsTestPanel:
     # ------------------------------------------------------------------
 
     def _current_seg_name(self) -> str:
-        ui = self.ui
-        seg = ui.current_segment
-        n = ui.n_segments
-        if seg == n:
-            return _ALL_SEGS
-        if seg > n:
-            ci = seg - n - 1
-            cs_list = getattr(ui, '_custom_segments', [])
-            if 0 <= ci < len(cs_list):
-                return cs_list[ci]['name']
-            return _ALL_SEGS
-        names = ui.ccg_ptr.segment_names
-        return names[seg] if seg < len(names) else _ALL_SEGS
+        return self.ui.current_segment  # already a str
 
     def _add_row(self):
         ui = self.ui
@@ -510,7 +498,7 @@ class StatsTestPanel:
         frame = ttk.Frame(self._rows_frame)
         frame.pack(fill=tk.X, pady=1)
 
-        cur_sess = str(ui._current_session_str())
+        cur_sess = str(ui._setup_mgr._current_session_str())
         ct = getattr(ui.key, 'conn_type', None)
         cur_ct_str = f"{ct[0]}-{ct[1]}" if ct else (conn_types[0] if conn_types else '')
         cur_seg = self._current_seg_name()
@@ -647,7 +635,7 @@ class StatsTestPanel:
     def _seg_name_to_idx(self, name: str) -> int | None:
         """Resolve segment index for the **currently bound** UI session."""
         ui = self.ui
-        if name == _ALL_SEGS:
+        if name in (_ALL_SEGS, "All"):
             return ui.n_segments
         if name in ui.ccg_ptr.segment_names:
             return ui.ccg_ptr.segment_names.index(name)
@@ -675,7 +663,7 @@ class StatsTestPanel:
             admitted = _admitted_pairs(ui._sel_data)
             pairs = base_pairs | {p for p in admitted if p[0] != p[1]}
         else:
-            pairs = ui._group_pairs(group_name, session=session_str)
+            pairs = ui._group_mgr._group_pairs(group_name, session=session_str)
 
         if ct_str:
             # Filter by conn type for consistent counts across panels
@@ -710,10 +698,10 @@ class StatsTestPanel:
                 eff_max_lag = getattr(conf, 'max_lag', None) if conf else None
                 for ref, tgt in sorted(self._get_pairs_for_group(group_name, sess, ct_str)):
                     try:
-                        key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                        key = ui._cs_mgr._cs_cache_key(int(ref), int(tgt), seg_idx, method,
                                                highres, eff_min_lag, eff_max_lag)
                         if key not in ui._conn_strength_cache:
-                            ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                            ui._cs_mgr._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
                                                            highres=highres)
                         entry = ui._conn_strength_cache.get(key)
                         if entry is not None and entry[0] is not None:
@@ -744,10 +732,10 @@ class StatsTestPanel:
         valid_pairs: list[tuple] = []
         for ref, tgt in pairs:
             try:
-                key = ui._cs_cache_key(int(ref), int(tgt), seg_idx, method,
+                key = ui._cs_mgr._cs_cache_key(int(ref), int(tgt), seg_idx, method,
                                        highres, eff_min_lag, eff_max_lag)
                 if key not in ui._conn_strength_cache:
-                    ui._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
+                    ui._cs_mgr._compute_pair_conn_strength(int(ref), int(tgt), seg_idx,
                                                    highres=highres)
                 entry = ui._conn_strength_cache.get(key)
                 if entry is not None and entry[0] is not None:
@@ -855,7 +843,7 @@ class StatsTestPanel:
         return valid_pairs, bl_vals
 
     def _get_baseline_values_bound(self, ct_str, seg_name, group_name):
-        from neuropy.analyses.ms_connectivity import apply_norms_to_ccg  # noqa: PLC0415
+        from neuropy.ui.ccg_norms import NormalizeBy, NormBackend  # noqa: PLC0415
         ui = self.ui
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:
@@ -876,22 +864,21 @@ class StatsTestPanel:
         lags_ms  = (np.arange(n_bins) - n_bins // 2) * bin_size * 1000  # in ms
         outside_mask = np.abs(lags_ms) > 5.0
 
-        norms_no_bl = ui.active_norms - {__import__(
-            'neuropy.analyses.ms_connectivity', fromlist=['NormalizeBy']).NormalizeBy.BASELINE}
+        norms_no_bl = ui.active_norms - {NormalizeBy.BASELINE}
 
         bl_vals: list[float] = []
         valid_pairs: list[tuple] = []
         for ref, tgt in pairs:
             try:
                 # Get raw CCG slice
-                is_custom = ui._is_custom_segment(seg_idx)
+                is_custom = ui._custom_mgr._is_custom_segment(seg_idx)
                 is_all    = (seg_idx == ui.n_segments)
                 if is_all:
                     ccg_raw = np.sum(cd.ccg[:, ref, tgt, :], axis=0).astype(float)
                     null_raw = (np.sum(cd.ccg_null[:, ref, tgt, :], axis=0).astype(float)
                                 if cd.ccg_null is not None else None)
                 elif is_custom:
-                    ci = ui._custom_seg_index(seg_idx)
+                    ci = ui._custom_mgr._custom_seg_index(seg_idx)
                     cs = ui._custom_segments[ci]
                     ccg_raw  = cs['ccg'][0, ref, tgt, :].astype(float)
                     null_raw = (cs['ccg_null'][0, ref, tgt, :].astype(float)
@@ -901,7 +888,7 @@ class StatsTestPanel:
                     null_raw = (cd.ccg_null[seg_idx, ref, tgt, :].astype(float)
                                 if cd.ccg_null is not None else None)
 
-                ccg_norm, _ = apply_norms_to_ccg(
+                ccg_norm, _ = NormBackend.apply(
                     ccg_raw, null_raw, ref, tgt, seg_idx,
                     norms_no_bl, ui.neurons, ui.cd.nd, ui.key.nd(),
                     ui.n_segments, is_custom)
@@ -1884,13 +1871,14 @@ class StatsTestPanel:
 
         # Collect custom segment names referenced in rows
         builtin = set()
-        for nk in ui._real_nd_keys_ordered():
-            tk_ = ui._type_key_for_nd(nk)
-            ptr = ui.cd.data.get(tk_) if tk_ is not None else None
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
+            tk_ = ui._sess_mgr._type_key_for_nd(nk)
+            ptr = ui.cd.ptr.get(tk_) if tk_ is not None else None
             if ptr is not None and getattr(ptr, 'edge_times', None) is not None:
                 for nm in ptr.edge_times['label'].values:
                     builtin.add(str(nm))
         builtin.add(_ALL_SEGS)
+        builtin.add("All")  # ccg_ui sentinel value
         custom_segs_used = sorted({
             r['segment'] for r in rows_snap
             if r['segment'] and r['segment'] not in builtin
@@ -2045,8 +2033,6 @@ class StatsTestPanel:
                         ccg_null=npz['ccg_null'],
                         pval=npz['pval'],
                         pval_corrected=npz['pval_corrected'],
-                        compute_sec=(float(npz['compute_sec_'])
-                                     if 'compute_sec_' in npz else float('nan')),
                         active_duration=(float(npz['active_duration_'])
                                          if 'active_duration_' in npz else float('nan')),
                         total_time_hours=(float(npz['total_time_hours_'])
@@ -2062,7 +2048,7 @@ class StatsTestPanel:
                         if k in npz:
                             cs[k] = npz[k]
                     lst = ui._custom_segments_by_session.setdefault(file_sess, [])
-                    ui._upsert_custom_segment_by_name(lst, cs)
+                    ui._custom_mgr.store._upsert_custom_segment_by_name(lst, cs)
                     if lst is ui._custom_segments:
                         try:
                             ui._build_sig_chips()

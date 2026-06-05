@@ -140,7 +140,7 @@ class JitterController:
             hl = getattr(ui, '_any_pair_handle_list', None) or []
             if ui.current_pair_idx < len(hl):
                 nd_key = hl[ui.current_pair_idx][0].nd()
-        lo_ccg = ui.cd._ccg.get(nd_key) if hasattr(ui.cd, '_ccg') else ui.ccg_data
+        lo_ccg = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else ui.ccg_data
         hi_ccg = ui.cd._ccg_highres.get(nd_key) if hasattr(ui.cd, '_ccg_highres') else None
         enqueued_res_keys = []
         for res_key, ccg_data, should_run in [('lo', lo_ccg, run_lo), ('hi', hi_ccg, run_hi)]:
@@ -161,7 +161,7 @@ class JitterController:
             "res_keys": enqueued_res_keys,
             "seg_arg": seg_arg,
             "njitter": int(njitter),
-            "current_segment": int(ui.current_segment),
+            "current_segment": ui.current_segment,
         })
         self.update_btn_text()
         self.start_next()
@@ -176,8 +176,8 @@ class JitterController:
             return
         task = self.jitter_worker._runner._pending[0]
         nd_key = task.nd_key if task.nd_key is not None else ui.key.nd()
-        ccg_data_lo = (ui.cd._ccg.get(nd_key)
-                       if hasattr(ui.cd, '_ccg') else ui.ccg_data)
+        ccg_data_lo = (ui.cd.ccg.get(nd_key)
+                       if hasattr(ui.cd, 'ccg') else ui.ccg_data)
         ccg_data_hi = (ui.cd._ccg_highres.get(nd_key)
                        if hasattr(ui.cd, '_ccg_highres') else None)
         started = self.jitter_worker.start_next(
@@ -241,8 +241,8 @@ class JitterController:
             self.apply_list_colors(pair=completed_pair)
             if self.mark_viewed():
                 ui._update_jitter_sig_buttons()
-                ui.update_plot()
-            ui._update_conn_str_metric_availability()
+                ui._plot_mgr.update_plot()
+            ui._cs_mgr._update_conn_str_metric_availability()
             ui.root.bell()
         elif result is not None and result.get('error'):
             messagebox.showerror("Jitter", f"Jitter failed:\n{result['error']}")
@@ -287,7 +287,12 @@ class JitterController:
         """Return segment key for jitter cache: None for All/custom, int for real segments."""
         if seg is None:
             seg = self._ui.current_segment
-        if seg == self._ui.n_segments or self._ui._is_custom_segment(seg):
+        if isinstance(seg, str):
+            if self._ui._custom_mgr._is_custom_segment(seg):
+                return None
+            idx = self._ui._seg_idx(seg)
+            return None if idx == self._ui.n_segments else idx
+        if seg == self._ui.n_segments or self._ui._custom_mgr._is_custom_segment(seg):
             return None
         return int(seg)
 
@@ -306,10 +311,10 @@ class JitterController:
                 for rk in ('lo', 'hi'):
                     ui.cd._jitter_results[nd_key].pop((ref, tgt, rk, segk), None)
         self.jitter_worker.unviewed.discard((ref, tgt))
-        ui._clear_all_png_cache()
+        ui._png_mgr._clear_all_png_cache()
         ui._update_jitter_sig_buttons()
         self.apply_list_colors()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
 
     # ------------------------------------------------------------------
     # List coloring
@@ -368,9 +373,9 @@ class JitterController:
                 if rt is None:
                     continue
                 if _apply_row(ui.selected_list, idx, *rt) and pair is not None:
-                    ui._reapply_bookmark_list_styles()
+                    ui._sel_mgr._reapply_bookmark_list_styles()
                     return
-            ui._reapply_bookmark_list_styles()
+            ui._sel_mgr._reapply_bookmark_list_styles()
             return
         for listbox, inds_set in [(ui.unselected_list, ui.unselected_inds),
                                   (ui.selected_list, ui.selected_inds)]:
@@ -386,9 +391,9 @@ class JitterController:
                 if rt is None:
                     continue
                 if _apply_row(listbox, idx, *rt) and pair is not None:
-                    ui._reapply_bookmark_list_styles()
+                    ui._sel_mgr._reapply_bookmark_list_styles()
                     return
-        ui._reapply_bookmark_list_styles()
+        ui._sel_mgr._reapply_bookmark_list_styles()
 
     def mark_viewed(self) -> bool:
         """Mark current pair's jitter as viewed; auto-enable overlay if available.
@@ -448,11 +453,11 @@ class JitterQueueDialog:
             lb.delete(0, tk.END)
             for i, task in enumerate(ui._jitter_pending):
                 seg_s = f" seg{task.seg_arg}" if task.seg_arg is not None else ""
-                status = "▶ RUNNING" if i == 0 and ui._is_task_running() else "  queued"
+                status = "▶ RUNNING" if i == 0 and ui.jitter_controller.is_task_running() else "  queued"
                 lb.insert(tk.END, f"{status}  jitter [{task.ref},{task.tgt}] n={task.njitter} {task.res_key}{seg_s}")
             for i, task in enumerate(ui._custom_ccg_pending):
                 name = (task.get('name') if isinstance(task, dict) else task[3])
-                status = "▶ RUNNING" if i == 0 and ui._custom_ccg_is_running() else "  queued"
+                status = "▶ RUNNING" if i == 0 and ui._custom_mgr.worker._runner.is_running() else "  queued"
                 lb.insert(tk.END, f"{status}  custom CCG '{name}'")
             if lb.size() == 0:
                 lb.insert(tk.END, "  (empty)")
@@ -462,8 +467,8 @@ class JitterQueueDialog:
             if not sel:
                 return
             n_jitter = len(ui._jitter_pending)
-            running_jitter = ui._is_task_running()
-            running_ccg = ui._custom_ccg_is_running()
+            running_jitter = ui.jitter_controller.is_task_running()
+            running_ccg = ui._custom_mgr.worker._runner.is_running()
             jitter_to_remove = []
             ccg_to_remove = []
             for s in sel:
@@ -482,7 +487,7 @@ class JitterQueueDialog:
                     pending.pop(idx)
                 ui._jitter_pending.clear()
                 ui._jitter_pending.extend(pending)
-                ui._update_jitter_btn_text()
+                ui.jitter_controller.update_btn_text()
             if ccg_to_remove:
                 pending = list(ui._custom_ccg_pending)
                 for idx in sorted(ccg_to_remove, reverse=True):

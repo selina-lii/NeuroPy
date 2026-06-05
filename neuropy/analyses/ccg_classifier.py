@@ -95,7 +95,7 @@ class CCGClassifier:
 
         # Infer bin params from actual array shape — conf.bin_size / conf.nbins /
         # conf.center_bin are all derived from bin_size and can be mutated by
-        # load_highres().  Derive everything from the array and conf.duration only.
+        # get_highres().  Derive everything from the array and conf.duration only.
         nb = ccg_data.ccg.shape[-1]           # actual number of bins in this CCGData
         bs = (conf.duration / (nb - 1)        # robust bin_size from actual array
               if nb > 1 else conf.bin_size)

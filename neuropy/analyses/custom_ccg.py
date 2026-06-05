@@ -1,406 +1,502 @@
-"""
-Backend helpers for custom CCG computation and persistence.
-
-These are pure-computation / pure-I/O functions with no tkinter dependency.
-The UI layer (ccg_ui.py) wraps them with error dialogs and widget updates.
-"""
+"""Custom CCG computation, segment management, persistence, and UI coordination."""
 from __future__ import annotations
 
-import dataclasses
+import os
 import json
-from dataclasses import dataclass, field
+import threading
+import traceback
+from pathlib import Path as _Path
+from tkinter import messagebox
+from typing import TYPE_CHECKING
+from neuropy.ui.utils import BackgroundTaskRunner
+from neuropy.analyses.ms_connectivity import CCGDataset, CCGSourceConfig
+from neuropy.analyses.utils import Cacheable, split_time_range as _split_time_range
 
-import numpy as np
+_ALL_SEGS = "All"  # must match ccg_ui._ALL_SEGS
 
-from neuropy.analyses.correlations import spike_correlations
-from neuropy.analyses.ms_connectivity import (CCGConfig, CCGData, CustomCCGMeta,
-                                               EranConv, _CCG_RESOLUTION)
+if TYPE_CHECKING:
+    from neuropy.ui.ccg_ui import CCGReviewUI
+
+_MAX_QUEUE = 50
 
 
-def compute_custom_ccg(
-    t0: float,
-    t1: float,
-    name: str,
-    neurons_slice,
-    conf,
-    *,
-    has_highres: bool = False,
-    active_duration: float | None = None,
-    excitability: str = 'E',
-    metadata: dict | None = None,
-    filter_state: dict | None = None,
-) -> tuple[CCGData, CCGData | None]:
-    """Compute the full CCG pipeline for an arbitrary time window.
+class CustomCCGWorker:
+    """Wraps BackgroundTaskRunner + thread result buffer for CCG computation."""
 
-    Runs spike_correlations → EranConv._conv → multiple_correction at low-res
-    (1 ms) and, when *has_highres* is True, also at high-res (0.1 ms) so that
-    the Ctrl+R resolution toggle works on custom segments.
+    def __init__(self, mgr: 'CustomCCGManager'):
+        self._mgr = mgr
+        self._ui = mgr._ui
+        self._runner = BackgroundTaskRunner(max_queue=_MAX_QUEUE, use_result_queue=False)
+        self._thread_result: list = []
 
-    Parameters
-    ----------
-    t0, t1 : float
-        Window boundaries in seconds.
-    name : str
-        Segment label stored in the result.
-    neurons_slice : Neurons
-        Already time-sliced Neurons object (caller does time_slice(t0, t1)).
-    conf : CCGConfig
-        Computation parameters (alpha, conv_window, symmetrize_ccg, …).
-    has_highres : bool
-        Whether to also compute high-res CCG.
-    active_duration : float or None
-        Effective recording duration in seconds; defaults to t1 - t0.
-    excitability : str
-        'E' (use pvals) or 'I' (use qvals) for significance selection.
-    metadata : dict or None
-        Arbitrary metadata stored verbatim on the result.
-    filter_state : dict or None
-        Time-slider filter state at the time the segment was created.
+    def _enqueue_custom_ccg_task(self, *, key, t0, t1, name, intervals,
+                                  active_duration, filter_state, metadata,
+                                  auto_save: bool, load_into_ui: bool,
+                                  batch_id: int | None = None) -> bool:
+        task = {
+            'kind': 'custom_ccg', 'key': key,
+            't0': float(t0), 't1': float(t1), 'name': str(name),
+            'intervals': intervals, 'active_duration': active_duration,
+            'filter_state': filter_state or {}, 'metadata': metadata or {},
+            'auto_save': bool(auto_save), 'load_into_ui': bool(load_into_ui),
+            'batch_id': batch_id,
+        }
+        if not self._runner.enqueue(task):
+            n = len(self._runner._pending)
+            messagebox.showwarning(
+                "Task queue full",
+                f"Custom CCG queue full ({n}/{_MAX_QUEUE}). "
+                "Wait for running tasks to complete.")
+            return False
+        return True
 
-    Returns
-    -------
-    (lo, hi)
-        ``lo`` is always a ``CCGData`` with ``custom_meta`` populated.
-        ``hi`` is a ``CCGData`` (arrays only, no custom_meta) when
-        *has_highres* is True, else ``None``.
+    def _custom_ccg_start_next(self):
+        """Start the next queued custom CCG task if none is running."""
+        ui = self._ui
 
-    Raises
-    ------
-    Exception
-        Any computation error propagates to the caller (no messagebox here).
-    """
-    if active_duration is None:
-        active_duration = t1 - t0
+        def _launch(task, _q):
+            t0 = float(task.get('t0', 0.0))
+            t1 = float(task.get('t1', 0.0))
+            name = str(task.get('name', 'custom'))
+            intervals = task.get('intervals')
+            active_duration = task.get('active_duration')
+            filter_state = task.get('filter_state', {})
+            key_for_task = task.get('key', ui.key)
+            nd_key = key_for_task.nd()
+            ccg_data_obj = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else ui.ccg_data
+            neurons_obj = (ui.cd.nd.data[nd_key]
+                           if getattr(ui.cd, 'nd', None) is not None else None)
+            if ccg_data_obj is None or neurons_obj is None:
+                try:
+                    ui.cd.get_ccg()
+                except Exception as ex:
+                    messagebox.showerror("Custom CCG", f"Session load failed for {key_for_task.session}:\n{ex}")
+                    self._on_chunk_done(task)
+                    return None
+                ccg_data_obj = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else ui.ccg_data
+                neurons_obj = (ui.cd.nd.data[nd_key]
+                               if getattr(ui.cd, 'nd', None) is not None else None)
+                if ccg_data_obj is None or neurons_obj is None:
+                    print(f"[CustomCCG] missing session data after load: {key_for_task.session}")
+                    self._on_chunk_done(task)
+                    return None
+            self._thread_result.clear()
 
-    n_neurons = neurons_slice.n_neurons
-    neuron_inds = np.arange(n_neurons)
-    method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
+            def _ccg_worker():
+                try:
+                    neurons_override = (
+                        ui.time_slider._apply_brain_state_intervals(intervals, t0, t1, neurons_obj=neurons_obj)
+                        if intervals is not None else None)
+                    result = self._compute_custom_segment(
+                        t0, t1, name,
+                        neurons_override=neurons_override, active_duration=active_duration,
+                        key_override=key_for_task, neurons_obj=neurons_obj, ccg_data_obj=ccg_data_obj)
+                    if result is not None:
+                        result.source.filter_state = filter_state
+                        result._task_session = str(key_for_task.session)
+                    self._thread_result.append(
+                        result if result is not None else {'error': 'compute returned None'})
+                except Exception as ex:
+                    self._thread_result.append({'error': str(ex)})
 
-    def _run_pipeline(bin_size: float, label: str) -> CCGData:
-        print(f"[CustomSegment] computing {label} CCG for {name} "
-              f"({t1-t0:.1f}s, {n_neurons} neurons, "
-              f"bin={bin_size*1e3:.2f}ms) ...")
-        ccg = spike_correlations(
-            neurons=neurons_slice,
-            neuron_inds=neuron_inds,
-            bin_size=bin_size,
-            window_size=conf.duration,
-            symmetrize=conf.symmetrize_ccg,
-            use_acceleration=conf.use_acceleration,
+            t = threading.Thread(target=_ccg_worker, daemon=True)
+            t.start()
+            return t
+
+        started = self._runner.start_next(_launch)
+        if started and self._runner._poll_id is None:
+            self._runner.start_polling(
+                ui.root, interval_ms=300,
+                on_done=self._on_custom_ccg_done)
+
+    def _on_custom_ccg_done(self, completed_task, _result):
+        """Called by BackgroundTaskRunner when the custom CCG thread exits."""
+        ui = self._ui
+        mgr = self._mgr
+        result = self._thread_result[0] if self._thread_result else None
+        self._thread_result.clear()
+
+        is_error = isinstance(result, dict) and result.get('error')
+        if result is not None and not is_error:
+            if isinstance(completed_task, dict) and completed_task.get('auto_save'):
+                result.save('lowres')
+                if any(getattr(k, 'resolution', None) == 'highres' for k in result.ccg):
+                    result.save('highres')
+                mgr.state._emit_inventory_event()
+            should_load = (not isinstance(completed_task, dict)
+                            or bool(completed_task.get('load_into_ui', True)))
+            _tk_done = (completed_task.get('key', ui.key)
+                        if isinstance(completed_task, dict) else ui.key)
+            _lsess = str(getattr(result, '_task_session', getattr(_tk_done, 'session', '')))
+            _lst = mgr._by_session.setdefault(_lsess, [])
+            nm = result.source.name
+            idx = next((i for i, cd in enumerate(_lst) if cd.source.name == nm), -1)
+            if idx >= 0:
+                _lst[idx] = result
+            else:
+                _lst.append(result)
+                idx = len(_lst) - 1
+            if should_load and mgr._active_list is _lst:
+                ui._build_sig_chips()
+                ui.current_segment = ui._seg_name(ui.n_segments + 1 + idx)
+                ui._clamp_current_segment_for_session()
+                ui._update_segment_label()
+                ui._plot_mgr.update_plot()
+            if hasattr(ui, '_ts_status_var'):
+                ui.time_slider._status_var.set(f"Done: {result.source.name}")
+            ui.root.bell()
+        elif is_error:
+            messagebox.showerror("Custom CCG", f"Computation failed:\n{result['error']}")
+
+        if completed_task is not None:
+            self._on_chunk_done(completed_task)
+
+        self._custom_ccg_start_next()
+
+    def _compute_custom_segment(self, t0: float, t1: float, name: str,
+                                 neurons_override=None, active_duration=None,
+                                 key_override=None, neurons_obj=None,
+                                 ccg_data_obj=None):
+        ui = self._ui
+        key_eff = key_override or ui.key
+        neurons_eff = neurons_obj if neurons_obj is not None else ui.neurons
+        cd_eff = ccg_data_obj if ccg_data_obj is not None else ui.ccg_data
+        if neurons_eff is None:
+            messagebox.showerror("Custom CCG", "No neuron data available.")
+            return None
+        try:
+            neurons_slice = (neurons_override if neurons_override is not None
+                             else neurons_eff.time_slice(t0, t1))
+            has_highres = bool(getattr(ui.cd, '_ccg_highres', None))
+            cd = CCGDataset(conf=cd_eff.conf, source=CCGSourceConfig(
+                name=name, t0=t0, t1=t1, active_duration=active_duration,
+            ))
+            cd.compute_custom(neurons_slice, has_highres=has_highres,
+                              excitability=getattr(key_eff, 'excitability', 'E'))
+            return cd
+        except Exception as ex:
+            print(f"[CustomCCG] ERROR: {ex}")
+            traceback.print_exc()
+            messagebox.showerror("Custom CCG", f"Error computing CCG:\n{ex}")
+            return None
+
+    def _on_chunk_done(self, task):
+        """Decrement split-batch counter; prompt to save when batch completes."""
+        if not isinstance(task, dict):
+            return
+        bid = task.get('batch_id')
+        if bid is None:
+            return
+        ts = self._ui.time_slider
+        if bid not in ts._batch_counts:
+            return
+        ts._batch_counts[bid] -= 1
+        if ts._batch_counts[bid] > 0:
+            return
+        del ts._batch_counts[bid]
+        names = list(ts._batch_names.pop(bid, []))
+        self._ui.root.after(100, lambda n=names: self._prompt_save_chunks(n))
+
+    def _prompt_save_chunks(self, names: list[str]):
+        """After all tasks in a split batch finish, offer to save unsaved chunks."""
+        name_set = set(names)
+        if not name_set:
+            return
+        unsaved: list = []
+        for lst in self._mgr._by_session.values():
+            for cd in lst or []:
+                lo_key = next((k for k in cd.ccg if getattr(k, 'resolution', None) == 'lowres'), None)
+                if cd.source.name in name_set and (lo_key is None or not cd.ccg[lo_key].is_saved):
+                    unsaved.append(cd)
+        if not unsaved:
+            return
+        n = len(unsaved)
+        if messagebox.askyesno(
+                "Save split windows",
+                f"{n} split window(s) finished computing but are not saved to disk yet.\n\n"
+                "Save them as .npz files now? (You can reload them later from the cache.)"):
+            saved = []
+            for cd in unsaved:
+                try:
+                    cd.save('lowres')
+                    if any(getattr(k, 'resolution', None) == 'highres' for k in cd.ccg):
+                        cd.save('highres')
+                    saved.append(cd.source.name)
+                except Exception as exc:
+                    print(f"[CustomCCG] save failed '{cd.source.name}': {exc}")
+            if saved:
+                messagebox.showinfo("Saved", "Saved:\n" + "\n".join(saved))
+
+
+class CustomCCGState:
+    """UI state: active session, stacked segments, inventory change-detection."""
+
+    def __init__(self, mgr: 'CustomCCGManager'):
+        self._mgr = mgr
+        self._ui = mgr._ui
+        self.active_sess: str = ''
+        self.inventory_sig: tuple = ()
+        self._stacked_segments: set = set()
+
+    def _emit_inventory_event(self):
+        """Refresh suggestion list if available specs changed since last call."""
+        avail = CCGDataset.available_specs(self._mgr.cache_dir)
+        sig = tuple(sorted(
+            (k, tuple(s.get('sessions', [])), str(s.get('scope', '')))
+            for k, s in avail.items()
+        ))
+        if sig != self.inventory_sig:
+            self.inventory_sig = sig
+            self._refresh_custom_ccg_suggestions(silent=True)
+
+    def _refresh_custom_ccg_suggestions(self, silent: bool = False):
+        """Rebuild suggestion list from saved custom CCG npz metadata."""
+        mgr = self._mgr
+        specs = sorted(
+            CCGDataset.available_specs(mgr.cache_dir).values(),
+            key=lambda x: (x['name'], x['t0'], x['scope'])
         )
-        ccg = ccg[np.newaxis, ...]
-        W = conf.conv_window / bin_size
-        pvals, pred, qvals = EranConv._conv(ccg, W=W, wintype="gauss", hollow_frac=None)
-        p_raw = pvals if excitability == 'E' else qvals
-        _, pval_corrected = EranConv.multiple_correction(p_raw, conf.alpha, method=method)
-        print(f"[CustomSegment] {label} done. shape={ccg.shape}")
-        conf_res = CCGConfig(
+        specs = [s for s in specs
+                 if not self._ui._is_legacy_name(s.get('name', ''))]
+        mgr._save_suggestions(specs)
+        if not silent:
+            messagebox.showinfo("Custom CCG suggestions",
+                                f"Updated suggestion list with {len(specs)} item(s).")
+
+    def _record_custom_ccg_suggestion(self, spec: dict):
+        norm = self._mgr._normalize_custom_spec(spec)
+        if self._ui._is_legacy_name(norm.get('name', '')):
+            return
+        key = (CCGSourceConfig.spec_key(norm), norm.get('scope', ''))
+        def _add_if_new(specs):
+            existing = {(CCGSourceConfig.spec_key(s), s.get('scope', '')) for s in specs}
+            if key not in existing:
+                specs.append(norm)
+        self._mgr._update_json_list(_add_if_new)
+
+
+class CustomCCGManager(Cacheable):
+    """Coordinator: owns worker/state and _by_session; houses cross-cutting UI methods."""
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        self.cache_dir = str(_Path(__file__).resolve().parents[2] / "data" / "custom_ccg")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.suggestions_path = os.path.join(self.cache_dir, "suggested_custom_ccgs.json")
+        self._by_session: dict = {}
+        self.worker = CustomCCGWorker(self)
+        self.state = CustomCCGState(self)
+        ui._custom_ccg_pending = self.worker._runner._pending
+        self.state.active_sess = str(ui.key.session)
+        self._by_session.setdefault(self.state.active_sess, [])
+
+    @property
+    def _active_list(self) -> list:
+        return self._by_session.setdefault(self.state.active_sess, [])
+
+    def _is_custom_segment(self, seg=None):
+        if seg is None:
+            seg = self._ui.current_segment
+        if isinstance(seg, str):
+            if seg == _ALL_SEGS:
+                return False
+            names = self._ui.ccg_ptr.segment_names if self._ui.ccg_ptr is not None else []
+            if seg in names:
+                return False
+            cs_list = getattr(self._ui, '_custom_segments', []) or []
+            return any(cs.source.name == seg for cs in cs_list)
+        return seg > self._ui.n_segments
+
+    def _custom_seg_index(self, seg=None):
+        if seg is None:
+            seg = self._ui.current_segment
+        if isinstance(seg, str):
+            cs_list = getattr(self._ui, '_custom_segments', []) or []
+            for ci, cs in enumerate(cs_list):
+                if cs.source.name == seg:
+                    return ci
+            return -1
+        return seg - self._ui.n_segments - 1
+
+    def _remove_custom_segment(self, ci):
+        ui = self._ui
+        if 0 <= ci < len(self._active_list):
+            self._active_list.pop(ci)
+            if ui._custom_mgr._is_custom_segment():
+                new_ci = ui._custom_mgr._custom_seg_index()
+                if new_ci < 0 or new_ci >= len(self._active_list):
+                    ui.current_segment = _ALL_SEGS
+            ui._build_sig_chips()
+            ui._update_segment_label()
+            ui._plot_mgr.update_plot()
+
+    def _build_custom_spec(self, *, for_all: bool, for_session: str | None = None):
+        ui = self._ui
+
+        def _parse_time(raw: str, sentinel: str):
+            raw = raw.strip().lower()
+            if raw == sentinel:
+                return sentinel
+            try:
+                return ui.time_slider._hms_to_sec(raw)
+            except (ValueError, IndexError):
+                messagebox.showerror("Time window",
+                                     f"Invalid {sentinel} time. Use HH:MM:SS or '{sentinel}'.")
+                return None
+
+        t0 = _parse_time(ui.time_slider._start_var.get(), 'start')
+        if t0 is None:
+            return None
+        t1 = _parse_time(ui.time_slider._end_var.get(), 'end')
+        if t1 is None:
+            return None
+        if not isinstance(t0, str) and not isinstance(t1, str) and float(t1) <= float(t0):
+            messagebox.showerror("Time window", "End time must be after start time.")
+            return None
+        try:
+            n_splits = max(1, int(ui.time_slider._splits_var.get()))
+        except (ValueError, TypeError):
+            n_splits = 1
+        try:
+            overlap_sec = max(0.0, float(ui.time_slider._overlap_sec_var.get()))
+        except (ValueError, TypeError):
+            overlap_sec = 0.0
+        name = ui.time_slider._name_var.get().strip()
+        if not name:
+            t0_str = t0 if isinstance(t0, str) else ui.time_slider._sec_to_hms(t0)
+            t1_str = t1 if isinstance(t1, str) else ui.time_slider._sec_to_hms(t1)
+            name = f"{t0_str}–{t1_str}"
+        sess = str(for_session or ui._setup_mgr._current_session_str())
+        return CCGSourceConfig(
             name=name,
-            bin_size=bin_size,
-            duration=conf.duration,
-            conv_window=conf.conv_window,
-            alpha=conf.alpha,
-            multiple_correction=method,
-        )
-        return CCGData(
-            key=None, _conf=conf_res,
-            ccg=ccg, ccg_null=pred,
-            pval=p_raw, qval=None,
-            pval_corrected=pval_corrected, qval_corrected=None,
-            significant=None, norm_factors=None, conn_strength=None,
+            t0=t0,
+            t1=t1,
+            filter_state=ui._current_filter_state(),
+            scope='All' if for_all else sess,
+            created_from_session=str(ui._setup_mgr._current_session_str()),
+            sessions=['All'] if for_all else [sess],
+            n_splits=n_splits,
+            overlap_sec=overlap_sec,
         )
 
-    lo = _run_pipeline(_CCG_RESOLUTION['lowres'], 'lowres')
-
-    firing_rates = np.array(
-        [len(st) for st in neurons_slice.spiketrains],
-        dtype=float) / max(active_duration, 1e-9)
-
-    lo.custom_meta = CustomCCGMeta(
-        name=name,
-        t0=t0,
-        t1=t1,
-        active_duration=active_duration,
-        total_time_hours=active_duration / 3600.0,
-        firing_rates=firing_rates,
-        filter_state=filter_state or {},
-        metadata=metadata or {},
-    )
-
-    hi = _run_pipeline(_CCG_RESOLUTION['highres'], 'highres') if has_highres else None
-
-    return lo, hi
-
-
-# ---------------------------------------------------------------------------
-# CustomSegmentNpz — schema-driven NPZ serialisation
-# ---------------------------------------------------------------------------
-
-class CustomSegmentNpz:
-    """Schema-driven NPZ serialiser for ``CCGData`` custom segments.
-
-    Field schema is defined once; ``dump`` and ``load`` both derive from it so
-    the two cannot drift.  All metadata lives on ``lo.custom_meta``
-    (a ``CustomCCGMeta``); ``hi`` carries only the CCG arrays.
-    """
-
-    # (CustomCCGMeta attribute, python type, default when absent in npz)
-    _SCALAR = [
-        ('name',             str,   ''),
-        ('t0',               float, 0.0),
-        ('t1',               float, 0.0),
-        ('compute_sec',      float, float('nan')),
-        ('active_duration',  float, float('nan')),
-        ('total_time_hours', float, float('nan')),
-    ]
-    # JSON-encoded scalar fields
-    _JSON = [('filter_state', {}), ('metadata', {})]
-    # lo / hi array field names
-    _LO  = ('ccg', 'ccg_null', 'pval', 'pval_corrected')
-    _HI  = ('ccg_hi', 'ccg_null_hi', 'pval_hi', 'pval_corrected_hi')
-
-    @classmethod
-    def dump(cls, lo: CCGData, path: str, hi: CCGData | None = None) -> None:
-        """Write *lo* (and optionally *hi*) to a compressed NumPy archive."""
-        m = lo.custom_meta or CustomCCGMeta(
-            name='', t0=0.0, t1=0.0, active_duration=0.0, total_time_hours=0.0)
-        arrays = {}
-        for attr, typ, _ in cls._SCALAR:
-            arrays[attr + '_'] = np.array(typ(getattr(m, attr)))
-        for attr, default in cls._JSON:
-            arrays[attr + '_'] = np.array(json.dumps(getattr(m, attr) or default))
-        for attr in cls._LO:
-            arrays[attr] = getattr(lo, attr)
-        if hi is not None:
-            for lo_k, hi_k in zip(cls._LO, cls._HI):
-                val = getattr(hi, lo_k, None)
-                if val is not None:
-                    arrays[hi_k] = val
-        if m.firing_rates is not None:
-            arrays['firing_rates'] = m.firing_rates
-        np.savez_compressed(path, **arrays)
-
-    @classmethod
-    def load(cls, path: str) -> tuple[CCGData, CCGData | None]:
-        """Load from a compressed NumPy archive.
-
-        Returns ``(lo, hi)`` where ``lo.custom_meta`` is populated and
-        ``hi`` is ``None`` if no high-res data was stored.
-
-        Raises on failure — caller should catch and skip the file.
-        """
-        npz = np.load(path, allow_pickle=False)
-        meta_kw: dict = {}
-        for attr, typ, default in cls._SCALAR:
-            k = attr + '_'
-            meta_kw[attr] = typ(npz[k]) if k in npz else default
-        for attr, default in cls._JSON:
-            k = attr + '_'
-            meta_kw[attr] = json.loads(str(npz[k])) if k in npz else default
-        meta_kw['firing_rates'] = npz['firing_rates'] if 'firing_rates' in npz else None
-        meta_kw['src_path'] = path
-        meta = CustomCCGMeta(**meta_kw)
-        lo = CCGData(
-            key=None, _conf=None,
-            ccg=npz['ccg'], ccg_null=npz['ccg_null'],
-            pval=npz['pval'], qval=None,
-            pval_corrected=npz['pval_corrected'], qval_corrected=None,
-            significant=None, norm_factors=None, conn_strength=None,
-            custom_meta=meta,
-        )
-        hi = None
-        if 'ccg_hi' in npz:
-            hi = CCGData(
-                key=None, _conf=None,
-                ccg=npz['ccg_hi'],
-                ccg_null=npz.get('ccg_null_hi'),
-                pval=npz.get('pval_hi'), qval=None,
-                pval_corrected=npz.get('pval_corrected_hi'), qval_corrected=None,
-                significant=None, norm_factors=None, conn_strength=None,
-            )
-        return lo, hi
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible module-level aliases (dict ↔ CCGData conversion)
-#
-# Callers that still use the old dict format (ccg_ui.py, time_slider.py,
-# custom_ccg_manager.py) continue to work unchanged.  New code should use
-# ``CustomSegmentNpz.dump / .load`` directly with ``CCGData`` objects.
-# ---------------------------------------------------------------------------
-
-def _dict_to_lo_hi(segment: dict) -> tuple[CCGData, 'CCGData | None']:
-    """Build (lo, hi) CCGData pair from the legacy segment dict format."""
-    meta = CustomCCGMeta(
-        name=str(segment.get('name', '')),
-        t0=float(segment.get('t0', 0.0)),
-        t1=float(segment.get('t1', 0.0)),
-        active_duration=float(segment.get('active_duration', float('nan'))),
-        total_time_hours=float(segment.get('total_time_hours', float('nan'))),
-        firing_rates=segment.get('firing_rates'),
-        filter_state=segment.get('filter_state') or {},
-        metadata=segment.get('metadata') or {},
-        compute_sec=float(segment.get('compute_sec', float('nan'))),
-        src_path=segment.get('src_path'),
-    )
-    lo = CCGData(
-        key=None, _conf=None,
-        ccg=segment['ccg'], ccg_null=segment['ccg_null'],
-        pval=segment['pval'], qval=None,
-        pval_corrected=segment['pval_corrected'], qval_corrected=None,
-        significant=None, norm_factors=None, conn_strength=None,
-        custom_meta=meta,
-    )
-    hi = None
-    if 'ccg_hi' in segment:
-        hi = CCGData(
-            key=None, _conf=None,
-            ccg=segment['ccg_hi'],
-            ccg_null=segment.get('ccg_null_hi'),
-            pval=segment.get('pval_hi'), qval=None,
-            pval_corrected=segment.get('pval_corrected_hi'), qval_corrected=None,
-            significant=None, norm_factors=None, conn_strength=None,
-        )
-    return lo, hi
-
-
-def _lo_hi_to_dict(lo: CCGData, hi: 'CCGData | None') -> dict:
-    """Convert (lo, hi) CCGData pair back to the legacy segment dict format."""
-    m = lo.custom_meta or CustomCCGMeta(
-        name='', t0=0.0, t1=0.0, active_duration=0.0, total_time_hours=0.0)
-    result = {
-        'name':             m.name,
-        't0':               m.t0,
-        't1':               m.t1,
-        'ccg':              lo.ccg,
-        'ccg_null':         lo.ccg_null,
-        'pval':             lo.pval,
-        'pval_corrected':   lo.pval_corrected,
-        'firing_rates':     m.firing_rates,
-        'active_duration':  m.active_duration,
-        'total_time_hours': m.total_time_hours,
-        'filter_state':     m.filter_state,
-        'metadata':         m.metadata,
-        'compute_sec':      m.compute_sec,
-        'src_path':         m.src_path,
-    }
-    if hi is not None:
-        result['ccg_hi']             = hi.ccg
-        result['ccg_null_hi']        = hi.ccg_null
-        result['pval_hi']            = hi.pval
-        result['pval_corrected_hi']  = hi.pval_corrected
-    return result
-
-
-def save_custom_segment_to_npz(segment: dict, path: str) -> None:
-    """Save a legacy segment dict to a compressed NumPy archive."""
-    lo, hi = _dict_to_lo_hi(segment)
-    CustomSegmentNpz.dump(lo, path, hi)
-
-
-def load_custom_segment_from_npz(path: str) -> dict:
-    """Load a compressed NumPy archive and return the legacy segment dict."""
-    lo, hi = CustomSegmentNpz.load(path)
-    return _lo_hi_to_dict(lo, hi)
-
-
-# ---------------------------------------------------------------------------
-# RawCCGSpec — typed spec container
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RawCCGSpec:
-    """Typed container for a custom CCG spec. t0/t1 may be float or 'start'/'end' sentinel."""
-    name:                str
-    t0:                  float | str
-    t1:                  float | str
-    scope:               str         = ''
-    created_from_session: str        = ''
-    sessions:            list = field(default_factory=list)
-    n_splits:            int         = 1
-    overlap_sec:         float       = 0.0
-    filter_state:        dict        = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, d: dict, *, default_session: str = '') -> 'RawCCGSpec':
-        """Build from a raw spec dict, normalising values via normalize_custom_spec."""
-        nd = normalize_custom_spec(d, default_session=default_session)
-        return cls(
-            name=nd['name'], t0=nd['t0'], t1=nd['t1'],
-            scope=nd['scope'], created_from_session=nd['created_from_session'],
-            sessions=nd['sessions'], n_splits=nd['n_splits'],
-            overlap_sec=nd['overlap_sec'], filter_state=nd.get('filter_state', {}),
+    def _normalize_custom_spec(self, spec: dict) -> dict:
+        return CCGSourceConfig.normalize(
+            spec, default_session=self._ui._setup_mgr._current_session_str()
         )
 
-    @classmethod
-    def from_npz(cls, npz, session: str) -> 'RawCCGSpec':
-        """Build from a loaded NPZ archive (standard CCG npz field names)."""
-        fs = json.loads(str(npz['filter_state_'])) if 'filter_state_' in npz else {}
-        return cls(
-            name=str(npz['name_']),
-            t0=float(npz['t0_']),
-            t1=float(npz['t1_']),
-            scope=session,
-            created_from_session=session,
-            sessions=[session],
-            filter_state=fs,
-        )
+    def _load_suggestions(self) -> list:
+        if not os.path.isfile(self.suggestions_path):
+            return []
+        try:
+            with open(self.suggestions_path, encoding='utf-8') as f:
+                raw = json.load(f)
+            out = [self._normalize_custom_spec(x)
+                   for x in (raw.get('items', []) or []) if isinstance(x, dict)]
+            return [x for x in out if not self._ui._is_legacy_name(x.get('name', ''))]
+        except Exception as ex:
+            print(f"[CustomCCG] suggestion list load failed: {ex}")
+            return []
 
-    @staticmethod
-    def infer_scope(sessions: list[str], all_sessions: list[str]) -> str:
-        """Return 'All', a single session string, or 'By session' based on coverage."""
-        if all_sessions and sorted(sessions) == sorted(all_sessions):
-            return 'All'
-        if len(sessions) == 1:
-            return sessions[0]
-        return 'By session'
+    def _save_suggestions(self, specs: list) -> None:
+        payload = {'version': 1, 'items': [self._normalize_custom_spec(s) for s in specs]}
+        self._ui._atomic_write_json(self.suggestions_path, payload)
 
-    def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+    def _update_json_list(self, fn):
+        """Load suggestion list, call fn(list) to mutate it, then save."""
+        specs = self._load_suggestions()
+        fn(specs)
+        self._save_suggestions(specs)
 
+    def _generate_suggested_custom_ccgs(self):
+        from neuropy.ui.dialogs import SuggestedCCGDialog
+        ui = self._ui
+        specs = self._load_suggestions()
 
-# ---------------------------------------------------------------------------
-# Spec helpers (unchanged)
-# ---------------------------------------------------------------------------
+        def _on_run(selected_specs):
+            queued = sum(
+                self._queue_custom_ccg_for_spec(
+                    s, for_all=(str(s.get('scope', '')).lower() == 'all'),
+                    auto_save=True)
+                for s in selected_specs)
+            if queued:
+                ui.time_slider._status_var.set(f"Queued {queued} suggested custom CCG task(s)")
+                self.worker._custom_ccg_start_next()
+            else:
+                ui.time_slider._status_var.set("All suggested custom CCGs already exist")
 
-def custom_spec_key(spec: dict) -> tuple:
-    """Return a hashable key that uniquely identifies a custom CCG spec."""
-    fs = spec.get('filter_state', {}) or {}
-    labels = fs.get('labels', {}) or {}
-    t0_raw = spec.get('t0', 0.0)
-    t1_raw = spec.get('t1', 0.0)
-    t0_key = str(t0_raw) if isinstance(t0_raw, str) else float(t0_raw)
-    t1_key = str(t1_raw) if isinstance(t1_raw, str) else float(t1_raw)
-    return (
-        str(spec.get('name', '')),
-        t0_key,
-        t1_key,
-        str(fs.get('theme', 'segments')),
-        tuple(sorted((str(k), bool(v)) for k, v in labels.items())),
-    )
+        SuggestedCCGDialog.show(ui, specs, _on_run)
 
+    def _queue_custom_ccg_for_spec(self, spec: dict, *, for_all: bool, auto_save: bool,
+                                    target_sessions: list | None = None) -> int:
+        ui = self._ui
+        queued = 0
+        if for_all and target_sessions is None:
+            targets = ui._sess_mgr._iter_type_keys_for_all_sessions()
+        else:
+            sess_set = ({str(s) for s in target_sessions}
+                        if target_sessions is not None
+                        else {str(s) for s in (spec.get('sessions') or []) if s != 'All'})
+            targets = ([tk_ for nk in ui._sess_mgr._real_nd_keys_ordered()
+                        if str(nk.session) in sess_set
+                        for tk_ in (ui._sess_mgr._type_key_for_nd(nk),) if tk_ is not None]
+                       if sess_set else [ui.key])
+        n_splits = max(1, int(spec.get('n_splits') or 1))
+        overlap_sec = max(0.0, float(spec.get('overlap_sec') or 0.0))
+        _any = getattr(ui, '_session_any_mode', False)
+        for tk_ in targets:
+            t_sess_start, t_sess_end = ui._sess_mgr._session_wall_clock_extent_for_key(tk_)
+            t0_r = ui._resolve_ts_time(spec.get('t0', 0.0), t_sess_start, t_sess_end)
+            t1_r = ui._resolve_ts_time(spec.get('t1', t_sess_end), t_sess_start, t_sess_end)
+            lone = ui._single_exclusive_segment_filter_label(spec.get('filter_state', {}))
+            if lone is not None:
+                span = ui._union_span_for_segment_label(tk_, lone)
+                if span is not None:
+                    t0_r, t1_r = span[0], span[1]
+                    t0_r = ui._resolve_ts_time(t0_r, t_sess_start, t_sess_end)
+                    t1_r = ui._resolve_ts_time(t1_r, t_sess_start, t_sess_end)
+            chunks = _split_time_range(
+                t0_r, t1_r, n_splits, overlap_sec, str(spec['name']))
+            split_bid = None
+            if len(chunks) > 1 and (_any or str(tk_.session) == str(ui.key.session)):
+                split_bid = ui.time_slider._batch_next_id
+                ui.time_slider._batch_next_id += 1
+            split_names: list[str] = []
+            for chunk_t0, chunk_t1, chunk_name in chunks:
+                lo = min(t_sess_start, t_sess_end)
+                hi = max(t_sess_start, t_sess_end)
+                cs = min(max(float(chunk_t0), lo), hi)
+                ce = min(max(float(chunk_t1), lo), hi)
+                if ce <= cs:
+                    continue
+                chunk_t0, chunk_t1 = cs, ce
+                chunk_spec = dict(spec, name=chunk_name, t0=chunk_t0, t1=chunk_t1)
+                iv = ui._intervals_for_spec_on_key(chunk_spec, tk_)
+                if iv is None or iv is False:
+                    continue
+                intervals, active_duration = iv
+                if (isinstance(intervals, list) and len(intervals) == 0
+                        and (active_duration is None or float(active_duration) <= 0.0)):
+                    print(f"[CustomCCG] skip chunk (no overlap with filter): "
+                          f"{chunk_name} session={tk_.session}")
+                    continue
+                ok = self.worker._enqueue_custom_ccg_task(
+                    key=tk_,
+                    t0=chunk_t0,
+                    t1=chunk_t1,
+                    name=chunk_name,
+                    intervals=intervals,
+                    active_duration=active_duration,
+                    filter_state=spec.get('filter_state') or {},
+                    auto_save=auto_save,
+                    load_into_ui=(_any or str(tk_.session) == str(ui.key.session)),
+                    batch_id=split_bid,
+                )
+                if ok:
+                    queued += 1
+                    if split_bid is not None:
+                        split_names.append(chunk_name)
+            if split_bid is not None and split_names:
+                ui.time_slider._batch_counts[split_bid] = len(split_names)
+                ui.time_slider._batch_names[split_bid] = split_names
+        return queued
 
-def normalize_custom_spec(spec: dict, *, default_session: str = '') -> dict:
-    """Normalise and fill defaults in a custom CCG spec dict."""
-    fs = spec.get('filter_state', {}) or {}
-    labels = fs.get('labels', {}) or {}
-    sessions = spec.get('sessions', []) or []
-    sessions = sorted(str(s) for s in sessions if s is not None)
-    t0_raw = spec.get('t0', 0.0)
-    t1_raw = spec.get('t1', 0.0)
-    t0 = str(t0_raw) if isinstance(t0_raw, str) and t0_raw.lower() in ('start', 'end') else float(t0_raw)
-    t1 = str(t1_raw) if isinstance(t1_raw, str) and t1_raw.lower() in ('start', 'end') else float(t1_raw)
-    return {
-        'name': str(spec.get('name', '')),
-        't0': t0,
-        't1': t1,
-        'filter_state': {
-            'theme': str(fs.get('theme', 'segments')),
-            'labels': {str(k): bool(v) for k, v in labels.items()},
-        },
-        'scope': str(spec.get('scope', default_session)),
-        'created_from_session': str(spec.get('created_from_session', default_session)),
-        'sessions': sessions,
-        'n_splits': int(spec.get('n_splits') or 1),
-        'overlap_sec': float(spec.get('overlap_sec') or 0.0),
-    }

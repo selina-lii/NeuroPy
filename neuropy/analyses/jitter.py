@@ -547,10 +547,10 @@ class JitterDataset(AnalysisDataset):
         self.data = {}   # Key → Jitter
 
     def run_jitter(self, save_progress=False):
-        for key, ccg_ptr in self.cd.data.items():
+        for key, ccg_ptr in self.cd.ptr.items():
             nd_key = key.nd()
             neurons = self.nd.data[nd_key]
-            ccg_data = self.cd._ccg[nd_key]
+            ccg_data = self.cd.ccg[nd_key]
 
             if ccg_ptr.n_pairs == 0:
                 self.data[key] = None
@@ -749,3 +749,82 @@ class JitterManager:
 
         self.start_next()
         return self.is_running()
+
+
+class JitterResults:
+    """On-disk jitter surrogate results (separate from CCG compute cache)."""
+
+    def __init__(self, conf: 'CCGConfig'):
+        self.conf = conf
+        self.results: dict = {}
+
+    def save_path(self) -> str:
+        return self.conf.save_path + '_jitter'
+
+    def save(self, path: str = None) -> None:
+        if not self.results:
+            print("[save_jitter] Nothing to save.")
+            return
+        import hickle as hkl
+        p = os.path.expanduser((path or self.save_path()) + '.hkl')
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        serializable = {}
+        for nd_key, pairs in self.results.items():
+            nd_str = str(nd_key)
+            serializable[nd_str] = {}
+            for cache_key, (j_avg, j_pval, j_pval_bins) in pairs.items():
+                ref, tgt, res_key = cache_key[0], cache_key[1], cache_key[2]
+                seg = cache_key[3] if len(cache_key) > 3 else None
+                k = f"{ref}_{tgt}_{res_key}" + (f"_s{seg}" if seg is not None else "")
+                serializable[nd_str][k] = {
+                    'ref': np.int64(ref),
+                    'tgt': np.int64(tgt),
+                    'res_key': res_key,
+                    'seg': np.int64(seg) if seg is not None else np.int64(-1),
+                    'j_avg': np.asarray(j_avg, dtype=float),
+                    'j_pval': np.float64(j_pval),
+                    'j_pval_bins': np.asarray(j_pval_bins, dtype=float),
+                }
+        hkl.dump(serializable, p)
+        total = sum(len(v) for v in self.results.values())
+        print(f"[CCGDataset] jitter saved ({total} pairs) → {p}")
+
+    def load(self,
+             nd_key=None,
+             path: str = None,
+             known_keys=None) -> bool:
+        import hickle as hkl
+        p = os.path.expanduser((path or self.save_path()) + '.hkl')
+        if not os.path.isfile(p):
+            return False
+        known_keys = known_keys or []
+        nd_key_map = {str(k): k for k in known_keys}
+        try:
+            data = hkl.load(p)
+            for nd_str, pairs in data.items():
+                mapped_key = nd_key_map.get(nd_str)
+                if mapped_key is None:
+                    continue
+                if nd_key is not None and mapped_key != nd_key:
+                    continue
+                if mapped_key not in self.results:
+                    self.results[mapped_key] = {}
+                for k, v in pairs.items():
+                    ref = int(v['ref'])
+                    tgt = int(v['tgt'])
+                    res_key = str(v['res_key'])
+                    seg_raw = v.get('seg', None)
+                    seg = (None if (seg_raw is None or int(seg_raw) < 0)
+                           else int(seg_raw))
+                    self.results[mapped_key][(ref, tgt, res_key, seg)] = (
+                        v['j_avg'], float(v['j_pval']), v['j_pval_bins'])
+            loaded = (sum(len(v) for v in self.results.values())
+                      if nd_key is None
+                      else len(self.results.get(nd_key, {})))
+            label = f"[{nd_key}]" if nd_key is not None else "(all sessions)"
+            print(f"[CCGDataset] jitter loaded {label} ({loaded} pairs) ← {p}")
+            return True
+        except Exception as exc:
+            print(f"[CCGDataset] jitter load failed: {exc}")
+            return False
+

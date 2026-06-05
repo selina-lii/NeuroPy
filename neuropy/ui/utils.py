@@ -462,3 +462,13 @@ def get_png_filename(
         f"{sess_prefix}pair_{ref}_{tgt}_{seg_name}_{norm_key}"
         f"{alpha_key}{res_key}{scale_key}{j_key}{ext_key}{dk_key}.png"
     )
+
+
+def json_numpy_default(obj):
+    """JSON encoder for numpy scalar types — pass as ``default=`` to json.dump."""
+    import numpy as np
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')

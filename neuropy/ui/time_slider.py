@@ -297,7 +297,7 @@ class TimeSliderPanel:
                 self._theme_label_union_all_sessions[attr] = sorted(acc)
         # segments: union of segment labels across every loaded CCG pointer
         seg = set()
-        data = getattr(self.ui.cd, 'data', None)
+        data = getattr(self.ui.cd, 'ptr', None)
         if data:
             for ptr in data.values():
                 if ptr is None:
@@ -399,8 +399,8 @@ class TimeSliderPanel:
             return objs
         out = []
         seen = set()
-        for nk in self.ui._real_nd_keys_ordered():
-            s = self.ui._session_obj_for_nd_key(nk)
+        for nk in self.ui._sess_mgr._real_nd_keys_ordered():
+            s = self.ui._sess_mgr._session_obj_for_nd_key(nk)
             if s is None:
                 continue
             sid = id(s)
@@ -573,12 +573,12 @@ class TimeSliderPanel:
         self._redraw()
 
     def _on_time_slider_set(self):
-        spec = self.ui._build_custom_spec(for_all=False)
+        spec = self.ui._custom_mgr._build_custom_spec(for_all=False)
         if spec is None:
             return
         filter_state = spec.get('filter_state', {})
         # Resolve sentinels for current session (use min/max times, not first/last table row)
-        t_sess_start, t_sess_end = self.ui._session_wall_clock_extent_for_key(self.ui.key)
+        t_sess_start, t_sess_end = self.ui._sess_mgr._session_wall_clock_extent_for_key(self.ui.key)
         t0 = self.ui._resolve_time(spec['t0'], t_sess_start, t_sess_end)
         t1 = self.ui._resolve_time(spec['t1'], t_sess_start, t_sess_end)
         lone = self.ui._single_exclusive_segment_filter_label(filter_state)
@@ -640,7 +640,7 @@ class TimeSliderPanel:
                 'name': chunk_name,
                 'theme': filter_state.get('theme', 'segments'),
                 'labels': filter_state.get('labels', {}),
-                'scope': spec.get('scope', self.ui._current_session_str()),
+                'scope': spec.get('scope', self.ui._setup_mgr._current_session_str()),
                 'session': str(self.ui.key.session),
                 'timing': {'t0': chunk_t0, 't1': chunk_t1},
             }
@@ -665,16 +665,16 @@ class TimeSliderPanel:
             self._batch_counts[split_bid] = len(split_names)
             self._batch_names[split_bid] = split_names
         if queued:
-            self.ui._record_custom_ccg_suggestion(spec)
+            self.ui._custom_mgr.state._record_custom_ccg_suggestion(spec)
             label = spec['name'] if n_splits == 1 else f"{spec['name']} ({queued} chunks)"
             self._status_var.set(f"Queued: {label}")
-            self.ui._custom_ccg_start_next()
+            self.ui._custom_mgr._custom_ccg_start_next()
 
     def _on_time_slider_apply_multiple_sessions(self):
-        spec = self.ui._build_custom_spec(for_all=False)
+        spec = self.ui._custom_mgr._build_custom_spec(for_all=False)
         if spec is None:
             return
-        all_nd_keys = self.ui._real_nd_keys_ordered()
+        all_nd_keys = self.ui._sess_mgr._real_nd_keys_ordered()
         if not all_nd_keys:
             messagebox.showinfo("Sessions", "No sessions available.")
             return
@@ -691,7 +691,7 @@ class TimeSliderPanel:
         spec['sessions'] = selected
         spec['scope'] = 'All' if is_all else (
             selected[0] if len(selected) == 1 else ', '.join(selected[:2]) + ('…' if len(selected) > 2 else ''))
-        self.ui._record_custom_ccg_suggestion(spec)
+        self.ui._custom_mgr.state._record_custom_ccg_suggestion(spec)
         queued = self.ui._queue_custom_ccg_for_spec(
             spec, for_all=is_all, auto_save=True,
             target_sessions=None if is_all else selected,
@@ -699,7 +699,7 @@ class TimeSliderPanel:
         if queued:
             sess_label = "all sessions" if is_all else f"{len(selected)} session(s)"
             self._status_var.set(f"Queued {queued} task(s) for {sess_label}")
-            self.ui._custom_ccg_start_next()
+            self.ui._custom_mgr._custom_ccg_start_next()
         else:
             self._status_var.set("No missing custom CCGs for selected sessions")
 
@@ -718,10 +718,10 @@ class TimeSliderPanel:
         self._zoom_end_var.set("00:00:00")
         self._zoom_frame.pack_forget()
         # Reset to first real segment
-        self.ui.current_segment = 0
+        self.ui.current_segment = self.ui._seg_name(0)
         self.ui._build_sig_chips()
         self.ui._update_segment_label()
-        self.ui.update_plot()
+        self.ui._plot_mgr.update_plot()
 
     def _on_zoom_range_set(self):
         """Set zoom range from the zoom time entry boxes."""
@@ -924,7 +924,7 @@ class TimeSliderPanel:
             w.destroy()
         cmap = self._label_color_map()
         self._legend_toggles = {}
-        _fs = max(7, self.ui._min_font_size())
+        _fs = max(7, self.ui._settings_mgr.min_font_size())
         _saved = self._per_theme_label_state.get(self._current_theme, {})
         for lbl, color in cmap.items():
             initial = _saved.get(lbl, True)
@@ -1271,13 +1271,14 @@ class TimeSliderPanel:
                 pass
 
         # Remove deleted entries from in-memory segment lists
+        from neuropy.analyses.custom_ccg import CustomSegment
         for lst in buckets.values():
             lst[:] = [
                 cs for cs in lst
-                if isinstance(cs, dict) and (
-                    cs.get('src_path') not in delete_paths
+                if isinstance(cs, CustomSegment) and (
+                    cs.src_path not in delete_paths
                     and re.sub(r'[^A-Za-z0-9_\-]', '_',
-                               str(cs.get('name', '')).replace(' ', '_'))
+                               str(cs.source.name).replace(' ', '_'))
                     not in delete_handles
                 )
             ]
@@ -1287,8 +1288,8 @@ class TimeSliderPanel:
             self.ui._update_segment_label()
         except Exception:
             pass
-        self.ui._emit_inventory_event()
-        self.ui._save_ui_state()
+        self.ui._custom_mgr._emit_inventory_event()
+        self.ui._settings_mgr.save_ui_state()
         ts = self
         fn, win = ts._load_custom_ccg_refresh, ts._load_custom_ccg_win
         if fn is not None and win is not None:
@@ -1302,7 +1303,7 @@ class TimeSliderPanel:
     def _load_custom_ccg(self):
         """Scan cache dir for saved custom segments and load selected ones additively."""
         # Archive stale files (those missing total_time_hours) before showing dialog
-        n_archived, trash_dir = self.ui._archive_stale_custom_ccgs()
+        n_archived, trash_dir = self.ui._custom_mgr.store._archive_stale_custom_ccgs()
         if n_archived:
             messagebox.showinfo(
                 "Stale custom CCGs archived",
@@ -1350,7 +1351,7 @@ class TimeSliderPanel:
         tv.tag_configure('file',   foreground=_fg_main)
         tv.tag_configure('group',  foreground=_fg_header, font=('TkDefaultFont', 9, 'bold'))
 
-        name_cov, _n_total_sessions = self.ui._custom_ccg_name_session_coverage()
+        name_cov, _n_total_sessions = self.ui._custom_mgr.store._custom_ccg_name_session_coverage()
         _n_sess_denom = max(1, _n_total_sessions)
 
         def _dur_str(dur):
@@ -1376,9 +1377,6 @@ class TimeSliderPanel:
                 if t0 is not None and t1 is not None:
                     bullets.append(
                         f"Time range: {self._sec_to_hms(t0)} – {self._sec_to_hms(t1)}")
-                dur = float(m['compute_sec_']) if 'compute_sec_' in m else float('nan')
-                if dur == dur:
-                    bullets.append(f"Compute time: {_dur_str(dur).strip()}")
                 act = float(m['active_duration_']) if 'active_duration_' in m else float('nan')
                 if act == act:
                     bullets.append(f"Active duration: {act:.1f}s")
@@ -1427,7 +1425,7 @@ class TimeSliderPanel:
             file_meta.clear()
             _groups: dict[str, list[str]] = collections.defaultdict(list)
             for p in path_list:
-                spec = self.ui._custom_npz_spec(p) or {}
+                spec = self.ui._custom_mgr.store._custom_npz_spec(p) or {}
                 nm = str(spec.get('name', '')).strip()
                 if not nm:
                     nm = os.path.basename(p).replace('.npz', '')
@@ -1466,7 +1464,7 @@ class TimeSliderPanel:
         def _refresh_list():
             new_paths = sorted(_glob.glob(pattern))
             _populate(new_paths)
-            self.ui._emit_inventory_event()
+            self.ui._custom_mgr._emit_inventory_event()
             if not file_meta:
                 win.destroy()
 
@@ -1490,7 +1488,7 @@ class TimeSliderPanel:
                 except Exception as ex:
                     print(f"[LoadCustomCCG] delete failed: {ex}")
             _refresh_list()
-            self.ui._emit_inventory_event()
+            self.ui._custom_mgr._emit_inventory_event()
 
         def _ok():
             sel = _selected_file_iids()
@@ -1500,39 +1498,39 @@ class TimeSliderPanel:
             added = []
             touched_view = False
             last_idx = 0
-            from neuropy.analyses.custom_ccg import load_custom_segment_from_npz
+            from neuropy.analyses.custom_ccg import CustomSegment
             for iid in sel:
                 p = file_meta[iid]
                 try:
-                    cs = load_custom_segment_from_npz(p)
+                    cs = CustomSegment.load(p)
                     bn = os.path.basename(p)
                     file_sess = bn.split("__", 1)[0] if "__" in bn else str(self.ui.key.session)
                     lst = self.ui._custom_segments_by_session.setdefault(file_sess, [])
-                    last_idx, _ = self.ui._upsert_custom_segment_by_name(lst, cs)
+                    last_idx, _ = self.ui._custom_mgr.store._upsert_custom_segment_by_name(lst, cs)
                     if lst is self.ui._custom_segments:
                         touched_view = True
-                    added.append(cs['name'])
+                    added.append(cs.source.name)
                 except Exception as ex:
                     print(f"[LoadCustomCCG] failed to load {p}: {ex}")
             win.destroy()
             if added and touched_view:
                 self.ui._build_sig_chips()
-                self.ui.current_segment = self.ui.n_segments + 1 + last_idx
+                self.ui.current_segment = self.ui._seg_name(self.ui.n_segments + 1 + last_idx)
                 self.ui._clamp_current_segment_for_session()
                 self.ui._update_segment_label()
-                self.ui.update_plot()
+                self.ui._plot_mgr.update_plot()
                 if hasattr(self, '_status_var'):
                     from collections import Counter as _Ctr
                     _cnts = _Ctr(added)
                     _parts = [f"{n} ({c})" if c > 1 else n for n, c in _cnts.items()]
                     self._status_var.set(f"Loaded: {', '.join(_parts)}")
-                self.ui._save_ui_state()
+                self.ui._settings_mgr.save_ui_state()
             elif added:
                 if hasattr(self, '_status_var'):
                     self._status_var.set(
                         f"Loaded {len(added)} segment(s) for other session(s); "
                         "switch pairs to that session to view chips.")
-                self.ui._save_ui_state()
+                self.ui._settings_mgr.save_ui_state()
 
         def _clear_load_dialog_ref(_e=None):
             if getattr(self, '_load_custom_ccg_win', None) is win:

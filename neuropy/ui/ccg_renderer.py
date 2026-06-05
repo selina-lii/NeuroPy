@@ -1,7 +1,7 @@
 """CCGContextBuilder — data prep for CCG PNGs (UI layer).
 
 Pure rendering (RenderContext, render_ccg_png) lives in neuropy.plotting.ccg.
-Pure computation (deconvolve_ccg) lives in neuropy.analyses.ms_connectivity.
+
 """
 from __future__ import annotations
 
@@ -9,10 +9,8 @@ import traceback
 
 import numpy as np
 
-from neuropy.analyses.ms_connectivity import (
-    NormalizeBy, apply_norms_to_ccg, compute_ccg_panel_data,
-    deconvolve_ccg,
-)
+from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
+
 from neuropy.plotting.ccg import (
     JitterOverlay, PlotStyle, TitleConfig, RenderContext,
     _fill_waveform, render_ccg_png,
@@ -125,7 +123,7 @@ class CCGContextBuilder:
         cd  = ccg_data_override if ccg_data_override is not None else ui.ccg_data
         conf = cd.conf
 
-        d = ui._resolve_segment_data(ref, tgt, segment, highres=highres,
+        d = ui._pair_mgr._resolve_segment_data(ref, tgt, segment, highres=highres,
                                      include_pval=True, include_acg=False, _cd=cd)
         ccg_raw      = d['ccg_raw']
         ccg_null_raw = d['ccg_null_raw']
@@ -146,7 +144,7 @@ class CCGContextBuilder:
             try:
                 bin_ext = (float(_extend_bin_ms) / 1000.0
                            if _extend_bin_ms is not None else float(bin_size_eff0))
-                ext = ui._resolve_extended_ccg(
+                ext = ui._pair_mgr._resolve_extended_ccg(
                     ref, tgt, segment, bool(highres), int(_extend_ms), float(bin_ext), cd)
                 if ext is not None:
                     ccg_raw         = ext['ccg_raw']
@@ -169,8 +167,8 @@ class CCGContextBuilder:
                   if render_cfg else ui.active_alpha)
 
         _custom_time_h = None
-        if ui._is_custom_segment(segment):
-            _ci = ui._custom_seg_index(segment)
+        if ui._custom_mgr._is_custom_segment(segment):
+            _ci = ui._custom_mgr._custom_seg_index(segment)
             _custom_time_h = ui._custom_segments[_ci].get('total_time_hours')
 
         norm_info = (', '.join(nm.name for nm in _norms)
@@ -183,7 +181,7 @@ class CCGContextBuilder:
                    if render_cfg else
                    ui.center_container.cs_panel._conn_str_show.get())
 
-        eff_min_lag, eff_max_lag = ui._effective_lags(ref, tgt)
+        eff_min_lag, eff_max_lag = ui._cs_mgr._effective_lags(ref, tgt)
         _tw_active = self._rsig('test_window', render_cfg)
 
         show_acg_ref = self._racg('_acg_ref',        render_cfg, False)
@@ -194,7 +192,7 @@ class CCGContextBuilder:
         acg_ref_raw = acg_tgt_raw = None
         nspks_ref = nspks_tgt = 1.0
         if _need_acg:
-            d_acg = ui._resolve_segment_data(ref, tgt, segment,
+            d_acg = ui._pair_mgr._resolve_segment_data(ref, tgt, segment,
                                              include_pval=False, include_acg=True, _cd=cd)
             acg_ref_raw = d_acg['acg_ref'].copy().astype(float)
             acg_tgt_raw = d_acg['acg_tgt'].copy().astype(float)
@@ -203,7 +201,7 @@ class CCGContextBuilder:
 
         _deconv_active = _dref or _dtgt
         if _deconv_active and acg_ref_raw is not None and acg_tgt_raw is not None:
-            ccg_raw, ccg_null_raw = deconvolve_ccg(
+            ccg_raw, ccg_null_raw = NormBackend.deconvolve(
                 ccg_raw, ccg_null_raw,
                 acg_ref_raw, nspks_ref,
                 acg_tgt_raw, nspks_tgt,
@@ -211,10 +209,10 @@ class CCGContextBuilder:
             )
 
         if method in ('conv', 'tailed', 'global'):
-            panel_data = compute_ccg_panel_data(
+            panel_data = NormBackend.compute(
                 ccg_raw, ccg_null_raw, conf, method,
                 _norms, ref, tgt, segment, ui.n_segments,
-                ui._is_custom_segment(segment), _custom_time_h,
+                ui._custom_mgr._is_custom_segment(segment), _custom_time_h,
                 eff_min_lag, eff_max_lag,
                 neurons=ui.neurons, nd=ui.cd.nd, nd_key=ui.key.nd(),
                 acg_ref=acg_ref_raw if method == 'tailed' else None,
@@ -227,15 +225,15 @@ class CCGContextBuilder:
             cs_val      = panel_data.cs_val
             if not _deconv_active:
                 ui._conn_strength_cache.put(
-                    ui._cs_cache_key(ref, tgt, segment, method, highres,
+                    ui._cs_mgr._cs_cache_key(ref, tgt, segment, method, highres,
                                      eff_min_lag, eff_max_lag),
                     (cs_val, baseline_1d))
         else:
-            ccg_out, show_null = apply_norms_to_ccg(
+            ccg_out, show_null = NormBackend.apply(
                 ccg_raw, ccg_null_raw, ref, tgt, segment,
                 _norms - {NormalizeBy.BASELINE},
                 ui.neurons, ui.cd.nd, ui.key.nd(), ui.n_segments,
-                ui._is_custom_segment(segment),
+                ui._custom_mgr._is_custom_segment(segment),
                 custom_time_hours=_custom_time_h,
             )
             baseline_1d = None
@@ -262,7 +260,7 @@ class CCGContextBuilder:
             pass
 
         resk  = 'hi' if bool(highres) else 'lo'
-        _jseg = ui._jitter_seg(segment)
+        _jseg = ui.jitter_controller.seg(segment)
         j_data = ui._jitter_cache.get((ref, tgt, resk, _jseg))
         if j_data is None and _jseg is not None:
             j_data = ui._jitter_cache.get((ref, tgt, resk, None))
@@ -275,7 +273,7 @@ class CCGContextBuilder:
             "H1", "ccg_renderer.py:build_context:jitter_lookup", "Jitter lookup before plot",
             {
                 "highres": bool(highres), "method": str(method), "segment": int(segment),
-                "j_key": [int(ref), int(tgt), "lo", ui._jitter_seg(segment)],
+                "j_key": [int(ref), int(tgt), "lo", ui.jitter_controller.seg(segment)],
                 "len_ccg": int(len(ccg_out)) if ccg_out is not None else None,
                 "len_j_ccg": int(len(j_ccg_arg)) if j_ccg_arg is not None else None,
                 "len_j_pval": int(len(j_pval_arg)) if j_pval_arg is not None else None,
@@ -289,7 +287,7 @@ class CCGContextBuilder:
             show_pval   = pval_arg   if self._rsig('conv_p',  render_cfg) else None
             show_pval_c = pval_c_arg if self._rsig('conv_pc', render_cfg) else None
             if self._rsig('conv_p', render_cfg) and pval_arg is None and render_cfg is None:
-                is_custom = ui._is_custom_segment(segment)
+                is_custom = ui._custom_mgr._is_custom_segment(segment)
                 is_all    = (segment == ui.n_segments)
                 reason    = ('all-segments view' if is_all
                              else 'custom segment' if is_custom else 'cd.pval is None')
@@ -363,7 +361,7 @@ class CCGContextBuilder:
             _title_sess_label = ""
 
         try:
-            _cs_lines = (ui._cs_annotation_lines(ref, tgt, segment, highres, print_stg, print_jbsi)
+            _cs_lines = (ui._cs_mgr._cs_annotation_lines(ref, tgt, segment, highres, print_stg, print_jbsi)
                          if (print_stg or print_jbsi) else [])
         except Exception:
             _cs_lines = []
@@ -393,7 +391,7 @@ class CCGContextBuilder:
             inds            = tuple(inds),
             shank_ids       = shank_ids,
             neuron_type     = nt,
-            is_significant_pair = ui._is_significant(ref, tgt, segment),
+            is_significant_pair = ui._pair_mgr._is_significant(ref, tgt, segment),
             show_ccg        = bool(self._racg('_ccg_show',    render_cfg, True)),
             line_ccg        = self._rline('_line_ccg',        render_cfg),
             line_baseline   = self._rline('_line_baseline',   render_cfg),

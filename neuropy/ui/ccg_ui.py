@@ -30,17 +30,14 @@ import shutil
 import time as _time
 import traceback
 from collections import defaultdict as _defaultdict
-from copy import deepcopy
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import FancyArrowPatch
 from matplotlib.lines import Line2D
 
 # winfo_containing raises KeyError('popdown') when a ttk Combobox dropdown is
@@ -78,10 +75,8 @@ import copy as _copy
 from neuropy.analyses import correlations
 from neuropy.analyses.correlations import np_spike_correlations, sim_generate_train
 from neuropy.analyses import custom_ccg as _custom_ccg_mod
-from neuropy.analyses.ms_connectivity import (
-    NormalizeBy, apply_norms_to_ccg, compute_pair_conn_strength_1d,
-    EranConv, CCGConfig, _CCG_RESOLUTION,
-)
+from neuropy.analyses.ms_connectivity import EranConv, CCGConfig, _CCG_RESOLUTION
+from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.core.neurons import Neurons
 from neuropy.core.epoch import Epoch
@@ -97,7 +92,7 @@ from neuropy.ui.utils import (BackgroundTaskRunner, GenericUI, LRUCache,
                               _SEPARATOR_ROW, is_separator_row,
                               _SPECIAL_PREFIX, is_special_group,
                               _admitted_pairs, _admit_pair,
-                              ArrowScroller)
+                              ArrowScroller, json_numpy_default)
 from neuropy.ui.selection_migration import SelectionMigration
 from neuropy.ui.dialogs import (
     MergeGroupsDialog, ManageGroupsDialog,
@@ -113,7 +108,6 @@ def _merge_groups_into(target: dict, source: dict) -> None:
             for sess, pairs in sd.items():
                 target[g].setdefault(sess, set()).update(pairs)
 
-
 # Sentinel value for the virtual "All segments" view
 _ALL_SEGS = "All"
 # Virtual session entry: union of all sessions (lazy-loaded per group tag).
@@ -121,8 +115,6 @@ _ALL_SESSION_MARKER = object()
 # TODO: make this configurable per dataset — currently hardcoded for 8-session NSD/SD design
 _SESS_PER_BLOCK = 8   # sessions 1..N: idx<=_SESS_PER_BLOCK → NSD, idx>_SESS_PER_BLOCK → SD
 # maximum number of queued jitters (including the currently running one)
-_MAX_JITTER_QUEUE = 50
-
 
 
 class SettingsManager:
@@ -209,10 +201,10 @@ class SettingsManager:
                 'highres_mode':        bool(getattr(ui, '_highres_mode', False)),
                 'lo_hi_mode':            bool(getattr(ui, '_lo_hi_mode', False)),
                 'loaded_custom_ccgs':  [
-                    cs.get('src_path')
+                    cs.src_path
                     for lst in getattr(ui, '_custom_segments_by_session', {}).values()
                     for cs in lst
-                    if isinstance(cs, dict) and cs.get('src_path')
+                    if cs.src_path
                 ],
             }
             with open(ui._ui_state_path, 'w') as f:
@@ -309,11 +301,11 @@ class ExportManager:
             if p is None:
                 return None
             if getattr(ui, '_session_any_mode', False) and len(p) == 3:
-                nk = ui._nd_key_for_session_str(str(p[0]))
+                nk = ui._sess_mgr._nd_key_for_session_str(str(p[0]))
                 if nk is not None:
-                    ckey = ui._type_key_for_nd(nk)
+                    ckey = ui._sess_mgr._type_key_for_nd(nk)
                     if ckey is not None:
-                        ui._bind_context_to_type_key(ckey)
+                        ui._sess_mgr._bind_context_to_type_key(ckey)
                 return int(p[1]), int(p[2])
             return int(p[0]), int(p[1])
 
@@ -342,12 +334,12 @@ class ExportManager:
         else:
             ref = tgt = None
         seg = ui.current_segment
-        if seg == ui.n_segments:
+        if seg == _ALL_SEGS:
             seg_tag = "All"
-        elif ui._is_custom_segment(seg):
+        elif seg not in ui.ccg_ptr.segment_names:
             seg_tag = "custom"
         else:
-            seg_tag = f"seg{seg}"
+            seg_tag = seg
         sess = str(getattr(getattr(ui.key, 'nd', lambda: ui.key)(), 'session', None) or getattr(ui.key, 'session', 'sess'))
         exc = getattr(ui.key, 'excitability', None)
         ct = getattr(ui.key, 'conn_type', None)
@@ -394,14 +386,14 @@ class ExportManager:
                     not getattr(ui, '_lo_hi_mode', False)):
                 # Single-pair view: render directly to path, bypassing the viewer cache
                 inds = ui.all_inds[ui.current_pair_idx]
-                seg  = int(ui.current_segment)
+                seg  = ui._seg_idx(ui.current_segment)
                 hr   = bool(getattr(ui, '_highres_mode', False))
                 ctx  = ui._render_engine.build_context(inds, seg, hr, None, None)
                 dpi  = 300 if fmt == 'png' else None
                 ui._render_engine.write_png(ctx, path, dpi=dpi)
             else:
                 # Multi-view (stacked/SBS): save composite figure as-is
-                ui.update_plot()
+                ui._plot_mgr.update_plot()
                 ui.canvas.draw()
                 ui.fig.savefig(path, bbox_inches='tight', dpi=300 if fmt == 'png' else None)
         finally:
@@ -412,7 +404,7 @@ class ExportManager:
         """Core export loop: render each (tk_, ptr, ref, tgt) into *folder*.
 
         *items* is a list of 4-tuples (tk_, ptr, ref, tgt) where tk_/ptr are
-        the exact Key/pointer objects from cd.data — no string lookup needed.
+        the exact Key/pointer objects from cd.ptr — no string lookup needed.
         """
         ui = self._ui
         export_segs = (opt or {}).get('export_segments', None)
@@ -439,7 +431,7 @@ class ExportManager:
             'n_segments': getattr(ui, 'n_segments', 0),
             'segment_names': ui.ccg_ptr.segment_names,
             'current_pair_idx': int(getattr(ui, 'current_pair_idx', 0)),
-            'current_segment': int(getattr(ui, 'current_segment', 0)),
+            'current_segment': getattr(ui, 'current_segment', _ALL_SEGS),
             '_custom_segments': getattr(ui, '_custom_segments', []),
             '_highres_mode': getattr(ui, '_highres_mode', False),
         }
@@ -470,12 +462,11 @@ class ExportManager:
                         seg_indices.append(int(ptr.n_segments))
                         continue
                     if export_seg == 'Current':
-                        seg_idx = int(old_state.get('current_segment', 0))
-                        if seg_idx < 0:
-                            seg_idx = 0
-                        if seg_idx > int(ptr.n_segments):
-                            seg_idx = int(ptr.n_segments)
-                        seg_indices.append(int(seg_idx))
+                        saved = old_state.get('current_segment', _ALL_SEGS)
+                        if isinstance(saved, int):
+                            seg_indices.append(saved)  # legacy int
+                        else:
+                            seg_indices.append(ui._seg_idx(saved))
                         continue
                     # Try regular segment label
                     try:
@@ -485,7 +476,7 @@ class ExportManager:
                         pass
                     # Try custom segment name for this session (silent skip if absent)
                     _ci = next((i for i, _cs in enumerate(ui._custom_segments)
-                                if isinstance(_cs, dict) and _cs.get('name') == export_seg), None)
+                                if isinstance(_cs, _custom_ccg_mod.CustomSegment) and _cs.source.name == export_seg), None)
                     if _ci is not None:
                         seg_indices.append(int(ptr.n_segments) + 1 + _ci)
                     # else: silently skip — this session doesn't have that custom segment
@@ -499,10 +490,10 @@ class ExportManager:
                         and ui.cd._ccg_highres.get(nd_key) is not None):
                     ui.ccg_data = ui.cd._ccg_highres.get(nd_key)
                 else:
-                    ui.ccg_data = (ui.cd._ccg.get(nd_key)
-                                     if getattr(ui.cd, '_ccg', None) else ui.ccg_data)
+                    ui.ccg_data = (ui.cd.ccg.get(nd_key)
+                                     if getattr(ui.cd, 'ccg', None) else ui.ccg_data)
                 try:
-                    ui.current_pair_idx = ui.get_pair_index((ref, tgt))
+                    ui.current_pair_idx = ui._plot_mgr.get_pair_index((ref, tgt))
                 except Exception:
                     ui.current_pair_idx = 0
 
@@ -579,8 +570,8 @@ class ExportManager:
                     if highres and _has_hires():
                         ui.ccg_data = ui.cd._ccg_highres.get(nd_key)
                     else:
-                        ui.ccg_data = (ui.cd._ccg.get(nd_key)
-                                         if getattr(ui.cd, '_ccg', None) else ui.ccg_data)
+                        ui.ccg_data = (ui.cd.ccg.get(nd_key)
+                                         if getattr(ui.cd, 'ccg', None) else ui.ccg_data)
                     old_eo = getattr(ui, '_export_overrides', None)
                     ui._export_overrides = opt
                     try:
@@ -593,12 +584,12 @@ class ExportManager:
 
                 # Export one file per selected segment (render directly; bypass viewer cache)
                 for seg_idx in seg_indices:
-                    ui.current_segment = int(seg_idx)
-                    seg = int(ui.current_segment)
+                    ui.current_segment = ui._seg_name(int(seg_idx))
+                    seg = ui._seg_idx(ui.current_segment)
                     if seg == int(ptr.n_segments):
                         seg_tag = "All"
-                    elif ui._is_custom_segment(seg):
-                        ci_tag = ui._custom_seg_index(seg)
+                    elif ui._custom_mgr._is_custom_segment(seg):
+                        ci_tag = ui._custom_mgr._custom_seg_index(seg)
                         cs_name = (ui._custom_segments[ci_tag].get('name', f'custom{ci_tag}')
                                    if ci_tag < len(ui._custom_segments) else f'custom{ci_tag}')
                         seg_tag = re.sub(r'[^A-Za-z0-9_\-]', '_', str(cs_name))
@@ -653,11 +644,14 @@ class ExportManager:
             ui.neurons = old_state['neurons']
             ui.n_segments = old_state['n_segments']
             ui.current_pair_idx = old_state['current_pair_idx']
-            ui.current_segment = old_state.get('current_segment', ui.current_segment)
+            saved_seg = old_state.get('current_segment', ui.current_segment)
+            if isinstance(saved_seg, int):
+                saved_seg = ui._seg_name(saved_seg)
+            ui.current_segment = saved_seg
             ui._custom_segments = old_state.get('_custom_segments', ui._custom_segments)
             ui._highres_mode = old_state.get('_highres_mode', ui._highres_mode)
             try:
-                ui.update_plot()
+                ui._plot_mgr.update_plot()
             except Exception:
                 pass
 
@@ -709,7 +703,7 @@ class ExportManager:
                     if getattr(ui, 'selected_inds', None) else None
                 )
         items = []
-        for tk_, ptr in ui.cd.data.items():
+        for tk_, ptr in ui.cd.ptr.items():
             sel = getattr(ptr, 'selected_inds', None)
             if sel is None or len(sel) == 0:
                 continue
@@ -723,14 +717,14 @@ class ExportManager:
         return items
 
     def _pair_handle_map(self) -> dict[tuple, list[tuple]]:
-        """Build {(session_str, ref, tgt): [(tk_, ptr), ...]} from all cd.data entries.
+        """Build {(session_str, ref, tgt): [(tk_, ptr), ...]} from all cd.ptr entries.
 
         A pair can legitimately appear in multiple conn-type keys for the same
         session.  We keep all of them so the caller can pick the right one.
         """
         ui = self._ui
         m: dict[tuple, list] = {}
-        for tk_, ptr in ui.cd.data.items():
+        for tk_, ptr in ui.cd.ptr.items():
             if ptr is None:
                 continue
             sess = str(getattr(tk_, 'session', getattr(tk_.nd(), 'session', '')))
@@ -752,7 +746,7 @@ class ExportManager:
 
         if action == 'all_sessions_selected':
             # All selected pairs across every session/type — handles come straight
-            # from cd.data, no lookup needed.
+            # from cd.ptr, no lookup needed.
             items = ui._export_mgr._collect_all_sessions_selected()
 
         elif action == 'all':
@@ -796,7 +790,7 @@ class ExportManager:
                 try:
                     sd = ui._sel_data._groups.get(g, {})
                     pairs_by_sess = sd if isinstance(sd, dict) else {
-                        ui._current_session_str(): list(sd)}
+                        ui._setup_mgr._current_session_str(): list(sd)}
                     for sess, pp in pairs_by_sess.items():
                         ss = str(sess)
                         s = want_by_sess.setdefault(ss, set())
@@ -811,7 +805,7 @@ class ExportManager:
             raw_items: list[tuple] = []
             seen: set[tuple] = set()
             found_by_sess: dict[str, set[tuple[int, int]]] = {}
-            for tk_, ptr in ui.cd.data.items():
+            for tk_, ptr in ui.cd.ptr.items():
                 if ptr is None:
                     continue
                 try:
@@ -918,7 +912,7 @@ class GroupManager:
         g = ui._sel_data._groups.get(gname, {})
         if isinstance(g, set):
             return g  # legacy flat format
-        sess = session or ui._current_session_str()
+        sess = session or ui._setup_mgr._current_session_str()
         return g.get(sess, set())
 
     def _group_pairs_all_sessions(self, gname):
@@ -934,22 +928,18 @@ class GroupManager:
 
     def _group_add_pair(self, gname, pair, session=None):
         ui = self._ui
-        sess = session or ui._current_session_str()
+        sess = session or ui._setup_mgr._current_session_str()
         ui._sel_data._groups.setdefault(gname, {}).setdefault(sess, set()).add(pair)
 
     def _group_discard_pair(self, gname, pair, session=None):
         ui = self._ui
-        sess = session or ui._current_session_str()
+        sess = session or ui._setup_mgr._current_session_str()
         print(f"[CCGReviewUI] group_discard: {gname!r} -= {pair} @ session={sess!r}")
         g = ui._sel_data._groups.get(gname, {})
         if isinstance(g, set):
             g.discard(pair)
         elif sess in g:
             g[sess].discard(pair)
-
-    # ------------------------------------------------------------------
-    # Layout
-    # ------------------------------------------------------------------
 
     def _any_group_header_names(self) -> list[str]:
         """Sorted user group names (tags) for ``any``-mode list sections."""
@@ -972,14 +962,14 @@ class GroupManager:
         ui = self._ui
         lbl = ui._type_label(ui.key)
         out: set[tuple] = set()
-        for k in ui.cd.data.keys():
+        for k in ui.cd.ptr.keys():
             if ui._type_label(k) != lbl:
                 continue
             sess = str(k.session)
-            valid = ui._all_inds_set_for_ptr(ui.cd.data.get(k))
+            valid = ui._all_inds_set_for_ptr(ui.cd.ptr.get(k))
             if not valid:
                 continue
-            for pair in ui._group_pairs(gname, session=sess):
+            for pair in ui._group_mgr._group_pairs(gname, session=sess):
                 r, t = int(pair[0]), int(pair[1])
                 if (r, t) in valid:
                     out.add((sess, r, t))
@@ -990,15 +980,15 @@ class GroupManager:
         ui = self._ui
         lbl = ui._type_label(ui.key)
         seen, seen_id = [], set()
-        for nk in ui._real_nd_keys_ordered():
-            ckey = ui._type_key_for_nd(nk)
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
+            ckey = ui._sess_mgr._type_key_for_nd(nk)
             if ckey is None or ui._type_label(ckey) != lbl:
                 continue
             sess = str(ckey.session)
-            ptr = ui.cd.data.get(ckey)
+            ptr = ui.cd.ptr.get(ckey)
             valid = ui._all_inds_set_for_ptr(ptr)
             if any((int(a), int(b)) in valid
-                   for a, b in ui._group_pairs(gname, session=sess)):
+                   for a, b in ui._group_mgr._group_pairs(gname, session=sess)):
                 nid = id(nk)
                 if nid not in seen_id:
                     seen.append(nk)
@@ -1012,18 +1002,18 @@ class GroupManager:
             return
         lbl = ui._type_label(ui.key)
         dead = ui.deleted_inds
-        for nk in ui._real_nd_keys_ordered():
-            ckey = ui._type_key_for_nd(nk)
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
+            ckey = ui._sess_mgr._type_key_for_nd(nk)
             if ckey is None or ui._type_label(ckey) != lbl:
                 continue
             sess = str(ckey.session)
-            ptr = ui.cd.data.get(ckey)
+            ptr = ui.cd.ptr.get(ckey)
             valid = ui._all_inds_set_for_ptr(ptr)
-            pairs = ui._group_pairs(gname, session=sess)
+            pairs = ui._group_mgr._group_pairs(gname, session=sess)
             if not pairs:
                 continue
             # Precompute CCG bounds to skip stale pairs (pointer may outlive data)
-            _cd = ui.cd._ccg.get(ckey.nd()) if hasattr(ui.cd, '_ccg') else None
+            _cd = ui.cd.ccg.get(ckey.nd()) if hasattr(ui.cd, 'ccg') else None
             _ccg_sh = (_cd.ccg.shape if _cd is not None and hasattr(_cd, 'ccg')
                        and _cd.ccg is not None else None)
             for r, t in sorted((int(a), int(b)) for a, b in pairs):
@@ -1046,7 +1036,7 @@ class GroupManager:
             ui.refresh_lists()
             return
 
-        nds = ui._any_nd_keys_for_group(gname)
+        nds = ui._group_mgr._any_nd_keys_for_group(gname)
 
         def _finish_expand():
             ui._any_expanded_group_tags.add(gname)
@@ -1060,14 +1050,14 @@ class GroupManager:
             if idx >= len(nds):
                 _finish_expand()
                 return
-            ui._ensure_session_loaded(nds[idx], on_loaded=lambda: _chain(idx + 1))
+            ui._sess_mgr._ensure_session_loaded(nds[idx], on_loaded=lambda: _chain(idx + 1))
 
         _chain(0)
 
     def _pair_in_group(self, pair, group_name: str) -> bool:
         ui = self._ui
         sess, p2 = ui._pair_sess_rt(pair)
-        return p2 in ui._group_pairs(group_name, session=sess)
+        return p2 in ui._group_mgr._group_pairs(group_name, session=sess)
 
     def _save_groups_export(self):
         """Write groups_export.json (v4.0): registry + cross-session pair assignments.
@@ -1080,7 +1070,7 @@ class GroupManager:
         ui = self._ui
         ui._group_mgr._sync_registry_from_groups()
         export_path = os.path.join(ui._sel_save_dir, 'groups_export.json')
-        cur_sess = ui._current_session_str()
+        cur_sess = ui._setup_mgr._current_session_str()
         any_mode = getattr(ui, '_session_any_mode', False)
 
         # In single-session mode: load existing file to preserve other sessions' data
@@ -1127,7 +1117,7 @@ class GroupManager:
                 for sess, pp in existing_pairs.get(gid_str, {}).items():
                     if sess != cur_sess:
                         g_pairs[sess] = pp
-                cur_pairs = sorted(ui._group_pairs(gname, cur_sess))
+                cur_pairs = sorted(ui._group_mgr._group_pairs(gname, cur_sess))
                 if cur_pairs:
                     g_pairs[cur_sess] = [[int(r), int(c)] for r, c in cur_pairs]
             if g_pairs:
@@ -1171,7 +1161,7 @@ class GroupManager:
                 ui._group_mgr._sync_registry_from_groups()
                 # Rewrite as v4.0 immediately so future loads use new format
                 try:
-                    ui._save_groups_export()
+                    ui._group_mgr._save_groups_export()
                     print("[CCGReviewUI] groups_export.json migrated to v4.0")
                 except Exception as exc:
                     print(f"[CCGReviewUI] migration save failed: {exc}")
@@ -1182,12 +1172,12 @@ class GroupManager:
                   f"{n_pairs} pair-session entries")
             # Refresh any UI that depends on group/hotkey state.
             try:
-                ui._rebuild_groups_menu()
+                ui._group_mgr._rebuild_groups_menu()
             except Exception:
                 pass
             try:
                 if hasattr(ui, '_hotkeys_bar'):
-                    ui._refresh_hotkeys_bar()
+                    ui._group_mgr._refresh_hotkeys_bar()
             except Exception:
                 pass
         except Exception as exc:
@@ -1265,7 +1255,7 @@ class GroupManager:
                             ui._sel_data._groups[g][sess] = pairs
                             added = True
         if added:
-            ui._save_groups_export()
+            ui._group_mgr._save_groups_export()
             print("[CCGReviewUI] groups_export.json updated with groups from per-session files")
 
     def _restore_groups_from_data(self, data: dict, restore_hotkeys: bool = False):
@@ -1277,7 +1267,7 @@ class GroupManager:
         """
         ui = self._ui
         raw_groups = data.get('groups', {})
-        file_session = data.get('session', ui._current_session_str())
+        file_session = data.get('session', ui._setup_mgr._current_session_str())
         for g, val in raw_groups.items():
             if isinstance(val, list):
                 pairs = {file_session: set(tuple(int(v) for v in p) for p in val)}
@@ -1300,7 +1290,7 @@ class GroupManager:
         for k, v in notes.items():
             if k not in ui._sel_data._group_notes:
                 ui._sel_data._group_notes[k] = v
-        ui._rebuild_groups_menu()
+        ui._group_mgr._rebuild_groups_menu()
 
     def _pair_group_label(self, inds) -> str:
         """Return a short label like '[G1,G2]' for the groups this pair belongs to."""
@@ -1309,7 +1299,7 @@ class GroupManager:
         pair = tuple(int(x) for x in pair)
         labels = []
         for gname in ui._sel_data._groups:
-            if pair not in ui._group_pairs(gname, session=sess):
+            if pair not in ui._group_mgr._group_pairs(gname, session=sess):
                 continue
             if is_special_group(gname):
                 labels.append('*' + gname[len(_SPECIAL_PREFIX):])
@@ -1325,8 +1315,8 @@ class GroupManager:
         if group_name not in ui._sel_data._groups:
             ui._sel_data._groups[group_name] = {}
         sess, p2 = ui._pair_sess_rt(pair)
-        if p2 in ui._group_pairs(group_name, session=sess):
-            ui._group_discard_pair(group_name, p2, session=sess)
+        if p2 in ui._group_mgr._group_pairs(group_name, session=sess):
+            ui._group_mgr._group_discard_pair(group_name, p2, session=sess)
         else:
             ui._group_mgr._group_add_pair(group_name, p2, session=sess)
         # Preserve scroll positions so the list doesn't jump to the top
@@ -1345,12 +1335,12 @@ class GroupManager:
         ui = self._ui
         if group_name not in ui._sel_data._groups:
             ui._sel_data._groups[group_name] = {}
-        all_in = all(ui._pair_in_group(p, group_name) for p in pairs)
+        all_in = all(ui._group_mgr._pair_in_group(p, group_name) for p in pairs)
         # action = "REMOVE" if all_in else "ADD"
         if all_in:
             for p in pairs:
                 s2, p2 = ui._pair_sess_rt(p)
-                ui._group_discard_pair(group_name, p2, session=s2)
+                ui._group_mgr._group_discard_pair(group_name, p2, session=s2)
         else:
             for p in pairs:
                 s2, p2 = ui._pair_sess_rt(p)
@@ -1389,7 +1379,7 @@ class GroupManager:
                                     parent=win)
                 return
             ui._sel_data._groups[full] = {}
-            ui._rebuild_groups_menu()
+            ui._group_mgr._rebuild_groups_menu()
             ui.refresh_lists()
             win.destroy()
 
@@ -1430,7 +1420,7 @@ class GroupManager:
                 ui._sel_data._group_hotkeys[new_name] = ui._sel_data._group_hotkeys.pop(old_name)
         if old_name in ui._sel_data._group_notes:
             ui._sel_data._group_notes[new_name] = ui._sel_data._group_notes.pop(old_name)
-        ui._rebuild_groups_menu()
+        ui._group_mgr._rebuild_groups_menu()
         ui.refresh_lists()
         if win:
             win.destroy()
@@ -1444,7 +1434,7 @@ class GroupManager:
         ui._sel_data._groups.pop(name, None)
         ui._sel_data._group_hotkeys.pop(name, None)
         ui._sel_data._group_notes.pop(name, None)
-        ui._rebuild_groups_menu()
+        ui._group_mgr._rebuild_groups_menu()
         ui.refresh_lists()
         if win:
             win.destroy()
@@ -1452,16 +1442,13 @@ class GroupManager:
             if ui._sel_data._groups:
                 ui._manage_groups_dialog()
 
-    # ------------------------------------------------------------------
-    # Auto-classification
-
     def _set_group_hotkey(self, group_name, key_str):
         """Assign hotkey: single digit 1–9/0 or single letter a–z."""
         ui = self._ui
         key_str = key_str.strip().lower()
         if not key_str:
             ui._sel_data._group_hotkeys.pop(group_name, None)
-            ui._rebuild_groups_menu()
+            ui._group_mgr._rebuild_groups_menu()
             return
         valid_digits = [str(i) for i in range(1, 10)] + ['0']
         if key_str not in valid_digits and not (len(key_str) == 1 and key_str.isalpha()):
@@ -1472,7 +1459,7 @@ class GroupManager:
             if k == key_str and g != group_name:
                 del ui._sel_data._group_hotkeys[g]
         ui._sel_data._group_hotkeys[group_name] = key_str
-        ui._rebuild_groups_menu()
+        ui._group_mgr._rebuild_groups_menu()
 
     def _rebuild_groups_menu(self):
         """Refresh the dynamic part of the Groups menu."""
@@ -1491,17 +1478,17 @@ class GroupManager:
         ui.network_panel.refresh_group_buttons()
         if (hasattr(ui, '_hotkeys_bar') and
                 ui._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get()):
-            ui._refresh_hotkeys_bar()
+            ui._group_mgr._refresh_hotkeys_bar()
 
     def _select_group(self, group_name):
         """Navigate to the first pair in the group."""
         ui = self._ui
-        pairs = ui._group_pairs(group_name)
+        pairs = ui._group_mgr._group_pairs(group_name)
         if not pairs:
             return
         first = sorted(pairs)[0]
-        ui.current_pair_idx = ui.get_pair_index(first)
-        ui.update_plot()
+        ui.current_pair_idx = ui._plot_mgr.get_pair_index(first)
+        ui._plot_mgr.update_plot()
         ui.network_panel.draw()
 
     def _group_hotkey_handler(self, key_str: str, advance: bool = True):
@@ -1565,11 +1552,11 @@ class GroupManager:
 
             multi = len(highlighted) > 1
             changed = set()
-            ui._push_undo()
+            ui._sel_mgr._push_undo()
 
             for pair in highlighted:
-                was_in_group = ui._pair_in_group(pair, gname)
-                ui._toggle_pair_group(pair, gname)
+                was_in_group = ui._group_mgr._pair_in_group(pair, gname)
+                ui._group_mgr._toggle_pair_group(pair, gname)
                 if getattr(ui, '_session_any_mode', False):
                     changed.add(pair)
                     continue
@@ -1582,7 +1569,7 @@ class GroupManager:
                     # Lost a tag → move back to available if no tags remain
                     if pair in ui.selected_inds:
                         has_groups = any(
-                            ui._pair_in_group(pair, g)
+                            ui._group_mgr._pair_in_group(pair, g)
                             for g in ui._sel_data._groups
                             if not g.startswith('__')
                         )
@@ -1591,7 +1578,7 @@ class GroupManager:
                             changed.add(pair)
 
             ui.refresh_lists()
-            ui._highlight_changed_pairs(changed or {current_pair})
+            ui._plot_mgr._highlight_changed_pairs(changed or {current_pair})
             if advance:
                 next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
                 ui.current_pair_idx = next_idx
@@ -1599,11 +1586,11 @@ class GroupManager:
             else:
                 # No advance: keep cursor on current pair after list rebuild
                 ui._select_pair_in_list(current_pair)
-            ui.update_plot()
+            ui._plot_mgr.update_plot()
             ui.network_panel.draw()
             return
         # No group assigned to this hotkey — show temporary warning
-        ui._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
+        ui._sel_mgr._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
 
     def _export_groups(self):
         """Export all group definitions to a standalone JSON file."""
@@ -1623,7 +1610,7 @@ class GroupManager:
         groups = {}
         for g, sessions_dict in ui._sel_data._groups.items():
             if isinstance(sessions_dict, set):
-                groups[g] = {ui._current_session_str():
+                groups[g] = {ui._setup_mgr._current_session_str():
                              [[int(r), int(c)] for r, c in sorted(sessions_dict)]}
             else:
                 groups[g] = {sess: [[int(r), int(c)] for r, c in sorted(pairs)]
@@ -1634,7 +1621,7 @@ class GroupManager:
             'notes': dict(ui._sel_data._group_notes),
         }
         with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=SelectionPersistenceManager._json_default)
+            json.dump(data, f, indent=2, default=json_numpy_default)
         print(f"[CCGReviewUI] groups exported → {path}")
 
     def _import_groups(self):
@@ -1657,7 +1644,7 @@ class GroupManager:
         for gname, val in imported_groups.items():
             if isinstance(val, list):
                 # Flat format → current session
-                sess = ui._current_session_str()
+                sess = ui._setup_mgr._current_session_str()
                 for p in val:
                     ui._group_mgr._group_add_pair(gname, tuple(int(v) for v in p), sess)
             elif isinstance(val, dict):
@@ -1673,13 +1660,9 @@ class GroupManager:
         for gname, note in data.get('notes', {}).items():
             if gname not in ui._sel_data._group_notes:
                 ui._sel_data._group_notes[gname] = note
-        ui._rebuild_groups_menu()
+        ui._group_mgr._rebuild_groups_menu()
         ui.refresh_lists()
         print(f"[CCGReviewUI] groups imported from {path}")
-
-    # ------------------------------------------------------------------
-    # Versioning helpers (Part II.3)
-    # ------------------------------------------------------------------
 
     def _show_hotkeys_dialog(self):
         """Show a dialog listing all keyboard shortcuts."""
@@ -1699,15 +1682,13 @@ class GroupManager:
         )
         messagebox.showinfo("Keyboard Shortcuts", hotkeys_text)
 
-    # ── Tool-strip row ─────────────────────────────────────────────────
-
     def setup_groups_menu(self, menubar):
         """Groups menu: create / manage pair groups."""
         ui = self._ui
         ui._groups_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Groups", menu=ui._groups_menu)
         ui._groups_menu.add_command(label="Create group…",
-                                      command=ui._create_group_dialog)
+                                      command=ui._group_mgr._create_group_dialog)
         ui._groups_menu.add_command(label="Manage groups…",
                                       command=ui._manage_groups_dialog)
         ui._groups_menu.add_command(label="Merge groups…",
@@ -1773,7 +1754,7 @@ class GroupManager:
                            relief=tk.RIDGE, borderwidth=1)
             lbl.pack(side=tk.LEFT, padx=2, pady=2)
             lbl.bind('<Button-1>',
-                     lambda e, g=gname: ui._select_group(g))
+                     lambda e, g=gname: ui._group_mgr._select_group(g))
             lbl.bind('<Double-Button-1>',
                      lambda e, g=gname: self._group_chip_double_click(g))
             ui._hotkeys_bar_labels.append(lbl)
@@ -1781,7 +1762,7 @@ class GroupManager:
     def _group_chip_double_click(self, group_name: str):
         """Draw a random example pair from group_name; flash chip red if empty."""
         ui = self._ui
-        pairs = ui._group_pairs(group_name)
+        pairs = ui._group_mgr._group_pairs(group_name)
         if not pairs:
             # Flash the chip label red for 0.3 s
             for lbl in ui._hotkeys_bar_labels:
@@ -1791,11 +1772,9 @@ class GroupManager:
                     ui.root.after(300, lambda l=lbl, c=orig_fg: l.config(fg=c))
             return
         chosen = random.choice(sorted(pairs))
-        ui.current_pair_idx = ui.get_pair_index(chosen)
-        ui.update_plot()
+        ui.current_pair_idx = ui._plot_mgr.get_pair_index(chosen)
+        ui._plot_mgr.update_plot()
         ui.network_panel.draw()
-
-    # ── Left panel ─────────────────────────────────────────────────────
 
 class SelectionPersistenceManager:
     """Selection save/load, undo/redo, history, and bookmarks for CCGReviewUI."""
@@ -1815,10 +1794,10 @@ class SelectionPersistenceManager:
                               command=ui._sel_mgr._load_selection_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Export as PNG…",
-                              command=ui._export_current_view)
+                              command=ui._export_mgr._export_current_view)
         file_menu.add_separator()
         file_menu.add_command(label="Clear bookmarks",
-                              command=ui._clear_bookmarks)
+                              command=ui._sel_mgr._clear_bookmarks)
 
     def _selections_menu_close(self):
         ui = self._ui
@@ -1853,12 +1832,12 @@ class SelectionPersistenceManager:
                               selected=state[0], deleted=state[2] if len(state) > 2 else set())
         if len(state) > 3:
             _merge_groups_into(ui._sel_data._groups, state[3])
-            ui._rebuild_groups_menu()
+            ui._group_mgr._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         ui.refresh_lists()
-        ui._highlight_changed_pairs(changed)
+        ui._plot_mgr._highlight_changed_pairs(changed)
         ui._flush_deleted_to_store()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
         ui.network_panel.draw()
         ui._refresh_stats()
 
@@ -1874,12 +1853,12 @@ class SelectionPersistenceManager:
                               selected=state[0], deleted=state[2] if len(state) > 2 else set())
         if len(state) > 3:
             _merge_groups_into(ui._sel_data._groups, state[3])
-            ui._rebuild_groups_menu()
+            ui._group_mgr._rebuild_groups_menu()
         changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
         ui.refresh_lists()
-        ui._highlight_changed_pairs(changed)
+        ui._plot_mgr._highlight_changed_pairs(changed)
         ui._flush_deleted_to_store()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
         ui.network_panel.draw()
         ui._refresh_stats()
 
@@ -1889,10 +1868,6 @@ class SelectionPersistenceManager:
         for listbox in (ui.unselected_list, ui.selected_list):
             for idx in range(listbox.size()):
                 listbox.itemconfig(idx, background='', foreground='')
-
-    # ------------------------------------------------------------------
-    # Pair lists — bridges to LeftPanel
-    # ------------------------------------------------------------------
 
     def _reapply_bookmark_list_styles(self):
         ui = self._ui
@@ -1992,7 +1967,7 @@ class SelectionPersistenceManager:
         try:
             # Always load pair selections from the session-specific file;
             # never load groups from it (they may be stale).
-            ui._load_selection_from_file(latest_path,
+            ui._sel_mgr._load_selection_from_file(latest_path,
                                            restore_groups=False,
                                            _skip_redraw=True)
         except Exception as exc:
@@ -2010,16 +1985,16 @@ class SelectionPersistenceManager:
         ui = self._ui
         if getattr(ui, '_session_any_mode', False):
             try:
-                ui._autosave_all_sessions_for_current_type()
+                ui._sel_mgr._autosave_all_sessions_for_current_type()
             except Exception as exc:
                 print(f"[CCGReviewUI] any-session autosave failed: {exc}")
             try:
                 if ui._sel_data._groups:
-                    ui._save_groups_export()
+                    ui._group_mgr._save_groups_export()
             except Exception:
                 traceback.print_exc()
             try:
-                ui._save_ui_state()
+                ui._settings_mgr.save_ui_state()
             except Exception:
                 traceback.print_exc()
             return
@@ -2058,15 +2033,15 @@ class SelectionPersistenceManager:
         old_neurons = ui.neurons
         old_ns = ui.n_segments
         try:
-            for nk in ui._real_nd_keys_ordered():
-                ckey = ui._type_key_for_nd(nk)
+            for nk in ui._sess_mgr._real_nd_keys_ordered():
+                ckey = ui._sess_mgr._type_key_for_nd(nk)
                 if ckey is None or ui._type_label(ckey) != lbl:
                     continue
                 sess = str(ckey.session)
                 if sess in saved_sess:
                     continue
                 saved_sess.add(sess)
-                ui._bind_context_to_type_key(ckey)
+                ui._sess_mgr._bind_context_to_type_key(ckey)
                 try:
                     ui._sel_mgr._autosave_to_history_fixed()
                 except Exception as exc:
@@ -2085,22 +2060,13 @@ class SelectionPersistenceManager:
                 hl = getattr(ui, '_any_pair_handle_list', None) or []
                 if (getattr(ui.network_panel, '_focused_pair', None) is None
                         and 0 <= idx < len(hl)):
-                    ui._sync_any_plot_context(idx)
+                    ui._sess_mgr._sync_any_plot_context(idx)
 
     def _sel_version_path(self, name: str) -> str:
         ui = self._ui
         safe = name.replace('/', '_').replace('\\', '_').replace(' ', '_')
         session_tag = getattr(ui.key, 'session', 'sess')
         return os.path.join(ui._sel_save_dir, f"{session_tag}__{safe}.json")
-
-    @staticmethod
-    def _json_default(obj):
-        """JSON encoder that converts numpy integer/float types to Python scalars."""
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
 
     def _enforce_label_selection_integrity_live(self):
         """If a pair has labels/tags/notes, force it into selected."""
@@ -2155,7 +2121,7 @@ class SelectionPersistenceManager:
         for pair in missing:
             candidates = []
             for kstr, tk_ in key_by_str.items():
-                ptr = ui.cd.data.get(tk_)
+                ptr = ui.cd.ptr.get(tk_)
                 valid = ui._all_inds_set_for_ptr(ptr)
                 if pair in valid:
                     candidates.append(kstr)
@@ -2268,12 +2234,12 @@ class SelectionPersistenceManager:
                 data = m.apply(data)
 
         selections_by_type = data.get('selections', {})
-        type_keys = ui._available_type_keys(ui.key.nd())
+        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
         selections_by_type = self._enforce_label_selection_integrity_file(
             selections_by_type, data.get('pair_tags', {}), type_keys)
         saved_keys = set(selections_by_type.keys())
         for tk_ in type_keys:
-            ptr = ui.cd.data.get(tk_)
+            ptr = ui.cd.ptr.get(tk_)
             if ptr is None:
                 continue
             pairs = selections_by_type.get(str(tk_), [])
@@ -2288,7 +2254,7 @@ class SelectionPersistenceManager:
         print(f"[load] ui.key={str(ui.key)!r}, cur_sel count={len(cur_sel)}, saved keys={sorted(selections_by_type.keys())}")
         selected = set(tuple(int(v) for v in p) for p in cur_sel)
 
-        ui._push_undo()
+        ui._sel_mgr._push_undo()
         current_available = set(map(tuple, ui.all_inds))
         print(f"[load] available={len(current_available)}, selected={len(selected)}, overlap={len(selected & current_available)}")
         missing = selected - current_available
@@ -2303,7 +2269,7 @@ class SelectionPersistenceManager:
                     _admit_pair(ui._sel_data, pair)
                 current_available = set(map(tuple, ui.all_inds))
         elif missing:
-            _cd = ui.cd._ccg.get(ui.key.nd()) if hasattr(ui.cd, '_ccg') else ui.ccg_data
+            _cd = ui.cd.ccg.get(ui.key.nd()) if hasattr(ui.cd, 'ccg') else ui.ccg_data
             _n = (_cd.ccg.shape[1] if _cd is not None
                   and getattr(_cd, 'ccg', None) is not None else None)
             for pair in missing:
@@ -2323,7 +2289,7 @@ class SelectionPersistenceManager:
         # Load pair_tags for this session — always reset to avoid stale cross-session tags
         ui._sel_data._pair_tags = {}
         raw_tags = data.get('pair_tags', {})
-        cur_sess = ui._current_session_str()
+        cur_sess = ui._setup_mgr._current_session_str()
         for key_str, tdata in raw_tags.items():
             parts = key_str.split(',')
             if len(parts) != 2:
@@ -2391,7 +2357,7 @@ class SelectionPersistenceManager:
                 ui._load_selection_dialog()   # reopen with updated list
                 return
             try:
-                ui._load_selection_from_file(path)
+                ui._sel_mgr._load_selection_from_file(path)
                 win.destroy()
             except Exception as ex:
                 messagebox.showerror("Load selection",
@@ -2452,12 +2418,12 @@ class SelectionPersistenceManager:
             return
 
         # Count total selections across all types
-        type_keys = ui._available_type_keys(ui.key.nd())
+        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
         total = sum(
-            len(ui.cd.data[tk_].selected_inds)
+            len(ui.cd.ptr[tk_].selected_inds)
             for tk_ in type_keys
-            if ui.cd.data.get(tk_) is not None
-            and getattr(ui.cd.data[tk_], 'selected_inds', None) is not None
+            if ui.cd.ptr.get(tk_) is not None
+            and getattr(ui.cd.ptr[tk_], 'selected_inds', None) is not None
         )
 
         # Groups were exported via _save_all_state; keep message for UI feedback.
@@ -2535,10 +2501,10 @@ class SelectionPersistenceManager:
                 if ui.selected_inds else None
             )
         # Collect selections for every type key in this session
-        type_keys = ui._available_type_keys(ui.key.nd())
+        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
         selections_by_type = {}
         for tk_ in type_keys:
-            ptr = ui.cd.data.get(tk_)
+            ptr = ui.cd.ptr.get(tk_)
             if ptr is None:
                 continue
             sel = getattr(ptr, 'selected_inds', None)
@@ -2549,7 +2515,7 @@ class SelectionPersistenceManager:
         # Serialize pair_tags: include group membership (names) for this session.
         # NOTE: We intentionally store group NAMES (not numeric IDs) in session save
         # files. IDs remain internal to groups_export.json only.
-        cur_sess = ui._current_session_str()
+        cur_sess = ui._setup_mgr._current_session_str()
         pair_tags_ser: dict = {}
         # Collect all pairs that have either tags/notes OR group membership
         all_annotated = set(ui._sel_data._pair_tags.keys())
@@ -2579,7 +2545,7 @@ class SelectionPersistenceManager:
         ui._flush_deleted_to_store()
         deleted_by_type = {}
         for tk_ in type_keys:
-            ptr = ui.cd.data.get(tk_)
+            ptr = ui.cd.ptr.get(tk_)
             valid = ui._all_inds_set_for_ptr(ptr)
             raw = set(ui._pair_deleted_store.get(str(tk_), set())) & valid
             deleted_by_type[str(tk_)] = [[int(r), int(c)] for r, c in sorted(raw)]
@@ -2682,12 +2648,12 @@ class SelectionPersistenceManager:
                 return False
         try:
             if ui._sel_data._groups:
-                ui._save_groups_export()
+                ui._group_mgr._save_groups_export()
         except Exception:
             # never block save on groups export
             traceback.print_exc()
         try:
-            ui._save_ui_state()
+            ui._settings_mgr.save_ui_state()
         except Exception:
             traceback.print_exc()
         return True
@@ -2731,8 +2697,8 @@ class MultiSessionManager:
             if cd is None:
                 cd = ui.ccg_data
         else:
-            cd = (ui.cd._ccg.get(nd_key)
-                  if hasattr(ui.cd, "_ccg") else ui.ccg_data)
+            cd = (ui.cd.ccg.get(nd_key)
+                  if hasattr(ui.cd, "ccg") else ui.ccg_data)
         all_seg = ui.n_segments
         for ref_tgt in ui.all_inds:
             ref, tgt = int(ref_tgt[0]), int(ref_tgt[1])
@@ -2767,10 +2733,6 @@ class MultiSessionManager:
             ui._same_scale_mode = None
         ui._refresh()
 
-    # ------------------------------------------------------------------
-    # On-demand jitter
-    # ------------------------------------------------------------------
-
     def _sanitize_sess_slug(self, sess: str) -> str:
         s = re.sub(r'[^\w.\-]+', '_', str(sess))[:48]
         return s or 'sess'
@@ -2778,27 +2740,27 @@ class MultiSessionManager:
     def _all_nd_keys(self) -> list:
         """Return unique nd_keys (one per session) across the dataset.
 
-        Prefers ``cd._ccg`` (keyed by nd_keys directly) so that ALL sessions
-        are represented even when some have no significant pairs in ``cd.data``.
-        Falls back to enumerating ``cd.data`` if ``_ccg`` is unavailable.
+        Prefers ``cd.ccg`` (keyed by nd_keys directly) so that ALL sessions
+        are represented even when some have no significant pairs in ``cd.ptr``.
+        Falls back to enumerating ``cd.ptr`` if ``ccg`` is unavailable.
         """
         ui = self._ui
         seen, seen_str = [], set()
-        # Primary source: _ccg is keyed by nd_keys, one per session
-        ccg_source = getattr(ui.cd, '_ccg', None) or {}
+        # Primary source: ccg is keyed by nd_keys, one per session
+        ccg_source = getattr(ui.cd, 'ccg', None) or {}
         for nk in ccg_source.keys():
             s = str(nk)
             if s not in seen_str:
                 seen.append(nk)
                 seen_str.add(s)
-        # Secondary: pick up any sessions present only in cd.data
-        for k in ui.cd.data.keys():
+        # Secondary: pick up any sessions present only in cd.ptr
+        for k in ui.cd.ptr.keys():
             nk = k.nd()
             s = str(nk)
             if s not in seen_str:
                 seen.append(nk)
                 seen_str.add(s)
-        # Tertiary: if neither _ccg nor cd.data are populated (lazy-load case),
+        # Tertiary: if neither ccg nor cd.ptr are populated (lazy-load case),
         # enumerate from the neuron-dataset edge_times which is always available
         if not seen:
             for nk in getattr(getattr(ui.cd, 'nd', None), 'edge_times', {}).keys():
@@ -2823,13 +2785,13 @@ class MultiSessionManager:
         """Pick a data Key matching *nd_key* and the current type label (any-mode)."""
         ui = self._ui
         lbl = ui._type_label(ui.key)
-        matches = [k for k in ui.cd.data.keys()
+        matches = [k for k in ui.cd.ptr.keys()
                    if k.nd() == nd_key and ui._type_label(k) == lbl]
         return matches[0] if matches else None
 
     def _nd_key_for_session_str(self, sess_str: str):
         ui = self._ui
-        for nk in ui._real_nd_keys_ordered():
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
             if str(getattr(nk, 'session', nk)) == sess_str:
                 return nk
         return None
@@ -2862,7 +2824,7 @@ class MultiSessionManager:
         ui = self._ui
         by_lbl: dict = {}
         keys_sorted = sorted(
-            ui.cd.data.keys(),
+            ui.cd.ptr.keys(),
             key=lambda k: (str(getattr(k, 'session', '')), ui._type_label(k)))
         for k in keys_sorted:
             lbl = ui._type_label(k)
@@ -2876,18 +2838,18 @@ class MultiSessionManager:
             ui._any_pair_handle_list = []
             return
         handles: list[tuple] = []
-        for gname in ui._any_group_header_names():
-            handles.extend(ui._any_iter_pairs_for_group(gname))
+        for gname in ui._group_mgr._any_group_header_names():
+            handles.extend(ui._group_mgr._any_iter_pairs_for_group(gname))
         ui._any_pair_handle_list = handles
 
     def _any_load_deleted_aggregate(self):
         ui = self._ui
         lbl = ui._type_label(ui.key)
         deleted: set = set()
-        for k in ui.cd.data.keys():
+        for k in ui.cd.ptr.keys():
             if ui._type_label(k) != lbl:
                 continue
-            ptr = ui.cd.data.get(k)
+            ptr = ui.cd.ptr.get(k)
             valid = ui._all_inds_set_for_ptr(ptr)
             raw = set(ui._pair_deleted_store.get(str(k), set())) & valid
             sess = str(k.session)
@@ -2904,7 +2866,7 @@ class MultiSessionManager:
         by_key: dict[str, set] = _defaultdict(set)
         for trip in ui.deleted_inds:
             s, r, t = trip[0], int(trip[1]), int(trip[2])
-            for k in ui.cd.data.keys():
+            for k in ui.cd.ptr.keys():
                 if ui._type_label(k) != lbl or str(k.session) != s:
                     continue
                 by_key[str(k)].add((r, t))
@@ -2926,7 +2888,7 @@ class MultiSessionManager:
             messagebox.showwarning("All sessions", "No connection types in dataset.")
             ui._session_all_mode = False
             try:
-                ui._session_var.set(ui._session_label(ui.key.nd()))
+                ui._session_var.set(ui._sess_mgr._session_label(ui.key.nd()))
             except Exception:
                 pass
             return
@@ -2935,13 +2897,13 @@ class MultiSessionManager:
         else:
             ui.key = ui._type_keys_list[0]
             ui._type_var.set(type_labels[0])
-        ui._bind_context_to_type_key(ui.key)
+        ui._sess_mgr._bind_context_to_type_key(ui.key)
         self._any_load_deleted_aggregate()
         ui.current_pair_idx = 0
-        ui.current_segment = ui.n_segments
+        ui.current_segment = _ALL_SEGS
         ui.segment_combo['values'] = ui.ccg_ptr.segment_names + [_ALL_SEGS]
         ui.segment_var.set(_ALL_SEGS)
-        ui._bind_custom_segments_to_session(str(ui.key.session))
+        ui._custom_mgr._bind_custom_segments_to_session(str(ui.key.session))
         # Default sort: sort-by-tag when entering All mode
         try:
             lp = ui.left_container.left_panel
@@ -2965,7 +2927,7 @@ class MultiSessionManager:
         # ``selected_inds`` was (session, ref, tgt) triples; single-session code expects
         # (ref, tgt) only — reload from the bound pointer before _switch_key / autosave.
         try:
-            ptr = ui.cd.data.get(ui.key) if getattr(ui, 'key', None) is not None else None
+            ptr = ui.cd.ptr.get(ui.key) if getattr(ui, 'key', None) is not None else None
             _avail = set(map(tuple, ui.all_inds))
             _sel = (set(map(tuple, ptr.selected_inds))
                     if ptr is not None and getattr(ptr, 'selected_inds', None) is not None
@@ -2975,14 +2937,14 @@ class MultiSessionManager:
         except Exception:
             pass
         try:
-            ui._bind_custom_segments_to_session(str(ui.key.session))
+            ui._custom_mgr._bind_custom_segments_to_session(str(ui.key.session))
         except Exception:
             pass
 
     def _bind_context_to_type_key(self, tk):
         """Point ccg_pointer / ccg_data / neurons at *tk* without touching triple sets."""
         ui = self._ui
-        ptr = ui.cd.data.get(tk)
+        ptr = ui.cd.ptr.get(tk)
         nd_key = tk.nd()
         ui.key = tk
         ui.ccg_ptr = ptr
@@ -2996,7 +2958,7 @@ class MultiSessionManager:
                 and ui.cd._ccg_highres.get(nd_key) is not None):
             ui.ccg_data = ui.cd._ccg_highres[nd_key]
         else:
-            ui.ccg_data = ui.cd._ccg.get(nd_key)
+            ui.ccg_data = ui.cd.ccg.get(nd_key)
         try:
             ui.neurons = (ui.cd.nd.data[nd_key]
                             if getattr(ui.cd, 'nd', None) is not None else None)
@@ -3018,7 +2980,7 @@ class MultiSessionManager:
         prev_sess = str(getattr(ui.key, 'session', '') or '')
         if (ui.key == ckey and ui.ccg_data is not None
                 and getattr(ui.ccg_ptr, 'inds2', None) is not None):
-            ui._bind_custom_segments_to_session(sess)
+            ui._custom_mgr._bind_custom_segments_to_session(sess)
             ui._clamp_current_segment_for_session()
             try:
                 ui._update_segment_label()
@@ -3026,29 +2988,19 @@ class MultiSessionManager:
                 pass
             return
         # Save current segment name before switching so it can be restored by name
-        _saved_seg_name = None
-        try:
-            seg = int(ui.current_segment)
-            if seg == ui.n_segments:
-                _saved_seg_name = _ALL_SEGS
-            elif 0 <= seg < len(ui.ccg_ptr.segment_names):
-                _saved_seg_name = ui.ccg_ptr.segment_names[seg]
-        except Exception:
-            pass
+        _saved_seg_name = ui.current_segment  # already a str
 
         if prev_sess != sess:
             # Custom CCG data are session-specific: show that session's segment chips.
-            ui._bind_custom_segments_to_session(sess)
-        ui._bind_context_to_type_key(ckey)
+            ui._custom_mgr._bind_custom_segments_to_session(sess)
+        ui._sess_mgr._bind_context_to_type_key(ckey)
         ui._clamp_current_segment_for_session()
 
         # Restore segment by name so switching pairs doesn't reset the segment
         if _saved_seg_name is not None:
             try:
-                if _saved_seg_name == _ALL_SEGS:
-                    ui.current_segment = ui.n_segments
-                elif _saved_seg_name in ui.ccg_ptr.segment_names:
-                    ui.current_segment = ui.ccg_ptr.segment_names.index(_saved_seg_name)
+                if _saved_seg_name in ui._all_segment_names():
+                    ui.current_segment = _saved_seg_name
                 ui._clamp_current_segment_for_session()
             except Exception:
                 pass
@@ -3067,7 +3019,7 @@ class MultiSessionManager:
         if nd_key is _ALL_SESSION_MARKER:
             return self._available_type_keys_any()
         nd_session = nd_key.session
-        return [k for k in ui.cd.data.keys() if k.nd().session == nd_session]
+        return [k for k in ui.cd.ptr.keys() if k.nd().session == nd_session]
 
     def _on_session_change(self, event):
         ui = self._ui
@@ -3094,10 +3046,10 @@ class MultiSessionManager:
         def _revert_session_combo():
             cur_nd = ui.key.nd()
             ui._session_var.set(
-                ui._session_label(_ALL_SESSION_MARKER) if cur_any
-                else ui._session_label(cur_nd))
+                ui._sess_mgr._session_label(_ALL_SESSION_MARKER) if cur_any
+                else ui._sess_mgr._session_label(cur_nd))
 
-        if ui._custom_mgr._custom_ccg_has_unsaved():
+        if ui._custom_mgr.store._custom_ccg_has_unsaved():
             r = messagebox.askyesnocancel(
                 "Unsaved custom CCGs",
                 "Unsaved custom segments will be lost when switching sessions.\n\n"
@@ -3107,7 +3059,7 @@ class MultiSessionManager:
                 return
             if r:
                 ui.time_slider._save_custom_ccg()
-                if ui._custom_mgr._custom_ccg_has_unsaved():
+                if ui._custom_mgr.store._custom_ccg_has_unsaved():
                     messagebox.showwarning(
                         "Custom CCGs not saved",
                         "Some custom segments are still unsaved. Session switch was cancelled.")
@@ -3119,9 +3071,9 @@ class MultiSessionManager:
             ui._stacked_segments = set()
 
         if new_any:
-            ui._enter_all_session_mode()
+            ui._sess_mgr._enter_all_session_mode()
             if not getattr(ui, '_session_all_mode', False):
-                ui._session_var.set(ui._session_label(ui.key.nd()))
+                ui._session_var.set(ui._sess_mgr._session_label(ui.key.nd()))
                 return
             ui._refresh_after_key_switch()
             ui.refresh_lists()
@@ -3131,18 +3083,18 @@ class MultiSessionManager:
         # Leaving ``any`` → concrete session
         if cur_any:
             try:
-                ui._autosave_all_sessions_for_current_type()
+                ui._sel_mgr._autosave_all_sessions_for_current_type()
             except Exception as exc:
                 print(f"[CCGReviewUI] multi-session autosave: {exc}")
             try:
                 if ui._sel_data._groups:
-                    ui._save_groups_export()
+                    ui._group_mgr._save_groups_export()
             except Exception:
                 traceback.print_exc()
-            ui._exit_all_session_mode()
+            ui._sess_mgr._exit_all_session_mode()
 
         def _do_switch():
-            type_keys = ui._available_type_keys(nd_key)
+            type_keys = ui._sess_mgr._available_type_keys(nd_key)
             ui._type_keys_list = type_keys
             type_labels = [ui._type_label(k) for k in type_keys]
             ui._type_combo['values'] = type_labels
@@ -3156,11 +3108,11 @@ class MultiSessionManager:
                 ui._type_var.set(type_labels[0])
             if ui._switch_key(new_key):
                 ui._refresh_after_key_switch()
-                ui._autoload_session_latest()
+                ui._sel_mgr._autoload_session_latest()
                 ui.refresh_lists()
                 ui.network_panel.draw()
 
-        ui._ensure_session_loaded(nd_key, on_loaded=_do_switch)
+        ui._sess_mgr._ensure_session_loaded(nd_key, on_loaded=_do_switch)
 
     def _ensure_session_loaded(self, nd_key, on_loaded):
         """Call on_loaded() immediately if raw CCG data for nd_key is present.
@@ -3169,7 +3121,7 @@ class MultiSessionManager:
         in a background thread, then dismiss and call on_loaded().
         """
         ui = self._ui
-        if nd_key in getattr(ui.cd, '_ccg', {}):
+        if nd_key in getattr(ui.cd, 'ccg', {}):
             getattr(ui.cd, '_touch_session', lambda k: None)(nd_key)
             on_loaded()
             return
@@ -3212,7 +3164,7 @@ class MultiSessionManager:
     def _ensure_highres_loaded(self, nd_key, on_loaded):
         """Call on_loaded() if high-res CCG for nd_key is in memory.
 
-        Otherwise trigger cd.load_highres(nd_key) in a background thread with
+        Otherwise trigger cd.get_ccg(resolution='highres', nd_key) in a background thread with
         a modal "Loading hi-res…" dialog, then call on_loaded().
         """
         ui = self._ui
@@ -3233,7 +3185,7 @@ class MultiSessionManager:
 
         def _worker():
             try:
-                ui.cd.load_highres(nd_key=nd_key)
+                ui.cd.get_ccg(resolution='highres', nd_key=nd_key)
                 limit = getattr(ui, '_ccg_memory_limit_gb', 8.0)
                 getattr(ui.cd, '_check_memory_and_evict', lambda l: None)(limit)
             except Exception as ex:
@@ -3277,7 +3229,7 @@ class MultiSessionManager:
         sb = ui._segment_bounds_for_key(key)
         if sb:
             return ui._segment_bounds_time_extent(sb)
-        ptr = ui.cd.data.get(key) if getattr(ui, 'cd', None) is not None else None
+        ptr = ui.cd.ptr.get(key) if getattr(ui, 'cd', None) is not None else None
         if ptr is None or getattr(ptr, 'edge_times', None) is None:
             return (0.0, max(1.0, float(ui.time_slider._total_sec)))
         et = ptr.edge_times
@@ -3291,8 +3243,8 @@ class MultiSessionManager:
         ui = self._ui
         lbl = ui._type_label(ui.key)
         out = []
-        for nk in ui._real_nd_keys_ordered():
-            tk_ = ui._type_key_for_nd(nk)
+        for nk in ui._sess_mgr._real_nd_keys_ordered():
+            tk_ = ui._sess_mgr._type_key_for_nd(nk)
             if tk_ is not None and ui._type_label(tk_) == lbl:
                 out.append(tk_)
         return out
@@ -3314,12 +3266,12 @@ class MultiSessionManager:
             if len(trip) < 3:
                 continue
             by_sess[trip[0]].append((int(trip[1]), int(trip[2])))
-        for k in ui.cd.data.keys():
+        for k in ui.cd.ptr.keys():
             if ui._type_label(k) != lbl:
                 continue
             sess = str(k.session)
             arr = by_sess.get(sess)
-            ptr = ui.cd.data[k]
+            ptr = ui.cd.ptr[k]
             ptr.selected_inds = (
                 np.array(sorted(arr), dtype=int) if arr else None)
 
@@ -3334,7 +3286,7 @@ class PNGCacheManager:
     def _clear_all_png_cache(self):
         ui = self._ui
         ui._pregen_cancel = True  # stop any in-progress pre-generation
-        ui._terminate_pregen_proc()
+        ui._pregen_ctrl._terminate_pregen_proc()
         for _fn in os.listdir(ui.tmp_dir):
             if _fn.endswith('.png'):
                 try: os.remove(os.path.join(ui.tmp_dir, _fn))
@@ -3352,12 +3304,12 @@ class PNGCacheManager:
         No cache config → full sig state encoded (legacy, one file per display config).
         """
         ui = self._ui
-        if ui._is_custom_segment(segment):
-            ci = ui._custom_seg_index(segment)
+        if ui._custom_mgr._is_custom_segment(segment):
+            ci = ui._custom_mgr._custom_seg_index(segment)
             cs_list = getattr(ui, '_custom_segments', []) or []
             if 0 <= ci < len(cs_list):
                 cs = cs_list[ci]
-                seg_name = f"custom{ci}_{cs['name']}_{cs['t0']:.2f}_{cs['t1']:.2f}"
+                seg_name = f"custom{ci}_{cs.source.name}_{cs.source.t0:.2f}_{cs.source.t1:.2f}"
                 seg_name = seg_name.replace(' ', '_').replace(':', '-')
             else:
                 seg_name = _ALL_SEGS.replace(' ', '_')
@@ -3383,7 +3335,7 @@ class PNGCacheManager:
             getattr(ui, '_same_scale_mode', None), '')
         _jrk = 'hi' if _hires else 'lo'
         j_key = '_j' if ui._jitter_cache.get(
-            (int(inds[0]), int(inds[1]), _jrk, ui._jitter_seg(segment))) is not None else ''
+            (int(inds[0]), int(inds[1]), _jrk, ui.jitter_controller.seg(segment))) is not None else ''
 
         # Cache configuration determines path style
         _dk = '_dk' if ui.theme.dark else ''
@@ -3455,7 +3407,7 @@ class PNGCacheManager:
         if highres:
             data = getattr(ui.cd, '_ccg_highres', {}).get(nd_key)
         else:
-            data = getattr(ui.cd, '_ccg', {}).get(nd_key)
+            data = getattr(ui.cd, 'ccg', {}).get(nd_key)
         if data is None:
             data = ui.ccg_data
         old_mode = ui._highres_mode
@@ -3597,10 +3549,6 @@ class PregenController:
         ui._pregen_ctrl._launch_pregen_subprocess(dict(ui._cache_config), status_var=status_var,
                                                    priority='user')
 
-    # ------------------------------------------------------------------
-    # Segment filter
-    # ------------------------------------------------------------------
-
 class ConnectionStrengthManager:
     def __init__(self, ui: "CCGReviewUI"):
         self._ui = ui
@@ -3627,14 +3575,14 @@ class ConnectionStrengthManager:
         if method == 'conv':
             ttk.Checkbutton(panel._cs_pval_row, text="p",
                             variable=panel._sig_conv_p,
-                            command=self._ui._on_sig_toggle).pack(side=tk.LEFT, padx=2)
+                            command=self._ui._pair_mgr._on_sig_toggle).pack(side=tk.LEFT, padx=2)
             ttk.Checkbutton(panel._cs_pval_row, text="p-corrected",
                             variable=panel._sig_conv_pc,
-                            command=self._ui._on_sig_toggle).pack(side=tk.LEFT, padx=2)
+                            command=self._ui._pair_mgr._on_sig_toggle).pack(side=tk.LEFT, padx=2)
         elif method == 'jitter':
             cb = ttk.Checkbutton(panel._cs_pval_row, text="p-corrected",
                                  variable=panel._sig_jitter_pc,
-                                 command=self._ui._on_sig_toggle)
+                                 command=self._ui._pair_mgr._on_sig_toggle)
             cb.pack(side=tk.LEFT, padx=2)
             cb.state(['disabled'])
             self._ui._sig_jitter_pc_cb = cb
@@ -3650,7 +3598,7 @@ class ConnectionStrengthManager:
         if clear_cache:
             ui._conn_strength_cache.clear()
         ui._refresh()
-        ui._update_conn_str_label()
+        ui._cs_mgr._update_conn_str_label()
         if redraw_network:
             ui.network_panel.draw()
 
@@ -3698,15 +3646,15 @@ class ConnectionStrengthManager:
             cd_res = (ui.cd._ccg_highres.get(nd_key)
                       if hasattr(ui.cd, '_ccg_highres') else None)
             if cd_res is None:
-                cd_res = ui.cd._ccg.get(nd_key) if hasattr(ui.cd, '_ccg') else None
+                cd_res = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else None
         else:
-            cd_res = ui.cd._ccg.get(nd_key) if hasattr(ui.cd, '_ccg') else None
+            cd_res = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else None
         if cd_res is None:
             cd_res = ui.ccg_data
         if cd_res is None:
             return "n/a"
 
-        d = ui._resolve_segment_data(ref, tgt, seg, highres=hr,
+        d = ui._pair_mgr._resolve_segment_data(ref, tgt, seg, highres=hr,
                                      include_pval=False, _cd=cd_res)
         real_ccg = d.get('ccg_raw')
         if real_ccg is None:
@@ -3715,7 +3663,7 @@ class ConnectionStrengthManager:
         # Jitter mean baseline: lo-res only; zero-fill when not available
         j_avg = None
         if not hr:
-            _jseg = ui._jitter_seg(seg)
+            _jseg = ui.jitter_controller.seg(seg)
             entry = ui._jitter_cache.get((ref, tgt, 'lo', _jseg))
             if entry is None and _jseg is not None:
                 entry = ui._jitter_cache.get((ref, tgt, 'lo', None))
@@ -3728,7 +3676,7 @@ class ConnectionStrengthManager:
         # n1 inside compute_jbsi = min(fr_ref, fr_tgt) — the lower-firing neuron
         fr_ref = fr_tgt = None
         if (nd_key is not None and ui.cd.nd is not None
-                and seg != ui.n_segments and not ui._is_custom_segment(seg)):
+                and seg != ui.n_segments and not ui._custom_mgr._is_custom_segment(seg)):
             seg_fr = ui.cd.nd.segment_firing_rates.get(nd_key)
             if (seg_fr is not None and seg < seg_fr.shape[0]
                     and ref < seg_fr.shape[1] and tgt < seg_fr.shape[1]):
@@ -3743,7 +3691,7 @@ class ConnectionStrengthManager:
             return "n/a"
 
         try:
-            lo_cd = ui.cd._ccg.get(nd_key) if hasattr(ui.cd, '_ccg') else ui.ccg_data
+            lo_cd = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else ui.ccg_data
             jscale = float(JitterConfig(ccg=lo_cd.conf, njitter=1).jscale)
         except Exception:
             jscale = 5e-3
@@ -3783,7 +3731,7 @@ class ConnectionStrengthManager:
                 return
             ref, tgt = int(inds[0]), int(inds[1])
             seg = ui.current_segment
-            eff_min_lag, eff_max_lag = ui._effective_lags(ref, tgt)
+            eff_min_lag, eff_max_lag = ui._cs_mgr._effective_lags(ref, tgt)
             metric = ui.center_container.cs_panel._conn_str_metric.get()
             nd_key = ui.key.nd() if ui.key else None
 
@@ -3803,13 +3751,14 @@ class ConnectionStrengthManager:
     def _get_cs_val(self, ref: int, tgt: int, seg, method: str, highres: bool):
         """Return raw CS value (float or None) from cache, computing if absent."""
         ui = self._ui
-        eff_min_lag, eff_max_lag = ui._effective_lags(ref, tgt)
-        k = ui._cs_cache_key(ref, tgt, seg, method, highres, eff_min_lag, eff_max_lag)
+        eff_min_lag, eff_max_lag = ui._cs_mgr._effective_lags(ref, tgt)
+        k = ui._cs_mgr._cs_cache_key(ref, tgt, seg, method, highres, eff_min_lag, eff_max_lag)
         if k not in ui._conn_strength_cache:
-            ui._compute_pair_conn_strength(ref, tgt, seg, highres=highres)
+            ui._cs_mgr._compute_pair_conn_strength(ref, tgt, seg, highres=highres)
         _cs_entry = ui._conn_strength_cache.get(k)
         v, _ = _cs_entry if _cs_entry is not None else (None, None)
         return v
+
     def _cs_annotation_lines(self, ref: int, tgt: int, seg, highres: bool,
                               print_stg: bool, print_jbsi: bool) -> list:
         """Return ["STG: val"] and/or ["JBSI: val"] for export annotation."""
@@ -3869,14 +3818,14 @@ class ConnectionStrengthManager:
         conf = cd.conf
 
         # ── Resolve raw arrays ────────────────────────────────────────────
-        d = ui._resolve_segment_data(ref, tgt, seg, highres=highres,
+        d = ui._pair_mgr._resolve_segment_data(ref, tgt, seg, highres=highres,
                                         include_pval=False, include_acg=False)
         ccg_raw = d['ccg_raw']
         ccg_null_raw = d['ccg_null_raw']
 
         _custom_time_h = None
-        if ui._is_custom_segment(seg):
-            _ci = ui._custom_seg_index(seg)
+        if ui._custom_mgr._is_custom_segment(seg):
+            _ci = ui._custom_mgr._custom_seg_index(seg)
             _custom_time_h = ui._custom_segments[_ci].get('total_time_hours')
 
         # ── Single normalisation pass (without BASELINE) ──────────────────
@@ -3884,47 +3833,47 @@ class ConnectionStrengthManager:
         # computed on the pre-subtraction signal so that global/tailed
         # baselines reflect the actual signal amplitude.
         norms_no_bl = ui.active_norms - {NormalizeBy.BASELINE}
-        ccg, ccg_null = apply_norms_to_ccg(
+        ccg, ccg_null = NormBackend.apply(
             ccg_raw, ccg_null_raw, ref, tgt, seg,
             norms_no_bl, ui.neurons, ui.cd.nd,
-            ui.key.nd(), ui.n_segments, ui._is_custom_segment(seg),
+            ui.key.nd(), ui.n_segments, ui._custom_mgr._is_custom_segment(seg),
             custom_time_hours=_custom_time_h)
 
         # ── Effective test-window lags (adaptive TW aware) ────────────────
-        eff_min_lag, eff_max_lag = ui._effective_lags(ref, tgt)
+        eff_min_lag, eff_max_lag = ui._cs_mgr._effective_lags(ref, tgt)
         _kw = dict(min_lag_override=eff_min_lag, max_lag_override=eff_max_lag)
 
         # ── conv ─────────────────────────────────────────────────────────
-        cs, bl = compute_pair_conn_strength_1d(ccg, ccg_null, conf, 'conv', **_kw)
+        cs, bl = NormBackend.conn_strength(ccg, ccg_null, conf, 'conv', **_kw)
         ui._conn_strength_cache.put(
-            ui._cs_cache_key(ref, tgt, seg, 'conv', highres, eff_min_lag, eff_max_lag),
+            ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'conv', highres, eff_min_lag, eff_max_lag),
             (cs, bl))
 
         # ── global (max outside detection window) ─────────────────────────
-        cs, bl = compute_pair_conn_strength_1d(ccg, ccg_null, conf, 'global', **_kw)
+        cs, bl = NormBackend.conn_strength(ccg, ccg_null, conf, 'global', **_kw)
         ui._conn_strength_cache.put(
-            ui._cs_cache_key(ref, tgt, seg, 'global', highres, eff_min_lag, eff_max_lag),
+            ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'global', highres, eff_min_lag, eff_max_lag),
             (cs, bl))
 
         # ── tailed (ACG deconvolution + tail baseline) ────────────────────
         try:
-            d_acg = ui._resolve_segment_data(ref, tgt, seg, highres=highres,
+            d_acg = ui._pair_mgr._resolve_segment_data(ref, tgt, seg, highres=highres,
                                                 include_pval=False, include_acg=True)
             acg_ref = d_acg['acg_ref'].copy().astype(float)
             acg_tgt = d_acg['acg_tgt'].copy().astype(float)
             nspks_ref = max(float(np.sum(acg_ref)), 1.0)
             nspks_tgt = max(float(np.sum(acg_tgt)), 1.0)
-            cs, bl = compute_pair_conn_strength_1d(
+            cs, bl = NormBackend.conn_strength(
                 ccg, ccg_null, conf, 'tailed',
                 acg_ref=acg_ref, acg_tgt=acg_tgt,
                 nspks_ref=nspks_ref, nspks_tgt=nspks_tgt, **_kw)
             ui._conn_strength_cache.put(
-                ui._cs_cache_key(ref, tgt, seg, 'tailed', highres, eff_min_lag, eff_max_lag),
+                ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'tailed', highres, eff_min_lag, eff_max_lag),
                 (cs, bl))
         except Exception as e:
             print(f"[CCGReviewUI] Tailed CS failed for ({ref},{tgt}): {e}")
             ui._conn_strength_cache.put(
-                ui._cs_cache_key(ref, tgt, seg, 'tailed', highres, eff_min_lag, eff_max_lag),
+                ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'tailed', highres, eff_min_lag, eff_max_lag),
                 (None, None))
 
         # ── JBSI ─────────────────────────────────────────────────────────
@@ -3934,16 +3883,16 @@ class ConnectionStrengthManager:
                 cd_res = (ui.cd._ccg_highres.get(nd_key)
                           if hasattr(ui.cd, '_ccg_highres') else None) or ui.ccg_data
             else:
-                cd_res = (ui.cd._ccg.get(nd_key)
-                          if hasattr(ui.cd, '_ccg') else None) or ui.ccg_data
+                cd_res = (ui.cd.ccg.get(nd_key)
+                          if hasattr(ui.cd, 'ccg') else None) or ui.ccg_data
             if cd_res is not None:
-                d_jbsi = ui._resolve_segment_data(ref, tgt, seg, highres=highres,
+                d_jbsi = ui._pair_mgr._resolve_segment_data(ref, tgt, seg, highres=highres,
                                                     include_pval=False, _cd=cd_res)
                 real_ccg = d_jbsi.get('ccg_raw')
                 if real_ccg is not None:
                     fr_ref = fr_tgt = None
                     if (nd_key is not None and ui.cd.nd is not None
-                            and seg != ui.n_segments and not ui._is_custom_segment(seg)):
+                            and seg != ui.n_segments and not ui._custom_mgr._is_custom_segment(seg)):
                         seg_fr = ui.cd.nd.segment_firing_rates.get(nd_key)
                         if (seg_fr is not None and seg < seg_fr.shape[0]
                                 and ref < seg_fr.shape[1] and tgt < seg_fr.shape[1]):
@@ -3956,8 +3905,8 @@ class ConnectionStrengthManager:
                             fr_tgt = float(fr[tgt])
                     if fr_ref is not None and fr_tgt is not None:
                         try:
-                            lo_cd = (ui.cd._ccg.get(nd_key)
-                                     if hasattr(ui.cd, '_ccg') else None) or ui.ccg_data
+                            lo_cd = (ui.cd.ccg.get(nd_key)
+                                     if hasattr(ui.cd, 'ccg') else None) or ui.ccg_data
                             jscale = float(JitterConfig(ccg=lo_cd.conf, njitter=1).jscale)
                         except Exception:
                             jscale = 5e-3
@@ -3981,18 +3930,18 @@ class ConnectionStrengthManager:
                                if eff_max_lag is not None else n_bins)
                         jbsi_cs = float(np.sum(jbsi_arr[_lo:_hi]))
                         ui._conn_strength_cache.put(
-                            ui._cs_cache_key(ref, tgt, seg, 'JBSI', highres,
+                            ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'JBSI', highres,
                                                eff_min_lag, eff_max_lag),
                             (jbsi_cs, None))
         except Exception as _jbsi_err:
             print(f"[CCGReviewUI] JBSI CS failed for ({ref},{tgt}): {_jbsi_err}")
             ui._conn_strength_cache.put(
-                ui._cs_cache_key(ref, tgt, seg, 'JBSI', highres, eff_min_lag, eff_max_lag),
+                ui._cs_mgr._cs_cache_key(ref, tgt, seg, 'JBSI', highres, eff_min_lag, eff_max_lag),
                 (None, None))
 
         method = ui.center_container.baseline_panel._conn_str_method.get()
         _final = ui._conn_strength_cache.get(
-            ui._cs_cache_key(ref, tgt, seg, method, highres, eff_min_lag, eff_max_lag))
+            ui._cs_mgr._cs_cache_key(ref, tgt, seg, method, highres, eff_min_lag, eff_max_lag))
         return _final if _final is not None else (None, None)
 
     def _update_global_baseline_availability(self):
@@ -4016,7 +3965,7 @@ class ConnectionStrengthManager:
     def _pair_qualifies_for_adaptive_tw(self, ref: int, tgt: int) -> bool:
         ui = self._ui
         pair = (ref, tgt)
-        return any(pair in ui._group_pairs(g) for g in self.__class__._ADAPTIVE_TW_GROUPS)
+        return any(pair in ui._group_mgr._group_pairs(g) for g in self.__class__._ADAPTIVE_TW_GROUPS)
 
     def _effective_lags(self, ref: int, tgt: int):
         """Return (min_lag, max_lag) accounting for adaptive test window."""
@@ -4024,7 +3973,7 @@ class ConnectionStrengthManager:
         _eo = getattr(ui, '_export_overrides', None)
         _adaptive = (_eo.get('adaptive_tw_export', False) if _eo
                      else ui.center_container.baseline_panel._adaptive_tw.get())
-        if (_adaptive and ui._pair_qualifies_for_adaptive_tw(ref, tgt)):
+        if (_adaptive and ui._cs_mgr._pair_qualifies_for_adaptive_tw(ref, tgt)):
             return self.__class__._ADAPTIVE_TW_MIN_LAG, self.__class__._ADAPTIVE_TW_MAX_LAG
         conf = ui.ccg_data.conf if ui.ccg_data else None
         if conf is None:
@@ -4039,7 +3988,7 @@ class ConnectionStrengthManager:
             return
         inds = ui._current_inds()
         qualifies = (inds is not None
-                     and ui._pair_qualifies_for_adaptive_tw(int(inds[0]), int(inds[1])))
+                     and ui._cs_mgr._pair_qualifies_for_adaptive_tw(int(inds[0]), int(inds[1])))
         try:
             btn.state(['!disabled'] if qualifies else ['disabled'])
         except Exception:
@@ -4069,12 +4018,12 @@ class PairAnalysisManager:
         """
         ui = self._ui
         # Custom segments: use stored pval_corrected
-        if ui._is_custom_segment(seg):
-            ci = ui._custom_seg_index(seg)
+        if ui._custom_mgr._is_custom_segment(seg):
+            ci = ui._custom_mgr._custom_seg_index(seg)
             cs_list = getattr(ui, '_custom_segments', [])
             if 0 <= ci < len(cs_list):
                 cs = cs_list[ci]
-                pc = cs.get('pval_corrected')
+                pc = cs.lo.pval_corrected if cs.lo is not None else None
                 if pc is not None:
                     conf = ui.ccg_data.conf
                     lb = getattr(conf, 'min_lag_bin', None)
@@ -4088,7 +4037,7 @@ class PairAnalysisManager:
             return False
 
         if seg == ui.n_segments:
-            return any(ui._is_significant(ref, tgt, s)
+            return any(ui._pair_mgr._is_significant(ref, tgt, s)
                        for s in range(ui.n_segments))
 
         j = ui.cd._jitter.get(ui.key) if hasattr(ui.cd, '_jitter') else None
@@ -4105,7 +4054,7 @@ class PairAnalysisManager:
                 return False
 
         # Always use low-res data for significance (high-res may lack pval arrays)
-        cd = ui.cd._ccg.get(ui.key.nd()) if hasattr(ui.cd, '_ccg') else None
+        cd = ui.cd.ccg.get(ui.key.nd()) if hasattr(ui.cd, 'ccg') else None
         if cd is None:
             cd = ui.ccg_data   # fallback
         if cd is not None and cd.pval_corrected is not None:
@@ -4145,8 +4094,8 @@ class PairAnalysisManager:
             if cd is None:
                 cd = ui.ccg_data
         else:
-            cd = (ui.cd._ccg.get(nd_key)
-                  if hasattr(ui.cd, "_ccg") else ui.ccg_data)
+            cd = (ui.cd.ccg.get(nd_key)
+                  if hasattr(ui.cd, "ccg") else ui.ccg_data)
         if cd is None:
             ui._pair_scale_cache.pop((ref, tgt, res_key))
             return None
@@ -4180,21 +4129,19 @@ class PairAnalysisManager:
         # Custom segments (include both lo/hi versions depending on res_key)
         cs_list = getattr(ui, "_custom_segments", []) or []
         for ci, cs in enumerate(cs_list):
-            if not isinstance(cs, dict):
-                continue
-            key_ccg = "ccg_hi" if (res_key == "hi" and cs.get("ccg_hi") is not None) else "ccg"
-            key_null = "ccg_null_hi" if (res_key == "hi" and cs.get("ccg_null_hi") is not None) else "ccg_null"
+            use_hi = res_key == "hi" and cs.hi is not None
+            ccg_data_cs = cs.hi if use_hi else cs.lo
             try:
-                src = cs.get(key_ccg)
+                src = ccg_data_cs.ccg if ccg_data_cs is not None else None
                 if src is None:
                     continue
                 ccg_raw = src[0, ref, tgt, :]
-                null_src = cs.get(key_null)
+                null_src = ccg_data_cs.ccg_null if ccg_data_cs is not None else None
                 ccg_null_raw = null_src[0, ref, tgt, :] if null_src is not None else None
                 seg_idx = ui.n_segments + ci  # custom segment index in UI space
                 ymin, ymax = ui._accumulate_ylim(
                     ccg_raw, ccg_null_raw, ref, tgt, seg_idx, True, ymin, ymax,
-                    custom_time_h=cs.get("total_time_hours"),
+                    custom_time_h=cs.source.total_time_hours,
                 )
             except Exception:
                 continue
@@ -4251,11 +4198,11 @@ class PairAnalysisManager:
             if nm not in existing:
                 existing.append(nm)
         cd.conf.normalize_methods = existing
-        ui._clear_all_png_cache()
+        ui._png_mgr._clear_all_png_cache()
         for var in ui.norm_vars.values():
             var.set(False)
         ui.active_norms = set()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
         messagebox.showinfo("Normalize all",
                             "Applied normalization to stored CCG data. Don't forget to Save Selections.")
 
@@ -4312,14 +4259,14 @@ class PairAnalysisManager:
                 cs_list = getattr(ui, '_custom_segments', [])
                 if 0 <= ci < len(cs_list):
                     cs = cs_list[ci]
-                    pc = cs.get('pval_corrected')
+                    pc = cs.lo.pval_corrected if cs.lo is not None else None
                     if (pc is not None and lb is not None and ub is not None
                             and ref < pc.shape[1] and tgt < pc.shape[2]):
                         sig = bool(pc[0, ref, tgt, lb:ub].min()
                                    <= ui.active_alpha)
                     else:
                         sig = False
-                    active = (ui.current_segment == chip_idx)
+                    active = (ui._seg_idx(ui.current_segment) == chip_idx)
                     bg = ('#4CAF50' if active else '#90EE90') if sig \
                         else ('#FFD54F' if active else '#FFF9C4')
                 else:
@@ -4332,9 +4279,9 @@ class PairAnalysisManager:
 
             is_all_chip = (chip_idx == ui.n_segments)
             if is_all_chip:
-                sig = any(ui._is_significant(ref, tgt, s)
+                sig = any(ui._pair_mgr._is_significant(ref, tgt, s)
                           for s in range(ui.n_segments))
-                active = (ui.current_segment == ui.n_segments)
+                active = (ui.current_segment == _ALL_SEGS)
             else:
                 seg = chip_idx
                 if (cd is not None and cd.pval_corrected is not None and
@@ -4344,8 +4291,8 @@ class PairAnalysisManager:
                         cd.pval_corrected[seg, ref, tgt, lb:ub].min()
                         <= ui.active_alpha)
                 else:
-                    sig = ui._is_significant(ref, tgt, seg)
-                active = (seg == ui.current_segment)
+                    sig = ui._pair_mgr._is_significant(ref, tgt, seg)
+                active = (ui._seg_idx(ui.current_segment) == seg)
 
             if sig:
                 bg = '#4CAF50' if active else '#90EE90'
@@ -4374,31 +4321,28 @@ class PairAnalysisManager:
         if nmap:
             ref = nmap.get(int(ref), int(ref))
             tgt = nmap.get(int(tgt), int(tgt))
-        is_custom = ui._is_custom_segment(segment)
+        is_custom = ui._custom_mgr._is_custom_segment(segment)
         is_all = (segment == ui.n_segments)
         result = {}
 
         if is_custom:
-            ci = ui._custom_seg_index(segment)
+            ci = ui._custom_mgr._custom_seg_index(segment)
             cs = ui._custom_segments[ci]
-            hi = highres and 'ccg_hi' in cs
-            key_ccg = 'ccg_hi' if hi else 'ccg'
-            key_null = 'ccg_null_hi' if hi else 'ccg_null'
-            result['ccg_raw'] = cs[key_ccg][0, ref, tgt, :]
-            raw_null = cs.get(key_null)
+            use_hi = highres and cs.hi is not None
+            cs_data = cs.hi if use_hi else cs.lo
+            ccg_arr = cs_data.ccg if cs_data is not None else None
+            result['ccg_raw'] = ccg_arr[0, ref, tgt, :]
+            raw_null = cs_data.ccg_null if cs_data is not None else None
             result['ccg_null_raw'] = raw_null[0, ref, tgt, :] if raw_null is not None else None
-            result['seg_label'] = cs['name']
+            result['seg_label'] = cs.source.name
             if include_pval:
-                key_p = 'pval_hi' if hi else 'pval'
-                key_pc = 'pval_corrected_hi' if hi else 'pval_corrected'
-                p = cs.get(key_p)
-                pc = cs.get(key_pc)
+                p = cs_data.pval if cs_data is not None else None
+                pc = cs_data.pval_corrected if cs_data is not None else None
                 result['pval'] = p[0, ref, tgt, :] if p is not None else None
                 result['pval_corrected'] = pc[0, ref, tgt, :] if pc is not None else None
             if include_acg:
-                src = cs[key_ccg]
-                result['acg_ref'] = src[0, ref, ref, :]
-                result['acg_tgt'] = src[0, tgt, tgt, :]
+                result['acg_ref'] = ccg_arr[0, ref, ref, :]
+                result['acg_tgt'] = ccg_arr[0, tgt, tgt, :]
         elif is_all:
             result['ccg_raw'] = np.sum(cd.ccg[:, ref, tgt, :], axis=0)
             result['ccg_null_raw'] = (np.sum(cd.ccg_null[:, ref, tgt, :], axis=0)
@@ -4450,16 +4394,16 @@ class PairAnalysisManager:
         # Segment time slicing (match jitter behavior)
         neurons_eff = ui.neurons
         seg_label_eff = None
-        if ui._is_custom_segment(segment):
+        if ui._custom_mgr._is_custom_segment(segment):
             # Custom segment: recompute on the custom window (and its saved brain-state filter).
             try:
-                ci = ui._custom_seg_index(segment)
+                ci = ui._custom_mgr._custom_seg_index(segment)
                 cs = ui._custom_segments[ci]
-                seg_label_eff = str(cs.get('name', 'custom'))
-                t0 = float(cs['t0'])
-                t1 = float(cs['t1'])
+                seg_label_eff = str(cs.source.name)
+                t0 = float(cs.source.t0)
+                t1 = float(cs.source.t1)
                 neurons_eff = ui.neurons.time_slice(t_start=t0, t_stop=t1)
-                fs = cs.get('filter_state') or {}
+                fs = cs.source.filter_state or {}
                 labels = (fs.get('labels') if isinstance(fs, dict) else None) or {}
                 # If labels are present and not all ON, reconstruct intervals.
                 if labels and not all(bool(v) for v in labels.values()):
@@ -4634,7 +4578,7 @@ class PairAnalysisManager:
         ui = self._ui
         theme = ui.time_slider._current_theme
         if theme == 'segments':
-            ptr = ui.cd.data.get(key)
+            ptr = ui.cd.ptr.get(key)
             if ptr is None or getattr(ptr, 'edge_times', None) is None:
                 return []
             out = []
@@ -4657,7 +4601,7 @@ class PairAnalysisManager:
                     out.append((t, t + dur, str(row['label'])))
                     t += dur
             return out
-        sess_obj = ui._session_obj_for_nd_key(key.nd())
+        sess_obj = ui._sess_mgr._session_obj_for_nd_key(key.nd())
         if sess_obj is None:
             return None
         epoch = getattr(sess_obj, theme, None)
@@ -4674,7 +4618,6 @@ class PairAnalysisManager:
             out = [(s, e, theme) for s, e, _ in out]
         return out
 
-
     def _pair_passes_main(self, ref: int, tgt: int, seg) -> bool:
         """
         Returns True if this pair passes the primary 'Main' template criterion.
@@ -4685,7 +4628,7 @@ class PairAnalysisManager:
         cd = ui.ccg_data
         if cd is None or cd.pval is None:
             return True  # no data to filter on
-        is_custom = ui._is_custom_segment(seg)
+        is_custom = ui._custom_mgr._is_custom_segment(seg)
         is_all = (seg == ui.n_segments)
         try:
             conf = cd.conf
@@ -4723,8 +4666,9 @@ class PairAnalysisManager:
         except Exception:
             pass
 
-        is_all = (segment == ui.n_segments)
-        is_custom = ui._is_custom_segment(segment)
+        is_all = (segment == _ALL_SEGS)
+        is_custom = ui._custom_mgr._is_custom_segment(segment)
+        seg_idx = ui._seg_idx(segment)
 
         def _get(arr, r, c):
             """Extract values from ccg-shaped array [seg, r, c, bins]."""
@@ -4733,12 +4677,14 @@ class PairAnalysisManager:
             if is_all:
                 return np.sum(arr[:, r, c, :], axis=0)
             elif is_custom:
-                ci = ui._custom_seg_index(segment)
+                ci = ui._custom_mgr._custom_seg_index(segment)
                 cs = ui._custom_segments[ci]
-                src = cs.get('ccg_hi') if ui._highres_mode and 'ccg_hi' in cs else cs.get('ccg')
+                use_hi = ui._highres_mode and cs.hi is not None
+                cs_data = cs.hi if use_hi else cs.lo
+                src = cs_data.ccg if cs_data is not None else None
                 return src[0, r, c, :] if src is not None else None
             else:
-                return arr[segment, r, c, :]
+                return arr[seg_idx, r, c, :]
 
         items = {
             # These two are display-derived (norms/baseline + possible deconvolution)
@@ -4999,13 +4945,13 @@ class UISetupManager:
         for _key in ('<Control-f>', '<Command-f>'):
             ui.root.bind(_key, lambda e: ui.left_container.left_panel._search_toggle())
         for _key in ('<Control-b>', '<Command-b>'):
-            ui.root.bind(_key, lambda e: ui._bookmark_toggle_current())
+            ui.root.bind(_key, lambda e: ui._sel_mgr._bookmark_toggle_current())
         for _key in ('<Control-z>', '<Command-z>'):
-            ui.root.bind(_key, ui._undo)
+            ui.root.bind(_key, ui._sel_mgr._undo)
         for _key in ('<Control-y>', '<Command-y>',
                       '<Control-Shift-z>', '<Command-Shift-z>',
                       '<Control-Shift-Z>', '<Command-Shift-Z>'):
-            ui.root.bind(_key, ui._redo)
+            ui.root.bind(_key, ui._sel_mgr._redo)
         for _del_key in ('<Control-Delete>', '<Control-BackSpace>',
                          '<Command-Delete>', '<Command-BackSpace>',
                          '<Meta-Delete>',    '<Meta-BackSpace>'):
@@ -5066,7 +5012,7 @@ class UISetupManager:
 
         # Restore loaded custom CCGs first (so segment indices exist before we restore current_segment)
         try:
-            ui._custom_mgr._restore_loaded_custom_ccgs_from_state()
+            ui._custom_mgr.store._restore_loaded_custom_ccgs_from_state()
         except Exception:
             pass
 
@@ -5084,9 +5030,10 @@ class UISetupManager:
         saved_seg = s.get('current_segment')
         if saved_seg is not None:
             try:
-                total = ui._n_total_segments()
-                if 0 <= int(saved_seg) < total:
-                    ui.current_segment = int(saved_seg)
+                if isinstance(saved_seg, int):
+                    saved_seg = ui._seg_name(saved_seg)
+                if saved_seg in ui._all_segment_names():
+                    ui.current_segment = saved_seg
                     ui._update_segment_label()
             except Exception:
                 pass
@@ -5137,7 +5084,7 @@ class UISetupManager:
                     and ui.cd._ccg_highres.get(nd_key) is not None):
                 ui.ccg_data = ui.cd._ccg_highres.get(nd_key)
             else:
-                ui.ccg_data = ui.cd._ccg.get(nd_key) if getattr(ui.cd, '_ccg', None) else ui.ccg_data
+                ui.ccg_data = ui.cd.ccg.get(nd_key) if getattr(ui.cd, 'ccg', None) else ui.ccg_data
         except Exception:
             pass
 
@@ -5147,7 +5094,7 @@ class UISetupManager:
 
         # Finally, re-render so main-panel button states are reflected visually.
         try:
-            ui.update_plot()
+            ui._plot_mgr.update_plot()
         except Exception:
             pass
 
@@ -5161,8 +5108,8 @@ class UISetupManager:
                   font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(8, 2))
         nd_keys = ui._sess_mgr._all_nd_keys()
         ui._nd_keys_list = nd_keys
-        session_labels = [ui._session_label(k) for k in nd_keys]
-        ui._session_var = tk.StringVar(value=ui._session_label(ui.key.nd()))
+        session_labels = [ui._sess_mgr._session_label(k) for k in nd_keys]
+        ui._session_var = tk.StringVar(value=ui._sess_mgr._session_label(ui.key.nd()))
         ui._session_combo = ttk.Combobox(
             menu_frame, textvariable=ui._session_var,
             values=session_labels, width=22, state='readonly')
@@ -5172,7 +5119,7 @@ class UISetupManager:
         # Type — if the key has no conn_type, fall back to E pyr→pyr or first available
         ttk.Label(menu_frame, text="Type:",
                   font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(10, 2))
-        type_keys = ui._available_type_keys(ui.key.nd())
+        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
         ui._type_keys_list = type_keys
         type_labels = [ui._type_label(k) for k in type_keys]
         if not getattr(ui.key, 'conn_type', None) and type_keys:
@@ -5182,7 +5129,7 @@ class UISetupManager:
                          and getattr(k, 'conn_type', None) == ('pyr', 'pyr')]
             ui.key = (preferred or type_keys)[0]
             if ui.ccg_ptr is None:
-                ui.ccg_ptr = ui.cd.data.get(ui.key)
+                ui.ccg_ptr = ui.cd.ptr.get(ui.key)
         ui._type_var = tk.StringVar(value=ui._type_label(ui.key))
         ui._type_combo = ttk.Combobox(
             menu_frame, textvariable=ui._type_var,
@@ -5195,7 +5142,6 @@ class UISetupManager:
             menu_frame, text="⚡ Pre-gen", width=10,
             command=ui._pregen_ctrl._start_pregen_with_defaults)
         ui._pregen_btn.pack(side=tk.RIGHT, padx=(2, 8))
-
 
     def setup_left_panel(self, parent):
         ui = self._ui
@@ -5291,7 +5237,7 @@ class UISetupManager:
         # Initialise p-value row and CS metric availability
         ui._sig_jitter_pc_cb = None
         ui._cs_mgr._rebuild_cs_pval_row()
-        ui._update_conn_str_metric_availability()
+        ui._cs_mgr._update_conn_str_metric_availability()
 
         # Waveforms panel (uses ui._plot_pw set above)
         ui.setup_waveforms_panel(ctrl_frame)
@@ -5303,8 +5249,7 @@ class UISetupManager:
         pw.add(scroll_outer, minsize=30, stretch='never')
 
         # Hidden segment state (combo removed; segment chips handle navigation)
-        _seg_var_init = (_ALL_SEGS if ui.current_segment >= ui.n_segments
-                         else ui.ccg_ptr.segment_names[ui.current_segment])
+        _seg_var_init = ui.current_segment
         ui.segment_var = tk.StringVar(value=_seg_var_init)
         ui.segment_combo = ttk.Combobox(
             parent, textvariable=ui.segment_var,
@@ -5326,8 +5271,8 @@ class UISetupManager:
         ttk.Button(bottom_frame, text="Save Selections",
                    command=ui._sel_mgr._quick_save).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bottom_frame, text="Quit",
-                   command=ui._on_close).pack(side=tk.RIGHT, padx=5)
-        ui.stats_var = tk.StringVar(value=ui._compute_stats_str())
+                   command=ui._setup_mgr._on_close).pack(side=tk.RIGHT, padx=5)
+        ui.stats_var = tk.StringVar(value=ui._pair_mgr._compute_stats_str())
         ttk.Label(bottom_frame, textvariable=ui.stats_var,
                   font=('Courier', 9)).pack(side=tk.LEFT, padx=8)
         ui._pair_info_var = tk.StringVar(value="")
@@ -5339,7 +5284,7 @@ class UISetupManager:
         ui = self._ui
         try:
             ui._setup_mgr._toggle_panel_impl(name)
-            ui._save_ui_state()
+            ui._settings_mgr.save_ui_state()
         except Exception as ex:
             print(f"[CCGReviewUI] _toggle_panel error for {name!r}: {ex}")
             traceback.print_exc()
@@ -5371,12 +5316,12 @@ class UISetupManager:
                 if str(frame) in ui._paned.panes():
                     ui._paned.forget(frame)
         elif name == 'Waveforms':
-            ui._toggle_waveforms_panel()
+            ui._setup_mgr._toggle_waveforms_panel()
         elif name == 'Time Slider':
             ui.time_slider.toggle()
         elif name == 'Group Hotkeys':
             if show:
-                ui._refresh_hotkeys_bar()
+                ui._group_mgr._refresh_hotkeys_bar()
                 # Pack after the tool-strip (setup_menu frame), before the main area
                 ui._hotkeys_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2),
                                        before=ui._main_frame)
@@ -5388,7 +5333,7 @@ class UISetupManager:
         ui._waveforms_visible = ui._panel_vars['Waveforms'].get()
         if ui._waveforms_visible:
             ui._plot_pw.add(ui.wave_frame, stretch='never', width=280)
-            ui._draw_waveforms()
+            ui._pair_mgr._draw_waveforms()
         else:
             try:
                 ui._plot_pw.forget(ui.wave_frame)
@@ -5399,20 +5344,20 @@ class UISetupManager:
         """Complete initialisation after data has been loaded; then draw."""
         ui = self._ui
         nd_key = ui.key.nd()
-        ptr = ui.cd.data.get(ui.key)
+        ptr = ui.cd.ptr.get(ui.key)
         if ptr is None:
             # Key may not exist yet; pick first available key for this session
-            type_keys = ui._available_type_keys(nd_key)
+            type_keys = ui._sess_mgr._available_type_keys(nd_key)
             if type_keys:
                 ui.key = type_keys[0]
-                ptr = ui.cd.data.get(ui.key)
+                ptr = ui.cd.ptr.get(ui.key)
         if ptr is None:
             messagebox.showerror("Load error",
                                  f"No data found for session {nd_key}",
                                  parent=ui.root)
             return
         ui.ccg_ptr = ptr
-        ui.ccg_data = ui.cd._ccg.get(nd_key)
+        ui.ccg_data = ui.cd.ccg.get(nd_key)
         try:
             ui.neurons = (ui.cd.nd.data[nd_key]
                             if getattr(ui.cd, 'nd', None) is not None else None)
@@ -5466,7 +5411,7 @@ class UISetupManager:
         ts_menu = tk.Menu(panels_menu, tearoff=0)
         ts_menu.add_command(
             label="Refresh suggested custom CCGs",
-            command=ui._custom_mgr._refresh_custom_ccg_suggestions,
+            command=ui._custom_mgr.state._refresh_custom_ccg_suggestions,
         )
         ts_menu.add_command(
             label="Generate suggested custom CCGs",
@@ -5540,14 +5485,14 @@ class UISetupManager:
         menu = tk.Menu(ui.root, tearoff=0)
         # Export actions
         menu.add_command(label="Export view as PNG…",
-                         command=ui._export_current_view)
+                         command=ui._export_mgr._export_current_view)
         menu.add_separator()
         for _label, _key in [("View CCG values",      'ccg'),
                               ("View ref ACG values",  'acg_ref'),
                               ("View tgt ACG values",  'acg_tgt'),
                               ("View baseline values", 'baseline'),
                               ("View p-values",        'pval')]:
-            menu.add_command(label=_label, command=lambda k=_key: ui._view_values(k))
+            menu.add_command(label=_label, command=lambda k=_key: ui._pair_mgr._view_values(k))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _on_close(self):
@@ -5575,7 +5520,7 @@ class UISetupManager:
             ui.jitter_worker._runner.terminate()
         ui._jitter_pending.clear()
         # Custom segments: ask permission to save if any are unsaved
-        if ui._custom_mgr._custom_ccg_has_unsaved():
+        if ui._custom_mgr.store._custom_ccg_has_unsaved():
             r = messagebox.askyesnocancel(
                 "Unsaved custom CCGs",
                 "You have one or more custom segments that are not saved to a .npz file.\n\n"
@@ -5595,14 +5540,13 @@ class UISetupManager:
                     cs
                     for lst in (getattr(ui, '_custom_segments_by_session', None) or {}).values()
                     for cs in lst
-                    if isinstance(cs, dict)
                 ]
                 if _all_exit_segs:
                     try:
-                        ui._custom_mgr._save_custom_segment_objects(_all_exit_segs, show_saved_message=False)
+                        ui._custom_mgr.store._save_custom_segment_objects(_all_exit_segs, show_saved_message=False)
                     except Exception as _exc:
                         print(f"[CCGReviewUI] on-exit custom CCG save error: {_exc}")
-                if ui._custom_mgr._custom_ccg_has_unsaved():
+                if ui._custom_mgr.store._custom_ccg_has_unsaved():
                     messagebox.showwarning(
                         "Custom CCGs not saved",
                         "Some custom segments are still unsaved. Quit was cancelled.",
@@ -5647,10 +5591,10 @@ class PlotManager:
                 if ui.network_panel._focused_pair is None and ui.current_pair_idx < len(hl):
                     row_ck = hl[ui.current_pair_idx][0]
                     if ui.key != row_ck:
-                        ui._sync_any_plot_context(ui.current_pair_idx)
+                        ui._sess_mgr._sync_any_plot_context(ui.current_pair_idx)
                 if ui.network_panel._focused_pair is None:
                     if ui.current_pair_idx < len(ui.all_inds):
-                        ui._sync_any_plot_context(ui.current_pair_idx)
+                        ui._sess_mgr._sync_any_plot_context(ui.current_pair_idx)
                 ui._clamp_current_segment_for_session()
             # Data not yet loaded — nothing to render
             if ui.ccg_data is None or ui.ccg_ptr is None:
@@ -5677,7 +5621,7 @@ class PlotManager:
             if not ui._ccg_pair_in_bounds(r0, t0):
                 if (getattr(ui, '_session_any_mode', False)
                         and ui.current_pair_idx < len(ui.all_inds)):
-                    ui._sync_any_plot_context(ui.current_pair_idx)
+                    ui._sess_mgr._sync_any_plot_context(ui.current_pair_idx)
                     ui._clamp_current_segment_for_session()
                     if ui.ccg_data is None or ui.current_pair_idx >= len(ui.all_inds):
                         return
@@ -5726,7 +5670,7 @@ class PlotManager:
 
             if ui._together_pairs and len(ui._together_pairs) >= 2:
                 n_tog = len(ui._together_pairs)
-                seg = ui.current_segment
+                seg = ui._seg_idx(ui.current_segment)
                 slots0 = _pngs_for_seg(np.array(ui._together_pairs[0]), seg)
                 n_cols = len(slots0)
                 ui.fig.clear()
@@ -5753,8 +5697,8 @@ class PlotManager:
                 def _seg_label(si: int) -> str:
                     if si == ui.n_segments:
                         return _ALL_SEGS
-                    if ui._is_custom_segment(si):
-                        ci = ui._custom_seg_index(si)
+                    if ui._custom_mgr._is_custom_segment(si):
+                        ci = ui._custom_mgr._custom_seg_index(si)
                         cs_list = getattr(ui, '_custom_segments', [])
                         if 0 <= ci < len(cs_list):
                             return cs_list[ci].get('name', f'custom {ci}')
@@ -5790,7 +5734,7 @@ class PlotManager:
 
             else:
                 # Single segment: 1×n_slots
-                seg = ui.current_segment
+                seg = ui._seg_idx(ui.current_segment)
                 slots = _pngs_for_seg(inds, seg)
                 ui.fig.clear()
                 if len(slots) == 1:
@@ -5815,32 +5759,22 @@ class PlotManager:
             ui.canvas.draw()
 
             ui.plot_title_var.set(ui._plot_mgr.get_plot_title())
-            ui._update_sig_indicators(inds)
+            ui._pair_mgr._update_sig_indicators(inds)
             ui._update_jitter_sig_buttons()
-            ui._update_global_baseline_availability()
-            ui._update_pair_info(inds)
-            ui._draw_waveforms()
-            ui._update_conn_str_label()
+            ui._cs_mgr._update_global_baseline_availability()
+            ui._plot_mgr._update_pair_info(inds)
+            ui._pair_mgr._draw_waveforms()
+            ui._cs_mgr._update_conn_str_label()
 
         except Exception as e:
             print(f"Error updating plot: {e}")
             traceback.print_exc()
 
-    # ------------------------------------------------------------------
-    # Waveforms
-    # ------------------------------------------------------------------
-
     def get_plot_title(self):
         ui = self._ui
         if ui.current_pair_idx < len(ui.all_inds):
             inds = ui.all_inds[ui.current_pair_idx]
-            if ui._is_custom_segment():
-                ci = ui._custom_seg_index()
-                seg_label = ui._custom_segments[ci]['name']
-            elif ui.current_segment == ui.n_segments:
-                seg_label = _ALL_SEGS
-            else:
-                seg_label = ui.ccg_ptr.segment_names[ui.current_segment]
+            seg_label = ui.current_segment
             sess = ui.key.session if ui.key else ''
             def _fmt_ct(x):
                 s = str(x)
@@ -5858,10 +5792,6 @@ class PlotManager:
             pair_str = f"{_plabel} (inds [{inds[0]}, {inds[1]}])"
             return f"{sess} | {ct} | {pair_str} — {seg_label}"
         return "No pair selected"
-
-    # ------------------------------------------------------------------
-    # PNG rendering
-    # ------------------------------------------------------------------
 
     def get_pair_index(self, inds):
         ui = self._ui
@@ -5889,10 +5819,6 @@ class PlotManager:
                 return i
         return 0
 
-    # ------------------------------------------------------------------
-    # Segment navigation
-    # ------------------------------------------------------------------
-
     def _update_pair_info(self, inds):
         """Update per-pair info (firing rates) in the stats bar."""
         ui = self._ui
@@ -5914,33 +5840,30 @@ class PlotManager:
 
         # Segment-level firing rate
         seg_str = ""
-        seg = ui.current_segment
+        seg_name = ui.current_segment
         nd_key = ui.key.nd() if ui.key else None
-        if ui._is_custom_segment(seg):
-            ci = ui._custom_seg_index(seg)
+        if ui._custom_mgr._is_custom_segment(seg_name):
+            ci = ui._custom_mgr._custom_seg_index(seg_name)
             cs = ui._custom_segments[ci]
-            cs_fr = cs.get('firing_rates')
+            cs_fr = cs.firing_rates
             if cs_fr is not None and ref < len(cs_fr) and tgt < len(cs_fr):
                 sr = float(cs_fr[ref])
                 st = float(cs_fr[tgt])
                 seg_str = f"  Seg FR: ref={sr:.1f} Hz  tgt={st:.1f} Hz"
         else:
             seg_frates = None
+            seg_idx = ui._seg_idx(seg_name)
             if (nd_key is not None and ui.cd.nd is not None
-                    and seg != ui.n_segments):
+                    and seg_name != _ALL_SEGS):
                 seg_frates = ui.cd.nd.segment_firing_rates.get(nd_key)
-            if (seg_frates is not None and seg < seg_frates.shape[0]
+            if (seg_frates is not None and seg_idx < seg_frates.shape[0]
                     and ref < seg_frates.shape[1] and tgt < seg_frates.shape[1]):
-                sr = float(seg_frates[seg, ref])
-                st = float(seg_frates[seg, tgt])
+                sr = float(seg_frates[seg_idx, ref])
+                st = float(seg_frates[seg_idx, tgt])
                 seg_str = f"  Seg FR: ref={sr:.1f} Hz  tgt={st:.1f} Hz"
 
         ui._pair_info_var.set(
             f"FR: ref={ref_fr:.1f}Hz  tgt={tgt_fr:.1f}Hz{seg_str}")
-
-    # ------------------------------------------------------------------
-    # Undo / redo for pair selection
-    # ------------------------------------------------------------------
 
     def _accumulate_ylim(self, ccg_raw, ccg_null_raw, ref, tgt, seg, is_custom, ymin, ymax, *, custom_time_h=None):
         """Accumulate y-axis limits for one trace using the active normalizations.
@@ -5949,7 +5872,7 @@ class PlotManager:
         when the user changes normalization settings.
         """
         ui = self._ui
-        ccg, ccg_null = apply_norms_to_ccg(
+        ccg, ccg_null = NormBackend.apply(
             ccg_raw,
             ccg_null_raw,
             ref, tgt, seg,
@@ -5975,13 +5898,11 @@ class PlotManager:
             highres = ui._highres_mode
         ctx = ui._render_engine.build_context(
             inds, segment, highres, _render_cfg, _ccg_data_override)
-        png_path = ui._png_path(inds, segment,
+        png_path = ui._png_mgr._png_path(inds, segment,
                                    _render_cfg=_render_cfg, _hires_override=highres)
         ui._render_engine.write_png(ctx, png_path)
         return png_path
 
-    # ------------------------------------------------------------------
-    # Plot update
     def _highlight_changed_pairs(self, changed_pairs):
         """Highlight pairs that moved during undo/redo with baseline color.
 
@@ -6006,7 +5927,7 @@ class PlotManager:
                                               foreground='white')
         # Clear highlight on next click anywhere
         def _clear_highlight(e=None):
-            ui._clear_undo_highlight()
+            ui._sel_mgr._clear_undo_highlight()
             ui.root.unbind('<Button-1>', bind_id)
         bind_id = ui.root.bind('<Button-1>', _clear_highlight, add='+')
 
@@ -6089,11 +6010,11 @@ class MiscManager:
                                  f"Pair ({ref},{tgt}) out of CCG data range "
                                  f"({cd.ccg.shape[1]}x{cd.ccg.shape[2]}).")
             return
-        ui._push_undo()
+        ui._sel_mgr._push_undo()
         _admit_pair(ui._sel_data, pair)
         ui._sel_data.set_state(pair, 'unsel')
         # Navigate to the pair
-        ui.current_pair_idx = ui.get_pair_index(pair)
+        ui.current_pair_idx = ui._plot_mgr.get_pair_index(pair)
         # Clear focus and update UI
         ui.network_panel._focused_pair = None
         ui.network_panel._focus_pair_var.set("")
@@ -6101,28 +6022,24 @@ class MiscManager:
         ui.network_panel._add_pair_btn.config(state=tk.DISABLED)
         ui.refresh_lists()
         ui.network_panel.draw()
-        ui.update_plot()
-
-    # ------------------------------------------------------------------
-    # Group helpers (Part II.2)
-    # ------------------------------------------------------------------
+        ui._plot_mgr.update_plot()
 
     def _pairs_by_conn_type(self, session_str, pairs):
         """Group pairs by their conn_type for display. Returns {label: [pairs]}."""
         ui = self._ui
-        # Build pair → conn_type mapping from cd.data keys for this session
+        # Build pair → conn_type mapping from cd.ptr keys for this session
         pair_ct = {}
-        for key in ui.cd.data:
+        for key in ui.cd.ptr:
             if str(key.session) != session_str and str(key.nd().session) != session_str:
                 continue
             ct = getattr(key, 'conn_type', None)
             ct_label = ui._conn_type_label(ct)
-            pt = ui.cd.data[key]
+            pt = ui.cd.ptr[key]
             if pt is None or not hasattr(pt, 'inds2') or pt.inds2 is None:
                 continue
             for ref, tgt in map(tuple, pt.inds2):
                 pair_ct[(ref, tgt)] = ct_label
-        # Fallback: look up pairs not found in cd.data from saved JSON selections.
+        # Fallback: look up pairs not found in cd.ptr from saved JSON selections.
         # Selection keys encode conn_type: 'sess_{S}.ex_{E}.type_{ref_type}-{tgt_type}'
         needs_lookup = [p for p in pairs if tuple(p) not in pair_ct]
         if needs_lookup:
@@ -6137,7 +6054,6 @@ class MiscManager:
             result.setdefault(ct_label, []).append(pair)
         return result
 
-
 class CCGReviewUI(GenericUI):
     """
     GUI for reviewing and manually selecting CCG pairs.
@@ -6146,7 +6062,7 @@ class CCGReviewUI(GenericUI):
     ----------
     cd : CCGDataset
         Dataset to review.  If ``cd._ccg_highres`` is populated
-        (via ``cd.load_highres()``), a resolution toggle button is shown.
+        (via ``cd.get_ccg(resolution='highres')``), a resolution toggle button is shown.
     key : Key
         Identifies which CCGPointer to review.
     """
@@ -6158,12 +6074,12 @@ class CCGReviewUI(GenericUI):
         super().__init__()
         self.cd = cd
         self.key = key
-        self.ccg_ptr = self.cd.data.get(key)
+        self.ccg_ptr = self.cd.ptr.get(key)
         # If raw CCG arrays for this session aren't loaded yet, load them now (fast: sidecar file)
         nd_key = key.nd()
-        if nd_key not in cd._ccg:
+        if nd_key not in cd.ccg:
             cd.get_ccg(nd_key=nd_key)
-        self.ccg_data = self.cd._ccg.get(nd_key)
+        self.ccg_data = self.cd.ccg.get(nd_key)
         self.neurons = self.cd.nd.data[nd_key]
 
         self._sel_data = SelectionData()
@@ -6176,6 +6092,7 @@ class CCGReviewUI(GenericUI):
         # accessors (e.g. all_inds → _group_mgr) before the later setup block runs.
         self._settings_mgr = SettingsManager(self)
         self._export_mgr = ExportManager(self)
+        self._extend_cache: dict = {}
         self._custom_mgr = CustomCCGManager(self)
         self._group_mgr = GroupManager(self)
         self._sel_mgr = SelectionPersistenceManager(self)
@@ -6193,7 +6110,7 @@ class CCGReviewUI(GenericUI):
         # These are set to empty defaults when data is not yet loaded; they are
         # refreshed in _finish_initial_draw() after lazy loading completes.
         self.n_segments = self.ccg_ptr.n_segments
-        self.current_segment = self.n_segments   # default = All (n_segments sentinel)
+        self.current_segment = _ALL_SEGS   # default = All
         self.current_pair_idx = 0
 
         # Manual selection state
@@ -6220,7 +6137,7 @@ class CCGReviewUI(GenericUI):
         self._setup_mgr.setup_ui()
         # Apply any persisted font sizing constraints after widgets exist
         self._settings_mgr.apply_min_font_size()
-        self._emit_inventory_event()
+        self._custom_mgr._emit_inventory_event()
 
     # ------------------------------------------------------------------
     # Derived state
@@ -6325,44 +6242,16 @@ class CCGReviewUI(GenericUI):
         except Exception:
             pass   # icon is optional — never break startup
 
-    def _current_session_str(self):
-        return self._setup_mgr._current_session_str()
-
-
-    def _refresh_hotkeys_bar(self):
-        self._group_mgr._refresh_hotkeys_bar()
-
-    def _load_selection_from_file(self, path: str, restore_groups: bool = True, **kw):
-        return self._sel_mgr._load_selection_from_file(path, restore_groups=restore_groups, **kw)
-
-    def get_plot_title(self) -> str:
-        return self._plot_mgr.get_plot_title()
-
     # ------------------------------------------------------------------
-    # Group registry helpers (v4.0 schema)
+    # Group registry helpers 
     # ------------------------------------------------------------------
-
-
-
 
     def _atomic_write_json(self, path: str, data: dict):
         """Write JSON atomically via a .tmp file, preventing partial writes."""
         tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, default=SelectionPersistenceManager._json_default)
+            json.dump(data, f, indent=2, default=json_numpy_default)
         os.replace(tmp, path)
-
-    def _group_pairs(self, gname, session=None):
-        return self._group_mgr._group_pairs(gname, session)
-
-    def _group_pairs_all_sessions(self, gname):
-        return self._group_mgr._group_pairs_all_sessions(gname)
-
-    def _group_add_pair(self, gname, pair, session=None):
-        self._group_mgr._group_add_pair(gname, pair, session)
-
-    def _group_discard_pair(self, gname, pair, session=None):
-        self._group_mgr._group_discard_pair(gname, pair, session)
 
     def _dbg_log(self, hypothesis_id: str, location: str, message: str, data: dict):
         """Debug-mode NDJSON logger (session cde521)."""
@@ -6400,7 +6289,7 @@ class CCGReviewUI(GenericUI):
             if next_idx != self.current_pair_idx:
                 self.current_pair_idx = next_idx
                 self._select_pair_in_list(tuple(self.all_inds[next_idx]))
-                self.update_plot()
+                self._plot_mgr.update_plot()
                 self.network_panel.draw()
         except Exception:
             pass
@@ -6408,8 +6297,6 @@ class CCGReviewUI(GenericUI):
     def _ui_state_path(self):
         return os.path.join(self._sel_save_dir, 'ui_state.json')
 
-    def _save_ui_state(self):
-        self._settings_mgr.save_ui_state()
 
     def setup_settings_menu(self, menubar):
         """Settings menu — opens the settings dialog."""
@@ -6435,7 +6322,7 @@ class CCGReviewUI(GenericUI):
     def _jitter_clear_queue(self):
         """Remove all pending (non-running) tasks from jitter and custom CCG queues."""
         n_removed = 0
-        if self._is_task_running() and self._jitter_pending:
+        if self.jitter_controller.is_task_running() and self._jitter_pending:
             first = self._jitter_pending[0]
             n_removed += len(self._jitter_pending) - 1
             self._jitter_pending.clear()
@@ -6443,19 +6330,19 @@ class CCGReviewUI(GenericUI):
         else:
             n_removed += len(self._jitter_pending)
             self._jitter_pending.clear()
-        if self._custom_ccg_is_running() and self._custom_ccg_pending:
+        if self._custom_mgr.worker._runner.is_running() and self._custom_ccg_pending:
             first = self._custom_ccg_pending[0]
             for task in list(self._custom_ccg_pending)[1:]:
-                self._on_chunk_done(task)
+                self._custom_mgr.worker._on_chunk_done(task)
             n_removed += len(self._custom_ccg_pending) - 1
             self._custom_ccg_pending.clear()
             self._custom_ccg_pending.append(first)
         else:
             for task in list(self._custom_ccg_pending):
-                self._on_chunk_done(task)
+                self._custom_mgr.worker._on_chunk_done(task)
             n_removed += len(self._custom_ccg_pending)
             self._custom_ccg_pending.clear()
-        self._update_jitter_btn_text()
+        self.jitter_controller.update_btn_text()
         if n_removed == 0:
             messagebox.showinfo("Jitter", "Queue is empty.")
         else:
@@ -6470,11 +6357,7 @@ class CCGReviewUI(GenericUI):
                               command=lambda: __import__('webbrowser').open(
                                   'https://github.com/selina-lii/NeuroPy'))
 
-    def _min_font_size(self) -> int:
-        return self._settings_mgr.min_font_size()
-
     # ── Center panel ───────────────────────────────────────────────────
-
 
     def _acg_var_get(self, name, default=None):
         """Safely read a correlogram-panel Tk variable by attribute name."""
@@ -6516,8 +6399,6 @@ class CCGReviewUI(GenericUI):
         cur = self._current_display_config()
         return cur == self._cache_config
 
-    def _on_sig_toggle(self):
-        self._pair_mgr._on_sig_toggle()
 
     def _update_jitter_sig_buttons(self):
         """Enable/disable jitter significance buttons based on cache.
@@ -6529,7 +6410,7 @@ class CCGReviewUI(GenericUI):
         has_jitter = False
         if inds is not None:
             has_jitter = self._jitter_cache.get(
-                (int(inds[0]), int(inds[1]), 'lo', self._jitter_seg())) is not None
+                (int(inds[0]), int(inds[1]), 'lo', self.jitter_controller.seg())) is not None
         if not has_jitter:
             self.center_container.correlogram_panel._line_jitter.set(False)
         # p-corrected checkbutton (only exists in UI when method='jitter')
@@ -6568,9 +6449,6 @@ class CCGReviewUI(GenericUI):
         'jitter': "Jitter: surrogate spike baseline",
     }
 
-    def _on_baseline_method_change(self):
-        self._cs_mgr._on_baseline_method_change()
-
     # ── Right panel ────────────────────────────────────────────────────
 
     def _draw_network(self):
@@ -6578,11 +6456,8 @@ class CCGReviewUI(GenericUI):
 
     # ── Bottom bar ─────────────────────────────────────────────────────
 
-    def _toggle_waveforms_panel(self):
-        self._setup_mgr._toggle_waveforms_panel()
-
     def _toggle_resolution(self):
-        """Toggle between low-res ``_ccg`` and high-res ``_ccg_highres``.
+        """Toggle between low-res ``ccg`` and high-res ``_ccg_highres``.
 
         If high-res data for the current session is not yet in memory, triggers
         a background load via _ensure_highres_loaded before switching.
@@ -6611,7 +6486,7 @@ class CCGReviewUI(GenericUI):
         if self._highres_mode:
             self.ccg_data = self.cd._ccg_highres.get(nd_key)
         else:
-            self.ccg_data = self.cd._ccg.get(nd_key)
+            self.ccg_data = self.cd.ccg.get(nd_key)
         self._clear_all_png_cache()
         self._build_sig_chips()
         if (self.ccg_data is not None and self.current_pair_idx < len(self.all_inds)):
@@ -6622,26 +6497,13 @@ class CCGReviewUI(GenericUI):
                     if self._ccg_pair_in_bounds(cr, ct):
                         self.current_pair_idx = cand_idx
                         break
-        self.update_plot()
-
-    def _ccg_context_menu(self, event):
-        self._setup_mgr._ccg_context_menu(event)
-
-    def _export_current_view(self):
-        self._export_mgr._export_current_view()
+        self._plot_mgr.update_plot()
 
     def _on_ctrl_e(self):
         var = self._panel_vars.get('Waveforms')
         if var:
             var.set(not var.get())
             self._setup_mgr._toggle_panel('Waveforms')
-
-    # ------------------------------------------------------------------
-    # Significance helpers
-    # ------------------------------------------------------------------
-
-    def _is_significant(self, ref: int, tgt: int, seg: int) -> bool:
-        return self._pair_mgr._is_significant(ref, tgt, seg)
 
     # ------------------------------------------------------------------
     # Alpha / normalization callbacks
@@ -6668,7 +6530,7 @@ class CCGReviewUI(GenericUI):
                 p = self._png_path(inds, seg)
                 if os.path.exists(p):
                     os.remove(p)
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
     # ------------------------------------------------------------------
     # Same-scale helpers
@@ -6704,60 +6566,16 @@ class CCGReviewUI(GenericUI):
         self._pair_scale_cache.clear()
         self._refresh()
 
-    def _on_session_scale_toggle(self):
-        self._sess_mgr._on_session_scale_toggle()
-
-    def _on_run_jitter(self):
-        self.jitter_controller.on_run_jitter()
-
-    def _is_task_running(self):
-        return self.jitter_controller.is_task_running()
-
     def _custom_ccg_is_running(self):
-        return self._custom_mgr._runner.is_running()
-
-    def _jitter_start_next(self):
-        self.jitter_controller.start_next()
-
-    def _custom_ccg_start_next(self):
-        return self._custom_mgr._custom_ccg_start_next()
-
-    def _update_jitter_btn_text(self):
-        self.jitter_controller.update_btn_text()
-
-    def _on_save_jitter(self):
-        self.jitter_controller.on_save()
-
-    def _load_jitter_from_cd(self):
-        self.jitter_controller.load_from_cd()
-
-    def _jitter_seg(self, seg=None):
-        return self.jitter_controller.seg(seg)
-
-    def _on_clear_jitter(self):
-        self.jitter_controller.on_clear()
-
-    def _apply_jitter_list_colors(self, pair=None):
-        self.jitter_controller.apply_list_colors(pair)
-
-    def _mark_jitter_viewed(self) -> bool:
-        return self.jitter_controller.mark_viewed()
-
-    def _finalize_normalization(self):
-        self._pair_mgr._finalize_normalization()
-
-    def _clear_all_png_cache(self):
-        self._png_mgr._clear_all_png_cache()
+        return self._custom_mgr.worker._runner.is_running()
 
     def _refresh(self, clear_extend: bool = False) -> None:
         """Invalidate PNG cache and redraw current pair."""
         if clear_extend:
             self._extend_cache.clear()
         self._clear_all_png_cache()
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
-    def _terminate_pregen_proc(self):
-        self._pregen_ctrl._terminate_pregen_proc()
 
     def _clear_seg_filter(self):
         self.seg_filter_var.set('')
@@ -6772,15 +6590,9 @@ class CCGReviewUI(GenericUI):
     # Key / dropdown helpers
     # ------------------------------------------------------------------
 
-    def _session_label(self, nd_key) -> str:
-        return self._sess_mgr._session_label(nd_key)
-
-    def _real_nd_keys_ordered(self) -> list:
-        return self._sess_mgr._real_nd_keys_ordered()
-
     def _sess_title_label(self, sess: str) -> str:
         """Return 'session=NSD 2' style label for use in plot titles."""
-        ordered = [str(getattr(nk, 'session', nk)) for nk in self._real_nd_keys_ordered()]
+        ordered = [str(getattr(nk, 'session', nk)) for nk in self._sess_mgr._real_nd_keys_ordered()]
         try:
             idx = ordered.index(sess) + 1   # 1-based
         except ValueError:
@@ -6789,48 +6601,6 @@ class CCGReviewUI(GenericUI):
         block_num   = ((idx - 1) % _SESS_PER_BLOCK) + 1
         return f"session={block_label}{block_num}"
 
-    def _type_key_for_nd(self, nd_key):
-        return self._sess_mgr._type_key_for_nd(nd_key)
-
-    def _nd_key_for_session_str(self, sess_str: str):
-        return self._sess_mgr._nd_key_for_session_str(sess_str)
-
-    def _any_group_header_names(self) -> list[str]:
-        return self._group_mgr._any_group_header_names()
-
-    def _any_triples_in_group(self, gname: str) -> set[tuple]:
-        return self._group_mgr._any_triples_in_group(gname)
-
-    def _any_nd_keys_for_group(self, gname: str) -> list:
-        return self._group_mgr._any_nd_keys_for_group(gname)
-
-    def _any_iter_pairs_for_group(self, gname: str):
-        return self._group_mgr._any_iter_pairs_for_group(gname)
-
-    def _any_rebuild_pair_handles(self):
-        return self._sess_mgr._any_rebuild_pair_handles()
-
-    def _any_sync_selection_from_universe(self):
-        self._sess_mgr._any_sync_selection_from_universe()
-
-    def _enter_all_session_mode(self):
-        return self._sess_mgr._enter_all_session_mode()
-
-    def _exit_all_session_mode(self):
-        self._sess_mgr._exit_all_session_mode()
-
-    def _bind_context_to_type_key(self, tk):
-        return self._sess_mgr._bind_context_to_type_key(tk)
-
-    def _autosave_all_sessions_for_current_type(self):
-        self._sel_mgr._autosave_all_sessions_for_current_type()
-
-    def _sync_any_plot_context(self, row_idx: int):
-        return self._sess_mgr._sync_any_plot_context(row_idx)
-
-    def _toggle_any_avail_group(self, gname: str):
-        return self._group_mgr._toggle_any_avail_group(gname)
-
     def _pair_sess_rt(self, inds) -> tuple[str, tuple[int, int]]:
         """Session string + (ref,tgt) for group/tag lookups."""
         if getattr(self, '_session_any_mode', False):
@@ -6838,12 +6608,6 @@ class CCGReviewUI(GenericUI):
                 return str(inds[0].session), (int(inds[1]), int(inds[2]))
             return str(inds[0]), (int(inds[1]), int(inds[2]))
         return self._current_session_str(), (int(inds[0]), int(inds[1]))
-
-    def _pair_in_group(self, pair, group_name: str) -> bool:
-        return self._group_mgr._pair_in_group(pair, group_name)
-
-    def _available_type_keys(self, nd_key) -> list:
-        return self._sess_mgr._available_type_keys(nd_key)
 
     def _type_label(self, key) -> str:
         parts = []
@@ -6873,7 +6637,7 @@ class CCGReviewUI(GenericUI):
                 if self.selected_inds else None
             )
 
-        ptr = self.cd.data.get(new_key)
+        ptr = self.cd.ptr.get(new_key)
         if ptr is None or ptr.inds is None:
             messagebox.showwarning("Switch key", f"No data for key:\n{new_key}")
             return False
@@ -6882,10 +6646,7 @@ class CCGReviewUI(GenericUI):
             self._pair_deleted_store[str(prev_key)] = set(self.deleted_inds)
 
         old_ptr = self.ccg_ptr
-        _prev_seg_label = (old_ptr.segment_names[self.current_segment]
-                           if old_ptr is not None
-                              and 0 <= self.current_segment < old_ptr.n_segments
-                           else None)
+        _prev_seg_label = self.current_segment  # already a str
         self.key = new_key
         self.ccg_ptr = ptr
         nd_key = new_key.nd()
@@ -6895,7 +6656,7 @@ class CCGReviewUI(GenericUI):
             self.ccg_data = self.cd._ccg_highres[nd_key]
         else:
             self._highres_mode = False   # reset if highres not available
-            self.ccg_data = self.cd._ccg.get(nd_key)
+            self.ccg_data = self.cd.ccg.get(nd_key)
         try:
             self.neurons = (self.cd.nd.data[new_key.nd()]
                             if getattr(self.cd, 'nd', None) is not None else None)
@@ -6904,10 +6665,10 @@ class CCGReviewUI(GenericUI):
         # all_inds is a @property — no assignment needed
         self.n_segments = self.ccg_ptr.n_segments
         new_names = self.ccg_ptr.segment_names
-        if _prev_seg_label is not None and _prev_seg_label in new_names:
-            self.current_segment = new_names.index(_prev_seg_label)
+        if _prev_seg_label is not None and _prev_seg_label in self._all_segment_names():
+            self.current_segment = _prev_seg_label
         else:
-            self.current_segment = 0
+            self.current_segment = _ALL_SEGS
         self.current_pair_idx = 0
         if (hasattr(self.ccg_ptr, 'selected_inds') and
                 self.ccg_ptr.selected_inds is not None):
@@ -6931,7 +6692,7 @@ class CCGReviewUI(GenericUI):
             str(prev_session or '') != str(new_session or ''))
         if self._switch_key_session_changed:
             self._custom_segments.clear()
-            self._bind_custom_segments_to_session(str(new_session))
+            self._custom_mgr._bind_custom_segments_to_session(str(new_session))
         # Update probe network ct checkboxes to match new key
         new_ct = getattr(new_key, 'conn_type', None)
         for ct, var in getattr(self, '_net_ct_vars', {}).items():
@@ -6943,14 +6704,14 @@ class CCGReviewUI(GenericUI):
         self.segment_var.set(self.ccg_ptr.segment_names[0])
         self._build_sig_chips()
         self.refresh_lists()
-        self.plot_title_var.set(self.get_plot_title())
+        self.plot_title_var.set(self._plot_mgr.get_plot_title())
         # Lazy-load jitter results for the new session if not yet in memory
         _nd = self.key.nd()
         if (hasattr(self.cd, 'load_jitter')
                 and _nd not in getattr(self.cd, '_jitter_results', {})):
             self.cd.load_jitter(nd_key=_nd)
         self.jitter_controller.load_from_cd()
-        self.update_plot()
+        self._plot_mgr.update_plot()
         if self.network_panel._focused_neuron is not None:
             self.network_panel._update_focus_info(self.network_panel._focused_neuron)
         self.network_panel.refresh_shank_buttons()
@@ -6965,17 +6726,17 @@ class CCGReviewUI(GenericUI):
 
     def _switch_type_any(self, new_key):
         """Change connection type while in virtual ``any`` session."""
-        self._flush_any_selections_to_pointers()
+        self._sess_mgr._flush_any_selections_to_pointers()
         try:
-            self._autosave_all_sessions_for_current_type()
+            self._sel_mgr._autosave_all_sessions_for_current_type()
         except Exception as exc:
             print(f"[CCGReviewUI] any-session type switch autosave: {exc}")
         try:
             if self._sel_data._groups:
-                self._save_groups_export()
+                self._group_mgr._save_groups_export()
         except Exception:
             traceback.print_exc()
-        self._bind_context_to_type_key(new_key)
+        self._sess_mgr._bind_context_to_type_key(new_key)
         self._type_var.set(self._type_label(new_key))
         self._any_load_deleted_aggregate()
         self._any_expanded_group_tags = set()
@@ -7001,36 +6762,19 @@ class CCGReviewUI(GenericUI):
 
     def _on_segment_change(self, event):
         name = self.segment_var.get()
-        if name == _ALL_SEGS:
-            self.current_segment = self.n_segments
-        elif name in self.ccg_ptr.segment_names:
-            self.current_segment = self.ccg_ptr.segment_names.index(name)
-        self.plot_title_var.set(self.get_plot_title())
+        if name in self._all_segment_names():
+            self.current_segment = name
+        self.plot_title_var.set(self._plot_mgr.get_plot_title())
         self.center_container.spike_attribution_panel._exit_spike_attribution_view()
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
 
-    def _compute_stats_str(self) -> str:
-        return self._pair_mgr._compute_stats_str()
-
     def _refresh_stats(self):
         if hasattr(self, 'stats_var'):
             self.stats_var.set(self._compute_stats_str())
-
-    def _update_pair_info(self, inds):
-        return self._plot_mgr._update_pair_info(inds)
-
-    def _flush_any_selections_to_pointers(self):
-        self._sess_mgr._flush_any_selections_to_pointers()
-
-    def _any_load_deleted_aggregate(self):
-        self._sess_mgr._any_load_deleted_aggregate()
-
-    def _flush_any_deleted_to_stores(self):
-        self._sess_mgr._flush_any_deleted_to_stores()
 
     def _flush_deleted_to_store(self):
         """Copy current deleted_inds into _pair_deleted_store for the active Key."""
@@ -7039,9 +6783,6 @@ class CCGReviewUI(GenericUI):
             return
         if getattr(self, 'key', None) is not None:
             self._pair_deleted_store[str(self.key)] = set(self.deleted_inds)
-
-    def _push_undo(self):
-        self._sel_mgr._push_undo()
 
     @property
     def selected_inds(self):
@@ -7067,18 +6808,6 @@ class CCGReviewUI(GenericUI):
     def deleted_inds(self, v):
         self._sel_data.deleted_inds = v
 
-    def _undo(self, event=None):
-        return self._sel_mgr._undo(event)
-
-    def _redo(self, event=None):
-        return self._sel_mgr._redo(event)
-
-    def _highlight_changed_pairs(self, changed_pairs):
-        return self._plot_mgr._highlight_changed_pairs(changed_pairs)
-
-    def _clear_undo_highlight(self):
-        self._sel_mgr._clear_undo_highlight()
-
     def refresh_lists(self):
         if hasattr(self, 'left_container'):
             self.left_container.left_panel.refresh_lists()
@@ -7086,9 +6815,6 @@ class CCGReviewUI(GenericUI):
     def _select_pair_in_list(self, inds):
         if hasattr(self, 'left_container'):
             self.left_container.left_panel._select_pair_in_list(inds)
-
-    def _reapply_bookmark_list_styles(self):
-        self._sel_mgr._reapply_bookmark_list_styles()
 
     def _selected_pair_from_lists(self):
         if hasattr(self, 'left_container'):
@@ -7106,12 +6832,6 @@ class CCGReviewUI(GenericUI):
         row = self.all_inds[idx]
         return tuple(int(x) for x in row)
 
-    def _bookmark_toggle_current(self, event=None):
-        self._sel_mgr._bookmark_toggle_current(event)
-
-    def _clear_bookmarks(self):
-        self._sel_mgr._clear_bookmarks()
-
     def _toggle_together(self, pairs):
         """Pin or unpin pairs from the 'Show Together' stacked view."""
         max_tog = self._settings.get('max_show_together', 5)
@@ -7126,19 +6846,50 @@ class CCGReviewUI(GenericUI):
                 if len(self._together_pairs) < max_tog:
                     self._together_pairs.append(pt)
                     tog_tuples.append(pt)
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
     def _clear_together(self):
         """Remove all pairs from the 'Show Together' pool."""
         self._together_pairs.clear()
-        self.update_plot()
-
-    def get_pair_index(self, inds):
-        return self._plot_mgr.get_pair_index(inds)
+        self._plot_mgr.update_plot()
 
     def _n_total_segments(self):
         """Total navigable segments: real + All + custom."""
         return self.n_segments + 1 + len(self._custom_segments)
+
+    def _seg_name(self, idx: int) -> str:
+        """Convert legacy int segment index to name string."""
+        if idx is None or idx == self.n_segments:
+            return _ALL_SEGS
+        if idx > self.n_segments:
+            ci = idx - self.n_segments - 1
+            cs_list = getattr(self, '_custom_segments', []) or []
+            if 0 <= ci < len(cs_list):
+                return cs_list[ci].source.name
+            return _ALL_SEGS
+        names = self.ccg_ptr.segment_names
+        if 0 <= idx < len(names):
+            return names[idx]
+        return _ALL_SEGS
+
+    def _seg_idx(self, name: str) -> int:
+        """Resolve segment name string to int index (for array indexing only)."""
+        if name is None or name == _ALL_SEGS:
+            return self.n_segments
+        names = self.ccg_ptr.segment_names
+        if name in names:
+            return names.index(name)
+        for ci, cs in enumerate(getattr(self, '_custom_segments', []) or []):
+            if cs.source.name == name:
+                return self.n_segments + 1 + ci
+        return self.n_segments
+
+    def _all_segment_names(self) -> list:
+        """Ordered list: regular names + _ALL_SEGS + custom names."""
+        names = list(self.ccg_ptr.segment_names)
+        names.append(_ALL_SEGS)
+        names.extend(cs.source.name for cs in (getattr(self, '_custom_segments', []) or []))
+        return names
 
     def _clamp_current_segment_for_session(self):
         """Keep ``current_segment`` within the loaded session (fixes Any-mode session hops).
@@ -7149,37 +6900,24 @@ class CCGReviewUI(GenericUI):
         """
         ns = int(self.n_segments) if self.n_segments is not None else 0
         cs_list = getattr(self, '_custom_segments', []) or []
-        if ns <= 0:
-            self.current_segment = 0
-            return
-        seg = int(self.current_segment)
-        # Valid ids: ``0..ns-1`` (real), ``ns`` (All), ``ns+1 .. ns+len(cs_list)`` (custom)
-        max_id = ns + len(cs_list)
-        if seg < 0:
-            self.current_segment = 0
-        elif seg > max_id:
-            self.current_segment = ns
-        elif seg > ns:
-            ci = seg - ns - 1
-            if ci < 0 or ci >= len(cs_list):
-                self.current_segment = ns
-
-    def _is_custom_segment(self, seg=None):
-        return self._custom_mgr._is_custom_segment(seg)
-
-    def _custom_seg_index(self, seg=None):
-        return self._custom_mgr._custom_seg_index(seg)
+        valid = list(self.ccg_ptr.segment_names) + [_ALL_SEGS] + [cs.source.name for cs in cs_list]
+        if self.current_segment not in valid:
+            self.current_segment = _ALL_SEGS
 
     def change_segment(self, delta):
-        total = self._n_total_segments()
-        self.current_segment = (self.current_segment + delta) % total
+        all_names = self._all_segment_names()
+        try:
+            idx = all_names.index(self.current_segment)
+        except ValueError:
+            idx = len(self.ccg_ptr.segment_names)  # All
+        self.current_segment = all_names[(idx + delta) % len(all_names)]
         self._clamp_current_segment_for_session()
         self._update_segment_label()
         self.center_container.spike_attribution_panel._exit_spike_attribution_view()
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
     def _jump_to_segment(self, idx):
-        self.current_segment = idx
+        self.current_segment = self._seg_name(idx)
         self._clamp_current_segment_for_session()
         self._update_segment_label()
         self.center_container.spike_attribution_panel._exit_spike_attribution_view()
@@ -7190,34 +6928,11 @@ class CCGReviewUI(GenericUI):
                 self._update_sig_indicators(inds)
         except Exception:
             pass
-        self.update_plot()
+        self._plot_mgr.update_plot()
 
     def _update_segment_label(self):
-        seg = int(self.current_segment)
-        if seg == self.n_segments:
-            self.segment_var.set(_ALL_SEGS)
-        elif self._is_custom_segment(seg):
-            ci = self._custom_seg_index(seg)
-            cs_list = getattr(self, '_custom_segments', []) or []
-            if 0 <= ci < len(cs_list):
-                self.segment_var.set(cs_list[ci]['name'])
-            else:
-                self.segment_var.set('custom')
-        else:
-            if 0 <= seg < len(self.ccg_ptr.segment_names):
-                self.segment_var.set(self.ccg_ptr.segment_names[seg])
-            else:
-                self.segment_var.set(str(seg))
-        self.plot_title_var.set(self.get_plot_title())
-
-    def _remove_custom_segment(self, ci):
-        self._custom_mgr._remove_custom_segment(ci)
-
-    def _update_sig_indicators(self, inds):
-        self._pair_mgr._update_sig_indicators(inds)
-
-    def _png_path(self, inds, segment, _render_cfg=None, _hires_override=None) -> str:
-        return self._png_mgr._png_path(inds, segment, _render_cfg, _hires_override)
+        self.segment_var.set(self.current_segment)
+        self.plot_title_var.set(self._plot_mgr.get_plot_title())
 
     def _ccg_pair_in_bounds(self, ref: int, tgt: int, cd=None) -> bool:
         """True if *(ref, tgt)* index the ref/tgt axes of *cd.ccg*."""
@@ -7232,13 +6947,6 @@ class CCGReviewUI(GenericUI):
             return 0 <= r < sh[1] and 0 <= t < sh[2]
         except (TypeError, ValueError, IndexError):
             return False
-
-    def _resolve_segment_data(self, ref, tgt, segment, highres=None, include_pval=True, include_acg=False, _cd=None):
-        return self._pair_mgr._resolve_segment_data(ref, tgt, segment, highres, include_pval, include_acg, _cd)
-
-    def _resolve_extended_ccg(self, ref: int, tgt: int, segment: int, highres: bool,
-                              extend_ms: int, bin_size_eff: float, cd):
-        return self._pair_mgr._resolve_extended_ccg(ref, tgt, segment, highres, extend_ms, bin_size_eff, cd)
 
     def _get_or_render_png(self, inds, segment):
         """Return PNG path, using disk cache when display matches cache configuration.
@@ -7268,15 +6976,6 @@ class CCGReviewUI(GenericUI):
                 print(f"[CCGReviewUI] git commit failed: {exc}")
         threading.Thread(target=_run, daemon=True).start()
 
-    def _save_groups_export(self):
-        self._group_mgr._save_groups_export()
-
-    def _autoload_session_latest(self, restore_groups: bool = False):
-        return self._sel_mgr._autoload_session_latest(restore_groups)
-
-    def _ensure_session_loaded(self, nd_key, on_loaded):
-        return self._sess_mgr._ensure_session_loaded(nd_key, on_loaded)
-
     def _post_load_refresh(self):
         """Unified UI refresh called after any load (initial, autoload, manual).
 
@@ -7287,32 +6986,14 @@ class CCGReviewUI(GenericUI):
         self._build_sig_chips()
         self._update_segment_label()
         self.network_panel.refresh_shank_buttons()
-        self._rebuild_groups_menu()   # also refreshes hotkeys bar chips
-        self._update_conn_str_metric_availability()
-        self.update_plot()
+        self._group_mgr._rebuild_groups_menu()   # also refreshes hotkeys bar chips
+        self._cs_mgr._update_conn_str_metric_availability()
+        self._plot_mgr.update_plot()
         self.network_panel.draw()
 
     # ------------------------------------------------------------------
     # Connectivity Strength
     # ------------------------------------------------------------------
-
-    def _pair_passes_main(self, ref: int, tgt: int, seg) -> bool:
-        return self._pair_mgr._pair_passes_main(ref, tgt, seg)
-    def _view_values(self, item):
-        return self._pair_mgr._view_values(item)
-
-    def _on_conn_str_toggle(self):
-        self._cs_mgr._on_conn_str_toggle()
-
-    def _update_conn_str_label(self):
-        self._cs_mgr._update_conn_str_label()
-
-    def _cs_annotation_lines(self, ref: int, tgt: int, seg, highres: bool,
-                              print_stg: bool, print_jbsi: bool) -> list:
-        return self._cs_mgr._cs_annotation_lines(ref, tgt, seg, highres, print_stg, print_jbsi)
-
-    def _update_conn_str_metric_availability(self):
-        self._cs_mgr._update_conn_str_metric_availability()
 
     def _current_inds(self):
         """Return current (ref, tgt) inds or None."""
@@ -7322,36 +7003,11 @@ class CCGReviewUI(GenericUI):
             return self.all_inds[self.current_pair_idx]
         return None
 
-    def _get_cs_val(self, ref: int, tgt: int, seg, method: str, highres: bool):
-        return self._cs_mgr._get_cs_val(ref, tgt, seg, method, highres)
-
-    def _cs_cache_key(self, ref: int, tgt: int, seg, method: str, highres: bool,
-                      eff_min_lag, eff_max_lag) -> tuple:
-        return self._cs_mgr._cs_cache_key(ref, tgt, seg, method, highres, eff_min_lag, eff_max_lag)
-
-    def _compute_pair_conn_strength(self, ref: int, tgt: int, seg, highres: bool = False):
-        return self._cs_mgr._compute_pair_conn_strength(ref, tgt, seg, highres)
-
-    def _update_global_baseline_availability(self):
-        self._cs_mgr._update_global_baseline_availability()
-
     # ── Adaptive test window ───────────────────────────────────────────
 
     _ADAPTIVE_TW_GROUPS = ('msconn', 'widems', '2peakms')
     _ADAPTIVE_TW_MIN_LAG = -1e-3   # -1 ms
     _ADAPTIVE_TW_MAX_LAG =  1e-3   #  1 ms
-
-    def _pair_qualifies_for_adaptive_tw(self, ref: int, tgt: int) -> bool:
-        return self._cs_mgr._pair_qualifies_for_adaptive_tw(ref, tgt)
-
-    def _effective_lags(self, ref: int, tgt: int):
-        return self._cs_mgr._effective_lags(ref, tgt)
-
-    def _update_adaptive_tw_availability(self):
-        self._cs_mgr._update_adaptive_tw_availability()
-
-    def _on_adaptive_tw_toggle(self):
-        self._cs_mgr._on_adaptive_tw_toggle()
 
     def _deferred_initial_draw(self):
         # Load groups/hotkeys first (independent of session data).
@@ -7361,17 +7017,11 @@ class CCGReviewUI(GenericUI):
             self._setup_mgr._finish_initial_draw()
             # Autoload selections + pair tags AFTER _finish_initial_draw so the
             # reset in that method doesn't clobber what we loaded.
-            self._autoload_session_latest(restore_groups=False)
+            self._sel_mgr._autoload_session_latest(restore_groups=False)
             self.refresh_lists()
             self.network_panel.draw()
 
-        self._ensure_session_loaded(self.key.nd(), on_loaded=_after_initial_draw)
-
-    def update_plot(self):
-        return self._plot_mgr.update_plot()
-
-    def _draw_waveforms(self):
-        return self._pair_mgr._draw_waveforms()
+        self._sess_mgr._ensure_session_loaded(self.key.nd(), on_loaded=_after_initial_draw)
 
     # ------------------------------------------------------------------
     # Time slider
@@ -7448,15 +7098,9 @@ class CCGReviewUI(GenericUI):
         win.wait_window()
         return result[0]
 
-    def _generate_suggested_custom_ccgs(self):
-        return self._custom_mgr._generate_suggested_custom_ccgs()
-
-    def _session_obj_for_nd_key(self, nd_key):
-        return self._sess_mgr._session_obj_for_nd_key(nd_key)
-
     def _segment_bounds_for_key(self, key) -> list:
         """Return segment bounds from edge_times for a key (always uses 'segments' theme)."""
-        ptr = self.cd.data.get(key)
+        ptr = self.cd.ptr.get(key)
         if ptr is None or getattr(ptr, 'edge_times', None) is None:
             return []
         out = []
@@ -7481,9 +7125,6 @@ class CCGReviewUI(GenericUI):
         if not seg_bounds:
             return (0.0, 0.0)
         return (min(b[0] for b in seg_bounds), max(b[1] for b in seg_bounds))
-
-    def _session_wall_clock_extent_for_key(self, key) -> tuple[float, float]:
-        return self._sess_mgr._session_wall_clock_extent_for_key(key)
 
     def _union_span_for_segment_label(self, key, label: str) -> tuple[float, float] | None:
         """Absolute [t0, t1] covering all edge_times rows whose label matches *label*."""
@@ -7566,33 +7207,15 @@ class CCGReviewUI(GenericUI):
         # Empty intervals are valid and produce an empty restricted spike selection.
         return (intervals, float(sum(e - s for s, e in intervals)))
 
-    def _custom_npz_spec(self, path: str) -> dict | None:
-        return self._custom_mgr._custom_npz_spec(path)
-
-    def _custom_ccg_name_session_coverage(self) -> tuple[dict[str, set[str]], int]:
-        return self._custom_mgr._custom_ccg_name_session_coverage()
-
-    def _custom_segment_disk_session(self, cs: dict) -> str:
-        return self._custom_mgr._custom_segment_disk_session(cs)
-
-    def _bind_custom_segments_to_session(self, sess: str):
-        self._custom_mgr._bind_custom_segments_to_session(sess)
-
-    def _key_for_custom_segment_save(self, cs: dict):
-        return self._custom_mgr._key_for_custom_segment_save(cs)
-
     def _enqueue_custom_ccg_task(self, *, key, t0, t1, name, intervals,
                                  active_duration, filter_state, metadata,
                                  auto_save: bool, load_into_ui: bool,
                                  batch_id: int | None = None) -> bool:
-        return self._custom_mgr._enqueue_custom_ccg_task(
+        return self._custom_mgr.worker._enqueue_custom_ccg_task(
             key=key, t0=t0, t1=t1, name=name, intervals=intervals,
             active_duration=active_duration, filter_state=filter_state,
             metadata=metadata, auto_save=auto_save, load_into_ui=load_into_ui,
             batch_id=batch_id)
-
-    def _iter_type_keys_for_all_sessions(self):
-        return self._sess_mgr._iter_type_keys_for_all_sessions()
 
     def _queue_custom_ccg_for_spec(self, spec: dict, *, for_all: bool, auto_save: bool,
                                     target_sessions: list | None = None) -> int:
@@ -7604,24 +7227,6 @@ class CCGReviewUI(GenericUI):
                                 key_override=None, neurons_obj=None,
                                 ccg_data_obj=None, metadata=None):
         return self._custom_mgr._compute_custom_segment(t0, t1, name, neurons_override, active_duration, key_override, neurons_obj, ccg_data_obj, metadata)
-
-    def _on_add_focused_pair(self):
-        return self._misc_mgr._on_add_focused_pair()
-
-    def _pair_group_label(self, inds) -> str:
-        return self._group_mgr._pair_group_label(inds)
-
-    def _toggle_pair_group(self, pair, group_name):
-        self._group_mgr._toggle_pair_group(pair, group_name)
-
-    def _toggle_pairs_group(self, pairs, group_name):
-        self._group_mgr._toggle_pairs_group(pairs, group_name)
-
-    def _create_group_dialog(self):
-        return self._group_mgr._create_group_dialog()
-
-    def _create_special_group_dialog(self):
-        return self._group_mgr._create_special_group_dialog()
 
     def _pair_tags_dialog(self):
         """Dialog to view/edit tags and notes for the current pair."""
@@ -7674,9 +7279,6 @@ class CCGReviewUI(GenericUI):
         ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(
             side=tk.RIGHT)
 
-    def _pairs_by_conn_type(self, session_str, pairs):
-        return self._misc_mgr._pairs_by_conn_type(session_str, pairs)
-
     def _conn_type_label(self, ct) -> str:
         """Return conn-type label matching _pairs_by_conn_type keys (e.g. 'pyr→inter')."""
         if ct is None:
@@ -7702,103 +7304,44 @@ class CCGReviewUI(GenericUI):
     def _manage_groups_dialog(self):
         ManageGroupsDialog.show(self)
 
-    def _rename_group(self, old_name, new_name, win=None):
-        return self._group_mgr._rename_group(old_name, new_name, win)
-
-    def _delete_group(self, name, win=None):
-        return self._group_mgr._delete_group(name, win)
-
-    # ------------------------------------------------------------------
-    # Template editor
-    # ------------------------------------------------------------------
-
-    def _set_group_hotkey(self, group_name, key_str):
-        return self._group_mgr._set_group_hotkey(group_name, key_str)
-
-    def _rebuild_groups_menu(self):
-        return self._group_mgr._rebuild_groups_menu()
-
-    def _select_group(self, group_name):
-        return self._group_mgr._select_group(group_name)
-
-    def _show_temp_warning(self, msg: str, duration_ms: int = 2000):
-        return self._sel_mgr._show_temp_warning(msg, duration_ms)
-
-    def _upsert_custom_segment_by_name(self, lst: list, result: dict) -> tuple:
-        return self._custom_mgr._upsert_custom_segment_by_name(lst, result)
-
-    def _on_chunk_done(self, task):
-        return self._custom_mgr._on_chunk_done(task)
-
-    # ── Property shims: attrs moved to CustomCCGManager ─────────────────────
+    # ── Property shims ───────────────────────────────────────────────────────
 
     @property
     def _custom_segments(self) -> list:
-        return self._custom_mgr._active_list
+        return self._custom_mgr.store._active_list
 
     @_custom_segments.setter
     def _custom_segments(self, v):
-        self._custom_mgr._by_session[self._custom_mgr._active_sess] = v
+        self._custom_mgr.store._by_session[self._custom_mgr.state.active_sess] = v
 
     @property
     def _custom_segments_by_session(self) -> dict:
-        return self._custom_mgr._by_session
-
-    @property
-    def _extend_cache(self) -> dict:
-        return self._custom_mgr._extend_cache
-
-    @_extend_cache.setter
-    def _extend_cache(self, v):
-        self._custom_mgr._extend_cache = v
+        return self._custom_mgr.store._by_session
 
     @property
     def _stacked_segments(self) -> set:
-        return self._custom_mgr._stacked_segments
+        return self._custom_mgr.state._stacked_segments
 
     @_stacked_segments.setter
     def _stacked_segments(self, v):
-        self._custom_mgr._stacked_segments = v
+        self._custom_mgr.state._stacked_segments = v
 
     @property
     def _custom_ccg_inventory_sig(self) -> tuple:
-        return self._custom_mgr._inventory_sig
+        return self._custom_mgr.state.inventory_sig
 
     @_custom_ccg_inventory_sig.setter
     def _custom_ccg_inventory_sig(self, v):
-        self._custom_mgr._inventory_sig = v
+        self._custom_mgr.state.inventory_sig = v
 
     @property
     def _ccg_cache_dir(self) -> str:
-        return self._custom_mgr.cache_dir
+        return self._custom_mgr.store.cache_dir
 
     @property
     def _custom_ccg_suggestions_path(self) -> str:
-        return self._custom_mgr.suggestions_path
-
-    def _emit_inventory_event(self):
-        return self._custom_mgr._emit_inventory_event()
-
-    def _bind_custom_segments_to_session(self, sess: str):
-        return self._custom_mgr._bind_custom_segments_to_session(sess)
-
-    def _archive_stale_custom_ccgs(self):
-        return self._custom_mgr._archive_stale_custom_ccgs()
-
-    def _build_custom_spec(self, *, for_all: bool, for_session: str | None = None):
-        return self._custom_mgr._build_custom_spec(for_all=for_all, for_session=for_session)
-
-    def _record_custom_ccg_suggestion(self, spec: dict):
-        return self._custom_mgr._record_custom_ccg_suggestion(spec)
-
-    def _emit_custom_ccg_inventory_event(self):
-        return self._custom_mgr._emit_inventory_event()
-
-    def _on_close(self):
-        return self._setup_mgr._on_close()
-
-    def run(self):
-        return self._sel_mgr.run()
+        return self._custom_mgr.store.suggestions_path
+    
 
 def _load_last_key() -> 'Key | None':
     """Return the Key saved in ui_state.json from the last session, or None."""
@@ -7821,25 +7364,15 @@ def launch_ccg_review(cd, key=None):
     """
     Launch CCG review UI.
 
-    Parameters
-    ----------
-    cd : CCGDataset
-        Dataset to review.  Call ``cd.load_highres()`` beforehand to enable
-        the resolution toggle button.
-    key : Key, optional
-        Key identifying which CCGPointer to review.  If omitted, the last
-        session opened is restored from ``ui_state.json``; if no saved state
-        exists, the first key in ``cd.data`` is used.
-
     Examples
     --------
     >>> ui = launch_ccg_review(cd, key)
-    >>> cd.load_highres(); ui = launch_ccg_review(cd, key)
+    >>> cd.get_ccg(resolution='highres'); ui = launch_ccg_review(cd, key)
     """
     if key is None:
         key = _load_last_key()
-        if key is None or key not in cd.data:
-            key = next(iter(cd.data))
+        if key is None or key not in cd.ptr:
+            key = next(iter(cd.ptr))
     ui = CCGReviewUI(cd, key)
     ui.run()
     return ui

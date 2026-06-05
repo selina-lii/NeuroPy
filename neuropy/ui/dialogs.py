@@ -66,7 +66,7 @@ class MergeGroupsDialog:
             for g in selected:
                 g_data = ui._sel_data._groups.get(g, {})
                 if isinstance(g_data, set):
-                    sess = ui._current_session_str()
+                    sess = ui._setup_mgr._current_session_str()
                     merged.setdefault(sess, set()).update(g_data)
                 else:
                     for sess, pairs in g_data.items():
@@ -76,7 +76,7 @@ class MergeGroupsDialog:
                     ui._sel_data._group_hotkeys.pop(g, None)
                     ui._sel_data._group_notes.pop(g, None)
             ui._sel_data._groups[target] = merged
-            ui._rebuild_groups_menu()
+            ui._group_mgr._rebuild_groups_menu()
             ui.refresh_lists()
             win.destroy()
 
@@ -114,7 +114,7 @@ class ManageGroupsDialog:
             new = nv.get().strip()
             if sp:
                 new = _SPECIAL_PREFIX + new
-            ui._rename_group(old, new, win)
+            ui._group_mgr._rename_group(old, new, win)
 
         ttk.Button(top, text="Rename", command=_do_rename).pack(side=tk.LEFT)
         if not is_special:
@@ -124,7 +124,7 @@ class ManageGroupsDialog:
             hk_var = tk.StringVar(value=ui._sel_data._group_hotkeys.get(gname, ''))
             ttk.Entry(hk_frame, textvariable=hk_var, width=6).pack(side=tk.LEFT, padx=4)
             ttk.Button(hk_frame, text="Set",
-                       command=lambda g=gname, hv=hk_var: ui._set_group_hotkey(g, hv.get())).pack(
+                       command=lambda g=gname, hv=hk_var: ui._group_mgr._set_group_hotkey(g, hv.get())).pack(
                 side=tk.LEFT)
         ttk.Label(frame, text="Discussion notes:" if is_special else "Notes:"
                   ).pack(anchor='w', padx=6, pady=(4, 0))
@@ -151,7 +151,7 @@ class ManageGroupsDialog:
                 pairs = g[sess]
                 if not pairs:
                     continue
-                ct_map = ui._pairs_by_conn_type(sess, pairs)
+                ct_map = ui._misc_mgr._pairs_by_conn_type(sess, pairs)
                 for ct_label, ct_pairs in ct_map.items():
                     lb.insert(tk.END, f"── {sess} | {ct_label} ──")
                     lb.itemconfig(lb.size() - 1, foreground='#666')
@@ -165,14 +165,14 @@ class ManageGroupsDialog:
         if is_special:
             conv_label = "Convert to group"
             def _do_convert(g=gname, d=display):
-                ui._rename_group(g, d, win)
+                ui._group_mgr._rename_group(g, d, win)
         else:
             conv_label = "Convert to special group"
             def _do_convert(g=gname, d=display):
-                ui._rename_group(g, _SPECIAL_PREFIX + d, win)
+                ui._group_mgr._rename_group(g, _SPECIAL_PREFIX + d, win)
         ttk.Button(btn_row, text=conv_label, command=_do_convert).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text=f"Delete group '{display}'",
-                   command=lambda g=gname: ui._delete_group(g, win)).pack(side=tk.LEFT, padx=4)
+                   command=lambda g=gname: ui._group_mgr._delete_group(g, win)).pack(side=tk.LEFT, padx=4)
 
     def _build(self):
         nb = ttk.Notebook(self.win)
@@ -345,14 +345,14 @@ class SettingsDialog:
                 v = int(_max_tog_var.get())
                 if 2 <= v <= 20:
                     ui._settings['max_show_together'] = v
-                    ui._save_ui_state()
+                    ui._settings_mgr.save_ui_state()
             except (ValueError, tk.TclError):
                 pass
             try:
                 fs = int(_min_font_var.get())
                 if 6 <= fs <= 32:
                     ui._settings['min_font_size'] = fs
-                    ui._save_ui_state()
+                    ui._settings_mgr.save_ui_state()
                     ui._settings_mgr.apply_min_font_size()
             except (ValueError, tk.TclError):
                 pass
@@ -468,13 +468,13 @@ class SettingsDialog:
 
         def _capture():
             ui._cache_config = ui._settings_mgr._current_display_config()
-            ui._save_ui_state()
+            ui._settings_mgr.save_ui_state()
             _refresh_cache_summary()
-            ui._clear_all_png_cache()
+            ui._png_mgr._clear_all_png_cache()
 
         def _clear_cache_config():
             ui._cache_config = None
-            ui._save_ui_state()
+            ui._settings_mgr.save_ui_state()
             _refresh_cache_summary()
 
         ttk.Button(cbtn_row, text="Capture current settings",
@@ -570,11 +570,11 @@ class SettingsDialog:
             _disk_var.set("…")
             cfg_now = ui._cache_config or ui._settings_mgr._current_display_config()
             nd_sessions = {}
-            for tk_, ptr in ui.cd.data.items():
+            for tk_, ptr in ui.cd.ptr.items():
                 nd_str = str(tk_.nd())
                 nd_sessions.setdefault(nd_str, []).append((tk_, ptr))
-            loaded_nd = {str(k.nd()) for k in ui.cd.data.keys()
-                         if getattr(ui.cd, '_ccg', {}).get(k.nd()) is not None}
+            loaded_nd = {str(k.nd()) for k in ui.cd.ptr.keys()
+                         if getattr(ui.cd, 'ccg', {}).get(k.nd()) is not None}
 
             def _worker():
                 disk_txt = _compute_disk_size()
@@ -639,7 +639,7 @@ class SettingsDialog:
 
         def _on_auto_toggle():
             ui._auto_pregen_enabled = _auto_var.get()
-            ui._save_ui_state()
+            ui._settings_mgr.save_ui_state()
 
         ttk.Checkbutton(auto_row, text="Auto-generate cache on session switch",
                         variable=_auto_var, command=_on_auto_toggle).pack(side=tk.LEFT)
@@ -652,7 +652,7 @@ class SettingsDialog:
         tk.Label(btn_row2, textvariable=_pregen_status_var,
                  bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
         ttk.Button(btn_row2, text="\U0001f5d1 Clear all PNGs",
-                   command=lambda: (ui._clear_all_png_cache(),
+                   command=lambda: (ui._png_mgr._clear_all_png_cache(),
                                     _populate_tree_async())).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(btn_row2, text="↻ Refresh",
                    command=_populate_tree_async).pack(side=tk.LEFT, padx=(8, 0))
@@ -764,10 +764,10 @@ class ExportOptionsDialog:
             seg_export_default = ["Current"]
         try:
             nd_key = ui.key.nd() if ui.key is not None else None
-            type_keys = ui._available_type_keys(nd_key) if nd_key is not None else []
+            type_keys = ui._sess_mgr._available_type_keys(nd_key) if nd_key is not None else []
             seg_union: set[str] = set()
             for tk_ in type_keys:
-                ptr = ui.cd.data.get(tk_)
+                ptr = ui.cd.ptr.get(tk_)
                 try:
                     labels = list(ptr.edge_times['label'].values) if ptr is not None else []
                 except Exception:
@@ -1239,7 +1239,7 @@ class ExportOptionsDialog:
                 # Build a PNG using the same rendering path (but without mutating UI state).
                 # Preview uses the current segment/resolution mode and first selected pair.
                 ref, tgt = int(preview_pair[0]), int(preview_pair[1])
-                seg = int(ui.current_segment)
+                seg = ui._seg_idx(ui.current_segment)
                 highres = bool(getattr(ui, '_highres_mode', False))
                 # Render preview directly (bypass viewer PNG cache) with export overrides.
                 tmp_over = {
@@ -1362,4 +1362,104 @@ class ExportOptionsDialog:
         self.win.update_idletasks()
         self.win.lift()
         self.win.focus_force()
+
+
+class PairTagsDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI") -> None:
+        if ui.current_pair_idx >= len(ui.all_inds):
+            messagebox.showinfo("Pair tags", "No pair selected.")
+            return
+        cls(ui).win.wait_window()
+
+    def __init__(self, ui: "CCGReviewUI"):
+        self._ui = ui
+        inds = tuple(ui.all_inds[ui.current_pair_idx])
+        self._ref, self._tgt = int(inds[0]), int(inds[1])
+        tag_data = ui._sel_data._pair_tags.get((self._ref, self._tgt), {})
+        self.win = tk.Toplevel(ui.root)
+        self.win.title(f"Pair Tags — [{self._ref}, {self._tgt}]")
+        self.win.geometry("400x350")
+        self.win.grab_set()
+        self._build(tag_data)
+
+    def _build(self, tag_data):
+        win = self.win
+        ttk.Label(win, text="Tags (comma-separated):").pack(anchor='w', padx=8, pady=(8, 0))
+        self._tags_var = tk.StringVar(value=', '.join(tag_data.get('tags', [])))
+        ttk.Entry(win, textvariable=self._tags_var, width=50).pack(fill=tk.X, padx=8, pady=2)
+        ttk.Label(win, text="Notes:").pack(anchor='w', padx=8, pady=(8, 0))
+        self._notes_text = tk.Text(win, height=12, width=50, font=('Arial', 9), wrap=tk.WORD)
+        self._notes_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        self._notes_text.insert('1.0', tag_data.get('notes', ''))
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Button(btn_frame, text="Save", command=self._save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _save(self):
+        ui = self._ui
+        ref, tgt = self._ref, self._tgt
+        tags = [t.strip() for t in self._tags_var.get().split(',') if t.strip()]
+        notes = self._notes_text.get('1.0', 'end-1c')
+        if tags or notes:
+            existing_groups = ui._sel_data._pair_tags.get((ref, tgt), {}).get('groups', [])
+            entry = {'tags': tags, 'notes': notes}
+            if existing_groups:
+                entry['groups'] = existing_groups
+            ui._sel_data._pair_tags[(ref, tgt)] = entry
+        elif (ref, tgt) in ui._sel_data._pair_tags:
+            del ui._sel_data._pair_tags[(ref, tgt)]
+        ui.refresh_lists()
+        ui._left_panel._select_pair_in_list((ref, tgt))
+        self.win.destroy()
+
+
+class SuggestedCCGDialog:
+    @classmethod
+    def show(cls, ui: "CCGReviewUI", specs: list, on_run) -> None:
+        if not specs:
+            messagebox.showinfo(
+                "Suggested custom CCGs",
+                "No suggested custom CCG entries found. Use 'Refresh suggested custom CCGs' first.")
+            return
+        win = tk.Toplevel(ui.root)
+        win.title("Suggested custom CCGs")
+        win.geometry("620x360")
+        win.grab_set()
+        ttk.Label(win, text="Generate custom CCGs from availability list:").pack(
+            anchor='w', padx=8, pady=(8, 4))
+        lb = tk.Listbox(win, selectmode=tk.MULTIPLE, height=12)
+        lb.pack(fill=tk.BOTH, expand=True, padx=8)
+
+        def _fmt_t(v):
+            if isinstance(v, str) and v.lower() in ('start', 'end'):
+                return v
+            try:
+                return ui.time_slider._sec_to_hms(float(v))
+            except Exception:
+                return str(v)
+
+        for i, spec in enumerate(specs):
+            name = str(spec.get('name', 'custom'))
+            t0 = _fmt_t(spec.get('t0', 0.0))
+            t1 = _fmt_t(spec.get('t1', 0.0))
+            scope = str(spec.get('scope', 'By session'))
+            n_have = len(spec.get('sessions', []) or [])
+            n_total = max(1, len(ui._sess_mgr._real_nd_keys_ordered()))
+            label = f"[{name} | {t0}-{t1}] for {'ALL' if scope == 'All' else scope} ({n_have}/{n_total})"
+            lb.insert(tk.END, label)
+            lb.select_set(i)
+
+        def _run(selected_idxs):
+            on_run([specs[int(i)] for i in selected_idxs])
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Button(btns, text="Generate selected",
+                   command=lambda: _run(lb.curselection())).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Generate all",
+                   command=lambda: _run(range(len(specs)))).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
 

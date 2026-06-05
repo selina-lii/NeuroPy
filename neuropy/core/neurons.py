@@ -10,8 +10,7 @@ from joblib import Parallel, delayed
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from typing import Self, Union
-
-import numpy as np
+from neuropy.analyses.utils import IntervalOp
 
 
 class Neurons(DataWriter):
@@ -367,62 +366,24 @@ class Neurons(DataWriter):
         splits = [neurons.time_slice(s,e,zero_spike_times=zero_spike_times) for s,e in edges]
         return splits
 
-    def _clip_intervals(self,intervals,t_start=None,t_stop=None):
-        # print("before",intervals[0],intervals[-1],t_start,t_stop)
-        # align start/end of a list of intervals
-        if len(intervals)==0:
-            return intervals
-        if t_start is not None:
-            intervals=intervals[intervals[:,1]>=t_start]
-            if len(intervals): intervals[0,0]=max(t_start,intervals[0,0])
-        if t_stop is not None:
-            intervals=intervals[intervals[:,0]<=t_stop]
-            if len(intervals): intervals[-1,-1]=min(t_stop,intervals[-1,-1])
-        # print("after",intervals[0],intervals[-1])
-        return intervals
+    def _clip_intervals(self, intervals, t_start=None, t_stop=None):
+        clipped = IntervalOp.clip([(r[0], r[1]) for r in intervals], t_start, t_stop)
+        return np.array(clipped) if clipped else np.empty((0, 2))
 
     def time_multislices(self, t_starts, t_stops):
-        """
-        Erase spikes that did not occur in any of the [t_start,t_stop] intervals specified
-        and tighten t_start, t_end by the intervals.
-        TODO slow (if num intervals are large)
-        """
-        intervals = list(zip(t_starts,t_stops))
-        def _merge_intervals(intervals):
-            intervals = np.array(sorted(intervals))
-            merged = []
-            for s,e in intervals:
-                if not merged or s > merged[-1][1]:
-                    merged.append([s, e])
-                else:
-                    merged[-1][1] = max(merged[-1][1], e)
-            return np.array(merged)
-
-        # remove out of range intervals
-        intervals=_merge_intervals(intervals)
-
+        """Erase spikes outside any [t_start, t_stop] interval and tighten bounds."""
+        intervals = IntervalOp.merge(zip(t_starts, t_stops))
         t_start, t_stop = super()._time_slice_params(
-            max(t_starts[0],self.t_start),
-            min(self.t_stop,t_stops[-1])
+            max(t_starts[0], self.t_start),
+            min(self.t_stop, t_stops[-1])
         )
-
-        # this is faster. 
-        # alternatively, use inds = np.any((spks >= intervals[:,0]) & (spks <= intervals[:,1]), axis=1)
-        def _mask(spks, intervals):
-            keep = []
-            for start, end in intervals:
-                i0 = np.searchsorted(spks, start, 'left')
-                i1 = np.searchsorted(spks, end, 'right')
-                keep.append(spks[i0:i1])
-            return np.concatenate(keep)
-        
         neurons = deepcopy(self)
-        spiketrains = [_mask(spks,intervals) for spks in neurons.spiketrains]
-
-        neurons.spiketrains=np.asarray(spiketrains,dtype='object')
-        neurons.t_stop=t_stop
-        neurons.t_start=t_start
-        neurons.metadata={'intervals':intervals}
+        neurons.spiketrains = np.asarray(
+            [IntervalOp.mask_spikes(spks, intervals) for spks in neurons.spiketrains],
+            dtype='object')
+        neurons.t_stop = t_stop
+        neurons.t_start = t_start
+        neurons.metadata = {'intervals': np.array(intervals)}
         return neurons
     
     def neuron_slice(self, neuron_inds=None, neuron_ids=None):

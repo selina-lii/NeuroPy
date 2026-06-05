@@ -130,8 +130,8 @@ class NetworkPanel:
     # ------------------------------------------------------------------
 
     def _probegroups(self) -> dict:
-        """Return the probegroups dict from cd.nd (empty dict if absent)."""
-        return getattr(getattr(self.ui.cd, 'nd', None), 'probegroups', {})
+        """Return probe_info dict from cd.nd (empty dict if absent)."""
+        return getattr(getattr(self.ui.cd, 'nd', None), 'probe_info', {})
 
     # ------------------------------------------------------------------
     # Setup — split into 4 focused sub-methods
@@ -233,7 +233,7 @@ class NetworkPanel:
         ttk.Label(_fp_inner, textvariable=self._focus_pair_info_var,
                   font=('Arial', 8), foreground='#555').pack(side=tk.LEFT, padx=4)
         self._add_pair_btn = ttk.Button(_fp_inner, text="Add to available",
-                                         command=ui._on_add_focused_pair,
+                                         command=ui._misc_mgr._on_add_focused_pair,
                                          state=tk.DISABLED)
         self._add_pair_btn.pack(side=tk.LEFT, padx=4)
 
@@ -450,22 +450,22 @@ class NetworkPanel:
         ≥1 pair in that group are returned; otherwise all real sessions.
         """
         ui = self.ui
-        sessions = ui._real_nd_keys_ordered()
+        sessions = ui._sess_mgr._real_nd_keys_ordered()
         active_groups = {g for g, var in self._net_group_filter_vars.items()
                          if var.get()}
         if not active_groups:
             return sessions
         filtered = []
         for nk in sessions:
-            ckey = ui._type_key_for_nd(nk)
+            ckey = ui._sess_mgr._type_key_for_nd(nk)
             if ckey is None:
                 continue
             sess = str(ckey.session)
-            ptr = ui.cd.data.get(ckey)
+            ptr = ui.cd.ptr.get(ckey)
             valid = ui._all_inds_set_for_ptr(ptr)
             for g in active_groups:
                 if any((int(a), int(b)) in valid
-                       for a, b in ui._group_pairs(g, session=sess)):
+                       for a, b in ui._group_mgr._group_pairs(g, session=sess)):
                     filtered.append(nk)
                     break
         return filtered
@@ -509,7 +509,7 @@ class NetworkPanel:
             sessions = self._net_any_sessions_cache or self._net_any_sessions()
             n = len(sessions)
             idx = max(0, min(self._net_any_idx, n - 1)) if n else 0
-            lbl = self.ui._session_label(sessions[idx]) if sessions else ''
+            lbl = self.ui._sess_mgr._session_label(sessions[idx]) if sessions else ''
             self._net_nav_label.config(text=f'{idx + 1}/{n}  {lbl}')
             _dim = '#cccccc'
             self._net_nav_left_bar.config(fg='#333' if idx > 0 else _dim)
@@ -552,7 +552,7 @@ class NetworkPanel:
             self._net_any_sessions_cache = _sessions
             _sess_nk = _sessions[self._net_any_idx]
             _nd_key = _sess_nk
-            _type_key = ui._type_key_for_nd(_sess_nk)
+            _type_key = ui._sess_mgr._type_key_for_nd(_sess_nk)
             segment_filter = None
         else:
             _nd_key = ui.key.nd()
@@ -601,7 +601,7 @@ class NetworkPanel:
 
         if any_mode:
             _neurons = ui.cd.nd.data.get(sess_nk) if ui.cd.nd is not None else None
-            _ptr = ui.cd.data.get(type_key) if type_key is not None else None
+            _ptr = ui.cd.ptr.get(type_key) if type_key is not None else None
             _deleted_inds = (ui._pair_deleted_store.get(str(type_key), set())
                              if type_key is not None else set())
         else:
@@ -632,10 +632,10 @@ class NetworkPanel:
             current_pair = (tuple(ui.all_inds[ui.current_pair_idx])
                             if ui.current_pair_idx < len(ui.all_inds) else None)
 
-        type_keys_show = ui._available_type_keys(nd_key)
+        type_keys_show = ui._sess_mgr._available_type_keys(nd_key)
         pair_entries: dict = {}
         for tk_ in type_keys_show:
-            pt = ui.cd.data.get(tk_)
+            pt = ui.cd.ptr.get(tk_)
             if pt is None or pt.inds is None:
                 continue
             ct  = getattr(tk_, 'conn_type', None)
@@ -646,7 +646,7 @@ class NetworkPanel:
             if is_cur and not any_mode:
                 _ptr_sel = ui.selected_inds
             else:
-                _other_ptr = ui.cd.data.get(tk_)
+                _other_ptr = ui.cd.ptr.get(tk_)
                 if (_other_ptr is not None
                         and hasattr(_other_ptr, 'selected_inds')
                         and _other_ptr.selected_inds is not None):
@@ -673,7 +673,7 @@ class NetworkPanel:
         cur_arr = (_ptr.inds[:, -2:] if _ptr is not None and _ptr.inds is not None
                    else np.empty((0, 2), dtype=int))
         cluster_neurons = set(int(v) for v in np.unique(cur_arr))
-        session_label = ui._session_label(sess_nk) if (any_mode and sess_nk is not None) else ''
+        session_label = ui._sess_mgr._session_label(sess_nk) if (any_mode and sess_nk is not None) else ''
 
         return ProbeNetworkData(
             nd_key=nd_key,
@@ -717,10 +717,10 @@ class NetworkPanel:
         active_groups = {g for g, var in self._net_group_filter_vars.items() if var.get()}
         if active_groups and fp is None:
             _gp_sess = (str(getattr(data.nd_key, 'session', data.nd_key))
-                        if any_mode else ui._current_session_str())
+                        if any_mode else ui._setup_mgr._current_session_str())
             group_pairs: set = set()
             for g in active_groups:
-                gp = ui._group_pairs(g, session=_gp_sess)
+                gp = ui._group_mgr._group_pairs(g, session=_gp_sess)
                 if not gp:
                     stored_keys = list(ui._sel_data._groups.get(g, {}).keys())[:5]
                     print(f"[probe_network] group={g!r} _gp_sess={_gp_sess!r} stored_keys={stored_keys} → empty")
@@ -739,9 +739,9 @@ class NetworkPanel:
 
         # ── Build config from Tk vars ─────────────────────────────────────────
         if any_mode and sess_nk is not None:
-            session_label = ui._session_label(sess_nk)
+            session_label = ui._sess_mgr._session_label(sess_nk)
             try:
-                pair_title = ui.get_plot_title()
+                pair_title = ui._plot_mgr.get_plot_title()
             except Exception:
                 pair_title = ''
         else:
@@ -832,26 +832,26 @@ class NetworkPanel:
             target_idx = self._net_any_idx
             if key_str is not None:
                 for si, nk in enumerate(sessions):
-                    ckey = ui._type_key_for_nd(nk)
+                    ckey = ui._sess_mgr._type_key_for_nd(nk)
                     if ckey is not None:
-                        avail = ui._available_type_keys(nk)
+                        avail = ui._sess_mgr._available_type_keys(nk)
                         if any(str(k) == key_str for k in avail):
                             target_idx = si
                             break
             if target_idx != self._net_any_idx:
                 self._net_any_idx = target_idx
-            pidx = ui.get_pair_index(pair)
+            pidx = ui._plot_mgr.get_pair_index(pair)
             if pidx < len(ui.all_inds):
                 ui.current_pair_idx = pidx
                 ui._select_pair_in_list(pair)
             self.draw()
-            ui.update_plot()
+            ui._plot_mgr.update_plot()
             return
 
         # ── Normal mode: optionally switch type key, then select pair ─────
         if key_str is not None:
             clicked_key = next(
-                (k for k in ui._available_type_keys(ui.key.nd())
+                (k for k in ui._sess_mgr._available_type_keys(ui.key.nd())
                  if str(k) == key_str),
                 None)
             if clicked_key is not None and clicked_key != ui.key:
@@ -863,12 +863,12 @@ class NetworkPanel:
                         ui._type_var.set(new_label)
                     ui._refresh_after_key_switch()
 
-        idx = ui.get_pair_index(pair)
+        idx = ui._plot_mgr.get_pair_index(pair)
         if idx < len(ui.all_inds):
             ui.current_pair_idx = idx
             ui._select_pair_in_list(pair)
         self.draw()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
 
     def _on_net_scroll(self, event):
         """Scroll wheel: adjust both spacing sliders and redraw."""
@@ -921,13 +921,13 @@ class NetworkPanel:
                     f"Group '{name}' already exists. Replace its pairs for this session?",
                     parent=ui.root):
                 return
-            sess = ui._current_session_str()
+            sess = ui._setup_mgr._current_session_str()
             ui._sel_data._groups[name][sess] = set()
         else:
             ui._sel_data._groups[name] = {}
         for pair in pairs:
-            ui._group_add_pair(name, pair)
-        ui._rebuild_groups_menu()
+            ui._group_mgr._group_add_pair(name, pair)
+        ui._group_mgr._rebuild_groups_menu()
         ui.refresh_lists()
         messagebox.showinfo("Save selections",
                             f"Saved {len(pairs)} pairs to group '{name}'.",
@@ -947,10 +947,10 @@ class NetworkPanel:
         if gname not in self._net_group_filter_vars:
             self._net_group_filter_vars[gname] = tk.BooleanVar(master=ui.root, value=False)
         if self._net_grp_counts_var.get():
-            pairs_sess = ui._group_pairs(gname, session=count_sess)
+            pairs_sess = ui._group_mgr._group_pairs(gname, session=count_sess)
             n_hl  = len(ui._filter_pairs_to_conn_types(
                 count_sess, pairs_sess, self._highlighted_ct_labels()))
-            n_all = len(ui._group_pairs_all_sessions(gname))
+            n_all = len(ui._group_mgr._group_pairs_all_sessions(gname))
             label = f"{display} ({n_hl}/{len(pairs_sess)}/{n_all})"
         else:
             label = display
@@ -986,7 +986,7 @@ class NetworkPanel:
             _nk  = self._net_any_sessions_cache[_idx]
             count_sess = str(getattr(_nk, 'session', _nk))
         else:
-            count_sess = ui._current_session_str()
+            count_sess = ui._setup_mgr._current_session_str()
 
         for gname in regular:
             btn = self._make_group_button(gname, gname, count_sess)
@@ -1141,8 +1141,8 @@ class NetworkPanel:
         cur_out = sum(1 for r, t in map(tuple, ui.all_inds) if r == nid)
         cur_in  = sum(1 for r, t in map(tuple, ui.all_inds) if t == nid)
         tot_out, tot_in = 0, 0
-        for tk_ in ui._available_type_keys(ui.key.nd()):
-            pt = ui.cd.data.get(tk_)
+        for tk_ in ui._sess_mgr._available_type_keys(ui.key.nd()):
+            pt = ui.cd.ptr.get(tk_)
             if pt is None or pt.inds is None:
                 continue
             arr = pt.inds[:, -2:]
@@ -1181,15 +1181,15 @@ class NetworkPanel:
                 return
         pair = (ref, tgt)
         pair_exists = False
-        for tk_ in ui._available_type_keys(ui.key.nd()):
-            pt = ui.cd.data.get(tk_)
+        for tk_ in ui._sess_mgr._available_type_keys(ui.key.nd()):
+            pt = ui.cd.ptr.get(tk_)
             if pt is None or pt.inds is None:
                 continue
             if pair in set(map(tuple, pt.inds2)):
                 pair_exists = True
                 break
         if not pair_exists:
-            ui._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
+            ui._sel_mgr._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
         self._focused_pair = pair
         self._focused_neuron = None
         self._focus_var.set("")
@@ -1197,7 +1197,7 @@ class NetworkPanel:
         self._update_pair_focus_info(pair, pair_exists)
         ui.refresh_lists()
         self.draw()
-        ui.update_plot()
+        ui._plot_mgr.update_plot()
 
     def _update_pair_focus_info(self, pair, exists):
         """Update the pair focus info label and 'Add to available' button."""
@@ -1224,7 +1224,7 @@ class NetworkPanel:
         self._add_pair_btn.config(state=tk.DISABLED)
         self.ui.refresh_lists()
         self.draw()
-        self.ui.update_plot()
+        self.ui._plot_mgr.update_plot()
 
     # ------------------------------------------------------------------
     # Helpers (formerly on CCGReviewUI)

@@ -22,14 +22,14 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as _plt
 
 from neuropy.plotting import ccg as plot_ccg
-from neuropy.analyses.ms_connectivity import NormalizeBy, apply_norms_to_ccg
+from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
 from neuropy.ui.utils import get_png_filename
 
 _ALL_SEGS_LABEL = "All_segments"
 
 
 # ---------------------------------------------------------------------------
-# Thin proxy classes so apply_norms_to_ccg works without real neurons/nd
+# Thin proxy classes so NormBackend.apply works without real neurons/nd
 # ---------------------------------------------------------------------------
 
 class _NeuronsProxy:
@@ -145,7 +145,7 @@ class CCGRenderer:
             _NDProxy({self.nd_key: self.edge_times})
             if self.edge_times is not None else None
         )
-        ccg, ccg_null = apply_norms_to_ccg(
+        ccg, ccg_null = NormBackend.apply(
             ccg_raw, ccg_null_raw, ref, tgt, segment,
             norms_set, self.neurons, nd_proxy, self.nd_key,
             self.n_segments, False,

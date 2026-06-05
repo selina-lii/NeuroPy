@@ -339,7 +339,7 @@ class CSPanel:
         row1.pack(fill=tk.X, anchor='w')
         ttk.Checkbutton(row1, text="Show CS overlay",
                         variable=self._conn_str_show,
-                        command=lambda: (self._ui._on_conn_str_toggle(),
+                        command=lambda: (self._ui._cs_mgr._on_conn_str_toggle(),
                                         self._ui._build_sig_chips())).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Label(row1, text="Measure:").pack(side=tk.LEFT, padx=(8, 2))
@@ -347,11 +347,11 @@ class CSPanel:
             rb = ttk.Radiobutton(
                 row1, text=val, value=val, variable=self._conn_str_metric,
                 command=lambda: (self._ui._refresh(),
-                                 self._ui._update_conn_str_label())
+                                 self._ui._cs_mgr._update_conn_str_label())
             )
             rb.pack(side=tk.LEFT, padx=(0, 6))
             self._cs_metric_rbs[val] = rb
-        self._ui._update_conn_str_metric_availability()
+        self._ui._cs_mgr._update_conn_str_metric_availability()
 
         row_cs = ttk.Frame(parent)
         row_cs.pack(fill=tk.X, anchor='w', pady=(2, 0))
@@ -362,7 +362,7 @@ class CSPanel:
             text="non-negative",
             variable=self._conn_str_nonneg,
             command=lambda: (self._ui._refresh(),
-                             self._ui._update_conn_str_label(),
+                             self._ui._cs_mgr._update_conn_str_label(),
                              getattr(self._ui, '_stats_panel', None)
                              and self._ui._stats_panel.on_parent_display_option_changed()),
         ).pack(side=tk.LEFT, padx=(10, 0))
@@ -437,7 +437,7 @@ class NormPanel:
         self._build(parent)
 
     def _build(self, parent: tk.Widget):
-        from neuropy.analyses.ms_connectivity import NormalizeBy
+        from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
         norm_inner, self._norm_fold = _collapsible_section(parent, "Normalization")
 
         saved_norms = self._ui._ui_state_cache.get('active_norms', [])
@@ -560,7 +560,7 @@ class SpikeAttributionPanel:
             self._selected_idx = -1
             if hasattr(self._ui, 'left_container'):
                 self._ui.left_container.spike_pairs.clear()
-            self._ui.update_plot()
+            self._ui._plot_mgr.update_plot()
 
     def _on_sa_set(self):
         """Query spike pairs for the current CCG pair + bin offset."""
@@ -617,7 +617,7 @@ class SpikeAttributionPanel:
         if self._selected_idx < 0:
             return
         self._selected_idx = -1
-        self._ui.update_plot()
+        self._ui._plot_mgr.update_plot()
 
     def _draw_sa_raster(self, idx: int):
         """Unpack UI state and call the pure plotting function."""
@@ -663,7 +663,7 @@ class SegmentChipsPanel:
             widget.destroy()
         ui.seg_sig_labels = {}
 
-        _fs = max(8, ui._min_font_size())
+        _fs = max(8, ui._settings_mgr.min_font_size())
 
         # CS chip (right-aligned)
         cs_panel = ui.center_container.cs_panel
@@ -677,7 +677,7 @@ class SegmentChipsPanel:
         cs_btn.pack(side=tk.RIGHT, padx=(2, 2))
         cs_btn.bind('<Button-1>', lambda e: (
             cs_panel._conn_str_show.set(not cs_panel._conn_str_show.get()),
-            ui._on_conn_str_toggle(),
+            ui._cs_mgr._on_conn_str_toggle(),
             self.rebuild(),
         ))
 
@@ -730,7 +730,7 @@ class SegmentChipsPanel:
                            fg='#5D4037', padx=4, pady=2)
             _bind_chip(lbl, seg_idx)
             lbl.bind('<Double-Button-1>',
-                     lambda e, idx=ci: ui._remove_custom_segment(idx))
+                     lambda e, idx=ci: ui._custom_mgr._remove_custom_segment(idx))
             return lbl, seg_idx
 
         # Build scrollable chips: real segs + custom (All is pinned separately)
@@ -759,7 +759,7 @@ class SegmentChipsPanel:
     def _toggle_lo_hi_mode(self):
         self._ui._lo_hi_mode = not self._ui._lo_hi_mode
         self.rebuild()
-        self._ui.update_plot()
+        self._ui._plot_mgr.update_plot()
 
     def _on_segment_chip_primary_click(self, idx: int):
         self._ui._stacked_segments = set()
@@ -775,14 +775,14 @@ class SegmentChipsPanel:
         ui._stacked_segments = sel
         inds = ui._current_inds()
         if inds is not None:
-            ui._update_sig_indicators(inds)
+            ui._pair_mgr._update_sig_indicators(inds)
 
     def _segment_chip_ctx_menu(self, event, idx: int):
         ui = self._ui
         menu = tk.Menu(ui.root, tearoff=0)
         menu.add_command(
             label="Stack selected segments",
-            command=lambda: ui.update_plot() if ui._stacked_segments else None)
+            command=lambda: ui._plot_mgr.update_plot() if ui._stacked_segments else None)
         menu.add_command(label="Select only this segment",
                          command=lambda i=idx: self._select_only_segment(i))
         menu.add_command(label="Clear segment selection",
@@ -794,14 +794,14 @@ class SegmentChipsPanel:
         ui._stacked_segments = {int(idx)}
         inds = ui._current_inds()
         if inds is not None:
-            ui._update_sig_indicators(inds)
+            ui._pair_mgr._update_sig_indicators(inds)
 
     def _clear_segment_selection(self):
         ui = self._ui
         ui._stacked_segments = set()
         inds = ui._current_inds()
         if inds is not None:
-            ui._update_sig_indicators(inds)
+            ui._pair_mgr._update_sig_indicators(inds)
 
 
 class CenterPanelContainer:

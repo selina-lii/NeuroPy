@@ -143,7 +143,7 @@ Points at significant pairs without duplicating arrays:
 
 ### 4.1 Construction (`__init__(cd, key)`)
 
-1. Bind `CCGDataset cd`, `Key key`, resolve `ccg_ptr = cd.data[key]`
+1. Bind `CCGDataset cd`, `Key key`, resolve `ccg_ptr = cd.ptr[key]`
 2. Lazy-load `ccg_data = cd._ccg[nd_key]` if not in memory
 3. Create `SelectionData()`; seed from `ccg_ptr.selected_inds` / `unselected_inds`
 4. Instantiate 12 managers (see below)
