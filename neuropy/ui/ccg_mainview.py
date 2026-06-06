@@ -12,44 +12,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from neuropy.analyses.spike_attribution import find_spike_pairs
 from neuropy.plotting.ccg import plot_spike_attribution_raster
-from neuropy.ui.utils import ArrowScroller, WrapFrame
+from neuropy.ui.utils import ArrowScroller, WrapFrame, collapsible_section
 
 if TYPE_CHECKING:
     from neuropy.analyses.ms_connectivity import CCGKey
     from neuropy.ui.ccg_ui import CCGReviewUI
 
-
-def _collapsible_section(parent: tk.Widget, title: str, expanded: bool = True):
-    """Separator-line collapsible section.  Returns (inner_frame, fold_var)."""
-    outer = ttk.Frame(parent)
-    outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(3, 0))
-
-    hdr = ttk.Frame(outer)
-    hdr.pack(fill=tk.X, pady=(2, 0))
-    hdr.columnconfigure(2, weight=1)
-
-    fold_var = tk.BooleanVar(value=expanded)
-    tri = ttk.Label(hdr, text='▾' if expanded else '▸',
-                    cursor='hand2', font=('Arial', 10))
-    tri.grid(row=0, column=0, padx=(4, 0))
-    ttk.Label(hdr, text=title, font=('Arial', 9, 'bold')).grid(
-        row=0, column=1, padx=(3, 6))
-    ttk.Separator(hdr, orient='horizontal').grid(
-        row=0, column=2, sticky='ew', padx=(0, 4), pady=6)
-
-    inner = ttk.Frame(outer, padding=(8, 2, 4, 2))
-    if expanded:
-        inner.pack(fill=tk.X)
-
-    def _toggle(e=None):
-        v = not fold_var.get()
-        fold_var.set(v)
-        (inner.pack(fill=tk.X) if v else inner.pack_forget())
-        tri.config(text='▾' if v else '▸')
-
-    tri.bind('<Button-1>', _toggle)
-    hdr.bind('<Button-1>', _toggle)
-    return inner, fold_var
 
 
 class CCGPlotPanel:
@@ -123,7 +91,7 @@ class CorrelogramPanel:
         return getattr(self, la), getattr(self, sa)
 
     def _build(self, parent: tk.Widget):
-        acg_frame, self._acg_fold = _collapsible_section(parent, "Correlograms")
+        acg_frame, self._acg_fold = collapsible_section(parent, "Correlograms")
         self._acg_inner_frame = acg_frame
         self._build_style_row(acg_frame)
         self._build_deconv_row(acg_frame)
@@ -437,8 +405,8 @@ class NormPanel:
         self._build(parent)
 
     def _build(self, parent: tk.Widget):
-        from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
-        norm_inner, self._norm_fold = _collapsible_section(parent, "Normalization")
+        from neuropy.analyses.ccg_norms import NormalizeBy, NormBackend
+        norm_inner, self._norm_fold = collapsible_section(parent, "Normalization")
 
         saved_norms = self._ui._ui_state_cache.get('active_norms', [])
         options = [
@@ -491,7 +459,7 @@ class JitterPanel:
         self._build(parent)
 
     def _build(self, parent: tk.Widget):
-        jitter_inner, self._jitter_fold = _collapsible_section(parent, "Jitter")
+        jitter_inner, self._jitter_fold = collapsible_section(parent, "Jitter")
         ttk.Label(jitter_inner, text="n=").pack(side=tk.LEFT)
         ttk.Spinbox(jitter_inner, from_=10, to=5000, increment=50,
                     textvariable=self._njitter, width=6).pack(
@@ -525,7 +493,7 @@ class SpikeAttributionPanel:
         self._build(parent)
 
     def _build(self, parent: tk.Widget):
-        sa_inner, self._fold = _collapsible_section(parent, "Spike Attribution")
+        sa_inner, self._fold = collapsible_section(parent, "Spike Attribution")
 
         row1 = ttk.Frame(sa_inner)
         row1.pack(fill=tk.X)
@@ -822,7 +790,7 @@ class CenterPanelContainer:
 
         # ── Control panels — BOTTOM stack: create in order bottom → top ─
         # 1. Baseline & CS (bottommost)
-        cs_frame, self._cs_fold_var = _collapsible_section(
+        cs_frame, self._cs_fold_var = collapsible_section(
             ctrl_frame, "Baseline & Connection Strength")
         self.cs_panel       = CSPanel(cs_frame, ui)
         self.baseline_panel = BaselinePanel(cs_frame, ui)

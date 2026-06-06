@@ -311,7 +311,6 @@ class JitterController:
                 for rk in ('lo', 'hi'):
                     ui.cd._jitter_results[nd_key].pop((ref, tgt, rk, segk), None)
         self.jitter_worker.unviewed.discard((ref, tgt))
-        ui._png_mgr._clear_all_png_cache()
         ui._update_jitter_sig_buttons()
         self.apply_list_colors()
         ui._plot_mgr.update_plot()
@@ -373,9 +372,9 @@ class JitterController:
                 if rt is None:
                     continue
                 if _apply_row(ui.selected_list, idx, *rt) and pair is not None:
-                    ui._sel_mgr._reapply_bookmark_list_styles()
+                    ui._group_mgr._reapply_bookmark_list_styles()
                     return
-            ui._sel_mgr._reapply_bookmark_list_styles()
+            ui._group_mgr._reapply_bookmark_list_styles()
             return
         for listbox, inds_set in [(ui.unselected_list, ui.unselected_inds),
                                   (ui.selected_list, ui.selected_inds)]:
@@ -391,9 +390,9 @@ class JitterController:
                 if rt is None:
                     continue
                 if _apply_row(listbox, idx, *rt) and pair is not None:
-                    ui._sel_mgr._reapply_bookmark_list_styles()
+                    ui._group_mgr._reapply_bookmark_list_styles()
                     return
-        ui._sel_mgr._reapply_bookmark_list_styles()
+        ui._group_mgr._reapply_bookmark_list_styles()
 
     def mark_viewed(self) -> bool:
         """Mark current pair's jitter as viewed; auto-enable overlay if available.

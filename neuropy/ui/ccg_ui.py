@@ -35,7 +35,6 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
-import matplotlib.image as mpimg
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -76,27 +75,30 @@ from neuropy.analyses import correlations
 from neuropy.analyses.correlations import np_spike_correlations, sim_generate_train
 from neuropy.analyses import custom_ccg as _custom_ccg_mod
 from neuropy.analyses.ms_connectivity import EranConv, CCGConfig, _CCG_RESOLUTION
-from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
+from neuropy.analyses.ccg_norms import NormalizeBy, NormBackend
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.core.neurons import Neurons
 from neuropy.core.epoch import Epoch
-from neuropy.ui.probe_network import NetworkPanel
+try:
+    from neuropy.ui.neuron_network import NetworkPanel
+except ImportError:
+    from neuropy.ui.probe_network import NetworkPanel
 from neuropy.ui.custom_ccg_manager import CustomCCGManager
 from neuropy.ui.time_slider import TimeSliderPanel
 from neuropy.ui.ccg_renderer import CCGRenderEngine
-from neuropy.ui.pair_selection_panel import LeftPanelContainer, SelectionData
+from neuropy.ui.pair_selection_panel import LeftPanelContainer, SelectionData, GroupManager
 from neuropy.ui.ccg_mainview import CenterPanelContainer
 from neuropy.ui.jitter_ui import JitterController, JitterWorker, JitterQueueDialog
-from neuropy.ui.utils import (BackgroundTaskRunner, GenericUI, LRUCache,
-                              get_png_filename, purge_png_dir,
+from neuropy.ui.utils import (GenericUI, LRUCache,
                               _SEPARATOR_ROW, is_separator_row,
                               _SPECIAL_PREFIX, is_special_group,
                               _admitted_pairs, _admit_pair,
-                              ArrowScroller, json_numpy_default)
-from neuropy.ui.selection_migration import SelectionMigration
+                              ArrowScroller, json_numpy_default,
+                              SelectionCommand)
 from neuropy.ui.dialogs import (
     MergeGroupsDialog, ManageGroupsDialog,
     SimulationDialog, SettingsDialog, ExportOptionsDialog,
+    QuickSaveDialog, LoadSelectionDialog,
 )
 
 def _merge_groups_into(target: dict, source: dict) -> None:
@@ -139,8 +141,6 @@ class SettingsManager:
         raw = self.load_ui_state()
         ui._ui_state_cache = raw
         ui._settings: dict = {**{'max_show_together': 5}, **raw.get('settings', {})}
-        ui._cache_config = raw.get('cache_config', None)
-        ui._auto_pregen_enabled = raw.get('auto_pregen_enabled', False)
 
     def load_ui_state(self) -> dict:
         try:
@@ -177,8 +177,6 @@ class SettingsManager:
             state = {
                 'panels':              {n: v.get() for n, v in ui._panel_vars.items()},
                 'settings':            ui._settings,
-                'cache_config':        ui._cache_config,
-                'auto_pregen_enabled': ui._auto_pregen_enabled,
                 'last_key':            key_dict,
                 'active_norms':        active_norms,
                 'conn_str_method':     (ui.center_container.baseline_panel._conn_str_method.get()
@@ -247,7 +245,7 @@ class SettingsManager:
                 pass
 
         try:
-            bar = getattr(ui, '_hotkeys_bar', None)
+            bar = getattr(getattr(ui, 'hotkeys_bar', None), 'frame', None)
             if bar is not None and bar.winfo_exists():
                 for w in bar.winfo_children():
                     try:
@@ -777,7 +775,7 @@ class ExportManager:
             # we scan each (tk_, ptr).inds2 and include it only if that pair is
             # explicitly in the chosen group(s) for that session.
             if action == 'all_groups':
-                gnames = [g for g in (ui._sel_data._groups or {}) if g and not str(g).startswith('__')]
+                gnames = [g for g in (ui._sel_data.groups or {}) if g and not str(g).startswith('__')]
             else:
                 gnames = list(opt.get('_selected_groups') or [])
                 if not gnames:
@@ -788,17 +786,8 @@ class ExportManager:
             want_by_sess: dict[str, set[tuple[int, int]]] = {}
             for g in gnames:
                 try:
-                    sd = ui._sel_data._groups.get(g, {})
-                    pairs_by_sess = sd if isinstance(sd, dict) else {
-                        ui._setup_mgr._current_session_str(): list(sd)}
-                    for sess, pp in pairs_by_sess.items():
-                        ss = str(sess)
-                        s = want_by_sess.setdefault(ss, set())
-                        for p in pp:
-                            try:
-                                s.add((int(p[0]), int(p[1])))
-                            except Exception:
-                                continue
+                    for sess, ref, tgt in ui._sel_data.forward(g):
+                        want_by_sess.setdefault(str(sess), set()).add((ref, tgt))
                 except Exception:
                     continue
 
@@ -866,1815 +855,6 @@ class ExportManager:
 
         ui._export_mgr._export_pairs_with_handles(fmt=fmt, opt=opt, items=items, folder=folder)
 
-class GroupManager:
-    """Group management, hotkeys, and related UI for CCGReviewUI."""
-
-    def __init__(self, ui: "CCGReviewUI"):
-        self._ui = ui
-
-    def _ensure_group_registered(self, name: str) -> int:
-        """Return the int ID for group name, creating an entry if new."""
-        ui = self._ui
-        for gid, g in ui._sel_data._group_registry.items():
-            if g['name'] == name:
-                return gid
-        gid = ui._sel_data._next_group_id
-        ui._sel_data._group_registry[gid] = {
-            'name': name,
-            'hotkey': ui._sel_data._group_hotkeys.get(name),
-            'notes': ui._sel_data._group_notes.get(name, ''),
-        }
-        ui._sel_data._next_group_id += 1
-        return gid
-
-    def _group_id_for(self, name: str) -> int | None:
-        """Return int ID for group name, or None if not registered."""
-        ui = self._ui
-        for gid, g in ui._sel_data._group_registry.items():
-            if g['name'] == name:
-                return gid
-        return None
-
-    def _sync_registry_from_groups(self):
-        """Ensure every group in ui._sel_data._groups has a registry entry."""
-        ui = self._ui
-        for name in list(ui._sel_data._groups.keys()):
-            ui._group_mgr._ensure_group_registered(name)
-        # Sync hotkeys/notes into registry
-        for gid, g in ui._sel_data._group_registry.items():
-            name = g['name']
-            g['hotkey'] = ui._sel_data._group_hotkeys.get(name)
-            g['notes'] = ui._sel_data._group_notes.get(name, '')
-
-    def _group_pairs(self, gname, session=None):
-        """Return pairs set for group in the given session (default: current)."""
-        ui = self._ui
-        g = ui._sel_data._groups.get(gname, {})
-        if isinstance(g, set):
-            return g  # legacy flat format
-        sess = session or ui._setup_mgr._current_session_str()
-        return g.get(sess, set())
-
-    def _group_pairs_all_sessions(self, gname):
-        """Return all pairs across all sessions for a group."""
-        ui = self._ui
-        g = ui._sel_data._groups.get(gname, {})
-        if isinstance(g, set):
-            return g
-        all_pairs = set()
-        for pairs in g.values():
-            all_pairs |= pairs
-        return all_pairs
-
-    def _group_add_pair(self, gname, pair, session=None):
-        ui = self._ui
-        sess = session or ui._setup_mgr._current_session_str()
-        ui._sel_data._groups.setdefault(gname, {}).setdefault(sess, set()).add(pair)
-
-    def _group_discard_pair(self, gname, pair, session=None):
-        ui = self._ui
-        sess = session or ui._setup_mgr._current_session_str()
-        print(f"[CCGReviewUI] group_discard: {gname!r} -= {pair} @ session={sess!r}")
-        g = ui._sel_data._groups.get(gname, {})
-        if isinstance(g, set):
-            g.discard(pair)
-        elif sess in g:
-            g[sess].discard(pair)
-
-    def _any_group_header_names(self) -> list[str]:
-        """Sorted user group names (tags) for ``any``-mode list sections."""
-        ui = self._ui
-
-        def _sort_key(n: str):
-            try:
-                return (0, int(n), '')
-            except (ValueError, TypeError):
-                return (1, 0, n)
-
-        names = [
-            g for g in ui._sel_data._groups
-            if not g.startswith('__')
-        ]
-        return sorted(names, key=_sort_key)
-
-    def _any_triples_in_group(self, gname: str) -> set[tuple]:
-        """All (session, ref, tgt) in *gname* for the current connection type."""
-        ui = self._ui
-        lbl = ui._type_label(ui.key)
-        out: set[tuple] = set()
-        for k in ui.cd.ptr.keys():
-            if ui._type_label(k) != lbl:
-                continue
-            sess = str(k.session)
-            valid = ui._all_inds_set_for_ptr(ui.cd.ptr.get(k))
-            if not valid:
-                continue
-            for pair in ui._group_mgr._group_pairs(gname, session=sess):
-                r, t = int(pair[0]), int(pair[1])
-                if (r, t) in valid:
-                    out.add((sess, r, t))
-        return out
-
-    def _any_nd_keys_for_group(self, gname: str) -> list:
-        """Neuron-dataset keys that have ≥1 pair in *gname* (current type)."""
-        ui = self._ui
-        lbl = ui._type_label(ui.key)
-        seen, seen_id = [], set()
-        for nk in ui._sess_mgr._real_nd_keys_ordered():
-            ckey = ui._sess_mgr._type_key_for_nd(nk)
-            if ckey is None or ui._type_label(ckey) != lbl:
-                continue
-            sess = str(ckey.session)
-            ptr = ui.cd.ptr.get(ckey)
-            valid = ui._all_inds_set_for_ptr(ptr)
-            if any((int(a), int(b)) in valid
-                   for a, b in ui._group_mgr._group_pairs(gname, session=sess)):
-                nid = id(nk)
-                if nid not in seen_id:
-                    seen.append(nk)
-                    seen_id.add(nid)
-        return seen
-
-    def _any_iter_pairs_for_group(self, gname: str):
-        """Yield ``(ckey, r, t)`` for *gname* by scanning sessions (expanded tag only)."""
-        ui = self._ui
-        if gname not in ui._any_expanded_group_tags:
-            return
-        lbl = ui._type_label(ui.key)
-        dead = ui.deleted_inds
-        for nk in ui._sess_mgr._real_nd_keys_ordered():
-            ckey = ui._sess_mgr._type_key_for_nd(nk)
-            if ckey is None or ui._type_label(ckey) != lbl:
-                continue
-            sess = str(ckey.session)
-            ptr = ui.cd.ptr.get(ckey)
-            valid = ui._all_inds_set_for_ptr(ptr)
-            pairs = ui._group_mgr._group_pairs(gname, session=sess)
-            if not pairs:
-                continue
-            # Precompute CCG bounds to skip stale pairs (pointer may outlive data)
-            _cd = ui.cd.ccg.get(ckey.nd()) if hasattr(ui.cd, 'ccg') else None
-            _ccg_sh = (_cd.ccg.shape if _cd is not None and hasattr(_cd, 'ccg')
-                       and _cd.ccg is not None else None)
-            for r, t in sorted((int(a), int(b)) for a, b in pairs):
-                if r == t:
-                    continue
-                if (r, t) not in valid:
-                    continue
-                if (sess, r, t) in dead:
-                    continue
-                if (_ccg_sh is not None and len(_ccg_sh) >= 4
-                        and (r >= _ccg_sh[1] or t >= _ccg_sh[2])):
-                    continue
-                yield ckey, r, t
-
-    def _toggle_any_avail_group(self, gname: str):
-        """Expand/collapse a group tag (Any mode); load CCG for involved sessions."""
-        ui = self._ui
-        if gname in ui._any_expanded_group_tags:
-            ui._any_expanded_group_tags.discard(gname)
-            ui.refresh_lists()
-            return
-
-        nds = ui._group_mgr._any_nd_keys_for_group(gname)
-
-        def _finish_expand():
-            ui._any_expanded_group_tags.add(gname)
-            ui.refresh_lists()
-
-        if not nds:
-            _finish_expand()
-            return
-
-        def _chain(idx: int):
-            if idx >= len(nds):
-                _finish_expand()
-                return
-            ui._sess_mgr._ensure_session_loaded(nds[idx], on_loaded=lambda: _chain(idx + 1))
-
-        _chain(0)
-
-    def _pair_in_group(self, pair, group_name: str) -> bool:
-        ui = self._ui
-        sess, p2 = ui._pair_sess_rt(pair)
-        return p2 in ui._group_mgr._group_pairs(group_name, session=sess)
-
-    def _save_groups_export(self):
-        """Write groups_export.json (v4.0): registry + cross-session pair assignments.
-
-        In any-mode: all sessions' data lives in _sel_data._groups in memory — write
-        all of it directly.
-        In single-session mode: merge-on-save — preserve other sessions from the
-        existing file and update only the current session's pairs.
-        """
-        ui = self._ui
-        ui._group_mgr._sync_registry_from_groups()
-        export_path = os.path.join(ui._sel_save_dir, 'groups_export.json')
-        cur_sess = ui._setup_mgr._current_session_str()
-        any_mode = getattr(ui, '_session_any_mode', False)
-
-        # In single-session mode: load existing file to preserve other sessions' data
-        existing_pairs: dict = {}  # gid_str → {sess → [[r,t],...]}
-        if not any_mode and os.path.isfile(export_path):
-            try:
-                with open(export_path, encoding='utf-8') as f:
-                    existing = json.load(f)
-                if existing.get('version', '3.x') >= '4.0':
-                    existing_pairs = existing.get('group_pairs', {})
-                else:
-                    # v3.x: migrate pair assignments into existing_pairs keyed by int IDs
-                    for gname, val in existing.get('groups', {}).items():
-                        gid = ui._group_mgr._ensure_group_registered(gname)
-                        gid_str = str(gid)
-                        existing_pairs.setdefault(gid_str, {})
-                        if isinstance(val, dict):
-                            for sess, pp in val.items():
-                                if sess != cur_sess:
-                                    existing_pairs[gid_str][sess] = pp
-            except Exception as exc:
-                print(f"[CCGReviewUI] _save_groups_export: failed to read existing: {exc}")
-
-        # Build new group_pairs
-        group_pairs: dict = {}
-        for gid, g_entry in ui._sel_data._group_registry.items():
-            gname = g_entry['name']
-            gid_str = str(gid)
-            g_pairs: dict = {}
-            if any_mode:
-                # All sessions' assignments are in memory — write them all
-                g = ui._sel_data._groups.get(gname, {})
-                if isinstance(g, dict):
-                    for sess, pairs in g.items():
-                        sorted_p = sorted(pairs) if pairs else []
-                        if sorted_p:
-                            g_pairs[sess] = [[int(r), int(c)] for r, c in sorted_p]
-                elif isinstance(g, set):
-                    sorted_p = sorted(g)
-                    if sorted_p:
-                        g_pairs[cur_sess] = [[int(r), int(c)] for r, c in sorted_p]
-            else:
-                # Single-session: preserve other sessions, update current session only
-                for sess, pp in existing_pairs.get(gid_str, {}).items():
-                    if sess != cur_sess:
-                        g_pairs[sess] = pp
-                cur_pairs = sorted(ui._group_mgr._group_pairs(gname, cur_sess))
-                if cur_pairs:
-                    g_pairs[cur_sess] = [[int(r), int(c)] for r, c in cur_pairs]
-            if g_pairs:
-                group_pairs[gid_str] = g_pairs
-
-        data = {
-            'version': '4.0',
-            'group_registry': {str(k): v for k, v in ui._sel_data._group_registry.items()},
-            'next_id': ui._sel_data._next_group_id,
-            'group_pairs': group_pairs,
-        }
-        ui._atomic_write_json(export_path, data)
-
-    def _load_groups_from_export(self):
-        """Load group registry + all-session pair assignments from groups_export.json.
-
-        Handles both v4.0 (registry + group_pairs) and v3.x (legacy string-name groups).
-        Falls back to per-session __latest.json if the export file doesn't exist yet.
-        """
-        ui = self._ui
-        export_path = os.path.join(ui._sel_save_dir, 'groups_export.json')
-        if not os.path.isfile(export_path):
-            latest_path = ui._sel_mgr._sel_version_path('latest')
-            if os.path.isfile(latest_path):
-                try:
-                    with open(latest_path, encoding='utf-8') as f:
-                        data = json.load(f)
-                    ui._group_mgr._restore_groups_from_data(data)
-                except Exception as exc:
-                    print(f"[CCGReviewUI] failed to load groups from session file: {exc}")
-            return
-        try:
-            with open(export_path, encoding='utf-8') as f:
-                data = json.load(f)
-            version = data.get('version', '3.x')
-            if 'group_registry' in data or str(version) >= '4.0':
-                ui._group_mgr._load_groups_v4(data)
-            else:
-                # v3.x → migrate
-                ui._group_mgr._restore_groups_from_data(data, restore_hotkeys=True)
-                ui._group_mgr._sync_registry_from_groups()
-                # Rewrite as v4.0 immediately so future loads use new format
-                try:
-                    ui._group_mgr._save_groups_export()
-                    print("[CCGReviewUI] groups_export.json migrated to v4.0")
-                except Exception as exc:
-                    print(f"[CCGReviewUI] migration save failed: {exc}")
-            n_groups = len(ui._sel_data._groups)
-            n_pairs = sum(len(p) for sd in ui._sel_data._groups.values()
-                          if isinstance(sd, dict) for p in sd.values())
-            print(f"[CCGReviewUI] groups loaded: {n_groups} groups, "
-                  f"{n_pairs} pair-session entries")
-            # Refresh any UI that depends on group/hotkey state.
-            try:
-                ui._group_mgr._rebuild_groups_menu()
-            except Exception:
-                pass
-            try:
-                if hasattr(ui, '_hotkeys_bar'):
-                    ui._group_mgr._refresh_hotkeys_bar()
-            except Exception:
-                pass
-        except Exception as exc:
-            print(f"[CCGReviewUI] failed to load groups_export.json: {exc}")
-
-    def _load_groups_v4(self, data: dict):
-        """Populate _group_registry, _groups, _group_hotkeys, _group_notes from v4.0 data."""
-        ui = self._ui
-        registry = data.get('group_registry', {})
-        ui._sel_data._group_registry = {}
-        for k, v in registry.items():
-            ui._sel_data._group_registry[int(k)] = v
-        ui._sel_data._next_group_id = data.get('next_id', max(ui._sel_data._group_registry.keys(), default=0) + 1)
-
-        # Rebuild _group_hotkeys and _group_notes from registry
-        ui._sel_data._group_hotkeys = {}
-        ui._sel_data._group_notes = {}
-        for gid, g in ui._sel_data._group_registry.items():
-            name = g['name']
-            if g.get('hotkey'):
-                ui._sel_data._group_hotkeys[name] = g['hotkey']
-            if g.get('notes'):
-                ui._sel_data._group_notes[name] = g['notes']
-
-        # Populate _groups from group_pairs
-        group_pairs = data.get('group_pairs', {})
-        for gid_str, sessions_dict in group_pairs.items():
-            try:
-                gid = int(gid_str)
-            except ValueError:
-                continue
-            gname = ui._sel_data._group_registry.get(gid, {}).get('name')
-            if not gname:
-                continue
-            ui._sel_data._groups.setdefault(gname, {})
-            for sess, pairs in sessions_dict.items():
-                ui._sel_data._groups[gname][sess] = set(
-                    tuple(int(v) for v in p) for p in pairs)
-
-    def _merge_groups_from_session_files(self, export_path: str):
-        """Merge group definitions from all per-session __latest.json files.
-
-        Adds any group names (+ their pair assignments) that exist in per-session
-        files but are missing from the already-loaded ui._sel_data._groups.  Does NOT
-        overwrite existing entries in ui._sel_data._groups (export file is authoritative
-        for groups that already exist there).  Saves the export file if anything
-        was added.
-        """
-        ui = self._ui
-        save_dir = os.path.dirname(export_path)
-        added = False
-        for fpath in sorted(_glob.glob(os.path.join(save_dir, '*__latest.json'))):
-            try:
-                with open(fpath, encoding='utf-8') as fh:
-                    fdata = json.load(fh)
-            except Exception:
-                continue
-            file_session = fdata.get('session',
-                                     os.path.basename(fpath).replace('__latest.json', ''))
-            for g, val in fdata.get('groups', {}).items():
-                if isinstance(val, list):
-                    pairs = set(tuple(int(v) for v in p) for p in val)
-                    sess_pairs = {file_session: pairs}
-                elif isinstance(val, dict):
-                    sess_pairs = {s: set(tuple(int(v) for v in p) for p in pp)
-                                  for s, pp in val.items()}
-                else:
-                    continue
-                if g not in ui._sel_data._groups:
-                    ui._sel_data._groups[g] = sess_pairs
-                    added = True
-                else:
-                    for sess, pairs in sess_pairs.items():
-                        if sess not in ui._sel_data._groups[g] and pairs:
-                            ui._sel_data._groups[g][sess] = pairs
-                            added = True
-        if added:
-            ui._group_mgr._save_groups_export()
-            print("[CCGReviewUI] groups_export.json updated with groups from per-session files")
-
-    def _restore_groups_from_data(self, data: dict, restore_hotkeys: bool = False):
-        """Merge group data from a dict into ui._sel_data._groups (v3.x legacy path).
-
-        CRITICAL: Merges — never overwrites existing entries — so loading a
-        per-session file cannot erase groups belonging to other sessions.
-        Pass restore_hotkeys=True only when loading from groups_export.json.
-        """
-        ui = self._ui
-        raw_groups = data.get('groups', {})
-        file_session = data.get('session', ui._setup_mgr._current_session_str())
-        for g, val in raw_groups.items():
-            if isinstance(val, list):
-                pairs = {file_session: set(tuple(int(v) for v in p) for p in val)}
-            elif isinstance(val, dict):
-                pairs = {sess: set(tuple(int(v) for v in p) for p in pp)
-                         for sess, pp in val.items()}
-            else:
-                pairs = {}
-            if g not in ui._sel_data._groups:
-                ui._sel_data._groups[g] = pairs
-            else:
-                # Merge: only add sessions that don't already exist
-                for sess, sp in pairs.items():
-                    if sess not in ui._sel_data._groups[g]:
-                        ui._sel_data._groups[g][sess] = sp
-        if restore_hotkeys:
-            hk = data.get('hotkeys', {})
-            ui._sel_data._group_hotkeys.update(hk)
-        notes = data.get('notes', {})
-        for k, v in notes.items():
-            if k not in ui._sel_data._group_notes:
-                ui._sel_data._group_notes[k] = v
-        ui._group_mgr._rebuild_groups_menu()
-
-    def _pair_group_label(self, inds) -> str:
-        """Return a short label like '[G1,G2]' for the groups this pair belongs to."""
-        ui = self._ui
-        sess, pair = ui._pair_sess_rt(inds)
-        pair = tuple(int(x) for x in pair)
-        labels = []
-        for gname in ui._sel_data._groups:
-            if pair not in ui._group_mgr._group_pairs(gname, session=sess):
-                continue
-            if is_special_group(gname):
-                labels.append('*' + gname[len(_SPECIAL_PREFIX):])
-            elif not gname.startswith('__'):
-                labels.append(gname)
-        pt = ui._sel_data._pair_tags.get(pair, {})
-        tag_mark = '~' if (pt.get('tags') or pt.get('notes', '').strip()) else ''
-        group_str = f"[{','.join(labels)}]" if labels else ""
-        return tag_mark + group_str
-
-    def _toggle_pair_group(self, pair, group_name):
-        ui = self._ui
-        if group_name not in ui._sel_data._groups:
-            ui._sel_data._groups[group_name] = {}
-        sess, p2 = ui._pair_sess_rt(pair)
-        if p2 in ui._group_mgr._group_pairs(group_name, session=sess):
-            ui._group_mgr._group_discard_pair(group_name, p2, session=sess)
-        else:
-            ui._group_mgr._group_add_pair(group_name, p2, session=sess)
-        # Preserve scroll positions so the list doesn't jump to the top
-        unsel_scroll = ui.unselected_list.yview()[0]
-        sel_scroll = ui.selected_list.yview()[0]
-        ui.refresh_lists()
-        ui.unselected_list.yview_moveto(unsel_scroll)
-        ui.selected_list.yview_moveto(sel_scroll)
-
-    def _toggle_pairs_group(self, pairs, group_name):
-        """Toggle multiple pairs in/out of a group.
-
-        If ALL pairs are already in the group, remove them all.
-        Otherwise, add all pairs to the group.
-        """
-        ui = self._ui
-        if group_name not in ui._sel_data._groups:
-            ui._sel_data._groups[group_name] = {}
-        all_in = all(ui._group_mgr._pair_in_group(p, group_name) for p in pairs)
-        # action = "REMOVE" if all_in else "ADD"
-        if all_in:
-            for p in pairs:
-                s2, p2 = ui._pair_sess_rt(p)
-                ui._group_mgr._group_discard_pair(group_name, p2, session=s2)
-        else:
-            for p in pairs:
-                s2, p2 = ui._pair_sess_rt(p)
-                ui._group_mgr._group_add_pair(group_name, p2, session=s2)
-        unsel_scroll = ui.unselected_list.yview()[0]
-        sel_scroll = ui.selected_list.yview()[0]
-        ui.refresh_lists()
-        ui.unselected_list.yview_moveto(unsel_scroll)
-        ui.selected_list.yview_moveto(sel_scroll)
-
-    def _create_group_dialog(self):
-        ui = self._ui
-        win = tk.Toplevel(ui.root)
-        win.title("Create group")
-        win.resizable(False, False)
-        win.grab_set()
-        ttk.Label(win, text="Group name:").grid(row=0, column=0, padx=8, pady=(10, 4), sticky='w')
-        name_var = tk.StringVar()
-        entry = ttk.Entry(win, textvariable=name_var, width=26)
-        entry.grid(row=0, column=1, padx=(0, 8), pady=(10, 4))
-        entry.focus_set()
-        special_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(win, text="Create as special group", variable=special_var).grid(
-            row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky='w')
-        btn_frame = ttk.Frame(win)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=(0, 8))
-
-        def _ok():
-            name = name_var.get().strip()
-            if not name:
-                return
-            full = (_SPECIAL_PREFIX + name) if special_var.get() else name
-            if full in ui._sel_data._groups:
-                kind = "special group" if special_var.get() else "group"
-                messagebox.showinfo("Create group", f"{kind.capitalize()} '{name}' already exists.",
-                                    parent=win)
-                return
-            ui._sel_data._groups[full] = {}
-            ui._group_mgr._rebuild_groups_menu()
-            ui.refresh_lists()
-            win.destroy()
-
-        ttk.Button(btn_frame, text="OK", command=_ok, width=8).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=win.destroy, width=8).pack(side=tk.LEFT, padx=4)
-        entry.bind('<Return>', lambda e: _ok())
-        win.bind('<Escape>', lambda e: win.destroy())
-
-    def _rename_group(self, old_name, new_name, win=None):
-        ui = self._ui
-        new_name = new_name.strip()
-        if not new_name or new_name == old_name:
-            return
-        if new_name in ui._sel_data._groups:
-            messagebox.showwarning("Rename", f"'{new_name}' already exists.")
-            return
-
-        # Preserve group identity in the v4 registry: rename the registry entry
-        # instead of orphaning it (which can drop assignments on save).
-        try:
-            gid = ui._group_id_for(old_name)
-            if gid is not None and gid in ui._sel_data._group_registry:
-                ui._sel_data._group_registry[gid]['name'] = new_name
-        except Exception:
-            pass
-
-        ui._sel_data._groups[new_name] = ui._sel_data._groups.pop(old_name)
-        if old_name in ui._sel_data._group_hotkeys:
-            if is_special_group(new_name):
-                ui._sel_data._group_hotkeys.pop(old_name)
-                try:
-                    gid = ui._group_id_for(new_name)
-                    if gid is not None and gid in ui._sel_data._group_registry:
-                        ui._sel_data._group_registry[gid]['hotkey'] = None
-                except Exception:
-                    pass
-            else:
-                ui._sel_data._group_hotkeys[new_name] = ui._sel_data._group_hotkeys.pop(old_name)
-        if old_name in ui._sel_data._group_notes:
-            ui._sel_data._group_notes[new_name] = ui._sel_data._group_notes.pop(old_name)
-        ui._group_mgr._rebuild_groups_menu()
-        ui.refresh_lists()
-        if win:
-            win.destroy()
-            ui._manage_groups_dialog()
-
-    def _delete_group(self, name, win=None):
-        ui = self._ui
-        if not messagebox.askyesno("Delete group",
-                                   f"Delete group '{name}'?"):
-            return
-        ui._sel_data._groups.pop(name, None)
-        ui._sel_data._group_hotkeys.pop(name, None)
-        ui._sel_data._group_notes.pop(name, None)
-        ui._group_mgr._rebuild_groups_menu()
-        ui.refresh_lists()
-        if win:
-            win.destroy()
-            # Reopen if there are remaining groups
-            if ui._sel_data._groups:
-                ui._manage_groups_dialog()
-
-    def _set_group_hotkey(self, group_name, key_str):
-        """Assign hotkey: single digit 1–9/0 or single letter a–z."""
-        ui = self._ui
-        key_str = key_str.strip().lower()
-        if not key_str:
-            ui._sel_data._group_hotkeys.pop(group_name, None)
-            ui._group_mgr._rebuild_groups_menu()
-            return
-        valid_digits = [str(i) for i in range(1, 10)] + ['0']
-        if key_str not in valid_digits and not (len(key_str) == 1 and key_str.isalpha()):
-            messagebox.showwarning("Hotkey", "Enter a digit 1–9/0 or a single letter a–z.")
-            return
-        # Remove from any other group that had this key
-        for g, k in list(ui._sel_data._group_hotkeys.items()):
-            if k == key_str and g != group_name:
-                del ui._sel_data._group_hotkeys[g]
-        ui._sel_data._group_hotkeys[group_name] = key_str
-        ui._group_mgr._rebuild_groups_menu()
-
-    def _rebuild_groups_menu(self):
-        """Refresh the dynamic part of the Groups menu."""
-        ui = self._ui
-        if hasattr(ui, 'left_container'):
-            ui.left_container.left_panel._rebuild_groups_menu()
-            return
-        # Pre-container fallback (during early setup before left_container exists)
-        if not hasattr(ui, '_groups_menu'):
-            return
-        try:
-            while ui._groups_menu.index('end') >= 7:
-                ui._groups_menu.delete(7)
-        except tk.TclError:
-            pass
-        ui.network_panel.refresh_group_buttons()
-        if (hasattr(ui, '_hotkeys_bar') and
-                ui._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get()):
-            ui._group_mgr._refresh_hotkeys_bar()
-
-    def _select_group(self, group_name):
-        """Navigate to the first pair in the group."""
-        ui = self._ui
-        pairs = ui._group_mgr._group_pairs(group_name)
-        if not pairs:
-            return
-        first = sorted(pairs)[0]
-        ui.current_pair_idx = ui._plot_mgr.get_pair_index(first)
-        ui._plot_mgr.update_plot()
-        ui.network_panel.draw()
-
-    def _group_hotkey_handler(self, key_str: str, advance: bool = True):
-        """Toggles the current pair in/out of the group assigned to key_str.
-
-        key_str is a single character: '1'-'9', '0', or 'a'-'z'.
-        advance=False (Shift held): tag without moving the cursor.
-        """
-        ui = self._ui
-        current_pair = ui._selected_pair_from_lists()
-        if current_pair is None:
-            if ui.current_pair_idx >= len(ui.all_inds):
-                return
-            if getattr(ui, '_session_any_mode', False):
-                trip = ui._pair_at_all_inds_idx(ui.current_pair_idx)
-                if trip is None:
-                    return
-                current_pair = trip
-            else:
-                row = ui.all_inds[ui.current_pair_idx]
-                current_pair = tuple(int(x) for x in row)
-        for gname, k in ui._sel_data._group_hotkeys.items():
-            if k != key_str:
-                continue
-
-            if not advance:
-                # Ctrl held: only the current pair, no listbox multi-select
-                highlighted = [current_pair]
-                # If the user is holding Shift to apply multiple tags, advance
-                # once when Shift is released.
-                ui._shift_tag_pending_advance = True
-            else:
-                # ── Collect all highlighted pairs from both listboxes ────────
-                _lp = getattr(ui.left_container, 'left_panel', None)
-                avail_map = getattr(_lp, '_avail_list_pairs', None)
-                highlighted = []
-                for i in ui.unselected_list.curselection():
-                    if avail_map and i < len(avail_map):
-                        entry = avail_map[i]
-                        if entry is None or is_separator_row(entry):
-                            continue
-                        if entry[1] != 'deleted':
-                            highlighted.append(entry[0])
-                    elif not avail_map:
-                        su = sorted(ui.unselected_inds)
-                        if i < len(su):
-                            highlighted.append(su[i])
-                sel_map = getattr(_lp, '_sel_list_pairs', None)
-                for i in ui.selected_list.curselection():
-                    if sel_map and i < len(sel_map):
-                        inds = sel_map[i]
-                        if inds is not None:
-                            highlighted.append(inds)
-                    elif not sel_map:
-                        ss = sorted(ui.selected_inds)
-                        if i < len(ss):
-                            highlighted.append(ss[i])
-                # If nothing is explicitly selected, fall back to current pair.
-                if not highlighted:
-                    highlighted = [current_pair]
-
-            multi = len(highlighted) > 1
-            changed = set()
-            ui._sel_mgr._push_undo()
-
-            for pair in highlighted:
-                was_in_group = ui._group_mgr._pair_in_group(pair, gname)
-                ui._group_mgr._toggle_pair_group(pair, gname)
-                if getattr(ui, '_session_any_mode', False):
-                    changed.add(pair)
-                    continue
-                if not was_in_group:
-                    # Gained a tag → move to selected
-                    if pair in ui.unselected_inds:
-                        ui._sel_data.set_state(pair, 'sel')
-                        changed.add(pair)
-                else:
-                    # Lost a tag → move back to available if no tags remain
-                    if pair in ui.selected_inds:
-                        has_groups = any(
-                            ui._group_mgr._pair_in_group(pair, g)
-                            for g in ui._sel_data._groups
-                            if not g.startswith('__')
-                        )
-                        if not has_groups:
-                            ui._sel_data.set_state(pair, 'unsel')
-                            changed.add(pair)
-
-            ui.refresh_lists()
-            ui._plot_mgr._highlight_changed_pairs(changed or {current_pair})
-            if advance:
-                next_idx = min(ui.current_pair_idx + 1, len(ui.all_inds) - 1)
-                ui.current_pair_idx = next_idx
-                ui._select_pair_in_list(ui._pair_at_all_inds_idx(next_idx))
-            else:
-                # No advance: keep cursor on current pair after list rebuild
-                ui._select_pair_in_list(current_pair)
-            ui._plot_mgr.update_plot()
-            ui.network_panel.draw()
-            return
-        # No group assigned to this hotkey — show temporary warning
-        ui._sel_mgr._show_temp_warning(f"No group assigned to Ctrl+{key_str}")
-
-    def _export_groups(self):
-        """Export all group definitions to a standalone JSON file."""
-        ui = self._ui
-        if not ui._sel_data._groups:
-            messagebox.showinfo("Export groups", "No groups to export.")
-            return
-        path = filedialog.asksaveasfilename(
-            title="Export groups",
-            defaultextension='.json',
-            filetypes=[('JSON files', '*.json')],
-            initialfile='groups_export.json',
-            initialdir=ui._sel_save_dir,
-        )
-        if not path:
-            return
-        groups = {}
-        for g, sessions_dict in ui._sel_data._groups.items():
-            if isinstance(sessions_dict, set):
-                groups[g] = {ui._setup_mgr._current_session_str():
-                             [[int(r), int(c)] for r, c in sorted(sessions_dict)]}
-            else:
-                groups[g] = {sess: [[int(r), int(c)] for r, c in sorted(pairs)]
-                             for sess, pairs in sessions_dict.items() if pairs}
-        data = {
-            'groups': groups,
-            'hotkeys': dict(ui._sel_data._group_hotkeys),
-            'notes': dict(ui._sel_data._group_notes),
-        }
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=json_numpy_default)
-        print(f"[CCGReviewUI] groups exported → {path}")
-
-    def _import_groups(self):
-        """Import group definitions from a JSON file, merging with existing."""
-        ui = self._ui
-        path = filedialog.askopenfilename(
-            title="Import groups",
-            filetypes=[('JSON files', '*.json')],
-            initialdir=ui._sel_save_dir,
-        )
-        if not path:
-            return
-        try:
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            messagebox.showerror("Import groups", f"Failed to read file:\n{exc}")
-            return
-        imported_groups = data.get('groups', {})
-        for gname, val in imported_groups.items():
-            if isinstance(val, list):
-                # Flat format → current session
-                sess = ui._setup_mgr._current_session_str()
-                for p in val:
-                    ui._group_mgr._group_add_pair(gname, tuple(int(v) for v in p), sess)
-            elif isinstance(val, dict):
-                # Per-session format
-                for sess, pairs in val.items():
-                    for p in pairs:
-                        ui._group_mgr._group_add_pair(gname, tuple(int(v) for v in p), sess)
-            else:
-                ui._sel_data._groups.setdefault(gname, {})
-        for gname, hk in data.get('hotkeys', {}).items():
-            if gname not in ui._sel_data._group_hotkeys:
-                ui._sel_data._group_hotkeys[gname] = hk
-        for gname, note in data.get('notes', {}).items():
-            if gname not in ui._sel_data._group_notes:
-                ui._sel_data._group_notes[gname] = note
-        ui._group_mgr._rebuild_groups_menu()
-        ui.refresh_lists()
-        print(f"[CCGReviewUI] groups imported from {path}")
-
-    def _show_hotkeys_dialog(self):
-        """Show a dialog listing all keyboard shortcuts."""
-        ui = self._ui
-        hotkeys_text = (
-            "Ctrl+E    Toggle between waveform and CCG\n"
-            "Ctrl+R    Toggle resolution (hi / lo)\n"
-            "Ctrl+S    Save selection\n"
-            "Ctrl+B    Toggle bookmark on current pair (pin + highlight in lists)\n"
-            "Ctrl+Z    Undo\n"
-            "Ctrl+Y    Redo\n"
-            "\n"
-            "1..0          Assign group + advance cursor\n"
-            "Shift+1..0    Assign group(s) to current pair (no advance)\n"
-            "Ctrl+Delete / Ctrl+Backspace   Move current pair to Deleted\n"
-            "Left/Right Arrow   Change segment"
-        )
-        messagebox.showinfo("Keyboard Shortcuts", hotkeys_text)
-
-    def setup_groups_menu(self, menubar):
-        """Groups menu: create / manage pair groups."""
-        ui = self._ui
-        ui._groups_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Groups", menu=ui._groups_menu)
-        ui._groups_menu.add_command(label="Create group…",
-                                      command=ui._group_mgr._create_group_dialog)
-        ui._groups_menu.add_command(label="Manage groups…",
-                                      command=ui._manage_groups_dialog)
-        ui._groups_menu.add_command(label="Merge groups…",
-                                      command=lambda: MergeGroupsDialog.show(ui))
-        ui._groups_menu.add_command(label="Export groups…",
-                                      command=ui._group_mgr._export_groups)
-        ui._groups_menu.add_command(label="Import groups…",
-                                      command=ui._group_mgr._import_groups)
-        ui._groups_menu.add_separator()
-        # Dynamic group entries added in _rebuild_groups_menu()
-
-    def setup_group_hotkeys_bar(self):
-        """Horizontal bar showing Ctrl+1…0 → group-name mappings."""
-        ui = self._ui
-        ui._hotkeys_bar = ttk.Frame(ui.root, relief=tk.GROOVE, borderwidth=1)
-        ui._hotkeys_bar_labels: list[tk.Label] = []
-        ui._hk_scroller = ArrowScroller()
-        self._refresh_hotkeys_bar()
-        # Pack immediately if default is visible
-        if ui._panel_vars.get('Group Hotkeys', tk.BooleanVar()).get():
-            ui._hotkeys_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2))
-
-    def _refresh_hotkeys_bar(self):
-        """Rebuild the labels inside the hotkeys bar."""
-        ui = self._ui
-        for w in ui._hotkeys_bar.winfo_children():
-            w.destroy()
-        ui._hotkeys_bar_labels.clear()
-
-        ttk.Label(ui._hotkeys_bar, text="Groups:",
-                  font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(6, 4))
-
-        del_lbl = tk.Label(ui._hotkeys_bar, text="Del/⌫: deleted",
-                           font=('Courier', 9), padx=6, pady=1,
-                           relief=tk.RIDGE, borderwidth=1, fg='#888888')
-        del_lbl.pack(side=tk.LEFT, padx=2, pady=2)
-
-        # Order: digits 1–9, 0 first, then letters a–z
-        digit_order = [str(i) for i in range(1, 10)] + ['0']
-        letter_order = list('abcdefghijklmnopqrstuvwxyz')
-        slot_order = digit_order + letter_order
-        # Invert: hotkey_str → group_name
-        hk_to_group = {v: k for k, v in ui._sel_data._group_hotkeys.items()}
-
-        # Build ordered list of (key_str, gname) chips
-        all_chips = [(k, hk_to_group[k]) for k in slot_order if k in hk_to_group]
-
-        if not all_chips:
-            ttk.Label(ui._hotkeys_bar, text="(no hotkeys assigned)",
-                      font=('Arial', 9), foreground='#888').pack(
-                side=tk.LEFT, padx=4)
-            return
-
-        n_chips = len(all_chips)
-        ui._hk_scroller.install(ui._hotkeys_bar, n_chips,
-                                lambda _: self._refresh_hotkeys_bar())
-        offset = ui._hk_scroller.offset
-
-        for key_str, gname in all_chips[offset:]:
-            display = f"{key_str}: {gname}"
-            lbl = tk.Label(ui._hotkeys_bar, text=display,
-                           font=('Courier', 9), padx=6, pady=1,
-                           relief=tk.RIDGE, borderwidth=1)
-            lbl.pack(side=tk.LEFT, padx=2, pady=2)
-            lbl.bind('<Button-1>',
-                     lambda e, g=gname: ui._group_mgr._select_group(g))
-            lbl.bind('<Double-Button-1>',
-                     lambda e, g=gname: self._group_chip_double_click(g))
-            ui._hotkeys_bar_labels.append(lbl)
-
-    def _group_chip_double_click(self, group_name: str):
-        """Draw a random example pair from group_name; flash chip red if empty."""
-        ui = self._ui
-        pairs = ui._group_mgr._group_pairs(group_name)
-        if not pairs:
-            # Flash the chip label red for 0.3 s
-            for lbl in ui._hotkeys_bar_labels:
-                if group_name in lbl.cget('text'):
-                    orig_fg = lbl.cget('fg')
-                    lbl.config(fg='red')
-                    ui.root.after(300, lambda l=lbl, c=orig_fg: l.config(fg=c))
-            return
-        chosen = random.choice(sorted(pairs))
-        ui.current_pair_idx = ui._plot_mgr.get_pair_index(chosen)
-        ui._plot_mgr.update_plot()
-        ui.network_panel.draw()
-
-class SelectionPersistenceManager:
-    """Selection save/load, undo/redo, history, and bookmarks for CCGReviewUI."""
-
-    def __init__(self, ui: "CCGReviewUI"):
-        self._ui = ui
-        ui._pair_deleted_store: dict = {}
-
-    def setup_file_menu(self, menubar):
-        """Selections menu: save / load selection versions."""
-        ui = self._ui
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Selections", menu=file_menu)
-        file_menu.add_command(label="Save selection…",
-                              command=ui._sel_mgr._quick_save)
-        file_menu.add_command(label="Load selection…",
-                              command=ui._sel_mgr._load_selection_dialog)
-        file_menu.add_separator()
-        file_menu.add_command(label="Export as PNG…",
-                              command=ui._export_mgr._export_current_view)
-        file_menu.add_separator()
-        file_menu.add_command(label="Clear bookmarks",
-                              command=ui._sel_mgr._clear_bookmarks)
-
-    def _selections_menu_close(self):
-        ui = self._ui
-        ui._bookmarked_pairs.clear()
-        ui.root.destroy()
-
-    def _push_undo(self):
-        """Snapshot current selection AND group state before a mutation."""
-        ui = self._ui
-        ui._undo_stack.append((
-            set(ui.selected_inds),
-            set(ui.unselected_inds),
-            set(ui.deleted_inds),
-            _copy.deepcopy(ui._sel_data._groups),
-        ))
-        if len(ui._undo_stack) > ui._UNDO_LIMIT:
-            ui._undo_stack.pop(0)
-        ui._redo_stack.clear()
-
-    # Highlight color for undo/redo indicators (matches CCG baseline orange)
-    _UNDO_HIGHLIGHT = '#ff7f0e'
-
-    def _undo(self, event=None):
-        ui = self._ui
-        if not ui._undo_stack:
-            return
-        cur = (set(ui.selected_inds), set(ui.unselected_inds),
-               set(ui.deleted_inds), _copy.deepcopy(ui._sel_data._groups))
-        ui._redo_stack.append(cur)
-        state = ui._undo_stack.pop()
-        ui._sel_data.populate(state[0] | state[1] | (state[2] if len(state) > 2 else set()),
-                              selected=state[0], deleted=state[2] if len(state) > 2 else set())
-        if len(state) > 3:
-            _merge_groups_into(ui._sel_data._groups, state[3])
-            ui._group_mgr._rebuild_groups_menu()
-        changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
-        ui.refresh_lists()
-        ui._plot_mgr._highlight_changed_pairs(changed)
-        ui._flush_deleted_to_store()
-        ui._plot_mgr.update_plot()
-        ui.network_panel.draw()
-        ui._refresh_stats()
-
-    def _redo(self, event=None):
-        ui = self._ui
-        if not ui._redo_stack:
-            return
-        cur = (set(ui.selected_inds), set(ui.unselected_inds),
-               set(ui.deleted_inds), _copy.deepcopy(ui._sel_data._groups))
-        ui._undo_stack.append(cur)
-        state = ui._redo_stack.pop()
-        ui._sel_data.populate(state[0] | state[1] | (state[2] if len(state) > 2 else set()),
-                              selected=state[0], deleted=state[2] if len(state) > 2 else set())
-        if len(state) > 3:
-            _merge_groups_into(ui._sel_data._groups, state[3])
-            ui._group_mgr._rebuild_groups_menu()
-        changed = (cur[0] ^ state[0]) | (cur[1] ^ state[1])
-        ui.refresh_lists()
-        ui._plot_mgr._highlight_changed_pairs(changed)
-        ui._flush_deleted_to_store()
-        ui._plot_mgr.update_plot()
-        ui.network_panel.draw()
-        ui._refresh_stats()
-
-    def _clear_undo_highlight(self):
-        """Remove undo/redo highlight from all list items."""
-        ui = self._ui
-        for listbox in (ui.unselected_list, ui.selected_list):
-            for idx in range(listbox.size()):
-                listbox.itemconfig(idx, background='', foreground='')
-
-    def _reapply_bookmark_list_styles(self):
-        ui = self._ui
-        if hasattr(ui, 'left_container'):
-            ui.left_container.left_panel._reapply_bookmark_list_styles()
-
-    def _bookmark_toggle_current(self, event=None):
-        ui = self._ui
-        if hasattr(ui, 'left_container'):
-            ui.left_container.left_panel._bookmark_toggle_current(event)
-
-    def _clear_bookmarks(self):
-        ui = self._ui
-        if hasattr(ui, 'left_container'):
-            ui.left_container.left_panel._clear_bookmarks()
-
-    def _history_dir(self) -> str:
-        ui = self._ui
-        return os.path.join(ui._sel_save_dir, ui._HISTORY_SUBDIR)
-
-    def _save_to_history(self, data: dict, suffix: str) -> str:
-        """Write data dict to .history/{session}__{ts}{suffix}.json and git-commit."""
-        ui = self._ui
-        hdir = ui._sel_mgr._history_dir()
-        os.makedirs(hdir, exist_ok=True)
-        ts = datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
-        sess = getattr(ui.key, 'session', 'sess')
-        fname = f"{sess}__{ts}{suffix}.json"
-        path = os.path.join(hdir, fname)
-        ui._atomic_write_json(path, data)
-        ui._git_commit_paths([path], f'[history] {fname}')
-        return path
-
-    def _purge_history(self):
-        """Delete .history/ files older than 3 days and commit the deletion."""
-        ui = self._ui
-        hdir = ui._sel_mgr._history_dir()
-        if not os.path.isdir(hdir):
-            return
-        cutoff = datetime.datetime.now() - datetime.timedelta(days=7)
-        removed = []
-        for fname in os.listdir(hdir):
-            if not fname.endswith('.json'):
-                continue
-            fpath = os.path.join(hdir, fname)
-            try:
-                if datetime.datetime.fromtimestamp(os.path.getmtime(fpath)) < cutoff:
-                    os.remove(fpath)
-                    removed.append(fpath)
-            except OSError:
-                pass
-        if removed:
-            repo = os.path.abspath(os.path.join(ui._sel_save_dir, '..', '..'))
-            for p in removed:
-                subprocess.run(['git', 'rm', '--cached', '-f',
-                                os.path.relpath(p, repo)],
-                               cwd=repo, capture_output=True)
-            subprocess.run(['git', 'commit', '--no-gpg-sign', '-m',
-                            f'[history] purge {len(removed)} files older than 7 days'],
-                           cwd=repo, capture_output=True)
-            print(f"[CCGReviewUI] purged {len(removed)} history files older than 7 days")
-
-    def _save_autosnapshot(self):
-        """Periodic 15-min autosave to .history/ as .autosaved.json."""
-        ui = self._ui
-        if ui.ccg_ptr is None or getattr(ui, '_closing', False):
-            return
-        try:
-            data = self._build_save_dict(
-                datetime.datetime.now().isoformat(), 'autosaved')
-            ui._sel_mgr._save_to_history(data, '.autosaved')
-            print(f"[CCGReviewUI] autosnapshot saved")
-        except Exception as exc:
-            print(f"[CCGReviewUI] autosnapshot failed: {exc}")
-
-    def _schedule_autosnapshot(self):
-        ui = self._ui
-        def _do():
-            ui._sel_mgr._save_autosnapshot()
-            ui.root.after(ui._AUTOSAVE_INTERVAL_MS, _do)
-        ui.root.after(ui._AUTOSAVE_INTERVAL_MS, _do)
-
-    def _autoload_session_latest(self, restore_groups: bool = False):
-        """Load the latest selection file for the current session.
-
-        By default only restores pair selections. Pass restore_groups=True on
-        first launch to also load groups from groups_export.json (not the
-        per-session file, which may have stale group entries).
-        """
-        ui = self._ui
-        latest_path = self._sel_version_path('latest')
-        if not os.path.isfile(latest_path):
-            # Even without a session file, try to load groups
-            if restore_groups:
-                ui._group_mgr._load_groups_from_export()
-            return
-        try:
-            # Always load pair selections from the session-specific file;
-            # never load groups from it (they may be stale).
-            ui._sel_mgr._load_selection_from_file(latest_path,
-                                           restore_groups=False,
-                                           _skip_redraw=True)
-        except Exception as exc:
-            print(f"[CCGReviewUI] failed to autoload latest: {exc}")
-        if restore_groups:
-            ui._group_mgr._load_groups_from_export()
-
-    def _autosave_current(self):
-        """Silently save current state to a fixed-name action-autosave file.
-
-        Writes to .history/{session}-last_action.autosaved.json (overwrite, no
-        new file per call).  Does NOT touch __latest.json — that is only written
-        on explicit user save.
-        """
-        ui = self._ui
-        if getattr(ui, '_session_any_mode', False):
-            try:
-                ui._sel_mgr._autosave_all_sessions_for_current_type()
-            except Exception as exc:
-                print(f"[CCGReviewUI] any-session autosave failed: {exc}")
-            try:
-                if ui._sel_data._groups:
-                    ui._group_mgr._save_groups_export()
-            except Exception:
-                traceback.print_exc()
-            try:
-                ui._settings_mgr.save_ui_state()
-            except Exception:
-                traceback.print_exc()
-            return
-        if ui.ccg_ptr is None:
-            return
-        ui._sel_mgr._autosave_to_history_fixed()
-
-    def _autosave_to_history_fixed(self):
-        """Write selections to .history/{session}-last_action.autosaved.json (overwrite)."""
-        ui = self._ui
-        try:
-            data = self._build_save_dict(datetime.datetime.now().isoformat(), 'action_autosave')
-            sess = getattr(ui.key, 'session', 'sess')
-            hdir = ui._sel_mgr._history_dir()
-            os.makedirs(hdir, exist_ok=True)
-            path = os.path.join(hdir, f"{sess}-last_action.autosaved.json")
-            ui._atomic_write_json(path, data)
-        except Exception as exc:
-            print(f"[CCGReviewUI] action autosave failed: {exc}")
-
-    def _autosave_all_sessions_for_current_type(self):
-        """Write fixed action-autosave file for each physical session (any-mode).
-
-        Writes to .history/{session}-last_action.autosaved.json per session
-        (overwrite).  Does NOT touch __latest.json.
-        """
-        ui = self._ui
-        if getattr(ui, '_session_any_mode', False):
-            ui._sess_mgr._flush_any_selections_to_pointers()
-        ui._sess_mgr._flush_any_deleted_to_stores()
-        lbl = ui._type_label(ui.key)
-        saved_sess: set[str] = set()
-        old_key = ui.key
-        old_ptr = ui.ccg_ptr
-        old_cd = ui.ccg_data
-        old_neurons = ui.neurons
-        old_ns = ui.n_segments
-        try:
-            for nk in ui._sess_mgr._real_nd_keys_ordered():
-                ckey = ui._sess_mgr._type_key_for_nd(nk)
-                if ckey is None or ui._type_label(ckey) != lbl:
-                    continue
-                sess = str(ckey.session)
-                if sess in saved_sess:
-                    continue
-                saved_sess.add(sess)
-                ui._sess_mgr._bind_context_to_type_key(ckey)
-                try:
-                    ui._sel_mgr._autosave_to_history_fixed()
-                except Exception as exc:
-                    print(f"[CCGReviewUI] any-session autosave failed for {sess}: {exc}")
-        finally:
-            ui.key = old_key
-            ui.ccg_ptr = old_ptr
-            ui.ccg_data = old_cd
-            ui.neurons = old_neurons
-            ui.n_segments = old_ns
-            # The save loop binds every session; restoring ``old_*`` can leave
-            # ``ccg_*`` on session A while ``current_pair_idx`` still points at
-            # a pair row for session B → IndexError in ``_resolve_segment_data``.
-            if getattr(ui, '_session_any_mode', False):
-                idx = ui.current_pair_idx
-                hl = getattr(ui, '_any_pair_handle_list', None) or []
-                if (getattr(ui.network_panel, '_focused_pair', None) is None
-                        and 0 <= idx < len(hl)):
-                    ui._sess_mgr._sync_any_plot_context(idx)
-
-    def _sel_version_path(self, name: str) -> str:
-        ui = self._ui
-        safe = name.replace('/', '_').replace('\\', '_').replace(' ', '_')
-        session_tag = getattr(ui.key, 'session', 'sess')
-        return os.path.join(ui._sel_save_dir, f"{session_tag}__{safe}.json")
-
-    def _enforce_label_selection_integrity_live(self):
-        """If a pair has labels/tags/notes, force it into selected."""
-        ui = self._ui
-        if getattr(ui, '_session_all_mode', False):
-            # all-in-one view selections are triples; pair-tags are session-local pairs.
-            return
-        tagged_pairs = {
-            tuple(map(int, p))
-            for p, entry in getattr(ui, '_pair_tags', {}).items()
-            if SelectionPersistenceManager._pair_tag_has_labels(entry)
-        }
-        if not tagged_pairs:
-            return
-        avail = set(map(tuple, ui.all_inds))
-        to_select = tagged_pairs & avail
-        if not to_select:
-            return
-        for p in to_select:
-            ui._sel_data.set_state(p, 'sel')
-
-    def _enforce_label_selection_integrity_file(
-            self, selections_by_type: dict, pair_tags: dict, type_keys: list):
-        """Normalize loaded file so pair_tags-labeled pairs are selected in some type."""
-        ui = self._ui
-        if not isinstance(selections_by_type, dict):
-            return selections_by_type
-        tagged_pairs = set()
-        for key_str, entry in (pair_tags or {}).items():
-            if not SelectionPersistenceManager._pair_tag_has_labels(entry):
-                continue
-            parts = str(key_str).split(',')
-            if len(parts) != 2:
-                continue
-            try:
-                tagged_pairs.add((int(parts[0]), int(parts[1])))
-            except Exception:
-                continue
-        if not tagged_pairs:
-            return selections_by_type
-        union_selected = set()
-        for v in selections_by_type.values():
-            for p in (v or []):
-                try:
-                    union_selected.add((int(p[0]), int(p[1])))
-                except Exception:
-                    pass
-        missing = sorted(tagged_pairs - union_selected)
-        if not missing:
-            return selections_by_type
-        key_by_str = {str(k): k for k in type_keys}
-        for pair in missing:
-            candidates = []
-            for kstr, tk_ in key_by_str.items():
-                ptr = ui.cd.ptr.get(tk_)
-                valid = ui._all_inds_set_for_ptr(ptr)
-                if pair in valid:
-                    candidates.append(kstr)
-            if not candidates:
-                # fall back to the most-populated key in the file
-                candidates = sorted(
-                    selections_by_type.keys(),
-                    key=lambda kk: len(selections_by_type.get(kk, []) or []),
-                    reverse=True,
-                )
-            if not candidates:
-                continue
-            chosen = candidates[0]
-            cur = selections_by_type.get(chosen, []) or []
-            if pair not in {(int(x[0]), int(x[1])) for x in cur if isinstance(x, (list, tuple)) and len(x) >= 2}:
-                cur.append([int(pair[0]), int(pair[1])])
-                selections_by_type[chosen] = cur
-        return selections_by_type
-
-    def _save_selection_version(self, name: str) -> str:
-        """Persist selections + pair annotations to a JSON file.
-
-        Writes to the named version path and copies to .history/ for recovery.
-        Uses atomic write to prevent partial saves from corrupting the file.
-        """
-        ui = self._ui
-        saved_at = datetime.datetime.now().isoformat()
-        data = self._build_save_dict(saved_at, name)
-        path = self._sel_version_path(name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        ui._atomic_write_json(path, data)
-        n_tags = len(data['pair_tags'])
-        print(f"[CCGReviewUI] saved → {os.path.basename(path)}  "
-              f"({n_tags} pair_tags, {len(data['selections'])} type keys)")
-        try:
-            ui._sel_mgr._save_to_history(data, '')
-        except Exception as exc:
-            print(f"[CCGReviewUI] history copy failed: {exc}")
-        return path
-
-    def _list_selection_versions(self) -> list:
-        """Return list of (name, path, saved_at, is_valid, is_history) tuples.
-
-        Main versions (in data/selections/) are listed first; then .history/
-        entries (backups + autosaves) follow, newest first, marked is_history=True.
-        """
-        ui = self._ui
-        session_tag = getattr(ui.key, 'session', 'sess')
-        prefix = session_tag + '__'
-        versions = []
-
-        def _read_entry(fpath, fname, is_hist):
-            is_autosaved = fname.endswith('.autosaved.json')
-            try:
-                with open(fpath, encoding='utf-8') as f:
-                    meta = json.load(f)
-                raw_name = meta.get('name', fname)
-                if is_hist:
-                    kind = '[autosaved]' if is_autosaved else '[backup]'
-                    display = f"{kind} {meta.get('saved_at', '')[:16]}"
-                else:
-                    display = raw_name
-                return (display, fpath, meta.get('saved_at', ''), True, is_hist)
-            except Exception:
-                return (fname, fpath, '⚠ corrupted', False, is_hist)
-
-        if os.path.isdir(ui._sel_save_dir):
-            for fname in sorted(os.listdir(ui._sel_save_dir)):
-                if not fname.startswith(prefix) or not fname.endswith('.json'):
-                    continue
-                versions.append(_read_entry(
-                    os.path.join(ui._sel_save_dir, fname), fname, False))
-
-        hdir = ui._sel_mgr._history_dir()
-        hist_entries = []
-        if os.path.isdir(hdir):
-            for fname in os.listdir(hdir):
-                if not fname.startswith(prefix) or not fname.endswith('.json'):
-                    continue
-                fpath = os.path.join(hdir, fname)
-                hist_entries.append(_read_entry(fpath, fname, True))
-        # Sort history newest first
-        hist_entries.sort(key=lambda e: e[2], reverse=True)
-        versions.extend(hist_entries)
-        return versions
-
-    def _load_selection_from_file(self, path: str, restore_groups: bool = True,
-                                   _skip_redraw: bool = False):
-        """Load selection from a JSON file (v1.0, v3.x, or v4.0).
-
-        If restore_groups is False, only pair selections are loaded — groups,
-        hotkeys, and notes are left untouched.  Used by autoload on session
-        switch (groups are shared across sessions and loaded from groups_export).
-        """
-        ui = self._ui
-        try:
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"JSON parse error in {os.path.basename(path)}.\n\n"
-                f"The file is likely corrupted from a previous save attempt.\n"
-                f"Technical detail: {exc}\n\n"
-                f"Please delete this file and re-save your selection."
-            ) from exc
-
-        if data.get('neuron_ids') is not None:
-            m = SelectionMigration(data['neuron_ids'], ui.neurons.neuron_ids)
-            if not m.is_identity:
-                data = m.apply(data)
-
-        selections_by_type = data.get('selections', {})
-        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
-        selections_by_type = self._enforce_label_selection_integrity_file(
-            selections_by_type, data.get('pair_tags', {}), type_keys)
-        saved_keys = set(selections_by_type.keys())
-        for tk_ in type_keys:
-            ptr = ui.cd.ptr.get(tk_)
-            if ptr is None:
-                continue
-            pairs = selections_by_type.get(str(tk_), [])
-            if not pairs and saved_keys:
-                print(f"[load] key mismatch: current={str(tk_)!r}, saved keys={sorted(saved_keys)}")
-            if pairs:
-                ptr.selected_inds = np.array(
-                    [[int(r), int(c)] for r, c in pairs], dtype=int)
-            else:
-                ptr.selected_inds = None
-        cur_sel = selections_by_type.get(str(ui.key), [])
-        print(f"[load] ui.key={str(ui.key)!r}, cur_sel count={len(cur_sel)}, saved keys={sorted(selections_by_type.keys())}")
-        selected = set(tuple(int(v) for v in p) for p in cur_sel)
-
-        ui._sel_mgr._push_undo()
-        current_available = set(map(tuple, ui.all_inds))
-        print(f"[load] available={len(current_available)}, selected={len(selected)}, overlap={len(selected & current_available)}")
-        missing = selected - current_available
-        if missing and restore_groups:
-            action = self._show_missing_pairs_dialog(missing)
-            if action == 'cancel':
-                return
-            elif action == 'partial':
-                selected = selected & current_available
-            elif action == 'admit_all':
-                for pair in missing:
-                    _admit_pair(ui._sel_data, pair)
-                current_available = set(map(tuple, ui.all_inds))
-        elif missing:
-            _cd = ui.cd.ccg.get(ui.key.nd()) if hasattr(ui.cd, 'ccg') else ui.ccg_data
-            _n = (_cd.ccg.shape[1] if _cd is not None
-                  and getattr(_cd, 'ccg', None) is not None else None)
-            for pair in missing:
-                if _n is not None and (pair[0] >= _n or pair[1] >= _n):
-                    continue
-                _admit_pair(ui._sel_data, pair)
-            current_available = set(map(tuple, ui.all_inds))
-
-        ui._pair_deleted_store = {}
-        dbtype = data.get('deleted_by_type') or {}
-        for k_str, plist in dbtype.items():
-            ui._pair_deleted_store[k_str] = {
-                tuple(int(v) for v in p) for p in plist}
-        deleted = set(ui._pair_deleted_store.get(str(ui.key), set())) & current_available
-        ui._sel_data.populate(current_available, selected=selected, deleted=deleted)
-
-        # Load pair_tags for this session — always reset to avoid stale cross-session tags
-        ui._sel_data._pair_tags = {}
-        raw_tags = data.get('pair_tags', {})
-        cur_sess = ui._setup_mgr._current_session_str()
-        for key_str, tdata in raw_tags.items():
-            parts = key_str.split(',')
-            if len(parts) != 2:
-                continue
-            pair = (int(parts[0]), int(parts[1]))
-            entry = dict(tdata) if isinstance(tdata, dict) else {'notes': str(tdata)}
-            ui._sel_data._pair_tags[pair] = entry
-            if 'groups' in entry:
-                for gitem in entry['groups']:
-                    gname = gitem if isinstance(gitem, str) else None
-                    if gname:
-                        ui._sel_data._groups.setdefault(str(gname), {}).setdefault(
-                            cur_sess, set()).add(pair)
-        self._enforce_label_selection_integrity_live()
-        if not _skip_redraw:
-            ui._post_load_refresh()
-
-    def _load_selection_dialog(self):
-        """Show a dialog listing all saved versions; user picks one to load."""
-        ui = self._ui
-        versions = self._list_selection_versions()
-        if not versions:
-            messagebox.showinfo("Load selection",
-                                "No saved selections found for this key.")
-            return
-        win = tk.Toplevel(ui.root)
-        win.title("Load Selection")
-        win.geometry("620x340")
-        win.grab_set()
-
-        ttk.Label(win, text="Select a version to load:",
-                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
-        frame = ttk.Frame(win)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-        sb = ttk.Scrollbar(frame)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        lb = tk.Listbox(frame, yscrollcommand=sb.set, font=('Courier', 9),
-                        selectmode=tk.BROWSE)
-        lb.pack(fill=tk.BOTH, expand=True)
-        sb.config(command=lb.yview)
-        for name, path, saved_at, is_valid, is_history in versions:
-            pfx = '   ' if is_valid else '⚠  '
-            lb.insert(tk.END, f"{pfx}{name:30s}  {saved_at[:19]}")
-            if not is_valid:
-                lb.itemconfig(lb.size() - 1, foreground='#CC4444')
-            elif is_history:
-                lb.itemconfig(lb.size() - 1, foreground='#999999')
-
-        def do_load():
-            sel = lb.curselection()
-            if not sel:
-                return
-            name, path, saved_at, is_valid, is_history = versions[sel[0]]
-            if not is_valid:
-                if not messagebox.askyesno(
-                        "Corrupted file",
-                        f"'{name}' appears to be corrupted.\n"
-                        "Delete it and continue?"):
-                    return
-                try:
-                    os.remove(path)
-                except OSError as ex:
-                    messagebox.showerror("Delete failed", str(ex))
-                win.destroy()
-                ui._load_selection_dialog()   # reopen with updated list
-                return
-            try:
-                ui._sel_mgr._load_selection_from_file(path)
-                win.destroy()
-            except Exception as ex:
-                messagebox.showerror("Load selection",
-                                     f"Failed to load:\n{ex}")
-
-        def do_delete(event=None):
-            sel = lb.curselection()
-            if not sel:
-                # Select item under cursor for right-click
-                idx = lb.nearest(event.y) if event else None
-                if idx is not None:
-                    lb.selection_clear(0, tk.END)
-                    lb.selection_set(idx)
-                    sel = (idx,)
-                else:
-                    return
-            name, path, saved_at, is_valid, is_history = versions[sel[0]]
-            if not messagebox.askyesno(
-                    "Delete selection",
-                    f"Move '{name}' to deleted folder?",
-                    parent=win):
-                return
-            deleted_dir = os.path.join(ui._sel_save_dir, 'deleted')
-            os.makedirs(deleted_dir, exist_ok=True)
-            try:
-                shutil.move(path, os.path.join(deleted_dir, os.path.basename(path)))
-            except OSError as ex:
-                messagebox.showerror("Delete failed", str(ex), parent=win)
-                return
-            win.destroy()
-            ui._load_selection_dialog()  # reopen with updated list
-
-        def _ctx_menu_load(event):
-            menu = tk.Menu(win, tearoff=0)
-            menu.add_command(label="Delete", command=lambda: do_delete(event))
-            menu.tk_popup(event.x_root, event.y_root)
-
-        lb.bind('<Button-2>', _ctx_menu_load)
-        lb.bind('<Button-3>', _ctx_menu_load)
-        lb.bind('<Double-Button-1>', lambda e: do_load())
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill=tk.X, padx=10, pady=6)
-        ttk.Button(btn_frame, text="Load", command=do_load).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Cancel",
-                   command=win.destroy).pack(side=tk.LEFT, padx=6)
-        ttk.Label(btn_frame, text="gray = backup/autosave  ⚠ = corrupted",
-                  font=('Arial', 8), foreground='#888888').pack(
-            side=tk.RIGHT, padx=6)
-
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
-
-    def _do_save(self, name: str):
-        """Core save logic: persist all types' selections + groups."""
-        ui = self._ui
-        if not ui._sel_mgr._save_all_state(name, silent=False):
-            return
-
-        # Count total selections across all types
-        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
-        total = sum(
-            len(ui.cd.ptr[tk_].selected_inds)
-            for tk_ in type_keys
-            if ui.cd.ptr.get(tk_) is not None
-            and getattr(ui.cd.ptr[tk_], 'selected_inds', None) is not None
-        )
-
-        # Groups were exported via _save_all_state; keep message for UI feedback.
-        groups_msg = f"\nGroups exported ({len(ui._sel_data._groups)} groups)." if ui._sel_data._groups else ""
-
-        messagebox.showinfo(
-            "Saved",
-            f"Saved {total} pairs across {len(type_keys)} types as '{name}'.{groups_msg}",
-            parent=ui.root)
-
-    def _quick_save(self):
-        """Ctrl+S / Save button: custom dialog with name entry + Latest button."""
-        ui = self._ui
-        default_name = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
-
-        win = tk.Toplevel(ui.root)
-        win.title("Save selection")
-        win.geometry("360x130")
-        win.transient(ui.root)
-        win.grab_set()
-
-        ttk.Label(win, text="Version name:").pack(pady=(10, 2))
-        name_var = tk.StringVar(value=default_name)
-        entry = ttk.Entry(win, textvariable=name_var, width=32)
-        entry.pack(padx=10)
-        entry.select_range(0, tk.END)
-        entry.focus_set()
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(pady=10)
-
-        def _save_named():
-            name = name_var.get().strip() or default_name
-            win.destroy()
-            self._do_save(name)
-
-        def _save_latest():
-            win.destroy()
-            self._do_save('latest')
-
-        ttk.Button(btn_frame, text="Save", command=_save_named).pack(
-            side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text="Save as Latest", command=_save_latest).pack(
-            side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(
-            side=tk.LEFT, padx=6)
-
-        entry.bind('<Return>', lambda e: _save_named())
-
-    def _show_temp_warning(self, msg: str, duration_ms: int = 2000):
-        """Show a temporary warning label at the top of the window that auto-disappears."""
-        ui = self._ui
-        lbl = tk.Label(ui.root, text=msg, bg='#FFF3CD', fg='#856404',
-                       font=('Arial', 10, 'bold'), padx=8, pady=4)
-        lbl.place(relx=0.5, y=4, anchor='n')
-        ui.root.after(duration_ms, lbl.destroy)
-
-    def _build_save_dict(self, saved_at: str, name: str = '') -> dict:
-        """Build the serializable dict for a session save (v4.0 format).
-
-        Flushes current type's selections to the pointer, then collects all
-        type keys + pair_tags (including group membership) + deleted pairs.
-        Does NOT write any files.
-        """
-        ui = self._ui
-        if ui.ccg_ptr is None:
-            raise RuntimeError("Cannot save: CCG data not yet loaded")
-        self._enforce_label_selection_integrity_live()
-        # Flush current type's selections to pointer
-        if getattr(ui, '_session_any_mode', False):
-            ui._sess_mgr._flush_any_selections_to_pointers()
-        else:
-            ui.ccg_ptr.selected_inds = (
-                np.array(sorted(ui.selected_inds), dtype=int)
-                if ui.selected_inds else None
-            )
-        # Collect selections for every type key in this session
-        type_keys = ui._sess_mgr._available_type_keys(ui.key.nd())
-        selections_by_type = {}
-        for tk_ in type_keys:
-            ptr = ui.cd.ptr.get(tk_)
-            if ptr is None:
-                continue
-            sel = getattr(ptr, 'selected_inds', None)
-            selections_by_type[str(tk_)] = (
-                [[int(r), int(c)] for r, c in sorted(map(tuple, sel))]
-                if sel is not None and len(sel) > 0 else []
-            )
-        # Serialize pair_tags: include group membership (names) for this session.
-        # NOTE: We intentionally store group NAMES (not numeric IDs) in session save
-        # files. IDs remain internal to groups_export.json only.
-        cur_sess = ui._setup_mgr._current_session_str()
-        pair_tags_ser: dict = {}
-        # Collect all pairs that have either tags/notes OR group membership
-        all_annotated = set(ui._sel_data._pair_tags.keys())
-        for gname, sd in ui._sel_data._groups.items():
-            if isinstance(sd, dict):
-                all_annotated |= sd.get(cur_sess, set())
-        for pair in sorted(all_annotated):
-            r, t = int(pair[0]), int(pair[1])
-            existing = dict(ui._sel_data._pair_tags.get(pair, {}))
-            # Compute group names for this pair in the current session
-            group_names: list[str] = []
-            for gname, sd in ui._sel_data._groups.items():
-                if gname.startswith('__'):
-                    continue
-                sp = sd.get(cur_sess, set()) if isinstance(sd, dict) else sd
-                if pair in sp:
-                    group_names.append(str(gname))
-            if group_names or existing.get('notes') or existing.get('tags'):
-                entry: dict = {}
-                if group_names:
-                    entry['groups'] = sorted(set(group_names))
-                if existing.get('notes'):
-                    entry['notes'] = existing['notes']
-                if existing.get('tags'):
-                    entry['tags'] = existing['tags']
-                pair_tags_ser[f"{r},{t}"] = entry
-        ui._flush_deleted_to_store()
-        deleted_by_type = {}
-        for tk_ in type_keys:
-            ptr = ui.cd.ptr.get(tk_)
-            valid = ui._all_inds_set_for_ptr(ptr)
-            raw = set(ui._pair_deleted_store.get(str(tk_), set())) & valid
-            deleted_by_type[str(tk_)] = [[int(r), int(c)] for r, c in sorted(raw)]
-        return {
-            'name': name,
-            'saved_at': saved_at,
-            'session': getattr(ui.key, 'session', 'sess'),
-            'nd_key': str(ui.key.nd()),
-            'neuron_ids': [int(x) for x in ui.neurons.neuron_ids],
-            'selections': selections_by_type,
-            'pair_tags': pair_tags_ser,
-            'deleted_by_type': deleted_by_type,
-        }
-
-    @staticmethod
-    def _pair_tag_has_labels(entry: dict) -> bool:
-        if not isinstance(entry, dict):
-            return False
-        groups = entry.get('groups', []) or []
-        tags = entry.get('tags', []) or []
-        notes = str(entry.get('notes', '') or '').strip()
-        return bool(groups or tags or notes)
-
-    def _show_missing_pairs_dialog(self, missing: set) -> str:
-        """Dialog when loaded selection has pairs not in current available set.
-
-        Returns 'partial', 'admit_all', or 'cancel'.
-        """
-        ui = self._ui
-        win = tk.Toplevel(ui.root)
-        win.title("Missing Pairs")
-        win.geometry("450x320")
-        win.grab_set()
-
-        result = {'action': 'cancel'}
-        n = len(missing)
-
-        ttk.Label(win, text=f"{n} selected pair(s) are no longer in available pairs:",
-                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
-        ttk.Label(win,
-                  text="These pairs may have lost significance after CCG/epoch changes.",
-                  font=('Arial', 9), foreground='#666').pack(pady=(0, 4))
-
-        frame = ttk.Frame(win)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-        lb = tk.Listbox(frame, font=('Courier', 9))
-        sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=lb.yview)
-        lb.config(yscrollcommand=sb.set)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        for ref, tgt in sorted(missing):
-            lb.insert(tk.END, f"  ({ref:3d}, {tgt:3d})")
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill=tk.X, padx=10, pady=8)
-
-        def partial():
-            result['action'] = 'partial'
-            win.destroy()
-
-        def admit_all():
-            result['action'] = 'admit_all'
-            win.destroy()
-
-        def cancel():
-            result['action'] = 'cancel'
-            win.destroy()
-
-        ttk.Button(btn_frame, text="Keep only available",
-                   command=partial).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Admit all missing",
-                   command=admit_all).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Cancel",
-                   command=cancel).pack(side=tk.RIGHT, padx=4)
-
-        win.protocol('WM_DELETE_WINDOW', cancel)
-        win.update_idletasks()
-        win.lift()
-        win.focus_force()
-        win.wait_window()
-        return result['action']
-
-    def _save_all_state(self, selection_name: str | None = None, *, silent: bool = True) -> bool:
-        """Single saving pathway for selections + groups + ui_state.
-
-        - If selection_name is provided: writes that selection version.
-        - Always attempts to write groups export (if any groups exist).
-        - Always writes ui_state.json (panel + display button state, resolution, etc.).
-        """
-        ui = self._ui
-        if selection_name is not None:
-            try:
-                self._save_selection_version(selection_name)
-            except Exception as exc:
-                traceback.print_exc()
-                if not silent:
-                    messagebox.showerror("Save error",
-                                         f"Failed to save selection:\n{exc}",
-                                         parent=ui.root)
-                return False
-        try:
-            if ui._sel_data._groups:
-                ui._group_mgr._save_groups_export()
-        except Exception:
-            # never block save on groups export
-            traceback.print_exc()
-        try:
-            ui._settings_mgr.save_ui_state()
-        except Exception:
-            traceback.print_exc()
-        return True
-
-    def run(self):
-        ui = self._ui
-        if ui._owns_mainloop:
-            ui.root.mainloop()
-        else:
-            # Another Tk root owns the mainloop; just wait for this window
-            ui.root.wait_window(ui.root)
-
-
-    def _current_filter_state(self) -> dict:
-        ui = self._ui
-        toggles = getattr(ui.time_slider, '_ts_legend_toggles', {})
-        return {
-            'theme': ui.time_slider._current_theme,
-            'labels': {str(lbl): bool(v.get()) for lbl, v in toggles.items()},
-        }
-
 class MultiSessionManager:
     """Multi-session navigation, scale, and data binding for CCGReviewUI."""
 
@@ -2683,7 +863,6 @@ class MultiSessionManager:
         ui._session_any_mode: bool = False
         ui._any_expanded_group_tags: set = set()
         ui._any_pair_handle_list: list = []
-        ui._png_sess_slug: str = ""
 
     def _compute_session_scale(self):
         """Return (ymin, ymax) unified across all pairs and segments in this key."""
@@ -2879,7 +1058,6 @@ class MultiSessionManager:
         ui._session_all_mode = True
         ui._any_expanded_group_tags = set()
         ui._any_pair_handle_list = []
-        ui._png_sess_slug = ''
         prev_lbl = ui._type_label(ui.key)
         ui._type_keys_list = self._available_type_keys_any()
         type_labels = [ui._type_label(k) for k in ui._type_keys_list]
@@ -2923,7 +1101,6 @@ class MultiSessionManager:
         ui._session_all_mode = False
         ui._any_expanded_group_tags = set()
         ui._any_pair_handle_list = []
-        ui._png_sess_slug = ''
         # ``selected_inds`` was (session, ref, tgt) triples; single-session code expects
         # (ref, tgt) only — reload from the bound pointer before _switch_key / autosave.
         try:
@@ -2976,7 +1153,6 @@ class MultiSessionManager:
             return
         ckey, _r, _t = hl[row_idx]
         sess = str(ckey.session)
-        ui._png_sess_slug = self._sanitize_sess_slug(sess)
         prev_sess = str(getattr(ui.key, 'session', '') or '')
         if (ui.key == ckey and ui.ccg_data is not None
                 and getattr(ui.ccg_ptr, 'inds2', None) is not None):
@@ -3041,7 +1217,7 @@ class MultiSessionManager:
                     and str(cur_sess) == str(new_sess)):
                 return
 
-        ui._sel_mgr._autosave_current()
+        ui._group_mgr._autosave_current()
 
         def _revert_session_combo():
             cur_nd = ui.key.nd()
@@ -3083,11 +1259,11 @@ class MultiSessionManager:
         # Leaving ``any`` → concrete session
         if cur_any:
             try:
-                ui._sel_mgr._autosave_all_sessions_for_current_type()
+                ui._group_mgr._autosave_all_sessions_for_current_type()
             except Exception as exc:
                 print(f"[CCGReviewUI] multi-session autosave: {exc}")
             try:
-                if ui._sel_data._groups:
+                if ui._sel_data.groups:
                     ui._group_mgr._save_groups_export()
             except Exception:
                 traceback.print_exc()
@@ -3108,7 +1284,7 @@ class MultiSessionManager:
                 ui._type_var.set(type_labels[0])
             if ui._switch_key(new_key):
                 ui._refresh_after_key_switch()
-                ui._sel_mgr._autoload_session_latest()
+                ui._group_mgr._autoload_session_latest()
                 ui.refresh_lists()
                 ui.network_panel.draw()
 
@@ -3274,280 +1450,6 @@ class MultiSessionManager:
             ptr = ui.cd.ptr[k]
             ptr.selected_inds = (
                 np.array(sorted(arr), dtype=int) if arr else None)
-
-class PNGCacheManager:
-    """PNG cache path, clearing, and rendering for CCGReviewUI."""
-
-    def __init__(self, ui: "CCGReviewUI"):
-        self._ui = ui
-        ui.tmp_dir = str(_Path(__file__).resolve().parents[2] / "images" / "tmp")
-        os.makedirs(ui.tmp_dir, exist_ok=True)
-
-    def _clear_all_png_cache(self):
-        ui = self._ui
-        ui._pregen_cancel = True  # stop any in-progress pre-generation
-        ui._pregen_ctrl._terminate_pregen_proc()
-        for _fn in os.listdir(ui.tmp_dir):
-            if _fn.endswith('.png'):
-                try: os.remove(os.path.join(ui.tmp_dir, _fn))
-                except OSError: pass
-
-    # ------------------------------------------------------------------
-    # PNG pre-generation  (runs as an independent subprocess)
-    # ------------------------------------------------------------------
-
-    def _png_path(self, inds, segment, _render_cfg=None, _hires_override=None) -> str:
-        """Return the disk-cache path for a PNG.
-
-        Cache config set + state matches → path encodes (pair, seg, norm, alpha, res, scale, jitter), no sig suffix.
-        Cache config set + state mismatch → short ``_rt_`` path (always overwritten, never reused).
-        No cache config → full sig state encoded (legacy, one file per display config).
-        """
-        ui = self._ui
-        if ui._custom_mgr._is_custom_segment(segment):
-            ci = ui._custom_mgr._custom_seg_index(segment)
-            cs_list = getattr(ui, '_custom_segments', []) or []
-            if 0 <= ci < len(cs_list):
-                cs = cs_list[ci]
-                seg_name = f"custom{ci}_{cs.source.name}_{cs.source.t0:.2f}_{cs.source.t1:.2f}"
-                seg_name = seg_name.replace(' ', '_').replace(':', '-')
-            else:
-                seg_name = _ALL_SEGS.replace(' ', '_')
-        elif segment == ui.n_segments:
-            seg_name = _ALL_SEGS.replace(' ', '_')
-        else:
-            sn = ui.ccg_ptr.segment_names if ui.ccg_ptr is not None else []
-            if 0 <= segment < len(sn):
-                seg_name = sn[segment]
-            else:
-                seg_name = _ALL_SEGS.replace(' ', '_')
-        _norms = (_render_cfg.get('active_norms') if _render_cfg else None)
-        norm_key = ('_'.join(sorted(_norms)) if _norms
-                    else ('_'.join(sorted(n.name for n in ui.active_norms))
-                          if ui.active_norms else 'raw'))
-        _alpha = (_render_cfg.get('active_alpha') if _render_cfg else None)
-        alpha_key = ''
-        if ui.ccg_data is not None and ui.ccg_data.pval_corrected is not None:
-            alpha_key = f'_a{(_alpha if _alpha is not None else ui.active_alpha):.3f}'
-        _hires = _hires_override if _hires_override is not None else getattr(ui, '_highres_mode', False)
-        res_key = '_hi' if _hires else '_lo'
-        scale_key = {'pair': '_ssp', 'session': '_sss'}.get(
-            getattr(ui, '_same_scale_mode', None), '')
-        _jrk = 'hi' if _hires else 'lo'
-        j_key = '_j' if ui._jitter_cache.get(
-            (int(inds[0]), int(inds[1]), _jrk, ui.jitter_controller.seg(segment))) is not None else ''
-
-        # Cache configuration determines path style
-        _dk = '_dk' if ui.theme.dark else ''
-        _ext_key = (f'_ext{int(ui._acg_var_get("_extend_ms", 0))}'
-                    if ui._acg_var_get('_extend_enable', False) else '')
-        if ui._cache_config is not None:
-            if _render_cfg is not None or ui._display_matches_cache_config():
-                # Canonical cached path — no sig encoding (only one config)
-                _sp = (f"{ui._png_sess_slug}_" if getattr(ui, '_session_any_mode', False)
-                       and getattr(ui, '_png_sess_slug', '') else '')
-                return os.path.join(
-                    ui.tmp_dir,
-                    get_png_filename(
-                        int(inds[0]), int(inds[1]), seg_name, norm_key,
-                        alpha_key, res_key, scale_key, j_key, _ext_key, _dk, _sp))
-            else:
-                # Real-time path — one file per (pair, seg, res), always overwritten
-                _sp = (f"{ui._png_sess_slug}_" if getattr(ui, '_session_any_mode', False)
-                       and getattr(ui, '_png_sess_slug', '') else '')
-                return os.path.join(
-                    ui.tmp_dir,
-                    f"{_sp}_rt_{int(inds[0])}_{int(inds[1])}_{seg_name}{res_key}{_dk}.png")
-
-        # Legacy mode (no cache config): encode full sig state
-        sig_key = ''
-        _m = ui.center_container.baseline_panel._conn_str_method.get()
-        sig_bits = (
-            (_m if _m != 'conv' else '') +
-            ('cs' if ui.center_container.cs_panel._conn_str_show.get() else '') +
-            ('p' if ui._sig('conv_p') else '') +
-            ('c' if ui._sig('conv_pc') else '') +
-            ('tw' if ui._sig('test_window') else '') +
-            ('jc' if ui._sig('jitter_pc') else '') +
-            ('ar' if ui._acg_var_get('_acg_ref', False) else '') +
-            ('at' if ui._acg_var_get('_acg_tgt', False) else '') +
-            ('dcr' if bool(ui._acg_var_get('_acg_deconv_ref', False)) else '') +
-            ('dct' if bool(ui._acg_var_get('_acg_deconv_tgt', False)) else '') +
-            ('wp' if _hires and ui._acg_var_get('_peak_wf', False) else '') +
-            (f'asr{ui._acg_var_get("_acg_yscale_ref", 1.0):.1f}'
-             if ui._acg_var_get('_acg_ref', False)
-                or (_hires and ui._acg_var_get('_peak_wf', False)) else '') +
-            (f'ast{ui._acg_var_get("_acg_yscale_tgt", 1.0):.1f}'
-             if ui._acg_var_get('_acg_tgt', False) else '') +
-            ('am' if ui._acg_var_get('_acg_match_ccg', False) else '') +
-            ('nc' if not ui._acg_var_get('_ccg_show', True) else '') +
-            ('nb' if not ui._acg_var_get('_baseline_show', True) else '') +
-            ('lc' if ui.center_container.correlogram_panel._line_ccg.get() else '') +
-            ('lb' if ui.center_container.correlogram_panel._line_baseline.get() else '') +
-            ('lr' if ui.center_container.correlogram_panel._line_ref.get() else '') +
-            ('lt' if ui.center_container.correlogram_panel._line_tgt.get() else '') +
-            ('lp' if (_hires and ui._acg_var_get('_peak_wf', False)
-                      and ui.center_container.correlogram_panel._line_peak_wf.get()) else '') +
-            ('lj' if ui.center_container.correlogram_panel._line_jitter.get() else '') +
-            (f'ext{int(ui._acg_var_get("_extend_ms", 0))}'
-             if ui._acg_var_get('_extend_enable', False) else ''))
-        if sig_bits:
-            sig_key = f'_s{sig_bits}'
-        _sp = (f"{ui._png_sess_slug}_" if getattr(ui, '_session_any_mode', False)
-               and getattr(ui, '_png_sess_slug', '') else '')
-        return os.path.join(
-            ui.tmp_dir,
-            f"{_sp}pair_{int(inds[0])}_{int(inds[1])}_{seg_name}_{norm_key}"
-            f"{alpha_key}{res_key}{scale_key}{j_key}{sig_key}{_dk}.png")
-
-    def _render_png_with_res(self, inds, segment, highres: bool) -> str:
-        """Render a PNG at a specific resolution without changing persistent state."""
-        ui = self._ui
-        nd_key = ui.key.nd()
-        if highres:
-            data = getattr(ui.cd, '_ccg_highres', {}).get(nd_key)
-        else:
-            data = getattr(ui.cd, 'ccg', {}).get(nd_key)
-        if data is None:
-            data = ui.ccg_data
-        old_mode = ui._highres_mode
-        old_data = ui.ccg_data
-        ui._highres_mode = highres
-        ui.ccg_data = data
-        try:
-            path = ui._plot_mgr._render_png(inds, segment, highres=highres)
-        finally:
-            ui._highres_mode = old_mode
-            ui.ccg_data = old_data
-        return path
-
-    def _purge_tmp_png_cache(self, days: int = 3, max_gb: float = 1.5):
-        """Delete PNGs in tmp_dir older than *days* days; also evict oldest if total > max_gb."""
-        ui = self._ui
-        purge_png_dir(getattr(ui, 'tmp_dir', ''), days=days, max_gb=max_gb)
-
-class PregenController:
-    """Pregeneration subprocess management for CCGReviewUI."""
-
-    def __init__(self, ui: "CCGReviewUI"):
-        self._ui = ui
-        self._runner = BackgroundTaskRunner(max_queue=1, use_result_queue=False)
-        ui._pregen_cancel = False
-        ui._pregen_priority = None
-
-    def _terminate_pregen_proc(self):
-        """Terminate a running pre-gen subprocess, if any."""
-        self._runner.terminate()
-
-    def _pregen_job_payload(self, cfg: dict) -> dict:
-        """Build the JSON job dict for the pre-gen subprocess."""
-        ui = self._ui
-        nd_key = ui.key.nd()
-        has_highres = (hasattr(ui.cd, '_ccg_highres')
-                       and ui.cd._ccg_highres.get(nd_key) is not None)
-        ccg_lo_path = os.path.expanduser(ui.cd._ccgdata_path()) + '.hkl'
-        ccg_hi_path = (os.path.expanduser(ui.cd.highres_save_path()) + '.hkl'
-                       if has_highres else None)
-
-        neurons_fr    = None
-        neurons_shank = None
-        edge_times    = None
-        if ui.neurons is not None:
-            fr = getattr(ui.neurons, 'firing_rate', None)
-            if fr is not None:
-                neurons_fr = [float(x) for x in fr]
-            neurons_shank = [int(x) for x in ui.neurons.shank_ids]
-        # edge_times for TIME_SPAN norm
-        et_df = getattr(ui.ccg_ptr, 'edge_times', None)
-        if et_df is not None:
-            try:
-                edge_times = [float(et_df.iloc[s]['effective_time_hours'])
-                              for s in range(ui.n_segments)]
-            except Exception:
-                edge_times = None
-
-        return {
-            'nd_key':          str(nd_key),
-            'ccg_lo_path':     ccg_lo_path,
-            'ccg_hi_path':     ccg_hi_path,
-            'has_highres':     has_highres,
-            'n_segments':      ui.n_segments,
-            'segment_names':   ui.ccg_ptr.segment_names,
-            'pairs':           [list(map(int, p)) for p in ui.all_inds],
-            'tmp_dir':         ui.tmp_dir,
-            'cache_config':    cfg,
-            'neurons_firing_rate': neurons_fr,
-            'neurons_shank_ids':   neurons_shank,
-            'edge_times':      edge_times,
-        }
-
-    def _launch_pregen_subprocess(self, cfg: dict, status_var=None, priority: str = 'user'):
-        """Write job file and launch pre_generate_images.py as an independent subprocess.
-
-        priority='user': preempts any running auto task; runs immediately.
-        priority='auto': skipped silently if any pregen is already running.
-        """
-        ui = self._ui
-        if priority == 'auto':
-            if self._runner.is_running():
-                return
-        else:
-            if ui._pregen_priority == 'auto':
-                self._terminate_pregen_proc()
-            elif self._runner.is_running():
-                self._terminate_pregen_proc()
-
-        ui._pregen_priority = priority
-        job = self._pregen_job_payload(cfg)
-        job_path = os.path.join(ui.tmp_dir, '_pregen_job.json')
-        with open(job_path, 'w', encoding='utf-8') as fh:
-            json.dump(job, fh)
-
-        script = str(_Path(__file__).parent / 'pre_generate_images.py')
-        proc = subprocess.Popen([sys.executable, script, job_path])
-        if priority == 'user':
-            print(f"[CCGReviewUI] pre-gen subprocess started (pid {proc.pid})")
-        if status_var is not None:
-            status_var.set("Generating…")
-        self._runner._proc = proc
-        self._runner.start_polling(
-            ui.root, interval_ms=1000,
-            on_done=lambda _task, _result: self._on_pregen_done(status_var))
-
-    def _on_pregen_done(self, status_var):
-        """Called by BackgroundTaskRunner when pre-gen subprocess exits."""
-        ui = self._ui
-        if status_var is not None:
-            status_var.set("Idle")
-        if ui._pregen_priority == 'user':
-            print("[CCGReviewUI] pre-gen subprocess finished")
-        ui._pregen_priority = None
-
-    def _pregen_png_cache(self):
-        """Launch background pre-gen subprocess for all pairs × segments."""
-        ui = self._ui
-        ui._pregen_cancel = True   # keep for on-demand render cancellation
-        ui._pregen_cancel = False
-        if ui._cache_config is not None:
-            cfg = dict(ui._cache_config)
-        else:
-            cfg = ui._settings_mgr._current_display_config()
-        ui._pregen_ctrl._launch_pregen_subprocess(cfg)
-
-    def _start_pregen_with_defaults(self, status_var=None):
-        """Launch pre-gen subprocess using the saved cache configuration (user-requested)."""
-        ui = self._ui
-        if ui._cache_config is None:
-            messagebox.showinfo(
-                "Pre-gen",
-                "No cache configuration set.\n\n"
-                "Go to Settings → Cache Configuration and click\n"
-                "\"Capture current settings\" to define the one\n"
-                "display state that will be saved to disk cache.",
-                parent=ui.root)
-            return
-        ui._pregen_ctrl._launch_pregen_subprocess(dict(ui._cache_config), status_var=status_var,
-                                                   priority='user')
 
 class ConnectionStrengthManager:
     def __init__(self, ui: "CCGReviewUI"):
@@ -4198,7 +2100,6 @@ class PairAnalysisManager:
             if nm not in existing:
                 existing.append(nm)
         cd.conf.normalize_methods = existing
-        ui._png_mgr._clear_all_png_cache()
         for var in ui.norm_vars.values():
             var.set(False)
         ui.active_norms = set()
@@ -4430,7 +2331,8 @@ class PairAnalysisManager:
                             if cursor < t1:
                                 intervals.append((cursor, t1))
                         if intervals:
-                            neurons_eff = ui.time_slider._apply_brain_state_intervals(intervals, t0, t1)
+                            from neuropy.analyses.utils import filter_neurons_to_intervals
+                            neurons_eff = filter_neurons_to_intervals(ui.neurons, intervals, t0, t1)
             except Exception:
                 neurons_eff = ui.neurons
         elif segment != ui.n_segments:
@@ -4704,7 +2606,7 @@ class PairAnalysisManager:
                 tmp = ui._display_pair_temp.get((ref, tgt, int(segment), resk))
                 if tmp is None:
                     # Force a render to populate display temp cache, then re-read.
-                    ui._plot_mgr._render_png((ref, tgt), segment, highres=ui._highres_mode)
+                    ui._plot_mgr._render_img((ref, tgt), segment, highres=ui._highres_mode)
                     tmp = ui._display_pair_temp.get((ref, tgt, int(segment), resk))
                 if tmp is not None:
                     vals = tmp.get("ccg") if item == "ccg" else tmp.get("baseline_1d")
@@ -4884,7 +2786,7 @@ class UISetupManager:
         ui.root.config(menu=menubar)
         ui._setup_mgr.setup_panels_menu(menubar)
         ui._group_mgr.setup_groups_menu(menubar)
-        ui._sel_mgr.setup_file_menu(menubar)
+        ui._group_mgr.setup_file_menu(menubar)
         self.setup_modules_menu(menubar)
         ui.setup_settings_menu(menubar)
         ui.setup_help_menu(menubar)
@@ -4941,17 +2843,17 @@ class UISetupManager:
         for _key in ('<Control-e>', '<Command-e>'):
             ui.root.bind(_key, lambda e: ui._on_ctrl_e())
         for _key in ('<Control-s>', '<Command-s>'):
-            ui.root.bind_all(_key, lambda e: ui._sel_mgr._quick_save())
+            ui.root.bind_all(_key, lambda e: QuickSaveDialog.show(ui))
         for _key in ('<Control-f>', '<Command-f>'):
             ui.root.bind(_key, lambda e: ui.left_container.left_panel._search_toggle())
         for _key in ('<Control-b>', '<Command-b>'):
-            ui.root.bind(_key, lambda e: ui._sel_mgr._bookmark_toggle_current())
+            ui.root.bind(_key, lambda e: ui._group_mgr._bookmark_toggle_current())
         for _key in ('<Control-z>', '<Command-z>'):
-            ui.root.bind(_key, ui._sel_mgr._undo)
+            ui.root.bind(_key, ui._group_mgr._undo)
         for _key in ('<Control-y>', '<Command-y>',
                       '<Control-Shift-z>', '<Command-Shift-z>',
                       '<Control-Shift-Z>', '<Command-Shift-Z>'):
-            ui.root.bind(_key, ui._sel_mgr._redo)
+            ui.root.bind(_key, ui._group_mgr._redo)
         for _del_key in ('<Control-Delete>', '<Control-BackSpace>',
                          '<Command-Delete>', '<Command-BackSpace>',
                          '<Meta-Delete>',    '<Meta-BackSpace>'):
@@ -5137,11 +3039,10 @@ class UISetupManager:
         ui._type_combo.pack(side=tk.LEFT, padx=2)
         ui._type_combo.bind('<<ComboboxSelected>>', ui._on_type_change)
 
-        # Pre-gen button — warms PNG cache with canonical display defaults
-        ui._pregen_btn = ttk.Button(
-            menu_frame, text="⚡ Pre-gen", width=10,
-            command=ui._pregen_ctrl._start_pregen_with_defaults)
-        ui._pregen_btn.pack(side=tk.RIGHT, padx=(2, 8))
+        # Pre-gen button disabled pending PySide6/pyqtgraph migration.
+        # ui._pregen_btn = ttk.Button(menu_frame, text="⚡ Pre-gen", width=10,
+        #     command=ui._pregen_ctrl._start_pregen_with_defaults)
+        # ui._pregen_btn.pack(side=tk.RIGHT, padx=(2, 8))
 
     def setup_left_panel(self, parent):
         ui = self._ui
@@ -5269,7 +3170,7 @@ class UISetupManager:
         bottom_frame = ttk.Frame(ui.root)
         bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
         ttk.Button(bottom_frame, text="Save Selections",
-                   command=ui._sel_mgr._quick_save).pack(side=tk.RIGHT, padx=5)
+                   command=lambda: QuickSaveDialog.show(ui)).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bottom_frame, text="Quit",
                    command=ui._setup_mgr._on_close).pack(side=tk.RIGHT, padx=5)
         ui.stats_var = tk.StringVar(value=ui._pair_mgr._compute_stats_str())
@@ -5321,12 +3222,11 @@ class UISetupManager:
             ui.time_slider.toggle()
         elif name == 'Group Hotkeys':
             if show:
-                ui._group_mgr._refresh_hotkeys_bar()
-                # Pack after the tool-strip (setup_menu frame), before the main area
-                ui._hotkeys_bar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2),
-                                       before=ui._main_frame)
+                ui.hotkeys_bar.refresh()
+                ui.hotkeys_bar.frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 2),
+                                          before=ui._main_frame)
             else:
-                ui._hotkeys_bar.pack_forget()
+                ui.hotkeys_bar.frame.pack_forget()
 
     def _toggle_waveforms_panel(self):
         ui = self._ui
@@ -5377,13 +3277,12 @@ class UISetupManager:
             ui.cd.load_jitter(nd_key=_jitter_nd)
         ui.jitter_controller.load_from_cd()
         ui._post_load_refresh()
-        # Startup: purge old history + tmp PNG cache, then start 15-min autosnapshot timer
+        # Startup: purge old selection history, then start 15-min autosnapshot timer
         try:
-            ui._sel_mgr._purge_history()
-            ui._png_mgr._purge_tmp_png_cache(days=3)
+            ui._group_mgr._purge_history()
         except Exception as exc:
             print(f"[CCGReviewUI] history purge failed: {exc}")
-        ui._sel_mgr._schedule_autosnapshot()
+        ui._group_mgr._schedule_autosnapshot()
 
     def setup_panels_menu(self, menubar):
         """Panels menu with checkbuttons for each panel."""
@@ -5570,7 +3469,7 @@ class UISetupManager:
             return
         if r:
             # Unified save pathway
-            ui._sel_mgr._autosave_current()
+            ui._group_mgr._autosave_current()
         ui._bookmarked_pairs.clear()
         ui.root.destroy()
 
@@ -5634,52 +3533,43 @@ class PlotManager:
             sbs = ui._lo_hi_mode
             extend_on = bool(ui._acg_var_get('_extend_enable', False))
 
-            def _pngs_for_seg(arr, seg, highres=None):
-                """Return [(png_path, col_title), ...] for one segment slot.
-
-                sbs off, extend off  → [Normal]
-                sbs off, extend on   → [Normal, Ext]
-                sbs on,  extend off  → [Lo, Hi]  (or [Normal] if no hi-res)
-                sbs on,  extend on   → [Lo, Hi, Ext]  (Ext = hi-res if avail)
-                """
+            def _imgs_for_seg(arr, seg, highres=None):
+                """Return [(img_array, col_title), ...] for one segment slot."""
                 slots = []
                 if sbs:
                     nd_key = ui.key.nd()
                     has_hi = (hasattr(ui.cd, '_ccg_highres')
                               and ui.cd._ccg_highres.get(nd_key) is not None)
                     if has_hi:
-                        p_lo = ui._png_mgr._render_png_with_res(arr, seg, highres=False)
-                        p_hi = ui._png_mgr._render_png_with_res(arr, seg, highres=True)
-                        slots.append((p_lo, 'Lo'))
-                        slots.append((p_hi, 'Hi'))
+                        img_lo = ui._plot_mgr._render_img(arr, seg, highres=False)
+                        img_hi = ui._plot_mgr._render_img(arr, seg, highres=True)
+                        slots.append((img_lo, 'Lo'))
+                        slots.append((img_hi, 'Hi'))
                     else:
-                        p = ui._get_or_render_png(arr, seg)
-                        slots.append((p, ''))
+                        slots.append((ui._plot_mgr._render_img(arr, seg), ''))
                     if extend_on:
-                        hi_for_ext = has_hi
-                        p_ext = ui._plot_mgr._render_png(arr, seg, highres=hi_for_ext)
-                        slots.append((p_ext, 'Ext'))
+                        slots.append((ui._plot_mgr._render_img(
+                            arr, seg, highres=has_hi), 'Ext'))
                 else:
                     hi = highres if highres is not None else False
-                    p = ui._get_or_render_png(arr, seg)
-                    slots.append((p, ''))
+                    slots.append((ui._plot_mgr._render_img(arr, seg), ''))
                     if extend_on:
-                        p_ext = ui._plot_mgr._render_png(arr, seg, highres=hi)
-                        slots.append((p_ext, 'Ext'))
+                        slots.append((ui._plot_mgr._render_img(
+                            arr, seg, highres=hi), 'Ext'))
                 return slots
 
             if ui._together_pairs and len(ui._together_pairs) >= 2:
                 n_tog = len(ui._together_pairs)
                 seg = ui._seg_idx(ui.current_segment)
-                slots0 = _pngs_for_seg(np.array(ui._together_pairs[0]), seg)
+                slots0 = _imgs_for_seg(np.array(ui._together_pairs[0]), seg)
                 n_cols = len(slots0)
                 ui.fig.clear()
                 axes_grid = ui.fig.subplots(n_tog, n_cols, squeeze=False)
                 for row_i, tp in enumerate(ui._together_pairs):
                     tp_arr = np.array(tp)
-                    slots = _pngs_for_seg(tp_arr, seg)
+                    slots = _imgs_for_seg(tp_arr, seg)
                     for ax, (png, col_title) in zip(axes_grid[row_i], slots):
-                        ax.imshow(mpimg.imread(png))
+                        ax.imshow(png)
                         ax.axis('off')
                         if col_title:
                             ax.set_title(col_title, fontsize=8, pad=1)
@@ -5707,17 +3597,17 @@ class PlotManager:
                         return str(ui.ccg_ptr.segment_names[si])
                     return str(si)
 
-                slots0 = _pngs_for_seg(inds, segs[0])
+                slots0 = _imgs_for_seg(inds, segs[0])
                 n_rows = len(slots0)   # rows = res/ext slots
                 n_seg_cols = len(segs)
                 ui.fig.clear()
                 axes_grid = ui.fig.subplots(n_rows, n_seg_cols, squeeze=False)
                 for col_i, seg in enumerate(segs):
                     seg_lbl = _seg_label(seg)
-                    slots = _pngs_for_seg(inds, seg)
+                    slots = _imgs_for_seg(inds, seg)
                     for row_i, (png, col_title) in enumerate(slots):
                         ax = axes_grid[row_i][col_i]
-                        ax.imshow(mpimg.imread(png))
+                        ax.imshow(png)
                         ax.axis('off')
                         t = f"{seg_lbl} · {col_title}" if col_title else seg_lbl
                         ax.set_title(t, fontsize=8, pad=1)
@@ -5735,17 +3625,17 @@ class PlotManager:
             else:
                 # Single segment: 1×n_slots
                 seg = ui._seg_idx(ui.current_segment)
-                slots = _pngs_for_seg(inds, seg)
+                slots = _imgs_for_seg(inds, seg)
                 ui.fig.clear()
                 if len(slots) == 1:
                     ax = ui.fig.add_subplot(111)
-                    ax.imshow(mpimg.imread(slots[0][0]))
+                    ax.imshow(slots[0][0])
                     ax.axis('off')
                     ui.fig.tight_layout(pad=0)
                 else:
                     axes = ui.fig.subplots(1, len(slots))
                     for ax, (png, col_title) in zip(axes, slots):
-                        ax.imshow(mpimg.imread(png))
+                        ax.imshow(png)
                         ax.axis('off')
                         if col_title:
                             ax.set_title(col_title, fontsize=9, pad=2)
@@ -5890,18 +3780,15 @@ class PlotManager:
             ymax = max(ymax, float(np.nanmax(ccg_null)))
         return ymin, ymax
 
-    def _render_png(self, inds, segment, highres=None,
-                    _render_cfg=None, _ccg_data_override=None) -> str:
-        """Thin coordinator: resolve state, build render context, write PNG."""
+    def _render_img(self, inds, segment, highres=None,
+                    _render_cfg=None, _ccg_data_override=None) -> 'np.ndarray':
+        """Build render context and return RGBA image array (no disk I/O)."""
         ui = self._ui
         if highres is None:
             highres = ui._highres_mode
         ctx = ui._render_engine.build_context(
             inds, segment, highres, _render_cfg, _ccg_data_override)
-        png_path = ui._png_mgr._png_path(inds, segment,
-                                   _render_cfg=_render_cfg, _hires_override=highres)
-        ui._render_engine.write_png(ctx, png_path)
-        return png_path
+        return ui._render_engine.render_to_image(ctx)
 
     def _highlight_changed_pairs(self, changed_pairs):
         """Highlight pairs that moved during undo/redo with baseline color.
@@ -5916,18 +3803,18 @@ class PlotManager:
                        if avail_map else enumerate(sorted(ui.unselected_inds)))
         for idx, inds in unsel_items:
             if inds in changed_pairs:
-                ui.unselected_list.itemconfig(idx, background=ui._sel_mgr._UNDO_HIGHLIGHT,
+                ui.unselected_list.itemconfig(idx, background=ui._group_mgr._UNDO_HIGHLIGHT,
                                                 foreground='white')
         sel_map = getattr(self, '_sel_list_pairs', None)
         sel_items = (((i, e) for i, e in enumerate(sel_map) if e is not None)
                      if sel_map else enumerate(sorted(ui.selected_inds)))
         for idx, inds in sel_items:
             if inds in changed_pairs:
-                ui.selected_list.itemconfig(idx, background=ui._sel_mgr._UNDO_HIGHLIGHT,
+                ui.selected_list.itemconfig(idx, background=ui._group_mgr._UNDO_HIGHLIGHT,
                                               foreground='white')
         # Clear highlight on next click anywhere
         def _clear_highlight(e=None):
-            ui._sel_mgr._clear_undo_highlight()
+            ui._group_mgr._clear_undo_highlight()
             ui.root.unbind('<Button-1>', bind_id)
         bind_id = ui.root.bind('<Button-1>', _clear_highlight, add='+')
 
@@ -6010,7 +3897,7 @@ class MiscManager:
                                  f"Pair ({ref},{tgt}) out of CCG data range "
                                  f"({cd.ccg.shape[1]}x{cd.ccg.shape[2]}).")
             return
-        ui._sel_mgr._push_undo()
+        ui._group_mgr._push_undo(SelectionCommand({pair: (None, 'unsel')}, []))
         _admit_pair(ui._sel_data, pair)
         ui._sel_data.set_state(pair, 'unsel')
         # Navigate to the pair
@@ -6095,10 +3982,8 @@ class CCGReviewUI(GenericUI):
         self._extend_cache: dict = {}
         self._custom_mgr = CustomCCGManager(self)
         self._group_mgr = GroupManager(self)
-        self._sel_mgr = SelectionPersistenceManager(self)
+        # SelectionPersistenceManager merged into GroupManager
         self._sess_mgr = MultiSessionManager(self)
-        self._png_mgr = PNGCacheManager(self)
-        self._pregen_ctrl = PregenController(self)
         self._cs_mgr = ConnectionStrengthManager(self)
         self._pair_mgr = PairAnalysisManager(self)
         self._sim_mgr = SimulationManager(self)
@@ -6392,14 +4277,6 @@ class CCGReviewUI(GenericUI):
         cfg['active_alpha'] = self.active_alpha
         return cfg
 
-    def _display_matches_cache_config(self) -> bool:
-        """True when the current display state matches the saved cache configuration."""
-        if self._cache_config is None:
-            return False
-        cur = self._current_display_config()
-        return cur == self._cache_config
-
-
     def _update_jitter_sig_buttons(self):
         """Enable/disable jitter significance buttons based on cache.
 
@@ -6524,12 +4401,6 @@ class CCGReviewUI(GenericUI):
         self._pair_scale_cache.clear()
         self._session_scale_cache = None
         self._conn_strength_cache.clear()
-        if self.current_pair_idx < len(self.all_inds):
-            inds = self.all_inds[self.current_pair_idx]
-            for seg in range(self.n_segments + 1):
-                p = self._png_path(inds, seg)
-                if os.path.exists(p):
-                    os.remove(p)
         self._plot_mgr.update_plot()
 
     # ------------------------------------------------------------------
@@ -6715,9 +4586,12 @@ class CCGReviewUI(GenericUI):
         if self.network_panel._focused_neuron is not None:
             self.network_panel._update_focus_info(self.network_panel._focused_neuron)
         self.network_panel.refresh_shank_buttons()
+        if hasattr(self.network_panel, 'refresh_ct_buttons'):
+            self.network_panel.refresh_ct_buttons()
         self.network_panel.draw()
-        if self._auto_pregen_enabled and self._cache_config is not None:
-            self._pregen_ctrl._launch_pregen_subprocess(dict(self._cache_config), priority='auto')
+        # Pre-gen disabled pending PySide6/pyqtgraph migration.
+        # if self._auto_pregen_enabled and self._cache_config is not None:
+        #     self._pregen_ctrl._launch_pregen_subprocess(dict(self._cache_config), priority='auto')
         _sess_ch = getattr(self, '_switch_key_session_changed', False)
         self.time_slider.on_key_changed()
         if not _sess_ch:
@@ -6728,11 +4602,11 @@ class CCGReviewUI(GenericUI):
         """Change connection type while in virtual ``any`` session."""
         self._sess_mgr._flush_any_selections_to_pointers()
         try:
-            self._sel_mgr._autosave_all_sessions_for_current_type()
+            self._group_mgr._autosave_all_sessions_for_current_type()
         except Exception as exc:
             print(f"[CCGReviewUI] any-session type switch autosave: {exc}")
         try:
-            if self._sel_data._groups:
+            if self._sel_data.groups:
                 self._group_mgr._save_groups_export()
         except Exception:
             traceback.print_exc()
@@ -6896,7 +4770,7 @@ class CCGReviewUI(GenericUI):
 
         After binding another session's ``ccg_pointer``/``n_segments``/``_custom_segments``,
         a prior custom-segment index can point past ``_custom_segments`` → IndexError in
-        ``_png_path`` / plot title.
+        plot title generation.
         """
         ns = int(self.n_segments) if self.n_segments is not None else 0
         cs_list = getattr(self, '_custom_segments', []) or []
@@ -6948,19 +4822,6 @@ class CCGReviewUI(GenericUI):
         except (TypeError, ValueError, IndexError):
             return False
 
-    def _get_or_render_png(self, inds, segment):
-        """Return PNG path, using disk cache when display matches cache configuration.
-
-        When a cache configuration is set and the current display state does NOT
-        match it, the plot is always re-rendered (real-time, no disk-cache reuse).
-        """
-        is_rt = (self._cache_config is not None
-                 and not self._display_matches_cache_config())
-        p = self._png_path(inds, segment)
-        if is_rt or not os.path.exists(p):
-            return self._plot_mgr._render_png(inds, segment)
-        return p
-
     def _git_commit_paths(self, paths: list, msg: str):
         """Stage and commit one or more files to git (background thread)."""
         repo = os.path.abspath(os.path.join(self._sel_save_dir, '..', '..'))
@@ -6986,6 +4847,8 @@ class CCGReviewUI(GenericUI):
         self._build_sig_chips()
         self._update_segment_label()
         self.network_panel.refresh_shank_buttons()
+        if hasattr(self.network_panel, 'refresh_ct_buttons'):
+            self.network_panel.refresh_ct_buttons()
         self._group_mgr._rebuild_groups_menu()   # also refreshes hotkeys bar chips
         self._cs_mgr._update_conn_str_metric_availability()
         self._plot_mgr.update_plot()
@@ -7017,7 +4880,7 @@ class CCGReviewUI(GenericUI):
             self._setup_mgr._finish_initial_draw()
             # Autoload selections + pair tags AFTER _finish_initial_draw so the
             # reset in that method doesn't clobber what we loaded.
-            self._sel_mgr._autoload_session_latest(restore_groups=False)
+            self._group_mgr._autoload_session_latest(restore_groups=False)
             self.refresh_lists()
             self.network_panel.draw()
 
@@ -7341,7 +5204,6 @@ class CCGReviewUI(GenericUI):
     @property
     def _custom_ccg_suggestions_path(self) -> str:
         return self._custom_mgr.store.suggestions_path
-    
 
 def _load_last_key() -> 'Key | None':
     """Return the Key saved in ui_state.json from the last session, or None."""

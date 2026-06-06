@@ -6,6 +6,8 @@ LRUCache             — generic bounded LRU cache (max_size=1 = single-slot inv
 UITheme              — frozen dark/light color theme; set on GenericUI as self.theme.
 WrapFrame            — tk.Frame that auto-wraps children horizontally like word-wrap.
 ArrowScroller        — ◀/▶ arrow scroll nav for chip rows / plot columns.
+CollapseState        — tracks which group headers are collapsed; UI-package independent.
+group_header_label   — formats a collapsible group header string.
 """
 from __future__ import annotations
 
@@ -429,10 +431,6 @@ def purge_dir(directory: str, suffix: str = '.png',
             pass
 
 
-def purge_png_dir(directory: str, days: int = 3, max_gb: float = 1.5) -> None:
-    purge_dir(directory, suffix='.png', days=days, max_gb=max_gb)
-
-
 def fit_axes_to_data(ax, x_all, y_all, x_pad_frac=0.08, y_pad_frac=0.06, min_pad=20):
     if not x_all or not y_all:
         return None
@@ -445,25 +443,6 @@ def fit_axes_to_data(ax, x_all, y_all, x_pad_frac=0.08, y_pad_frac=0.06, min_pad
     return x_min, x_max, y_min, y_max
 
 
-def get_png_filename(
-    ref: int,
-    tgt: int,
-    seg_name: str,
-    norm_key: str,
-    alpha_key: str,
-    res_key: str,
-    scale_key: str = '',
-    j_key: str = '',
-    ext_key: str = '',
-    dk_key: str = '',
-    sess_prefix: str = '',
-) -> str:
-    return (
-        f"{sess_prefix}pair_{ref}_{tgt}_{seg_name}_{norm_key}"
-        f"{alpha_key}{res_key}{scale_key}{j_key}{ext_key}{dk_key}.png"
-    )
-
-
 def json_numpy_default(obj):
     """JSON encoder for numpy scalar types — pass as ``default=`` to json.dump."""
     import numpy as np
@@ -472,3 +451,152 @@ def json_numpy_default(obj):
     if isinstance(obj, np.floating):
         return float(obj)
     raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
+
+
+def group_header_label(name: str, count: int, collapsed: bool) -> str:
+    """Format a collapsible group header: '── name (n) ──' with '>>' when collapsed."""
+    return f"── {name} ({count}) ──" + (" >>" if collapsed else "")
+
+
+@dataclasses.dataclass
+class SelectionCommand:
+    """Records what changed for one undoable action."""
+    pair_changes: dict   # {pair_tuple: (old_state, new_state)}
+    group_changes: list  # [(group_name, session, pair, 'add'|'remove')]
+
+
+class BiIndex:
+    """Generic bidirectional multimap: A ↔ set(B) and B ↔ set(A), both O(1).
+
+    Items can be any hashable type. Maintains two dicts in sync so both
+    forward (key → values) and inverse (value → keys) lookups are O(1).
+
+    Usage
+    -----
+    For groups: a = gname, b = (sess, ref, tgt)
+        idx.add(gname, (sess, ref, tgt))
+        idx.inverse((sess, ref, tgt))   → set of gnames
+        idx.forward(gname)              → set of (sess, ref, tgt)
+    """
+
+    def __init__(self):
+        self._fwd: dict = {}
+        self._inv: dict = {}
+
+    # ── Mutations ──────────────────────────────────────────────────────
+
+    def add(self, a, b) -> None:
+        self._fwd.setdefault(a, set()).add(b)
+        self._inv.setdefault(b, set()).add(a)
+
+    def discard(self, a, b) -> None:
+        fa = self._fwd.get(a)
+        if fa is not None:
+            fa.discard(b)
+            if not fa:
+                del self._fwd[a]
+        ib = self._inv.get(b)
+        if ib is not None:
+            ib.discard(a)
+            if not ib:
+                del self._inv[b]
+
+    def delete_key(self, a) -> None:
+        """Remove a and clean up all its b associations in the inverse."""
+        for b in self._fwd.pop(a, ()):
+            ib = self._inv.get(b)
+            if ib is not None:
+                ib.discard(a)
+                if not ib:
+                    del self._inv[b]
+
+    def rename_key(self, old_a, new_a) -> None:
+        """Rename key old_a → new_a in both directions."""
+        bs = self._fwd.pop(old_a, None)
+        if bs is None:
+            return
+        self._fwd[new_a] = bs
+        for b in bs:
+            ib = self._inv.get(b)
+            if ib is not None:
+                ib.discard(old_a)
+                ib.add(new_a)
+
+    def clear(self) -> None:
+        self._fwd.clear()
+        self._inv.clear()
+
+    # ── Lookups ────────────────────────────────────────────────────────
+
+    def forward(self, a) -> set:
+        return self._fwd.get(a, set())
+
+    def inverse(self, b) -> set:
+        return self._inv.get(b, set())
+
+    # ── Dict-style protocol over forward index ─────────────────────────
+
+    def __contains__(self, a) -> bool: return a in self._fwd
+    def __len__(self)         -> int:  return len(self._fwd)
+    def __iter__(self):                return iter(self._fwd)
+    def get(self, a, default=None):    return self._fwd.get(a, default)
+    def keys(self):                    return self._fwd.keys()
+    def values(self):                  return self._fwd.values()
+    def items(self):                   return self._fwd.items()
+
+
+class CollapseState:
+    """Tracks which named sections are collapsed in a list widget. UI-package independent."""
+
+    def __init__(self, initial: set | None = None):
+        self._collapsed: set = set(initial or [])
+
+    def is_collapsed(self, name: str) -> bool:
+        return name in self._collapsed
+
+    def toggle(self, name: str) -> None:
+        self._collapsed.discard(name) if name in self._collapsed else self._collapsed.add(name)
+
+    def collapse_all(self, names) -> None:
+        self._collapsed = set(names)
+
+    def expand_all(self) -> None:
+        self._collapsed.clear()
+
+    def as_set(self) -> set:
+        return set(self._collapsed)
+
+
+def collapsible_section(parent: 'tk.Widget', title: str, expanded: bool = True):
+    """Separator-line collapsible section.  Returns (inner_frame, fold_var)."""
+    import tkinter as tk
+    from tkinter import ttk
+    outer = ttk.Frame(parent)
+    outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(3, 0))
+
+    hdr = ttk.Frame(outer)
+    hdr.pack(fill=tk.X, pady=(2, 0))
+    hdr.columnconfigure(2, weight=1)
+
+    fold_var = tk.BooleanVar(value=expanded)
+    tri = ttk.Label(hdr, text='▾' if expanded else '▸',
+                    cursor='hand2', font=('Arial', 10))
+    tri.grid(row=0, column=0, padx=(4, 0))
+    ttk.Label(hdr, text=title, font=('Arial', 9, 'bold')).grid(
+        row=0, column=1, padx=(3, 6))
+    ttk.Separator(hdr, orient='horizontal').grid(
+        row=0, column=2, sticky='ew', padx=(0, 4), pady=6)
+
+    inner = ttk.Frame(outer, padding=(8, 2, 4, 2))
+    if expanded:
+        inner.pack(fill=tk.X)
+
+    def _toggle(e=None):
+        v = not fold_var.get()
+        fold_var.set(v)
+        (inner.pack(fill=tk.X) if v else inner.pack_forget())
+        tri.config(text='▾' if v else '▸')
+
+    tri.bind('<Button-1>', _toggle)
+    hdr.bind('<Button-1>', _toggle)
+    return inner, fold_var

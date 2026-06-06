@@ -843,7 +843,7 @@ class StatsTestPanel:
         return valid_pairs, bl_vals
 
     def _get_baseline_values_bound(self, ct_str, seg_name, group_name):
-        from neuropy.ui.ccg_norms import NormalizeBy, NormBackend  # noqa: PLC0415
+        from neuropy.analyses.ccg_norms import NormalizeBy, NormBackend  # noqa: PLC0415
         ui = self.ui
         seg_idx = self._seg_name_to_idx(seg_name)
         if seg_idx is None:

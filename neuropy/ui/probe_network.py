@@ -25,61 +25,6 @@ if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
 
 
-# ---------------------------------------------------------------------------
-# ProbeNetworkData
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ProbeNetworkData:
-    """Assembled draw inputs for one session's probe network.
-
-    Focused neuron/pair and view toggles (zoom, arrows, hide-unconnected) are
-    **not** included — they are render-time state read from ``NetworkPanel``
-    directly, so toggling them does not invalidate the cache.
-
-    Cache key: ``(nd_key, type_key, segment_filter, selected_hash, deleted_hash)``
-    where the hashes are ``frozenset`` of the respective pair sets.
-    """
-
-    # Identity
-    nd_key: object
-    session_label: str
-
-    # Neuron layout (scale-independent; scale applied at render time)
-    x_pos: np.ndarray                   # (n_neurons,) unscaled x (already spread for same-ch)
-    y_pos: np.ndarray                   # (n_neurons,) unscaled y
-    peak_channels: np.ndarray           # (n_neurons,) int
-    shank_ids: np.ndarray | None        # (n_neurons,) int, or None
-    neuron_type: np.ndarray | None      # (n_neurons,) str 'pyr'/'inter', or None
-    n_neurons: int
-
-    # Probe geometry (reference, not owned)
-    pg: object | None                   # ProbeGroup | None
-
-    # Pairs
-    pair_entries: dict = field(default_factory=dict)
-    # (ref, tgt) -> list[{key, conn_type, ei, is_current, in_filter, is_selected}]
-
-    deleted_pair_entries: dict = field(default_factory=dict)
-    # (ref, tgt) -> True
-
-    visible_pairs_current: set = field(default_factory=set)
-    # (ref, tgt) pairs passing current segment filter
-
-    current_pair: tuple | None = None
-    # (ref, tgt) from ui.current_pair_idx; None in any-mode
-
-    cluster_neurons: set = field(default_factory=set)
-    # All neuron indices appearing in the current type's .inds
-
-    neuron_colors: np.ndarray = field(default_factory=lambda: np.array([]))
-    # (n_neurons,) str hex colors — grayscale gradient within same-channel groups
-
-
-# ---------------------------------------------------------------------------
-# NetworkPanel
-# ---------------------------------------------------------------------------
-
 class NetworkPanel:
     """Probe network panel — neuron positions + connection arrows.
 
@@ -125,17 +70,9 @@ class NetworkPanel:
                 labels.add(self.ui._conn_type_label((a, b)))
         return labels
 
-    # ------------------------------------------------------------------
-    # Small render/filter helpers
-    # ------------------------------------------------------------------
-
     def _probegroups(self) -> dict:
         """Return probe_info dict from cd.nd (empty dict if absent)."""
         return getattr(getattr(self.ui.cd, 'nd', None), 'probe_info', {})
-
-    # ------------------------------------------------------------------
-    # Setup — split into 4 focused sub-methods
-    # ------------------------------------------------------------------
 
     def _setup(self, parent):
         """Build all widgets."""
@@ -439,10 +376,6 @@ class NetworkPanel:
             'scroll_event', self._on_net_scroll)
         self._scale_initialized = False
 
-    # ------------------------------------------------------------------
-    # Any-mode session navigation
-    # ------------------------------------------------------------------
-
     def _net_any_sessions(self) -> list:
         """Session nd_keys to display in any-mode probe navigation.
 
@@ -465,7 +398,7 @@ class NetworkPanel:
             valid = ui._all_inds_set_for_ptr(ptr)
             for g in active_groups:
                 if any((int(a), int(b)) in valid
-                       for a, b in ui._group_mgr._group_pairs(g, session=sess)):
+                       for a, b in ui._sel_data.pairs_in_group(g, sess)):
                     filtered.append(nk)
                     break
         return filtered
@@ -486,10 +419,6 @@ class NetworkPanel:
             self._net_any_idx += 1
             self.draw()
             self.refresh_group_buttons()
-
-    # ------------------------------------------------------------------
-    # Public draw entry point
-    # ------------------------------------------------------------------
 
     def draw(self):
         """Redraw the network (safe wrapper — prints traceback on error)."""
@@ -525,10 +454,6 @@ class NetworkPanel:
                 self._net_nav_right_bar.grid_remove()
                 self._net_nav_frame.pack_forget()
                 self._nav_bar_visible = False
-
-    # ------------------------------------------------------------------
-    # Internal draw implementation
-    # ------------------------------------------------------------------
 
     def _draw_impl(self):
         ui = self.ui
@@ -580,13 +505,8 @@ class NetworkPanel:
     def _make_cache_key(self, nd_key, type_key, segment_filter, any_mode: bool) -> tuple:
         """Compute cache key: (nd_key, type_key_str, segment_filter, sel_hash, del_hash)."""
         ui = self.ui
-        if not any_mode:
-            sel_hash = frozenset(map(tuple, ui.selected_inds)) if ui.selected_inds is not None else frozenset()
-            del_hash = frozenset(ui.deleted_inds) if ui.deleted_inds is not None else frozenset()
-        else:
-            sel_hash = frozenset()
-            del_hash = (frozenset(ui._pair_deleted_store.get(str(type_key), set()))
-                        if type_key is not None else frozenset())
+        sel_hash = frozenset(ui._sel_data.selected_inds) if ui._sel_data is not None else frozenset()
+        del_hash = frozenset(ui._sel_data.deleted_inds)  if ui._sel_data is not None else frozenset()
         return (nd_key, str(type_key), segment_filter, sel_hash, del_hash)
 
     def _assemble_data(self, nd_key, type_key, segment_filter, any_mode: bool,
@@ -602,20 +522,17 @@ class NetworkPanel:
         if any_mode:
             _neurons = ui.cd.nd.data.get(sess_nk) if ui.cd.nd is not None else None
             _ptr = ui.cd.ptr.get(type_key) if type_key is not None else None
-            _deleted_inds = (ui._pair_deleted_store.get(str(type_key), set())
-                             if type_key is not None else set())
         else:
             _neurons = ui.neurons
             _ptr = ui.ccg_ptr
-            _deleted_inds = ui.deleted_inds
 
         # Unscaled positions — scale applied at render time
         pos = self._get_neuron_positions(x_scale=1.0, y_scale=1.0,
                                          nd_key=nd_key, neurons=_neurons)
         if pos is None:
             return None
-        x_pos, y_pos, peak_ch = pos
-        n_neurons = len(x_pos)
+        xy, peak_ch = pos
+        n_neurons = len(xy)
 
         shank_ids   = getattr(_neurons, 'shank_ids', None) if _neurons is not None else None
         neuron_type = _neurons.neuron_type if _neurons is not None else None
@@ -642,16 +559,6 @@ class NetworkPanel:
             ei  = getattr(tk_, 'excitability', 'E')
             is_cur = (tk_ == type_key)
             arr = pt.inds[:, -2:]
-            _ptr_sel: set = set()
-            if is_cur and not any_mode:
-                _ptr_sel = ui.selected_inds
-            else:
-                _other_ptr = ui.cd.ptr.get(tk_)
-                if (_other_ptr is not None
-                        and hasattr(_other_ptr, 'selected_inds')
-                        and _other_ptr.selected_inds is not None):
-                    _ptr_sel = set(map(tuple, _other_ptr.selected_inds))
-
             for ref, tgt in map(tuple, arr):
                 key_t = (ref, tgt)
                 if key_t not in pair_entries:
@@ -662,24 +569,14 @@ class NetworkPanel:
                     'ei':         ei,
                     'is_current': is_cur,
                     'in_filter':  (ref, tgt) in visible_pairs_current if is_cur else True,
-                    'is_selected': (ref, tgt) in _ptr_sel,
                 })
 
-        deleted_pair_entries: dict = {}
-        for (ref, tgt) in _deleted_inds:
-            if (ref, tgt) not in pair_entries and 0 <= ref < n_neurons and 0 <= tgt < n_neurons:
-                deleted_pair_entries[(ref, tgt)] = True
-
-        cur_arr = (_ptr.inds[:, -2:] if _ptr is not None and _ptr.inds is not None
-                   else np.empty((0, 2), dtype=int))
-        cluster_neurons = set(int(v) for v in np.unique(cur_arr))
         session_label = ui._sess_mgr._session_label(sess_nk) if (any_mode and sess_nk is not None) else ''
 
         return ProbeNetworkData(
             nd_key=nd_key,
             session_label=session_label,
-            x_pos=x_pos,
-            y_pos=y_pos,
+            pos=xy,
             peak_channels=peak_ch,
             shank_ids=shank_ids,
             neuron_type=neuron_type,
@@ -687,10 +584,8 @@ class NetworkPanel:
 
             pg=pg,
             pair_entries=pair_entries,
-            deleted_pair_entries=deleted_pair_entries,
-            visible_pairs_current=visible_pairs_current,
+            sel_data=ui._sel_data,
             current_pair=current_pair,
-            cluster_neurons=cluster_neurons,
         )
 
     def _render(self, data: 'ProbeNetworkData', any_mode: bool, sess_nk, sessions):
@@ -702,8 +597,8 @@ class NetworkPanel:
         line_alpha    = max(0.05, min(1.0, self._net_line_alpha_var.get()))
         hidden_shanks = {s for s, v in self._net_shank_vars.items() if not v.get()}
 
-        x_pos = data.x_pos * h_scale
-        y_pos = data.y_pos * v_scale
+        x_pos = data.pos[:, 0] * h_scale
+        y_pos = data.pos[:, 1] * v_scale
 
         # current_pair is render-time state — read live so cache hits still reflect it.
         if any_mode:
@@ -720,9 +615,9 @@ class NetworkPanel:
                         if any_mode else ui._setup_mgr._current_session_str())
             group_pairs: set = set()
             for g in active_groups:
-                gp = ui._group_mgr._group_pairs(g, session=_gp_sess)
+                gp = ui._sel_data.pairs_in_group(g, _gp_sess)
                 if not gp:
-                    stored_keys = list(ui._sel_data._groups.get(g, {}).keys())[:5]
+                    stored_keys = list(ui._sel_data.forward(g))[:5]
                     print(f"[probe_network] group={g!r} _gp_sess={_gp_sess!r} stored_keys={stored_keys} → empty")
                 group_pairs |= gp
             gf_active = True
@@ -775,10 +670,10 @@ class NetworkPanel:
         )
 
         _draw_neurons(ax, x_pos, y_pos, data.peak_channels, data.shank_ids,
-                      data.neuron_type, data.n_neurons, data.cluster_neurons,
-                      data.pair_entries, data.deleted_pair_entries, cfg)
+                      data.neuron_type, data.n_neurons,
+                      data.pair_entries, cfg)
         _draw_connections(ax, x_pos, y_pos, data.peak_channels, data.shank_ids,
-                          data.n_neurons, data.pair_entries, data.deleted_pair_entries, cfg)
+                          data.n_neurons, data.pair_entries, data.sel_data, cfg)
         xs_all, ys_all = _draw_labels(ax, x_pos, y_pos, data.pg, data.shank_ids,
                                       data.n_neurons, data.pair_entries, cfg)
 
@@ -801,10 +696,6 @@ class NetworkPanel:
 
         self.net_fig.tight_layout(pad=0.5)
         self.net_canvas.draw_idle()
-
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
 
     def _on_network_pick(self, event):
         # Deduplicate: only process the first pick per mouse event
@@ -915,18 +806,18 @@ class NetworkPanel:
         name = name.strip()
         if not name:
             return
-        if name in ui._sel_data._groups:
+        sess = ui._setup_mgr._current_session_str()
+        if name in ui._sel_data.groups:
             if not messagebox.askyesno(
                     "Save selections",
                     f"Group '{name}' already exists. Replace its pairs for this session?",
                     parent=ui.root):
                 return
-            sess = ui._setup_mgr._current_session_str()
-            ui._sel_data._groups[name][sess] = set()
-        else:
-            ui._sel_data._groups[name] = {}
+            for _, r, t in list(ui._sel_data.forward(name)):
+                if _ == sess:
+                    ui._sel_data.discard_from_group(name, sess, (r, t))
         for pair in pairs:
-            ui._group_mgr._group_add_pair(name, pair)
+            ui._sel_data.add_to_group(name, sess, pair)
         ui._group_mgr._rebuild_groups_menu()
         ui.refresh_lists()
         messagebox.showinfo("Save selections",
@@ -937,20 +828,16 @@ class NetworkPanel:
         """Called when H or V zoom slider changes — redraws with new spacing."""
         self.draw()
 
-    # ------------------------------------------------------------------
-    # Group / shank button refresh
-    # ------------------------------------------------------------------
-
     def _make_group_button(self, gname: str, display: str, count_sess: str) -> ttk.Checkbutton:
         """Create and return a group checkbutton with optional pair-count label."""
         ui = self.ui
         if gname not in self._net_group_filter_vars:
             self._net_group_filter_vars[gname] = tk.BooleanVar(master=ui.root, value=False)
         if self._net_grp_counts_var.get():
-            pairs_sess = ui._group_mgr._group_pairs(gname, session=count_sess)
+            pairs_sess = ui._sel_data.pairs_in_group(gname, count_sess)
             n_hl  = len(ui._filter_pairs_to_conn_types(
                 count_sess, pairs_sess, self._highlighted_ct_labels()))
-            n_all = len(ui._group_mgr._group_pairs_all_sessions(gname))
+            n_all = len({(r, t) for _, r, t in ui._sel_data.forward(gname)})
             label = f"{display} ({n_hl}/{len(pairs_sess)}/{n_all})"
         else:
             label = display
@@ -1089,10 +976,6 @@ class NetworkPanel:
             cb.pack(side=tk.LEFT, padx=2)
         self._net_shank_vars = new_vars
 
-    # ------------------------------------------------------------------
-    # Shank / pair labels
-    # ------------------------------------------------------------------
-
     def _shank_label(self, idx: int) -> str:
         """Return the shank number for neuron at position idx, or str(idx) as fallback."""
         shank_ids = getattr(self.ui.neurons, 'shank_ids', None)
@@ -1106,10 +989,6 @@ class NetworkPanel:
     def _pair_label(self, inds) -> str:
         """Short display label for a (ref, tgt) pair using shank numbers."""
         return f"{self._shank_label(inds[0])}→{self._shank_label(inds[1])}"
-
-    # ------------------------------------------------------------------
-    # Neuron / pair focus
-    # ------------------------------------------------------------------
 
     def _on_neuron_focus(self):
         val = self._focus_var.get().strip()
@@ -1189,7 +1068,7 @@ class NetworkPanel:
                 pair_exists = True
                 break
         if not pair_exists:
-            ui._sel_mgr._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
+            ui._group_mgr._show_temp_warning(f"Pair ({ref},{tgt}) not significant — showing position")
         self._focused_pair = pair
         self._focused_neuron = None
         self._focus_var.set("")
@@ -1226,10 +1105,6 @@ class NetworkPanel:
         self.draw()
         self.ui._plot_mgr.update_plot()
 
-    # ------------------------------------------------------------------
-    # Helpers (formerly on CCGReviewUI)
-    # ------------------------------------------------------------------
-
     def _get_neuron_positions(self, x_scale=1.0, y_scale=1.0, nd_key=None, neurons=None):
         ui = self.ui
         if neurons is None:
@@ -1256,7 +1131,7 @@ class NetworkPanel:
                   f"pg_ch sample={valid_chs}")
         x = x_raw.fillna(0.0).to_numpy(dtype=float) * x_scale
         y = y_raw.fillna(0.0).to_numpy(dtype=float) * y_scale
-        return x, y, peak_ch
+        return np.stack([x, y], axis=1), peak_ch
 
     def _pairs_for_segment_filter(self):
         ui = self.ui

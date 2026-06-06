@@ -9,11 +9,11 @@ import traceback
 
 import numpy as np
 
-from neuropy.ui.ccg_norms import NormalizeBy, NormBackend
+from neuropy.analyses.ccg_norms import NormalizeBy, NormBackend
 
 from neuropy.plotting.ccg import (
     JitterOverlay, PlotStyle, TitleConfig, RenderContext,
-    _fill_waveform, render_ccg_png,
+    load_peak_waveform, render_ccg_png,
 )
 import neuropy.plotting.ccg as plot_ccg
 
@@ -68,41 +68,24 @@ class CCGContextBuilder:
         neurons = self._ui.neurons
         if neurons is None:
             return None, None
-        wf_all = getattr(neurons, 'waveforms',     None)
-        pc      = getattr(neurons, 'peak_channels', None)
-        sids    = getattr(neurons, 'shank_ids',     None)
-        if wf_all is None or pc is None or sids is None:
-            return None, None
-
         nd_conf   = getattr(getattr(self._ui.cd, 'nd', None), '_conf', None)
         ch_ps     = int(getattr(nd_conf, 'ch_per_shank', 16) or 16)
         recinfo   = getattr(nd_conf, 'recinfo', None) if nd_conf else None
         skipped   = getattr(recinfo, 'skipped_channels', None) if recinfo else None
-        discarded = None if skipped is None else np.asarray(skipped, dtype=int)
-
-        try:
-            peak_ch = int(pc[ref])
-            rs      = int(sids[ref])
-        except (IndexError, TypeError, ValueError):
+        t_raw, amp = load_peak_waveform(
+            ref,
+            getattr(neurons, 'waveforms', None),
+            getattr(neurons, 'peak_channels', None),
+            getattr(neurons, 'shank_ids', None),
+            ch_ps,
+            skipped,
+        )
+        if t_raw is None:
             return None, None
-
-        if discarded is not None and discarded.size and np.isin(peak_ch, discarded):
-            return None, None
-        local_idx = peak_ch - ch_ps * rs
-        if not (0 <= local_idx < ch_ps):
-            return None, None
-
-        ref_full = _fill_waveform(wf_all[ref], rs, ch_ps, discarded)
-        tr = ref_full[local_idx]
-        if not np.any(np.isfinite(tr)):
-            return None, None
-
         fs = float(getattr(neurons, 'sampling_rate', None) or 30000.0)
         if not np.isfinite(fs) or fs <= 0:
             fs = 30000.0
-        n   = int(tr.shape[0])
-        ctr = n // 2
-        return (np.arange(n, dtype=float) - ctr) / fs * 1000.0, np.asarray(tr, dtype=float)
+        return t_raw / fs * 1000.0, amp
 
     # ----------------------------------------------------------------
     # Main build method
@@ -430,6 +413,11 @@ class CCGContextBuilder:
 
     def write_png(self, ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
         render_ccg_png(ctx, png_path, dpi)
+
+    def render_to_image(self, ctx: RenderContext, dpi: int = 100) -> 'np.ndarray':
+        """Render to RGBA numpy array; no disk I/O."""
+        from neuropy.plotting.ccg import render_ccg_image
+        return render_ccg_image(ctx, dpi)
 
 
 # Backward-compat alias

@@ -10,7 +10,7 @@ from tkinter import messagebox
 from typing import TYPE_CHECKING
 from neuropy.ui.utils import BackgroundTaskRunner
 from neuropy.analyses.ms_connectivity import CCGDataset, CCGSourceConfig
-from neuropy.analyses.utils import Cacheable, split_time_range as _split_time_range
+from neuropy.analyses.utils import Cacheable, split_time_range as _split_time_range, filter_neurons_to_intervals
 
 _ALL_SEGS = "All"  # must match ccg_ui._ALL_SEGS
 
@@ -85,7 +85,9 @@ class CustomCCGWorker:
             def _ccg_worker():
                 try:
                     neurons_override = (
-                        ui.time_slider._apply_brain_state_intervals(intervals, t0, t1, neurons_obj=neurons_obj)
+                        filter_neurons_to_intervals(
+                            neurons_obj if neurons_obj is not None else ui.neurons,
+                            intervals, t0, t1)
                         if intervals is not None else None)
                     result = self._compute_custom_segment(
                         t0, t1, name,

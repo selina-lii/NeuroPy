@@ -552,6 +552,34 @@ class SetOp():
         return np.unique(x, axis=0)
 
 
+def filter_neurons_to_intervals(neurons, intervals, t0: float, t1: float):
+    """Return a deepcopy of *neurons* with spiketrains masked to *intervals*.
+
+    Safe to call from background threads — deepcopy stays off the main thread.
+    """
+    from copy import deepcopy
+    from neuropy.core.neurons import Neurons
+    neurons = deepcopy(neurons)
+    filtered_trains = []
+    for st in neurons.spiketrains:
+        mask = np.zeros(len(st), dtype=bool)
+        for s, e in intervals:
+            mask |= (st >= s) & (st <= e)
+        filtered_trains.append(st[mask])
+    return Neurons(
+        spiketrains=filtered_trains,
+        t_stop=t1, t_start=t0,
+        sampling_rate=neurons.sampling_rate,
+        neuron_ids=neurons.neuron_ids,
+        neuron_type=neurons.neuron_type,
+        waveforms=neurons.waveforms,
+        waveforms_amplitude=neurons.waveforms_amplitude,
+        peak_channels=getattr(neurons, 'peak_channels', None),
+        shank_ids=getattr(neurons, 'shank_ids', None),
+        metadata=neurons.metadata,
+    )
+
+
 def split_time_range(t0: float, t1: float, n_splits: int, overlap_sec: float,
                      base_name: str) -> list:
     """Partition [t0, t1] into n_splits overlapping chunks.

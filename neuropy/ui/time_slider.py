@@ -14,7 +14,6 @@ import re
 import threading
 import traceback
 import tkinter as tk
-from copy import deepcopy
 from pathlib import Path as _Path
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
@@ -22,7 +21,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from neuropy.core.epoch import Epoch as _Epoch
-from neuropy.core.neurons import Neurons
+from neuropy.analyses.utils import filter_neurons_to_intervals
 from neuropy.ui.utils import intersect_intervals, UITheme
 
 if TYPE_CHECKING:
@@ -264,7 +263,7 @@ class TimeSliderPanel:
 
     def _refresh_union_if_all_sessions_mode(self):
         """Recompute All-session label union without resetting the time-slider theme/handles."""
-        if not getattr(self, '_session_any_mode', False):
+        if not getattr(self.ui, '_session_any_mode', False):
             return
         if getattr(self, '_theme_combo', None) is None:
             return
@@ -276,7 +275,7 @@ class TimeSliderPanel:
     def _rebuild_theme_label_union_for_all_sessions(self):
         """When Session=All, map each theme to sorted unique labels seen on any session."""
         self._theme_label_union_all_sessions = {}
-        if not getattr(self, '_session_any_mode', False):
+        if not getattr(self.ui, '_session_any_mode', False):
             return
         session_objs = self._all_process_data_sessions()
         if not session_objs:
@@ -414,7 +413,7 @@ class TimeSliderPanel:
         """Non-blank labels for overlap + legend; Session=All includes union (also stripped)."""
         theme = getattr(self, '_current_theme', 'segments')
         acc = {str(lb).strip() for _, _, lb in self._epoch_bounds if str(lb).strip()}
-        if getattr(self, '_session_any_mode', False):
+        if getattr(self.ui, '_session_any_mode', False):
             extra = (getattr(self, '_theme_label_union_all_sessions', None)
                      or {}).get(theme, ())
             acc |= {str(x).strip() for x in (extra or ()) if str(x).strip()}
@@ -679,7 +678,7 @@ class TimeSliderPanel:
             messagebox.showinfo("Sessions", "No sessions available.")
             return
         session_labels = [str(nk.session) for nk in all_nd_keys]
-        current_sess = str(self.ui.key.session) if not getattr(self, '_session_any_mode', False) else None
+        current_sess = str(self.ui.key.session) if not getattr(self.ui, '_session_any_mode', False) else None
         selected = self.ui._pick_sessions_dialog(
             title="Apply custom CCG to sessions",
             sessions=session_labels,
@@ -965,7 +964,7 @@ class TimeSliderPanel:
         if w < 20:
             return
 
-        if getattr(self, '_session_any_mode', False):
+        if getattr(self.ui, '_session_any_mode', False):
             c.create_text(
                 w // 2, h // 2,
                 text="All sessions view — no single behavioral timeline to display.\n"
@@ -1183,31 +1182,6 @@ class TimeSliderPanel:
             return False
         active_sec = sum(e - s for s, e in intervals)
         return (intervals, active_sec)
-
-    def _apply_brain_state_intervals(self, intervals, t0, t1, neurons_obj=None):
-        """Filter self.ui.neurons to the given intervals and return a new Neurons object.
-        Called in the background worker thread — deepcopy stays off the main thread.
-        """
-        source_neurons = neurons_obj if neurons_obj is not None else self.ui.neurons
-        neurons = deepcopy(source_neurons)
-        filtered_trains = []
-        for st in neurons.spiketrains:
-            mask = np.zeros(len(st), dtype=bool)
-            for s, e in intervals:
-                mask |= (st >= s) & (st <= e)
-            filtered_trains.append(st[mask])
-        return Neurons(
-            spiketrains=filtered_trains,
-            t_stop=t1, t_start=t0,
-            sampling_rate=neurons.sampling_rate,
-            neuron_ids=neurons.neuron_ids,
-            neuron_type=neurons.neuron_type,
-            waveforms=neurons.waveforms,
-            waveforms_amplitude=neurons.waveforms_amplitude,
-            peak_channels=getattr(neurons, 'peak_channels', None),
-            shank_ids=getattr(neurons, 'shank_ids', None),
-            metadata=neurons.metadata,
-        )
 
     # ── Custom CCG save / load ──────────────────────────────────────────────
 

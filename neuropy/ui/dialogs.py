@@ -427,258 +427,6 @@ class SettingsDialog:
         tk.Label(row, text="(6–32)", bg=_CONT_BG,
                  fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
 
-        cache_sec = _add_section('Cache')
-        tk.Label(cache_sec, text="Cache", bg=_CONT_BG, fg=_FG,
-                 font=_HDR_FONT, anchor='w').pack(fill=tk.X, pady=(0, 4))
-        ttk.Separator(cache_sec).pack(fill=tk.X, pady=(0, 10))
-        _cache_config_help = tk.Label(cache_sec,
-                 text="Only one display configuration is saved to the PNG disk cache.\n"
-                      "Any other configuration is rendered in real-time (not cached).\n"
-                      "Set up the significance panel as desired, then capture it here.",
-                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9),
-                 justify='left', wraplength=380)
-        _cache_config_help.pack(anchor='w', pady=(0, 10))
-        _cache_summary_var = tk.StringVar()
-
-        def _refresh_cache_summary():
-            cfg = ui._cache_config
-            if cfg is None:
-                _cache_summary_var.set("No configuration set  (legacy mode: all states cached)")
-            else:
-                lines = []
-                on_sigs = [k.replace('_sig_', '').replace('_var', '')
-                           for k in ui._CACHE_CONFIG_ATTRS
-                           if k.startswith('_sig_') and cfg.get(k)]
-                lines.append(f"Sig overlays: {', '.join(on_sigs) or 'none'}")
-                on_lines = [k.replace('_line_', '').replace('_var', '')
-                            for k in ui._CACHE_CONFIG_ATTRS
-                            if k.startswith('_line_') and cfg.get(k)]
-                lines.append(f"Line styles:  {', '.join(on_lines) or 'none'}")
-                norms = cfg.get('active_norms') or []
-                lines.append(f"Norms:        {', '.join(norms) or 'raw'}")
-                lines.append(f"Alpha:        {cfg.get('active_alpha', '—')}")
-                _cache_summary_var.set('\n'.join(lines))
-
-        _refresh_cache_summary()
-        tk.Label(cache_sec, textvariable=_cache_summary_var,
-                 bg=_SUM_BG, fg=_FG, relief='groove', font=('Courier', 9),
-                 justify='left', anchor='nw', padx=8, pady=6).pack(fill=tk.X, pady=(0, 10))
-        cbtn_row = tk.Frame(cache_sec, bg=_CONT_BG)
-        cbtn_row.pack(anchor='w')
-
-        def _capture():
-            ui._cache_config = ui._settings_mgr._current_display_config()
-            ui._settings_mgr.save_ui_state()
-            _refresh_cache_summary()
-            ui._png_mgr._clear_all_png_cache()
-
-        def _clear_cache_config():
-            ui._cache_config = None
-            ui._settings_mgr.save_ui_state()
-            _refresh_cache_summary()
-
-        ttk.Button(cbtn_row, text="Capture current settings",
-                   command=_capture).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(cbtn_row, text="Clear",
-                   command=_clear_cache_config).pack(side=tk.LEFT)
-
-        ttk.Separator(cache_sec).pack(fill=tk.X, pady=(10, 10))
-        cache_mgmt = cache_sec
-        _disk_var = tk.StringVar(value="–")
-        disk_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        disk_row.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(disk_row, text="Cache folder:", bg=_CONT_BG, fg=_FG,
-                 font=_LBL_FONT).pack(side=tk.LEFT)
-        tk.Label(disk_row, text=ui.tmp_dir, bg=_CONT_BG, fg=_FG_DIM,
-                 font=('Arial', 9)).pack(side=tk.LEFT, padx=(6, 12))
-        tk.Label(disk_row, textvariable=_disk_var, bg=_CONT_BG, fg=_FG,
-                 font=_LBL_FONT).pack(side=tk.LEFT)
-
-        def _compute_disk_size():
-            total = 0
-            n_files = 0
-            try:
-                for fn in os.listdir(ui.tmp_dir):
-                    if fn.endswith('.png'):
-                        try:
-                            total += os.path.getsize(os.path.join(ui.tmp_dir, fn))
-                            n_files += 1
-                        except OSError:
-                            pass
-            except OSError:
-                pass
-            if total < 1024 ** 2:
-                sz = f"{total / 1024:.1f} KB"
-            elif total < 1024 ** 3:
-                sz = f"{total / 1024**2:.1f} MB"
-            else:
-                sz = f"{total / 1024**3:.2f} GB"
-            return f"{n_files} PNGs  ·  {sz}"
-
-        tree_frame = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        cols = ('type', 'pairs', 'segs', 'pngs', 'pct')
-        tree = ttk.Treeview(tree_frame, columns=cols, show='tree headings',
-                            height=10, selectmode='none')
-        for col_id, heading, width, anchor, stretch in [
-            ('#0',    'Session', 160, 'w', True),
-            ('type',  'Type',    120, 'w', True),
-            ('pairs', 'Pairs',    50, 'e', False),
-            ('segs',  'Segs',     45, 'e', False),
-            ('pngs',  'PNGs',     80, 'e', False),
-            ('pct',   '%',        55, 'e', False),
-        ]:
-            tree.heading(col_id, text=heading)
-            tree.column(col_id, width=width, anchor=anchor, stretch=stretch)
-        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree.tag_configure('full',    background='#d4edda')
-        tree.tag_configure('partial', background='')
-        tree.tag_configure('low',     background='#fff3cd')
-        tree.tag_configure('empty',   background='#f8d7da')
-
-        def _pct_tag(pct):
-            if pct >= 100: return 'full'
-            if pct >= 50:  return 'partial'
-            if pct > 0:    return 'low'
-            return 'empty'
-
-        def _count_pngs_for_pair(ref, tgt, n_segs, seg_names, cfg_now, has_hi):
-            count = 0
-            for seg in list(range(n_segs)) + [n_segs]:
-                seg_nm = ('All_segments' if seg == n_segs
-                          else seg_names[seg] if seg < len(seg_names)
-                          else str(seg))
-                norms = cfg_now.get('active_norms') or []
-                norm_key = '_'.join(sorted(norms)) if norms else 'raw'
-                alpha = cfg_now.get('active_alpha', 0.001)
-                for hires in ([False, True] if has_hi else [False]):
-                    res_key = '_hi' if hires else '_lo'
-                    for ak in (f'_a{alpha:.3f}', ''):
-                        fn = (f"pair_{ref}_{tgt}_{seg_nm}_{norm_key}"
-                              f"{ak}{res_key}.png")
-                        if os.path.isfile(os.path.join(ui.tmp_dir, fn)):
-                            count += 1
-                            break
-            return count
-
-        def _populate_tree_async():
-            for iid in tree.get_children():
-                tree.delete(iid)
-            _disk_var.set("…")
-            cfg_now = ui._cache_config or ui._settings_mgr._current_display_config()
-            nd_sessions = {}
-            for tk_, ptr in ui.cd.ptr.items():
-                nd_str = str(tk_.nd())
-                nd_sessions.setdefault(nd_str, []).append((tk_, ptr))
-            loaded_nd = {str(k.nd()) for k in ui.cd.ptr.keys()
-                         if getattr(ui.cd, 'ccg', {}).get(k.nd()) is not None}
-
-            def _worker():
-                disk_txt = _compute_disk_size()
-                rows = []
-                for nd_str, entries in sorted(nd_sessions.items()):
-                    is_loaded = nd_str in loaded_nd
-                    rows.append(('__nd__', nd_str, None))
-                    for type_key, ptr in sorted(entries, key=lambda x: str(x[0])):
-                        type_lbl = ui._type_label(type_key)
-                        if not is_loaded:
-                            rows.append(('__type__', nd_str,
-                                         (type_lbl, '–', '–', '–', '–', 'partial')))
-                            continue
-                        pairs_arr = ptr.inds2
-                        n_pairs = len(pairs_arr)
-                        n_segs = ptr.n_segments
-                        seg_names = list(ptr.edge_times['label'].values)
-                        has_hi = (hasattr(ui.cd, '_ccg_highres') and
-                                  ui.cd._ccg_highres.get(type_key.nd()) is not None)
-                        res_mult = 2 if has_hi else 1
-                        expected = n_pairs * (n_segs + 1) * res_mult
-                        actual = sum(
-                            _count_pngs_for_pair(int(inds[0]), int(inds[1]),
-                                                 n_segs, seg_names, cfg_now, has_hi)
-                            for inds in pairs_arr)
-                        pct = int(100 * actual / expected) if expected > 0 else 0
-                        pct_str = f"{pct}%" if expected > 0 else '–'
-                        rows.append(('__type__', nd_str,
-                                     (type_lbl, n_pairs, n_segs,
-                                      f"{actual}/{expected}", pct_str, _pct_tag(pct))))
-                return disk_txt, rows
-
-            def _render(disk_txt, rows):
-                if not win.winfo_exists():
-                    return
-                _disk_var.set(disk_txt)
-                nodes = {}
-                for kind, nd_str, payload in rows:
-                    if kind == '__nd__':
-                        nodes[nd_str] = tree.insert('', 'end', text=nd_str,
-                                                    values=('', '', '', '', ''), open=True)
-                    else:
-                        node = nodes.get(nd_str)
-                        if node is None:
-                            continue
-                        type_lbl, n_pairs, n_segs, pngs, pct_str, tag = payload
-                        tree.insert(node, 'end',
-                                    values=(type_lbl, n_pairs, n_segs, pngs, pct_str),
-                                    tags=(tag,))
-
-            def _run():
-                try:
-                    disk_txt, rows = _worker()
-                except Exception:
-                    disk_txt, rows = "err", []
-                win.after(0, lambda: _render(disk_txt, rows))
-            threading.Thread(target=_run, daemon=True).start()
-
-        auto_row = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        auto_row.pack(anchor='w', pady=(0, 4))
-        _auto_var = tk.BooleanVar(value=ui._auto_pregen_enabled)
-
-        def _on_auto_toggle():
-            ui._auto_pregen_enabled = _auto_var.get()
-            ui._settings_mgr.save_ui_state()
-
-        ttk.Checkbutton(auto_row, text="Auto-generate cache on session switch",
-                        variable=_auto_var, command=_on_auto_toggle).pack(side=tk.LEFT)
-        btn_row2 = tk.Frame(cache_mgmt, bg=_CONT_BG)
-        btn_row2.pack(anchor='w', pady=(0, 8))
-        _pregen_status_var = tk.StringVar(value="Idle")
-        ttk.Button(btn_row2, text="⚡ Run Pre-gen",
-                   command=lambda: ui._pregen_ctrl._start_pregen_with_defaults(
-                       status_var=_pregen_status_var)).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(btn_row2, textvariable=_pregen_status_var,
-                 bg=_CONT_BG, fg=_FG_DIM, font=('Arial', 9)).pack(side=tk.LEFT)
-        ttk.Button(btn_row2, text="\U0001f5d1 Clear all PNGs",
-                   command=lambda: (ui._png_mgr._clear_all_png_cache(),
-                                    _populate_tree_async())).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Button(btn_row2, text="↻ Refresh",
-                   command=_populate_tree_async).pack(side=tk.LEFT, padx=(8, 0))
-
-        def _show_cache_section():
-            _show_section('Cache')
-            win.after(10, _populate_tree_async)
-        _nav_buttons['Cache'].config(command=_show_cache_section)
-
-        def _on_resize(_e=None):
-            try:
-                w = max(int(cont_canvas.winfo_width()), 320)
-                _cache_config_help.config(wraplength=max(w - 80, 220))
-            except Exception:
-                pass
-            try:
-                tfw = max(int(tree_frame.winfo_width()), 320)
-                fixed = 50 + 45 + 80 + 55 + 20
-                rem = max(tfw - fixed, 200)
-                tree.column('#0', width=int(rem * 0.55))
-                tree.column('type', width=int(rem * 0.45))
-            except Exception:
-                pass
-
-        win.bind('<Configure>', _on_resize)
-        _show_section('Display')
 
 class ExportOptionsDialog:
     """Export options dialog — returns option dict or None if cancelled."""
@@ -1213,7 +961,7 @@ class ExportOptionsDialog:
                     'title_show_session':      bool(opts.get('title_show_session',      False)),
                 }
                 # Save UI state without touching selections
-                ui._sel_mgr._save_all_state(selection_name=None, silent=True)
+                ui._group_mgr._save_all_state(selection_name=None, silent=True)
             except Exception:
                 pass
 
@@ -1463,3 +1211,278 @@ class SuggestedCCGDialog:
                    command=lambda: _run(range(len(specs)))).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
 
+
+
+# ---------------------------------------------------------------------------
+# Selection dialogs (moved from SelectionPersistenceManager)
+# ---------------------------------------------------------------------------
+
+import os as _os
+import shutil as _shutil
+import datetime as _datetime
+import json as _json
+from tkinter import filedialog as _filedialog
+
+
+class QuickSaveDialog:
+    """Ctrl+S save dialog: name entry + Save / Save as Latest buttons."""
+
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI') -> None:
+        default_name = _datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
+        win = tk.Toplevel(ui.root)
+        win.title('Save selection')
+        win.geometry('360x130')
+        win.transient(ui.root)
+        win.grab_set()
+
+        ttk.Label(win, text='Version name:').pack(pady=(10, 2))
+        name_var = tk.StringVar(value=default_name)
+        entry = ttk.Entry(win, textvariable=name_var, width=32)
+        entry.pack(padx=10)
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=10)
+
+        def _save_named():
+            name = name_var.get().strip() or default_name
+            win.destroy()
+            ui._group_mgr._do_save(name)
+
+        def _save_latest():
+            win.destroy()
+            ui._group_mgr._do_save('latest')
+
+        ttk.Button(btn_frame, text='Save',          command=_save_named).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text='Save as Latest',command=_save_latest).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text='Cancel',        command=win.destroy).pack(side=tk.LEFT, padx=6)
+        entry.bind('<Return>', lambda e: _save_named())
+
+
+class LoadSelectionDialog:
+    """List saved selection versions; user picks one to load."""
+
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI') -> None:
+        versions = ui._group_mgr._list_selection_versions()
+        if not versions:
+            messagebox.showinfo('Load selection',
+                                'No saved selections found for this key.')
+            return
+        win = tk.Toplevel(ui.root)
+        win.title('Load Selection')
+        win.geometry('620x340')
+        win.grab_set()
+
+        ttk.Label(win, text='Select a version to load:',
+                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        sb = ttk.Scrollbar(frame)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        lb = tk.Listbox(frame, yscrollcommand=sb.set, font=('Courier', 9),
+                        selectmode=tk.BROWSE)
+        lb.pack(fill=tk.BOTH, expand=True)
+        sb.config(command=lb.yview)
+        for name, path, saved_at, is_valid, is_history in versions:
+            pfx = '   ' if is_valid else '⚠  '
+            lb.insert(tk.END, f'{pfx}{name:30s}  {saved_at[:19]}')
+            if not is_valid:
+                lb.itemconfig(lb.size() - 1, foreground='#CC4444')
+            elif is_history:
+                lb.itemconfig(lb.size() - 1, foreground='#999999')
+
+        def do_load():
+            sel = lb.curselection()
+            if not sel:
+                return
+            name, path, saved_at, is_valid, is_history = versions[sel[0]]
+            if not is_valid:
+                if not messagebox.askyesno('Corrupted file',
+                                           f"'{name}' appears to be corrupted.\n"
+                                           'Delete it and continue?'):
+                    return
+                try:
+                    _os.remove(path)
+                except OSError as ex:
+                    messagebox.showerror('Delete failed', str(ex))
+                win.destroy()
+                cls.show(ui)
+                return
+            try:
+                ui._group_mgr._load_selection_from_file(path)
+                win.destroy()
+            except Exception as ex:
+                messagebox.showerror('Load selection', f'Failed to load:\n{ex}')
+
+        def do_delete(event=None):
+            sel = lb.curselection()
+            if not sel:
+                idx = lb.nearest(event.y) if event else None
+                if idx is not None:
+                    lb.selection_clear(0, tk.END)
+                    lb.selection_set(idx)
+                    sel = (idx,)
+                else:
+                    return
+            name, path, saved_at, is_valid, is_history = versions[sel[0]]
+            if not messagebox.askyesno('Delete selection',
+                                       f"Move '{name}' to deleted folder?",
+                                       parent=win):
+                return
+            deleted_dir = _os.path.join(ui._sel_save_dir, 'deleted')
+            _os.makedirs(deleted_dir, exist_ok=True)
+            try:
+                _shutil.move(path, _os.path.join(deleted_dir, _os.path.basename(path)))
+            except OSError as ex:
+                messagebox.showerror('Delete failed', str(ex), parent=win)
+                return
+            win.destroy()
+            cls.show(ui)
+
+        def _ctx_menu(event):
+            menu = tk.Menu(win, tearoff=0)
+            menu.add_command(label='Delete', command=lambda: do_delete(event))
+            menu.tk_popup(event.x_root, event.y_root)
+
+        lb.bind('<Button-2>', _ctx_menu)
+        lb.bind('<Button-3>', _ctx_menu)
+        lb.bind('<Double-Button-1>', lambda e: do_load())
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Button(btn_frame, text='Load',   command=do_load).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text='Cancel', command=win.destroy).pack(side=tk.LEFT, padx=6)
+        ttk.Label(btn_frame, text='gray = backup/autosave  ⚠ = corrupted',
+                  font=('Arial', 8), foreground='#888888').pack(side=tk.RIGHT, padx=6)
+
+
+class MissingPairsDialog:
+    """Dialog when loaded selection contains pairs absent from current available set.
+
+    Returns 'partial', 'admit_all', or 'cancel'.
+    """
+
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI', missing: set) -> str:
+        win = tk.Toplevel(ui.root)
+        win.title('Missing Pairs')
+        win.geometry('450x320')
+        win.grab_set()
+        result = {'action': 'cancel'}
+        n = len(missing)
+        ttk.Label(win,
+                  text=f'{n} selected pair(s) are no longer in available pairs:',
+                  font=('Arial', 10, 'bold')).pack(pady=(8, 4))
+        ttk.Label(win,
+                  text='These pairs may have lost significance after CCG/epoch changes.',
+                  font=('Arial', 9), foreground='#666').pack(pady=(0, 4))
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        lb = tk.Listbox(frame, font=('Courier', 9))
+        sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=lb.yview)
+        lb.config(yscrollcommand=sb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        for ref, tgt in sorted(missing):
+            lb.insert(tk.END, f'  ({ref:3d}, {tgt:3d})')
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=8)
+
+        def _set(action):
+            result['action'] = action
+            win.destroy()
+
+        ttk.Button(btn_frame, text='Keep only available', command=lambda: _set('partial')).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text='Admit all missing',   command=lambda: _set('admit_all')).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text='Cancel',              command=lambda: _set('cancel')).pack(side=tk.RIGHT, padx=4)
+        win.protocol('WM_DELETE_WINDOW', lambda: _set('cancel'))
+        win.update_idletasks()
+        win.lift()
+        win.focus_force()
+        win.wait_window()
+        return result['action']
+
+
+# ---------------------------------------------------------------------------
+# Group dialogs (moved from GroupManager)
+# ---------------------------------------------------------------------------
+
+class CreateGroupDialog:
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI') -> None:
+        win = tk.Toplevel(ui.root)
+        win.title('Create group')
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text='Group name:').grid(row=0, column=0, padx=8, pady=(10, 4), sticky='w')
+        name_var = tk.StringVar()
+        entry = ttk.Entry(win, textvariable=name_var, width=26)
+        entry.grid(row=0, column=1, padx=(0, 8), pady=(10, 4))
+        entry.focus_set()
+        special_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text='Create as special group',
+                        variable=special_var).grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky='w')
+        btn_frame = ttk.Frame(win)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(0, 8))
+
+        def _ok():
+            name = name_var.get().strip()
+            if not name:
+                return
+            full = (_SPECIAL_PREFIX + name) if special_var.get() else name
+            if full in ui._sel_data.groups:
+                kind = 'special group' if special_var.get() else 'group'
+                messagebox.showinfo('Create group',
+                                    f"{kind.capitalize()} '{name}' already exists.",
+                                    parent=win)
+                return
+            ui._sel_data.get_group_metadata(full)
+            ui._group_mgr._rebuild_groups_menu()
+            ui.refresh_lists()
+            win.destroy()
+
+        ttk.Button(btn_frame, text='OK',     command=_ok,          width=8).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text='Cancel', command=win.destroy,  width=8).pack(side=tk.LEFT, padx=4)
+        entry.bind('<Return>', lambda e: _ok())
+        win.bind('<Escape>', lambda e: win.destroy())
+
+
+class ExportGroupsDialog:
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI') -> None:
+        if not ui._sel_data.groups:
+            messagebox.showinfo('Export groups', 'No groups to export.')
+            return
+        path = _filedialog.asksaveasfilename(
+            title='Export groups',
+            defaultextension='.json',
+            filetypes=[('JSON files', '*.json')],
+            initialfile='groups_export.json',
+            initialdir=ui._sel_save_dir,
+        )
+        if not path:
+            return
+        ui._sel_data.save(path.removesuffix('.json'))
+        print(f'[groups] exported → {path}')
+
+
+class ImportGroupsDialog:
+    @classmethod
+    def show(cls, ui: 'CCGReviewUI') -> None:
+        path = _filedialog.askopenfilename(
+            title='Import groups',
+            filetypes=[('JSON files', '*.json')],
+            initialdir=ui._sel_save_dir,
+        )
+        if not path:
+            return
+        try:
+            ui._sel_data.load(path.removesuffix('.json'))
+        except (OSError, Exception) as exc:
+            messagebox.showerror('Import groups', f'Failed to read file:\n{exc}')
+            return
+        ui._group_mgr._rebuild_groups_menu()
+        ui.refresh_lists()
+        print(f'[groups] imported from {path}')

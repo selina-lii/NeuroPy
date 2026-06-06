@@ -782,6 +782,30 @@ def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded):
     return clean
 
 
+def load_peak_waveform(ref: int, waveforms, peak_channels, shank_ids,
+                       ch_per_shank: int, discarded):
+    """Extract (t_ms, amp) for neuron *ref*'s peak-channel waveform. Returns (None, None) on failure."""
+    if waveforms is None or peak_channels is None or shank_ids is None:
+        return None, None
+    try:
+        peak_ch = int(peak_channels[ref])
+        rs      = int(shank_ids[ref])
+    except (IndexError, TypeError, ValueError):
+        return None, None
+    discarded_arr = None if discarded is None else np.asarray(discarded, dtype=int)
+    if discarded_arr is not None and discarded_arr.size and np.isin(peak_ch, discarded_arr):
+        return None, None
+    local_idx = peak_ch - ch_per_shank * rs
+    if not (0 <= local_idx < ch_per_shank):
+        return None, None
+    ref_full = _fill_waveform(waveforms[ref], rs, ch_per_shank, discarded_arr)
+    tr = ref_full[local_idx]
+    if not np.any(np.isfinite(tr)):
+        return None, None
+    n = int(tr.shape[0])
+    return np.arange(n, dtype=float) - n // 2, np.asarray(tr, dtype=float)
+
+
 def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
     """Create figure, call plot_ccg_panel, apply post-processing, save PNG."""
     fig = Figure(figsize=(7, 5))
@@ -903,3 +927,12 @@ def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
     fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
                 facecolor=fig.get_facecolor())
     plt.close(fig)
+
+
+def render_ccg_image(ctx: RenderContext, dpi: int = 100) -> 'np.ndarray':
+    """Render CCG panel to a numpy RGBA array (no disk I/O)."""
+    import io as _io
+    buf = _io.BytesIO()
+    render_ccg_png(ctx, buf, dpi=dpi)
+    buf.seek(0)
+    return mpimg.imread(buf)

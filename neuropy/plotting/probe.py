@@ -120,14 +120,14 @@ def _compute_positions(neurons, pg):
 # ---------------------------------------------------------------------------
 
 def _draw_neurons(ax, x_pos, y_pos, peak_channels, shank_ids, neuron_type, n_neurons,
-                  cluster_neurons, pair_entries, deleted_pair_entries,
-                  cfg: ProbeNetworkConfig):
+                  pair_entries, cfg: ProbeNetworkConfig):
     """Scatter-plot neurons, applying focus/hide-unconnected at render time."""
     fn            = cfg.focused_neuron
     fp            = cfg.focused_pair
     nt            = neuron_type
 
     fp_neurons = {fp[0], fp[1]} if fp is not None else set()
+    cluster_neurons = {n for r, t in pair_entries for n in (r, t)}
 
     all_involved: set = set()
     for (ref, tgt), entries in pair_entries.items():
@@ -223,15 +223,17 @@ def _draw_neurons(ax, x_pos, y_pos, peak_channels, shank_ids, neuron_type, n_neu
 
 
 def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
-                      pair_entries, deleted_pair_entries, cfg: ProbeNetworkConfig):
+                      pair_entries, sel_data, cfg: ProbeNetworkConfig):
     """Draw FancyArrowPatch arrows, deleted-pair lines, same-channel arcs, current-pair overlay."""
     fn           = cfg.focused_neuron
     fp           = cfg.focused_pair
     current_pair = cfg.current_pair
 
-    fp_neurons   = {fp[0], fp[1]} if fp is not None else set()
-    show_arrows  = cfg.show_arrows
-    all_pair_set = set(pair_entries.keys())
+    fp_neurons    = {fp[0], fp[1]} if fp is not None else set()
+    show_arrows   = cfg.show_arrows
+    all_pair_set  = set(pair_entries.keys())
+    selected_inds = getattr(sel_data, 'selected_inds', set()) if sel_data is not None else set()
+    deleted_inds  = getattr(sel_data, 'deleted_inds',  set()) if sel_data is not None else set()
 
     for (ref, tgt), entries in pair_entries.items():
         if not show_arrows:
@@ -258,7 +260,7 @@ def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
             ei       = entry['ei']
             is_cur   = entry['is_current']
             in_filt  = entry['in_filter']
-            is_sel   = entry['is_selected']
+            is_sel   = (ref, tgt) in selected_inds
             is_cpair = (is_cur and (ref, tgt) == current_pair)
 
             if not _ct_enabled(ct, cfg):
@@ -297,7 +299,11 @@ def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
                 ))
 
     if show_arrows:
-        for (ref, tgt) in deleted_pair_entries:
+        for (ref, tgt) in deleted_inds:
+            if (ref, tgt) in pair_entries:
+                continue
+            if not (0 <= ref < n_neurons and 0 <= tgt < n_neurons):
+                continue
             if fn is not None and ref != fn and tgt != fn:
                 continue
             if cfg.hidden_shanks and shank_ids is not None:
@@ -305,7 +311,7 @@ def _draw_connections(ax, x_pos, y_pos, peak_channels, shank_ids, n_neurons,
                         and (int(shank_ids[ref]) in cfg.hidden_shanks
                              or int(shank_ids[tgt]) in cfg.hidden_shanks)):
                     continue
-            has_reverse = (tgt, ref) in deleted_pair_entries
+            has_reverse = (tgt, ref) in deleted_inds
             rad = 0.18 if has_reverse else 0.0
             ax.add_patch(FancyArrowPatch(
                 (x_pos[ref], y_pos[ref]), (x_pos[tgt], y_pos[tgt]),
@@ -545,12 +551,10 @@ def plot_probe_network(ax, neurons, ptrs, pg, cfg=None):
                          if ptr is not None and ptr.inds is not None]) \
               if any(p is not None and p.inds is not None for p in ptrs) \
               else np.empty((0, 2), dtype=int)
-    cluster_neurons = set(int(v) for v in np.unique(cur_arr))
-
     _draw_neurons(ax, x_pos, y_pos, peak_ch, shank_ids, neuron_type, n,
-                  cluster_neurons, pair_entries, {}, cfg)
+                  pair_entries, cfg)
     _draw_connections(ax, x_pos, y_pos, peak_ch, shank_ids, n,
-                      pair_entries, {}, cfg)
+                      pair_entries, None, cfg)
     _draw_labels(ax, x_pos, y_pos, pg, shank_ids, n, pair_entries, cfg)
     return ax
 
