@@ -1,34 +1,26 @@
 """
 Jitter UI glue for the CCG Review UI.
 
-JitterWorker     — low-level process-pool / cache management (no Tk).
-JitterController — high-level orchestration; holds a back-ref to CCGReviewUI.
-
-CCGReviewUI creates one JitterController and delegates all jitter operations to it.
+JitterWorker        — low-level process-pool / cache management (no Tk).
+JitterControllerQt  — Qt-native orchestration; uses QTimer + signals.
 """
 from __future__ import annotations
 
+import collections
 import multiprocessing as _mp
 from typing import TYPE_CHECKING
 
-import tkinter as tk
-from tkinter import messagebox
-
 from neuropy.analyses._jitter_worker import jitter_worker
 from neuropy.analyses.jitter import JitterTask
-from neuropy.ui.utils import BackgroundTaskRunner, LRUCache
+from neuropy.ui.ui_common import BackgroundTaskRunner, LRUCache
 
 if TYPE_CHECKING:
-    from neuropy.ui.ccg_ui import CCGReviewUI
+    from neuropy.ui.app_state import AppState
 
 # maximum queued jitter tasks (running + pending)
 _MAX_JITTER_QUEUE = 50
 
 _ALL_SEGS = "All"
-
-# ---------------------------------------------------------------------------
-# JitterWorker
-# ---------------------------------------------------------------------------
 
 class JitterWorker:
     """Manages on-demand jitter computation queue, process lifecycle, and in-memory cache.
@@ -84,424 +76,313 @@ class JitterWorker:
             self._cache.pop((ref, tgt, res_key, seg_key))
 
 
-# ---------------------------------------------------------------------------
-# JitterController
-# ---------------------------------------------------------------------------
+from pyqtgraph.Qt.QtCore import QObject, QTimer, Signal as _Signal
+from pyqtgraph.Qt.QtWidgets import QMessageBox
 
-class JitterController:
-    """Orchestrates jitter computation lifecycle for CCGReviewUI.
+if TYPE_CHECKING:
+    from neuropy.ui.app_state import AppState
 
-    CCGReviewUI creates one instance and delegates all jitter operations here.
+
+class JitterControllerQt(QObject):
+    """Qt-native jitter orchestration.
+
+    Drop-in replacement for JitterController that owns no tkinter objects.
+    Uses QTimer polling and emits signals so panels can react without
+    being directly coupled to the controller.
+
+    Signals
+    -------
+    jitter_completed(ref, tgt, res_key, seg_key)
+        Emitted after a successful jitter run.  Panels should call
+        request_render() when they receive this if the pair matches.
+    jitter_failed(msg)
+        Emitted on worker error.
+    status_changed(text)
+        Button-label text: empty string means "idle / Run Jitter".
+    colors_changed(pair_or_None)
+        Request list-color refresh.  None = all rows; (ref,tgt) = one row.
     """
 
-    def __init__(self, ui: 'CCGReviewUI'):
-        self._ui = ui
+    jitter_completed = _Signal(int, int, str, object)
+    jitter_failed    = _Signal(str)
+    status_changed   = _Signal(str)
+    colors_changed   = _Signal(object)
+
+    def __init__(self, nav: 'AppState', cd):
+        super().__init__()
+        self._nav = nav
         self.jitter_worker = JitterWorker()
-        self._poll_id = None  # root.after() id — Tk, not shared
+        self._timer = QTimer()
+        self._timer.setInterval(300)
+        self._timer.timeout.connect(self._poll)
 
-    # ------------------------------------------------------------------
-    # Task scheduling
-    # ------------------------------------------------------------------
+    @property
+    def _cd(self):
+        """Live current dataset. Always nav.cd so session/project switches are tracked
+        (the controller is built once; nav.set_cd swaps the dataset underneath it)."""
+        return self._nav.cd
 
-    def on_run_jitter(self):
-        ui = self._ui
-        if ui.current_pair_idx >= len(ui.all_inds):
+    def run_jitter(self, ref: int, tgt: int, njitter: int,
+                   run_lo: bool = True, run_hi: bool = False):
+        """Enqueue jitter for (ref, tgt) at current segment and start polling."""
+        nav = self._nav
+        if nav.neurons is None:
+            QMessageBox.critical(None, "Jitter", "No neuron data attached.")
             return
-        if ui.neurons is None:
-            messagebox.showerror("Jitter", "No neuron data attached.")
-            return
-        inds = ui.all_inds[ui.current_pair_idx]
-        ref, tgt = int(inds[0]), int(inds[1])
-        panel = ui.center_container.jitter_panel
-        njitter = int(panel._njitter.get())
-        run_lo  = bool(panel._jitter_run_lo.get())
-        run_hi  = bool(panel._jitter_run_hi.get())
-        if not run_lo and not run_hi:
-            messagebox.showwarning("Jitter", "Select at least one resolution (lo and/or hi).")
-            return
+
         total = ((1 if self.jitter_worker.is_running() else 0)
                  + self.jitter_worker._runner.pending_count())
         if total >= _MAX_JITTER_QUEUE:
-            messagebox.showwarning(
-                "Jitter", f"Queue full ({total}/{_MAX_JITTER_QUEUE}).\n"
-                          "Wait for running jitters to complete.")
+            QMessageBox.warning(None, "Jitter",
+                                f"Queue full ({total}/{_MAX_JITTER_QUEUE}).")
             return
+
         seg_arg = self.seg()
-        if seg_arg is not None:
-            et = ui.ccg_ptr.edge_times
+        et = self._cd.edge_times_for(nav.key)
+        if seg_arg is not None and et is not None:
             jitter_t0 = float(et.iloc[seg_arg]['start'])
             jitter_t1 = float(et.iloc[seg_arg]['stop'])
         else:
-            jitter_t0, jitter_t1 = None, None
-        # In Any mode the current pair may belong to a different session than
-        # ui.key; look up the pair's session key from the handle list.
-        nd_key = ui.key.nd()
-        if getattr(ui, '_session_any_mode', False):
-            hl = getattr(ui, '_any_pair_handle_list', None) or []
-            if ui.current_pair_idx < len(hl):
-                nd_key = hl[ui.current_pair_idx][0].nd()
-        lo_ccg = ui.cd.ccg.get(nd_key) if hasattr(ui.cd, 'ccg') else ui.ccg_data
-        hi_ccg = ui.cd._ccg_highres.get(nd_key) if hasattr(ui.cd, '_ccg_highres') else None
-        enqueued_res_keys = []
-        for res_key, ccg_data, should_run in [('lo', lo_ccg, run_lo), ('hi', hi_ccg, run_hi)]:
+            jitter_t0 = jitter_t1 = None
+
+        nd_key = nav.key.nd()
+        if nav.session_any_mode:
+            hl = nav.cross_session_handles or []
+            idx = nav.current_pair_idx
+            if idx < len(hl):
+                nd_key = hl[idx][0].nd()
+
+        lo_ccg = (self._cd.ccg_for(nd_key, 'lowres') if hasattr(self._cd, 'ccg_for')
+                  else self._cd.ccg.get(nd_key)) or nav.ccg_data
+        hi_ccg = self._cd.ccg_for(nd_key, 'highres') if hasattr(self._cd, 'ccg_for') else None
+
+        for res_key, ccg_data, should_run in [('lo', lo_ccg, run_lo),
+                                               ('hi', hi_ccg, run_hi)]:
             if not should_run:
                 continue
             if ccg_data is None:
                 if res_key == 'hi':
-                    messagebox.showwarning(
-                        "Jitter", "High-res CCG not loaded; cannot run hi jitter.")
+                    QMessageBox.warning(None, "Jitter",
+                                        "High-res CCG not loaded; cannot run hi jitter.")
                 continue
             n = ccg_data.ccg.shape[-1]
-            bin_size_eff = ccg_data.conf.duration / (n - 1) if n > 1 else ccg_data.conf.bin_size
-            self.jitter_worker.enqueue('jitter', ref, tgt, njitter, res_key, bin_size_eff,
+            bin_size_eff = (ccg_data.conf.duration / (n - 1)
+                            if n > 1 else ccg_data.conf.bin_size)
+            self.jitter_worker.enqueue('jitter', ref, tgt, njitter,
+                                       res_key, bin_size_eff,
                                        seg_arg, jitter_t0, jitter_t1, nd_key)
-            enqueued_res_keys.append(res_key)
-        ui._dbg_log("H3", "jitter.py:on_run_jitter:enqueue", "Enqueued jitter task(s)", {
-            "pair": [int(ref), int(tgt)],
-            "res_keys": enqueued_res_keys,
-            "seg_arg": seg_arg,
-            "njitter": int(njitter),
-            "current_segment": ui.current_segment,
-        })
-        self.update_btn_text()
-        self.start_next()
 
-    def is_task_running(self) -> bool:
-        return self.jitter_worker.is_running()
+        self._update_status()
+        self._start_next()
 
-    def start_next(self):
-        ui = self._ui
+    def _start_next(self):
+        nav = self._nav
         if not self.jitter_worker._runner.pending_count():
-            self.update_btn_text()
+            self._update_status()
             return
         task = self.jitter_worker._runner._pending[0]
-        nd_key = task.nd_key if task.nd_key is not None else ui.key.nd()
-        ccg_data_lo = (ui.cd.ccg.get(nd_key)
-                       if hasattr(ui.cd, 'ccg') else ui.ccg_data)
-        ccg_data_hi = (ui.cd._ccg_highres.get(nd_key)
-                       if hasattr(ui.cd, '_ccg_highres') else None)
+        nd_key = task.nd_key if task.nd_key is not None else nav.key.nd()
+        lo = (self._cd.ccg_for(nd_key, 'lowres') if hasattr(self._cd, 'ccg_for')
+              else self._cd.ccg.get(nd_key)) or nav.ccg_data
+        hi = self._cd.ccg_for(nd_key, 'highres') if hasattr(self._cd, 'ccg_for') else None
         started = self.jitter_worker.start_next(
-            ui.key, ui.neurons, ccg_data_lo, ccg_data_hi,
-            ui.ccg_ptr.edge_times)
-        self.update_btn_text()
-        if started and self._poll_id is None:
-            self._poll_id = ui.root.after(300, self.poll)
+            nav.key, nav.neurons, lo, hi,
+            self._cd.edge_times_for(nav.key))
+        self._update_status()
+        if started and not self._timer.isActive():
+            self._timer.start()
 
-    def _set_jitter_btn(self, text=''):
-        self._ui.center_container.jitter_panel._jitter_btn_text.set(text or 'Run Jitter')
-
-    def update_btn_text(self):
-        ui = self._ui
-        running = self.jitter_worker.is_running()
-        pending = self.jitter_worker._runner._pending
-        queued = len(pending)
-        if running and pending:
-            task = pending[0]
-            ref, tgt = task.ref, task.tgt
-            seg_arg = task.seg_arg
-            if seg_arg is None:
-                seg_name = _ALL_SEGS
-            else:
-                try:
-                    seg_name = str(ui.ccg_ptr.segment_names[int(seg_arg)])
-                except Exception:
-                    seg_name = f"seg{seg_arg}"
-            label = f"Jitter [{ref},{tgt}] {seg_name}…"
-            suffix = f" +{queued - 1} queued" if queued > 1 else ''
-            self._set_jitter_btn(f"{label}{suffix}")
-        else:
-            self._set_jitter_btn()
-
-    def poll(self):
-        ui = self._ui
+    def _poll(self):
         if self.jitter_worker.is_running():
-            self._poll_id = ui.root.after(300, self.poll)
             return
-        self._poll_id = None
+        self._timer.stop()
         completed, result = self.jitter_worker._runner.poll()
         if result is not None and not result.get('error') and result.get('j_avg') is not None:
-            res_key = completed.res_key if completed is not None else 'lo'
-            seg_arg = completed.seg_arg if completed is not None else None
-            cache_key = (result['ref'], result['tgt'], res_key, seg_arg)
-            jitter_val = (
-                result.get('j_avg'),
-                result.get('j_pval'),
-                result.get('j_pval_bins'),
-                result.get('j_lo'),
-                result.get('j_hi'),
-            )
+            res_key  = completed.res_key  if completed is not None else 'lo'
+            seg_key  = completed.seg_arg  if completed is not None else None
+            ref, tgt = int(result['ref']), int(result['tgt'])
+            cache_key = (ref, tgt, res_key, seg_key)
+            jitter_val = (result.get('j_avg'), result.get('j_pval'),
+                          result.get('j_pval_bins'), result.get('j_lo'), result.get('j_hi'))
             self.jitter_worker._cache.put(cache_key, jitter_val)
-            nd_key = ui.key.nd()
-            if hasattr(ui.cd, '_jitter_results'):
-                if nd_key not in ui.cd._jitter_results:
-                    ui.cd._jitter_results[nd_key] = {}
-                ui.cd._jitter_results[nd_key][cache_key] = jitter_val
-            completed_pair = (result['ref'], result['tgt'])
-            self.jitter_worker.unviewed.add(completed_pair)
-            self.apply_list_colors(pair=completed_pair)
-            if self.mark_viewed():
-                ui._update_jitter_sig_buttons()
-                ui._plot_mgr.update_plot()
-            ui._cs_mgr._update_conn_str_metric_availability()
-            ui.root.bell()
+
+            nd_key = self._nav.key.nd()
+            if hasattr(self._cd, '_jitter_results'):
+                self._cd._jitter_results.setdefault(nd_key, {})[cache_key] = jitter_val
+
+            self.jitter_worker.unviewed.add((ref, tgt))
+            self.jitter_completed.emit(ref, tgt, res_key, seg_key)
+            self.colors_changed.emit((ref, tgt))
         elif result is not None and result.get('error'):
-            messagebox.showerror("Jitter", f"Jitter failed:\n{result['error']}")
-        self.start_next()
+            self.jitter_failed.emit(str(result['error']))
+        self._start_next()
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    def on_save(self):
-        if not hasattr(self._ui.cd, 'save_jitter'):
-            messagebox.showerror(
-                "Save Jitter",
-                "CCGDataset does not support jitter persistence.")
-            return
-        try:
-            self._ui.cd.save_jitter()
-            total = sum(len(v) for v in self._ui.cd._jitter_results.values())
-            messagebox.showinfo("Save Jitter", f"Saved {total} pair(s).")
-        except Exception as exc:
-            messagebox.showerror("Save Jitter", f"Save failed:\n{exc}")
 
     def load_from_cd(self):
-        ui = self._ui
-        if not hasattr(ui.cd, '_jitter_results'):
+        nav = self._nav
+        if not hasattr(self._cd, '_jitter_results'):
             return
-        nd_key = ui.key.nd()
-        pairs = ui.cd._jitter_results.get(nd_key, {})
-        for cache_key, val in pairs.items():
+        nd_key = nav.key.nd()
+        for cache_key, val in self._cd._jitter_results.get(nd_key, {}).items():
             if len(cache_key) == 3:
                 cache_key = cache_key + (None,)
             self.jitter_worker._cache.put(cache_key, val)
-        if pairs:
-            ui._update_jitter_sig_buttons()
-            self.apply_list_colors()
+        self.colors_changed.emit(None)
 
-    # ------------------------------------------------------------------
-    # Segment / cache helpers
-    # ------------------------------------------------------------------
+    def on_save(self):
+        if not hasattr(self._cd, 'save_jitter'):
+            QMessageBox.critical(None, "Save Jitter",
+                                 "CCGDataset does not support jitter persistence.")
+            return
+        try:
+            self._cd.save_jitter()
+            total = sum(len(v) for v in self._cd._jitter_results.values())
+            QMessageBox.information(None, "Save Jitter", f"Saved {total} pair(s).")
+        except Exception as exc:
+            QMessageBox.critical(None, "Save Jitter", f"Save failed:\n{exc}")
+
 
     def seg(self, seg=None) -> int | None:
-        """Return segment key for jitter cache: None for All/custom, int for real segments."""
+        """Segment key for jitter cache: None for All/custom, int for real segments."""
+        nav = self._nav
         if seg is None:
-            seg = self._ui.current_segment
+            seg = nav.current_segment
         if isinstance(seg, str):
-            if self._ui._custom_mgr._is_custom_segment(seg):
+            if seg == _ALL_SEGS:
                 return None
-            idx = self._ui._seg_idx(seg)
-            return None if idx == self._ui.n_segments else idx
-        if seg == self._ui.n_segments or self._ui._custom_mgr._is_custom_segment(seg):
-            return None
-        return int(seg)
+            names = self._cd.segment_names_for(nav.key)
+            return names.index(seg) if seg in names else None  # custom → None
+        n = nav.n_segments
+        return None if seg >= n else int(seg)
 
-    def on_clear(self):
-        ui = self._ui
-        if ui.current_pair_idx >= len(ui.all_inds):
-            return
-        inds = ui.all_inds[ui.current_pair_idx]
-        ref, tgt = int(inds[0]), int(inds[1])
-        segk = self.seg()
+    def clear_queue(self) -> int:
+        """Remove all pending (non-running) tasks. Returns count removed."""
+        worker = self.jitter_worker
+        if worker.is_running() and worker._runner._pending:
+            pending_to_clear = list(worker._runner._pending[1:])
+        else:
+            pending_to_clear = list(worker._runner._pending)
+        n = len(pending_to_clear)
+        worker._runner._pending.clear()
+        return n
+
+    def clear(self, ref: int, tgt: int):
+        seg_key = self.seg()
         for rk in ('lo', 'hi'):
-            self.jitter_worker._cache.pop((ref, tgt, rk, segk), None)
-        if hasattr(ui.cd, '_jitter_results'):
-            nd_key = ui.key.nd()
-            if nd_key in ui.cd._jitter_results:
-                for rk in ('lo', 'hi'):
-                    ui.cd._jitter_results[nd_key].pop((ref, tgt, rk, segk), None)
+            self.jitter_worker._cache.pop((ref, tgt, rk, seg_key), None)
+        nd_key = self._nav.key.nd()
+        if hasattr(self._cd, '_jitter_results'):
+            res = self._cd._jitter_results.get(nd_key, {})
+            for rk in ('lo', 'hi'):
+                res.pop((ref, tgt, rk, seg_key), None)
         self.jitter_worker.unviewed.discard((ref, tgt))
-        ui._update_jitter_sig_buttons()
-        self.apply_list_colors()
-        ui._plot_mgr.update_plot()
+        self.colors_changed.emit((ref, tgt))
 
-    # ------------------------------------------------------------------
-    # List coloring
-    # ------------------------------------------------------------------
+    def apply_list_colors(self):
+        """Refresh pair-list jitter highlight colors (no-op if lists handle via signal)."""
+        self.colors_changed.emit(None)
 
-    def pair_coords(self, inds) -> tuple[int, int] | None:
-        """Return (ref, tgt) for jitter coloring from a selection triple or pair."""
-        if not isinstance(inds, tuple) or len(inds) < 2:
-            return None
-        try:
-            if len(inds) >= 3 and isinstance(inds[0], str):
-                return int(inds[1]), int(inds[2])
-            return int(inds[0]), int(inds[1])
-        except (TypeError, ValueError):
-            return None
-
-    def apply_list_colors(self, pair=None):
-        """Color pair list items based on jitter cache state."""
-        ui = self._ui
-        jitter_cache = self.jitter_worker._cache
-        jitter_unviewed = self.jitter_worker.unviewed
-
-        def _apply_row(listbox, idx, ref, tgt):
-            p = (int(ref), int(tgt))
-            if pair is not None and p != pair:
+    def mark_viewed(self, ref: int = None, tgt: int = None) -> bool:
+        """Mark pair as viewed. Returns True if newly marked."""
+        if ref is None or tgt is None:
+            inds = self._nav.current_pair_inds
+            if inds is None:
                 return False
-            has_any_res = any(k[0] == p[0] and k[1] == p[1] for k in jitter_cache)
-            try:
-                if p in jitter_unviewed:
-                    listbox.itemconfig(idx,
-                                       background=JitterWorker.UNVIEWED_BG,
-                                       foreground=JitterWorker.UNVIEWED_FG)
-                elif has_any_res:
-                    listbox.itemconfig(idx,
-                                       background=JitterWorker.VIEWED_BG,
-                                       foreground=JitterWorker.VIEWED_FG)
-                else:
-                    listbox.itemconfig(idx, background='', foreground='')
-            except tk.TclError:
-                return False
-            return True
-
-        if not hasattr(ui, 'unselected_list'):
-            return
-        if getattr(ui, '_session_any_mode', False):
-            try:
-                n_items = int(ui.selected_list.size())
-            except Exception:
-                n_items = 0
-            _lp = getattr(getattr(ui, 'left_container', None), 'left_panel', None)
-            sel_map = getattr(_lp, '_sel_list_pairs', None) or []
-            for idx, entry in enumerate(sel_map):
-                if idx >= n_items or entry is None:
-                    continue
-                rt = self.pair_coords(entry)
-                if rt is None:
-                    continue
-                if _apply_row(ui.selected_list, idx, *rt) and pair is not None:
-                    ui._group_mgr._reapply_bookmark_list_styles()
-                    return
-            ui._group_mgr._reapply_bookmark_list_styles()
-            return
-        for listbox, inds_set in [(ui.unselected_list, ui.unselected_inds),
-                                  (ui.selected_list, ui.selected_inds)]:
-            sorted_items = sorted(inds_set)
-            try:
-                n_items = int(listbox.size())
-            except Exception:
-                n_items = 0
-            for idx, inds in enumerate(sorted_items):
-                if idx >= n_items:
-                    break
-                rt = self.pair_coords(inds)
-                if rt is None:
-                    continue
-                if _apply_row(listbox, idx, *rt) and pair is not None:
-                    ui._group_mgr._reapply_bookmark_list_styles()
-                    return
-        ui._group_mgr._reapply_bookmark_list_styles()
-
-    def mark_viewed(self) -> bool:
-        """Mark current pair's jitter as viewed; auto-enable overlay if available.
-
-        Returns True if a pair was newly marked as viewed.
-        Does NOT call update_plot() — the caller is responsible for that.
-        """
-        ui = self._ui
-        if ui.current_pair_idx >= len(ui.all_inds):
-            return False
-        inds = ui.all_inds[ui.current_pair_idx]
-        pair = (int(inds[0]), int(inds[1]))
+            ref, tgt = int(inds[0]), int(inds[1])
+        pair = (ref, tgt)
         if pair in self.jitter_worker.unviewed:
             self.jitter_worker.unviewed.discard(pair)
-            self.apply_list_colors(pair=pair)
-            seg_key = self.seg()
-            if self.jitter_worker._cache.get(
-                    (pair[0], pair[1], 'lo', seg_key)) is not None:
-                ui.center_container.baseline_panel._conn_str_method.set('jitter')
-                ui.center_container.baseline_panel._sig_jitter_pc.set(True)
-                ui.center_container.correlogram_panel._line_jitter.set(False)
+            self.colors_changed.emit(pair)
             return True
         return False
 
-class JitterQueueDialog:
-    """Dialog showing all queued and running jitter/custom-CCG tasks."""
+    def has_result(self, ref: int, tgt: int, res_key: str = 'lo') -> bool:
+        seg_key = self.seg()
+        return self.jitter_worker._cache.get((ref, tgt, res_key, seg_key)) is not None
 
-    @classmethod
-    def show(cls, ui: "CCGReviewUI") -> None:
-        cls(ui).win.wait_window()
+    def get_result(self, ref: int, tgt: int, res_key: str = 'lo'):
+        """Return cached jitter tuple or None."""
+        seg_key = self.seg()
+        return self.jitter_worker._cache.get((ref, tgt, res_key, seg_key))
 
-    def __init__(self, ui: "CCGReviewUI"):
-        self._ui = ui
-        self.win = tk.Toplevel(ui.root)
-        self.win.title("Jitter Queue")
-        self.win.geometry("460x340")
-        self._build()
+    def _update_status(self):
+        running = self.jitter_worker.is_running()
+        pending = self.jitter_worker._runner._pending
+        if running and pending:
+            task = pending[0]
+            nav = self._nav
+            seg_name = _ALL_SEGS
+            if task.seg_arg is not None:
+                try:
+                    seg_name = str(self._cd.segment_names_for(nav.key)[int(task.seg_arg)])
+                except Exception:
+                    seg_name = f"seg{task.seg_arg}"
+            n_extra = len(pending) - 1
+            suffix = f" +{n_extra} queued" if n_extra > 0 else ''
+            self.status_changed.emit(
+                f"Jitter [{task.ref},{task.tgt}] {seg_name}…{suffix}")
+        else:
+            self.status_changed.emit('')
 
-    def _build(self):
-        ui = self._ui
-        win = self.win
-        from tkinter import ttk
-        frame = ttk.Frame(win, padding=8)
-        frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="Queued tasks",
-                  font=('TkDefaultFont', 11, 'bold')).pack(anchor='w')
-        list_frame = ttk.Frame(frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
-        lb = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
-                        selectmode=tk.EXTENDED, font=('TkFixedFont', 10))
-        scrollbar.config(command=lb.yview)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        def _refresh():
-            lb.delete(0, tk.END)
-            for i, task in enumerate(ui._jitter_pending):
-                seg_s = f" seg{task.seg_arg}" if task.seg_arg is not None else ""
-                status = "▶ RUNNING" if i == 0 and ui.jitter_controller.is_task_running() else "  queued"
-                lb.insert(tk.END, f"{status}  jitter [{task.ref},{task.tgt}] n={task.njitter} {task.res_key}{seg_s}")
-            for i, task in enumerate(ui._custom_ccg_pending):
-                name = (task.get('name') if isinstance(task, dict) else task[3])
-                status = "▶ RUNNING" if i == 0 and ui._custom_mgr.worker._runner.is_running() else "  queued"
-                lb.insert(tk.END, f"{status}  custom CCG '{name}'")
-            if lb.size() == 0:
-                lb.insert(tk.END, "  (empty)")
 
-        def _delete_selected():
-            sel = lb.curselection()
-            if not sel:
-                return
-            n_jitter = len(ui._jitter_pending)
-            running_jitter = ui.jitter_controller.is_task_running()
-            running_ccg = ui._custom_mgr.worker._runner.is_running()
-            jitter_to_remove = []
-            ccg_to_remove = []
-            for s in sel:
-                if s < n_jitter:
-                    if s == 0 and running_jitter:
-                        continue
-                    jitter_to_remove.append(s)
-                else:
-                    ccg_idx = s - n_jitter
-                    if ccg_idx == 0 and running_ccg:
-                        continue
-                    ccg_to_remove.append(ccg_idx)
-            if jitter_to_remove:
-                pending = list(ui._jitter_pending)
-                for idx in sorted(jitter_to_remove, reverse=True):
-                    pending.pop(idx)
-                ui._jitter_pending.clear()
-                ui._jitter_pending.extend(pending)
-                ui.jitter_controller.update_btn_text()
-            if ccg_to_remove:
-                pending = list(ui._custom_ccg_pending)
-                for idx in sorted(ccg_to_remove, reverse=True):
-                    removed = pending.pop(idx)
-                    ui._on_split_batch_task_done(removed)
-                ui._custom_ccg_pending.clear()
-                ui._custom_ccg_pending.extend(pending)
-            _refresh()
+from pyqtgraph.Qt.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton)
 
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(btn_frame, text="Delete selected",
-                   command=_delete_selected).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Refresh",
-                   command=_refresh).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text="Close",
-                   command=win.destroy).pack(side=tk.RIGHT)
-        _refresh()
+class JitterQueueDialog(QDialog):
+    """Shows pending jitter tasks; allows deleting from queue."""
+
+    def __init__(self, jitter_ctrl, parent=None):
+        super().__init__(parent)
+        self._ctrl = jitter_ctrl
+        self.setWindowTitle("Jitter Queue")
+        self.resize(420, 280)
+        layout = QVBoxLayout(self)
+
+        self._list = QListWidget()
+        layout.addWidget(self._list)
+
+        row = QHBoxLayout()
+        del_btn = QPushButton("Delete selected")
+        del_btn.clicked.connect(self._delete_selected)
+        ref_btn = QPushButton("Refresh")
+        ref_btn.clicked.connect(self._refresh)
+        cls_btn = QPushButton("Close")
+        cls_btn.clicked.connect(self.accept)
+        row.addWidget(del_btn); row.addWidget(ref_btn)
+        row.addStretch(); row.addWidget(cls_btn)
+        layout.addLayout(row)
+        self._refresh()
+
+    def _refresh(self):
+        self._list.clear()
+        w = self._ctrl.jitter_worker
+        pending = list(w._runner._pending)
+        if w.is_running() and pending:
+            self._list.addItem(f"[running] {pending[0]}")
+            for t in pending[1:]:
+                self._list.addItem(str(t))
+        else:
+            for t in pending:
+                self._list.addItem(str(t))
+        if self._list.count() == 0:
+            self._list.addItem("(queue empty)")
+
+    def _delete_selected(self):
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        w = self._ctrl.jitter_worker
+        pending = w._runner._pending
+        # row 0 = running task if running — skip it
+        offset = 1 if (w.is_running() and pending) else 0
+        del_idx = row - offset
+        if 0 <= del_idx < len(pending) - (1 if w.is_running() else 0):
+            lst = list(pending)
+            if w.is_running():
+                lst = [lst[0]] + lst[1:del_idx + 1] + lst[del_idx + 2:]
+            else:
+                lst = lst[:del_idx] + lst[del_idx + 1:]
+            pending.clear()
+            pending.extend(lst)
+        self._refresh()

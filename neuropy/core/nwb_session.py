@@ -5,7 +5,8 @@ Usage::
     from neuropy.core.nwb_session import NWBSession
     from neuropy.analyses.neurons_dataset import NeuronsDataset, NeuronsDatasetConfig
     from neuropy.analyses.ms_connectivity import CCGDataset, CCGConfig
-    from neuropy.ui.ccg_ui import launch_ccg_review
+    from neuropy.ui.ccg_review import CCGReviewUI as _CCGReviewUI
+def launch_ccg_review(cd, key=None): return _CCGReviewUI.launch(cd, key)
 
     sess = [NWBSession("recording.nwb")]
     nd = NeuronsDataset(sess, NeuronsDatasetConfig(epochs=['pre', 'maze', 'post']))

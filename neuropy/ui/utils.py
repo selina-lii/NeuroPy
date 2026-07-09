@@ -1,602 +1,752 @@
-"""Shared UI utilities for NeuroPy.
+"""Reusable Qt widgets shared across NeuroPy UI panels.
 
-GenericUI            — base class: undo/redo stack, Tk window setup, heartbeat.
-BackgroundTaskRunner — single background process/thread + Tk polling queue.
-LRUCache             — generic bounded LRU cache (max_size=1 = single-slot invalidation).
-UITheme              — frozen dark/light color theme; set on GenericUI as self.theme.
-WrapFrame            — tk.Frame that auto-wraps children horizontally like word-wrap.
-ArrowScroller        — ◀/▶ arrow scroll nav for chip rows / plot columns.
-CollapseState        — tracks which group headers are collapsed; UI-package independent.
-group_header_label   — formats a collapsible group header string.
+Chip buttons, cycle buttons, flow layout, collapsible sections — all panels
+import from here so identical widgets don't diverge across files.
+
+Also: CheckboxVar / LabelVar / LineEditVar — tk var .get()/.set() shims for Qt widgets.
+PairListWidget — QListWidget with tkinter-compat helpers and key forwarding.
 """
 from __future__ import annotations
 
-import collections
-import dataclasses
-import datetime
-import multiprocessing as _mp
-import os
-import threading
-import tkinter as tk
-from tkinter import ttk
-from typing import Callable, Generic, TypeVar
+from typing import TYPE_CHECKING
 
-K = TypeVar('K')
-V = TypeVar('V')
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt.QtCore import Qt
+from pyqtgraph.Qt.QtGui import QColor, QBrush, QFont
+from pyqtgraph.Qt.QtCore import Signal
+from pyqtgraph.Qt.QtWidgets import (
+    QApplication, QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
+    QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QSizePolicy, QSlider,
+    QToolButton, QVBoxLayout, QWidget, QFrame,
+    QSplitter, QStackedWidget,
+)
+from neuropy.ui.ui_common import qt_dark_mode
 
-# Sentinel constants
-_SEPARATOR_ROW = "__separator_row__"
-_SPECIAL_PREFIX = "__special_"
-
-is_separator_row = lambda e: isinstance(e, tuple) and bool(e) and e[0] == _SEPARATOR_ROW
-is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
-
-def _admitted_pairs(sel_data) -> set[tuple]:
-    return {p for p, t in sel_data._pair_tags.items() if t.get('admitted')}
-
-def _admit_pair(sel_data, pair: tuple) -> None:
-    sel_data._pair_tags.setdefault(pair, {})['admitted'] = True
+if TYPE_CHECKING:
+    from neuropy.ui.pair_selection_panel import LeftPanel
 
 
-@dataclasses.dataclass(frozen=True)
-class UITheme:
-    """Frozen dark/light color palette. Access via ui.theme.*"""
-    dark: bool
-    fg: str        # main text
-    fg_muted: str  # secondary text
-    fg_header: str # headers
-    bg: str        # background
-    dim: str       # inactive arrows / labels
-    active: str    # active arrows / labels
 
-    @classmethod
-    def from_dark(cls, dark: bool) -> 'UITheme':
-        if dark:
-            return cls(True,  '#dddddd', '#aaaaaa', '#ffffff', '#1e1e1e', '#777777', '#dddddd')
-        return cls(False, '#000000', '#666666', '#333333', 'white',   '#cccccc', '#333333')
+class CheckboxVar:
+    """Wrap QCheckBox with .get()/.set() like tk.BooleanVar."""
+
+    def __init__(self, cb: 'QCheckBox'):
+        self._cb = cb
+
+    def get(self) -> bool:
+        return self._cb.isChecked()
+
+    def set(self, v: bool):
+        self._cb.setChecked(bool(v))
 
 
-class WrapFrame(tk.Frame):
-    """tk.Frame that auto-wraps child widgets horizontally (like word-wrap).
+class LabelVar:
+    """Wrap QLabel with .get()/.set() like tk.StringVar."""
 
-    Usage: create, pack/grid the frame, then call .add(widget) for each child.
+    def __init__(self, label: 'QLabel'):
+        self._lbl = label
+
+    def get(self) -> str:
+        return self._lbl.text()
+
+    def set(self, v: str):
+        self._lbl.setText(v)
+
+
+class LineEditVar:
+    """Wrap QLineEdit with .get()/.set() like tk.StringVar."""
+
+    def __init__(self, entry: 'QLineEdit'):
+        self._entry = entry
+
+    def get(self) -> str:
+        return self._entry.text()
+
+    def set(self, v: str):
+        self._entry.setText(v)
+
+    def trace_add(self, *_):
+        pass   # connect to QLineEdit.textChanged directly
+
+
+
+class PairListWidget(QListWidget):
+    """QListWidget with tkinter-compat helpers and key forwarding to LeftPanel."""
+
+    def __init__(self, panel: 'LeftPanel', parent: QWidget = None):
+        super().__init__(parent)
+        self._panel = panel
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        _mf = QFont()
+        _mf.setStyleHint(QFont.StyleHint.Monospace)
+        _mf.setPointSize(9)
+        self.setFont(_mf)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setUniformItemSizes(True)
+        if qt_dark_mode():
+            self.setStyleSheet(
+                "QListWidget { color: #ffffff; background: #1e1e1e; }"
+                "QListWidget::item:selected { background: #3366cc; color: #ffffff; }"
+            )
+
+    def curselection(self) -> tuple:
+        return tuple(sorted(self.row(it) for it in self.selectedItems()))
+
+    def size(self) -> int:
+        return self.count()
+
+    def get(self, i: int) -> str:
+        it = self.item(i)
+        return it.text() if it else ''
+
+    def yview(self) -> tuple:
+        sb = self.verticalScrollBar()
+        frac = sb.value() / sb.maximum() if sb.maximum() else 0.0
+        return (frac, frac)
+
+    def yview_moveto(self, frac: float):
+        sb = self.verticalScrollBar()
+        sb.setValue(int(frac * sb.maximum()))
+
+    def see(self, i: int):
+        it = self.item(i)
+        if it:
+            self.scrollToItem(it)
+
+    def selection_clear(self, _a=None, _b=None):
+        self.clearSelection()
+
+    def selection_set(self, i: int):
+        it = self.item(i)
+        if it:
+            it.setSelected(True)
+
+    def activate(self, i: int):
+        it = self.item(i)
+        if it:
+            self.setCurrentItem(it)
+
+    def nearest(self, y: int) -> int:
+        it = self.itemAt(0, y)
+        return self.row(it) if it else max(0, self.count() - 1)
+
+    def selection_includes(self, i: int) -> bool:
+        it = self.item(i)
+        return it is not None and it.isSelected()
+
+    def itemconfig(self, i: int, **kw):
+        it = self.item(i)
+        if it is None:
+            return
+        bg = kw.get('background') or kw.get('selectbackground')
+        fg = kw.get('foreground') or kw.get('selectforeground')
+        if bg:
+            it.setBackground(QBrush(QColor(bg)))
+        elif 'background' in kw:
+            it.setBackground(QBrush())
+        if fg:
+            it.setForeground(QBrush(QColor(fg)))
+        elif 'foreground' in kw:
+            it.setForeground(QBrush())
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()   # per-event modifiers: reliable on macOS, unlike the global state
+        ctrl = bool(mods & Qt.ControlModifier)
+        cmd = bool(mods & Qt.MetaModifier)
+        print(f"[hk] keyPress key={key} text={event.text()!r} ctrl={ctrl} cmd={cmd}")
+
+        if key in (Qt.Key_Up, Qt.Key_Down):
+            super().keyPressEvent(event)
+            self._panel._on_arrow_key()
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self._panel._on_enter_key(self)
+            return
+        if key in (Qt.Key_Delete, Qt.Key_Backspace) and not (ctrl or cmd):
+            self._panel._on_delete_pair()
+            return
+        self._panel._on_list_key(event)
+        event.accept()
+
+
+def chip_button(label: str, checkable: bool = True, checked: bool = False,
+                parent=None) -> 'QPushButton':
+    """Flat toggleable chip-style QPushButton."""
+    btn = QPushButton(label, parent)
+    btn.setCheckable(checkable)
+    btn.setChecked(checked)
+    btn.setFlat(False)
+    btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    btn.setStyleSheet(
+        "QPushButton { border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; }"
+        "QPushButton:checked { background: #4a7fd4; color: white; border-color: #3366cc; }"
+        "QPushButton:hover { background: #dde; }"
+    )
+    return btn
+
+
+class ListPickerButton(QPushButton):
+    """Button that opens a multi-select dialog. Text auto-summarizes selection."""
+    selection_changed = Signal(list)
+
+    def __init__(self, title: str, items: list[str] = (), plural: str = "items",
+                 parent=None):
+        super().__init__(parent)
+        self._title  = title
+        self._plural = plural
+        self._items: list[str] = list(items)
+        self._selected: list[str] = list(items)
+        self._update_label()
+        self.clicked.connect(self._open_dialog)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_items(self, items: list[str], keep_selection: bool = True):
+        prev = set(self._selected) if keep_selection else set()
+        self._items = list(items)
+        self._selected = [x for x in self._items if x in prev] or list(items)
+        self._update_label()
+
+    def set_selected(self, selected: list[str]):
+        want = set(selected)
+        self._selected = [x for x in self._items if x in want] or list(self._items)
+        self._update_label()
+
+    @property
+    def selected(self) -> list[str]:
+        return list(self._selected)
+
+    def _open_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self._title)
+        dlg.resize(260, 320)
+        lay = QVBoxLayout(dlg)
+        lst = QListWidget()
+        lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for item in self._items:
+            it = QListWidgetItem(item)
+            lst.addItem(it)
+            if item in self._selected:
+                it.setSelected(True)
+        lay.addWidget(lst)
+        btns = QHBoxLayout()
+        sel_all = QPushButton("Select all")
+        sel_none = QPushButton("Select none")
+        sel_all.clicked.connect(lst.selectAll)
+        sel_none.clicked.connect(lst.clearSelection)
+        apply_btn = QPushButton("Apply")
+        cancel_btn = QPushButton("Cancel")
+        btns.addWidget(sel_all); btns.addWidget(sel_none)
+        btns.addStretch()
+        btns.addWidget(apply_btn); btns.addWidget(cancel_btn)
+        lay.addLayout(btns)
+        apply_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._selected = [lst.item(i).text()
+                              for i in range(lst.count()) if lst.item(i).isSelected()]
+            if not self._selected:
+                self._selected = list(self._items)
+            self._update_label()
+            self.selection_changed.emit(self._selected)
+
+    def _update_label(self):
+        n, total = len(self._selected), len(self._items)
+        if n == 0 or n == total:
+            self.setText(f"{self._title}: All")
+        elif n == 1:
+            self.setText(self._selected[0])
+        else:
+            self.setText(f"{self._title}: {n} {self._plural}")
+
+
+class SliderWithInput(QWidget):
+    """Horizontal slider paired with a numeric QLineEdit.
+
+    valueChanged emits the scaled float on slider release or input commit.
     """
 
-    def __init__(self, parent, pad_x: int = 2, pad_y: int = 1, **kw):
-        super().__init__(parent, **kw)
-        self._pad_x = pad_x
-        self._pad_y = pad_y
-        self._items: list[tk.Widget] = []
-        self.bind('<Configure>', lambda e: self.after_idle(self._rewrap))
+    value_changed = Signal(float)
 
-    def add(self, widget: tk.Widget) -> tk.Widget:
-        self._items.append(widget)
-        return widget
+    def __init__(self, lo: int, hi: int, init: int, scale: float = 0.01,
+                 fmt: str = "{:.2f}", tracking: bool = False, parent=None):
+        super().__init__(parent)
+        self._scale = scale
+        self._fmt   = fmt
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(lo, hi)
+        self._slider.setValue(init)
+        self._slider.setPageStep(0)
+        self._slider.setTracking(tracking)
+        self._slider.wheelEvent = lambda ev: ev.ignore()
+        self._slider.setFixedWidth(60)
+        self._input = QLineEdit(fmt.format(init * scale))
+        self._input.setFixedWidth(44)
+        self._slider.valueChanged.connect(self._on_slider)
+        self._input.editingFinished.connect(self._on_input)
+        lay.addWidget(self._slider)
+        lay.addWidget(self._input)
 
-    def _rewrap(self):
-        self.update_idletasks()
-        avail_w = self.winfo_width()
-        if avail_w <= 1:
-            self.after(100, self._rewrap)
+    def _on_slider(self, v: int):
+        self._input.setText(self._fmt.format(v * self._scale))
+        self.value_changed.emit(v * self._scale)
+
+    def _on_input(self):
+        try:
+            v = float(self._input.text())
+        except ValueError:
             return
-        x, y, row_h = self._pad_x, self._pad_y, 0
-        for w in self._items:
-            if not w.winfo_exists():
+        raw = int(round(v / self._scale))
+        raw = max(self._slider.minimum(), min(self._slider.maximum(), raw))
+        self._slider.blockSignals(True)
+        self._slider.setValue(raw)
+        self._slider.blockSignals(False)
+        self._input.setText(self._fmt.format(raw * self._scale))
+        self.value_changed.emit(raw * self._scale)
+
+    @property
+    def value(self) -> float:
+        return self._slider.value() * self._scale
+
+    def set_value(self, v: float):
+        raw = int(round(v / self._scale))
+        raw = max(self._slider.minimum(), min(self._slider.maximum(), raw))
+        self._slider.blockSignals(True)
+        self._slider.setValue(raw)
+        self._slider.blockSignals(False)
+        self._input.setText(self._fmt.format(raw * self._scale))
+
+
+class ExclusiveButtonSet:
+    """Checkable chip buttons with at-most-one checked (or none)."""
+
+    def __init__(self, *, on_change=None, parent=None):
+        self._parent = parent
+        self._on_change = on_change
+        self._buttons: dict[str, QPushButton] = {}
+        self._syncing = False
+
+    def add(self, key: str, label: str, *, checked: bool = False
+            ) -> tuple['QPushButton', CheckboxVar]:
+        btn = chip_button(label, checkable=True, checked=checked,
+                          parent=self._parent)
+        btn.toggled.connect(lambda on, k=key: self._on_toggled(k, on))
+        self._buttons[key] = btn
+        return btn, CheckboxVar(btn)
+
+    def button(self, key: str) -> 'QPushButton':
+        return self._buttons[key]
+
+    def select(self, key: str) -> None:
+        self._buttons[key].setChecked(True)
+
+    def is_checked(self, key: str) -> bool:
+        return self._buttons[key].isChecked()
+
+    def _on_toggled(self, key: str, checked: bool) -> None:
+        if self._syncing:
+            return
+        if checked:
+            self._syncing = True
+            for k, btn in self._buttons.items():
+                if k != key:
+                    btn.setChecked(False)
+            self._syncing = False
+        if self._on_change:
+            self._on_change()
+
+
+
+def collapsible(title: str, parent=None) -> 'tuple[QGroupBox, QVBoxLayout]':
+    """Checkable QGroupBox that shows/hides its children on toggle."""
+    box = QGroupBox(title, parent)
+    box.setCheckable(True)
+    box.setChecked(True)
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(4, 4, 4, 4)
+    layout.setSpacing(2)
+
+    def _toggle(checked):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget():
+                item.widget().setVisible(checked)
+
+    box.toggled.connect(_toggle)
+    return box, layout
+
+
+
+class CycleButton(QPushButton):
+    """Three-state cycle: solid(■) → line(□) → hidden(x) or reverse start.
+
+    Properties:
+        show  — whether the item should be rendered at all
+        line  — whether to use line style instead of solid bars
+    """
+
+    _STATES_FWD = [('■', True, False),  # solid
+                   ('□', True, True),   # line
+                   ('x', False, False)] # hidden
+    _STATES_REV = [('x', False, False), # hidden  (start_hidden=True)
+                   ('□', True, True),   # line
+                   ('■', True, False)]  # solid
+
+    def __init__(self, name: str, start_hidden: bool = False, parent=None):
+        super().__init__(parent)
+        self._name   = name
+        self._states = self._STATES_REV if start_hidden else self._STATES_FWD
+        self._idx    = 0
+        self._apply()
+        self.clicked.connect(self._cycle)
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            "QPushButton { border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; }"
+            "QPushButton:hover { background: #dde; }"
+        )
+
+    def _apply(self):
+        sym, _, _ = self._states[self._idx]
+        self.setText(f"{sym} {self._name}")
+
+    def _cycle(self):
+        self._idx = (self._idx + 1) % len(self._states)
+        self._apply()
+
+    @property
+    def show(self) -> bool:
+        return self._states[self._idx][1]
+
+    @property
+    def line(self) -> bool:
+        return self._states[self._idx][2]
+
+
+
+class FlowLayout(QtWidgets.QLayout):
+    """Left-to-right wrapping layout — chip buttons wrap to next row when full."""
+
+    def __init__(self, parent=None, spacing: int = 4):
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addWidget(self, w):
+        self.addItem(QtWidgets.QWidgetItem(w))
+        w.setParent(self.parentWidget())
+
+    def clear_widgets(self):
+        """Remove all widgets without destroying the layout container."""
+        while self._items:
+            item = self._items.pop()
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), test=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QtCore.QSize()
+        for item in self._items:
+            s = s.expandedTo(item.minimumSize())
+        return s + QtCore.QSize(2, 2)
+
+    def _do_layout(self, rect, test: bool) -> int:
+        x, y = rect.x(), rect.y()
+        row_h = 0
+        for item in self._items:
+            w = item.widget()
+            if w is None or not w.isVisible():
                 continue
-            w.update_idletasks()
-            ww, wh = w.winfo_reqwidth(), w.winfo_reqheight()
-            if x + ww > avail_w - self._pad_x and x > self._pad_x:
-                y += row_h + self._pad_y
-                x, row_h = self._pad_x, 0
-            w.place(x=x, y=y)
-            x += ww + self._pad_x
-            row_h = max(row_h, wh)
-        self.configure(height=max(y + row_h + self._pad_y * 2, 22))
+            hint = w.sizeHint()
+            next_x = x + hint.width() + self._spacing
+            if next_x - self._spacing > rect.right() and row_h > 0:
+                x = rect.x()
+                y += row_h + self._spacing
+                row_h = 0
+                next_x = x + hint.width() + self._spacing
+            if not test:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
+            x = next_x
+            row_h = max(row_h, hint.height())
+        return y + row_h - rect.y()
 
 
-class ArrowScroller:
-    """Manages horizontal scroll offset + ◀/▶ arrow labels for a chip/plot row.
 
-    Create once; call install() on each rebuild (frame is cleared each time).
+
+class SideNavPanel(QWidget):
+    """Sidebar-nav shell — shared by the Settings dialog and Manage Groups.
+
+    A draggable sash separates the nav list (sidebar) from the page stack (main).
+    The content pane stretches to fill the window; the nav pane is user-resizable
+    (no hard width cap, so neither side is squeezed).
     """
 
-    def __init__(self):
-        self.offset: int = 0
-
-    def install(self, frame: tk.Widget, n_total: int,
-                on_change: Callable[[int], None],
-                font_size: int = 9, dark: bool = False) -> tuple:
-        """Add ◀ (LEFT) and ▶ (RIGHT) labels to *frame*.
-
-        Arrows dim at boundaries. Calls on_change(new_offset) on click.
-        Returns (btn_l, btn_r).
-        """
-        self.offset = max(0, min(self.offset, max(0, n_total - 1)))
-        dim    = '#777777' if dark else '#cccccc'
-        active = '#dddddd' if dark else '#333333'
-        fs = ('Arial', font_size)
-
-        btn_r = tk.Label(frame, text='▶', font=fs, cursor='hand2',
-                         padx=3, fg=active if self.offset < n_total - 1 else dim)
-        btn_r.pack(side=tk.RIGHT, padx=(0, 2))
-        btn_r.bind('<Button-1>', lambda e: self._click(1, n_total, on_change))
-
-        btn_l = tk.Label(frame, text='◀', font=fs, cursor='hand2',
-                         padx=3, fg=active if self.offset > 0 else dim)
-        btn_l.pack(side=tk.LEFT, padx=(2, 2))
-        btn_l.bind('<Button-1>', lambda e: self._click(-1, n_total, on_change))
-
-        return btn_l, btn_r
-
-    def _click(self, direction: int, n_total: int, on_change: Callable[[int], None]):
-        new = max(0, min(self.offset + direction, max(0, n_total - 1)))
-        if new != self.offset:
-            self.offset = new
-            on_change(new)
-
-
-class GenericUI:
-
-    def __init__(self):
-        self._undo_stack: list = []
-        self._redo_stack: list = []
-        self._UNDO_LIMIT = 30
-
-    def _setup_window(self):
-        self._owns_mainloop = False
-        try:
-            existing = tk._default_root  # noqa: access internal
-        except AttributeError:
-            existing = None
-        if existing is not None and existing.winfo_exists():
-            self.root = tk.Toplevel(existing)
-        else:
-            self.root = tk.Tk()
-            self._owns_mainloop = True
-        self.root.title("CCG Manual Review")
-        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-        self._set_window_icon()
-        try:
-            _style = ttk.Style(self.root)
-            _raw_bg = _style.lookup('TFrame', 'background') or self.root.cget('bg')
-            _rgb = self.root.winfo_rgb(_raw_bg)
-            lum = (0.299 * _rgb[0] + 0.587 * _rgb[1] + 0.114 * _rgb[2]) / 65535
-            self._dark = lum < 0.4
-            print(f"[UITheme] bg={_raw_bg!r} rgb={_rgb} lum={lum:.3f} → {'dark' if self._dark else 'light'}")
-        except Exception:
-            self._dark = False
-        if self._dark:
-            print("[UITheme] using dark mode")
-        self.theme = UITheme.from_dark(self._dark)
-        self._heartbeat_id = None
-        self._closing = False
-        self._start_heartbeat()
-
-    def _start_heartbeat(self):
-        """Periodic no-op to keep the Tk event loop alive in Jupyter."""
-        def _beat():
-            if self._closing:
-                return
-            try:
-                if self.root.winfo_exists():
-                    self._heartbeat_id = self.root.after(2000, _beat)
-            except Exception:
-                pass
-        self._heartbeat_id = self.root.after(2000, _beat)
-        self.root.bind('<Destroy>', self._on_root_destroy, '+')
-
-    def _on_root_destroy(self, event):
-        if getattr(event, 'widget', None) is not self.root:
-            return
-        self._closing = True
-        if self._heartbeat_id is not None:
-            try:
-                self.root.after_cancel(self._heartbeat_id)
-            except Exception:
-                pass
-            self._heartbeat_id = None
-
-
-class BackgroundTaskRunner:
-    """Background process/thread queue with Tk polling.
-
-    Handles one running task at a time. Supports:
-    - subprocess.Popen   (fire-and-forget; max_queue=1, use_result_queue=False)
-    - mp.Process         (returns data via mp.Queue; use_result_queue=True)
-    - threading.Thread   (result written to shared state by caller; use_result_queue=False)
-
-    Parameters
-    ----------
-    max_queue : int
-        Maximum number of pending tasks (including the running one).
-    use_result_queue : bool
-        If True, mp.Queue passed to launch_fn; poll() → (task, result_dict).
-        If False, poll() → (task, None).
-    """
-
-    def __init__(self, *, max_queue: int = 1, use_result_queue: bool = False):
-        self._max_queue = max_queue
-        self._use_result_queue = use_result_queue
-        self._pending: collections.deque = collections.deque()
-        self._proc = None            # Popen, mp.Process, or threading.Thread
-        self._result_queue = None    # mp.Queue | None
-        self._poll_id = None         # root.after handle
-        self._root = None
-
-    # ── Process state ──────────────────────────────────────────────────────
-
-    def is_running(self) -> bool:
-        if self._proc is None:
-            return False
-        if hasattr(self._proc, 'is_alive'):
-            return self._proc.is_alive()
-        return self._proc.poll() is None  # Popen
-
-    def pending_count(self) -> int:
-        # _pending[0] stays in the deque until poll() pops it
-        return len(self._pending)
-
-    # ── Enqueue / launch ───────────────────────────────────────────────────
-
-    def enqueue(self, task) -> bool:
-        if len(self._pending) >= self._max_queue:
-            return False
-        self._pending.append(task)
-        return True
-
-    def start_next(self, launch_fn) -> bool:
-        """Launch the next pending task via launch_fn(task, queue|None) → proc|None.
-
-        Return an unstarted mp.Process (start_next calls .start()), an already-running
-        Popen/Thread, or None to skip the task.  Returns True if a task was launched.
-        """
-        if self.is_running() or not self._pending:
-            return False
-        task = self._pending[0]
-        q = _mp.Queue() if self._use_result_queue else None
-        proc = launch_fn(task, q)
-        if proc is None:
-            # Caller signalled skip — drop task and try the next one
-            self._pending.popleft()
-            return self.start_next(launch_fn)
-        self._result_queue = q
-        self._proc = proc
-        # mp.Process must be started; Popen / Thread are already running
-        if isinstance(proc, _mp.Process):
-            proc.start()
-        return True
-
-    # ── Polling ────────────────────────────────────────────────────────────
-
-    def start_polling(self, root: tk.Tk, *, interval_ms: int, on_done) -> None:
-        self._root = root
-        self._poll_id = root.after(interval_ms, self._poll, interval_ms, on_done)
-
-    def poll(self) -> tuple:
-        if self.is_running():
-            return None, None
-        completed = self._pending.popleft() if self._pending else None
-        result = None
-        if self._use_result_queue and self._result_queue is not None:
-            try:
-                if not self._result_queue.empty():
-                    result = self._result_queue.get_nowait()
-            except Exception:
-                pass
-        if self._proc is not None:
-            if hasattr(self._proc, 'join'):
-                self._proc.join(timeout=1)
-            self._proc = None
-        self._result_queue = None
-        return completed, result
-
-    def _poll(self, interval_ms: int, on_done):
-        self._poll_id = None
-        if self._proc is None:
-            return
-        if self.is_running():
-            self._poll_id = self._root.after(interval_ms, self._poll, interval_ms, on_done)
-        else:
-            task, result = self.poll()
-            on_done(task, result)
-
-    # ── Terminate ──────────────────────────────────────────────────────────
-
-    def terminate(self) -> None:
-        """Cancel the polling loop and terminate the running process.
-
-        For threading.Thread targets, terminate is a no-op on the thread
-        itself; only the poll handle is cancelled so results are discarded.
-        """
-        if self._poll_id is not None:
-            try:
-                self._root.after_cancel(self._poll_id)
-            except Exception:
-                pass
-            self._poll_id = None
-        if self._proc is not None and not isinstance(self._proc, threading.Thread):
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-        self._proc = None
-        self._result_queue = None
-
-
-class LRUCache(Generic[K, V]):
-    """Generic bounded LRU cache backed by OrderedDict.
-
-    Use max_size=1 as a single-slot invalidation cache (always keeps the
-    most recently written entry).  Use max_size=N for bounded LRU eviction.
-
-    Examples
-    --------
-    >>> c = LRUCache(max_size=3)
-    >>> c.put('a', 1); c.put('b', 2); c.put('c', 3)
-    >>> c.get('a')   # promotes 'a'
-    1
-    >>> c.put('d', 4)   # evicts 'b' (LRU)
-    >>> 'b' in c
-    False
-    """
-
-    def __init__(self, max_size: int):
-        if max_size < 1:
-            raise ValueError("max_size must be >= 1")
-        self._cache: collections.OrderedDict = collections.OrderedDict()
-        self._max_size = max_size
-
-    # ── Read ───────────────────────────────────────────────────────────────
-
-    def get(self, key: K) -> 'V | None':
-        """Return cached value for *key*, or None. Promotes key to MRU on hit."""
-        if key not in self._cache:
-            return None
-        self._cache.move_to_end(key)
-        return self._cache[key]
-
-    def __contains__(self, key) -> bool:
-        return key in self._cache
-
-    def __len__(self) -> int:
-        return len(self._cache)
-
-    def __iter__(self):
-        return iter(self._cache)  # MRU-last order
-
-    # ── Write ──────────────────────────────────────────────────────────────
-
-    def put(self, key: K, value: V) -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        self._cache[key] = value
-        while len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
-
-    def pop(self, key: K, default=None):
-        return self._cache.pop(key, default)
-
-    def clear(self) -> None:
-        self._cache.clear()
-
-
-def intersect_intervals(a, b):
-    """Two-pointer O(n+m) intersection of two sorted interval lists."""
-    res, i, j = [], 0, 0
-    while i < len(a) and j < len(b):
-        lo = max(a[i][0], b[j][0])
-        hi = min(a[i][1], b[j][1])
-        if lo < hi:
-            res.append((lo, hi))
-        if a[i][1] < b[j][1]:
-            i += 1
-        else:
-            j += 1
-    return res
-
-
-def purge_dir(directory: str, suffix: str = '.png',
-              days: int = 3, max_gb: float = 1.5) -> None:
-    """Delete files matching *suffix* older than *days*; evict oldest until total < *max_gb* GB."""
-    if not os.path.isdir(directory):
-        return
-    files: list[tuple[float, int, str]] = []
-    for fn in os.listdir(directory):
-        if not fn.endswith(suffix):
-            continue
-        path = os.path.join(directory, fn)
-        try:
-            st = os.stat(path)
-            files.append((st.st_mtime, st.st_size, path))
-        except OSError:
-            pass
-    cutoff = (datetime.datetime.now() -
-              datetime.timedelta(days=max(0, int(days)))).timestamp()
-    for mtime, _, path in files:
-        if mtime < cutoff:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-    files = [(m, s, p) for m, s, p in files if os.path.exists(p)]
-    total = sum(s for _, s, _ in files)
-    limit = int(max_gb * 1024 ** 3)
-    for _, size, path in sorted(files):          # oldest-first
-        if total <= limit:
-            break
-        try:
-            os.remove(path)
-            total -= size
-        except OSError:
-            pass
-
-
-def fit_axes_to_data(ax, x_all, y_all, x_pad_frac=0.08, y_pad_frac=0.06, min_pad=20):
-    if not x_all or not y_all:
-        return None
-    x_min, x_max = min(x_all), max(x_all)
-    y_min, y_max = min(y_all), max(y_all)
-    pad_x = max((x_max - x_min) * x_pad_frac, min_pad)
-    pad_y = max((y_max - y_min) * y_pad_frac, min_pad)
-    ax.set_xlim(x_min - pad_x, x_max + pad_x)
-    ax.set_ylim(y_min - pad_y, y_max + pad_y)
-    return x_min, x_max, y_min, y_max
-
-
-def json_numpy_default(obj):
-    """JSON encoder for numpy scalar types — pass as ``default=`` to json.dump."""
-    import numpy as np
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return float(obj)
-    raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
-
-
-def group_header_label(name: str, count: int, collapsed: bool) -> str:
-    """Format a collapsible group header: '── name (n) ──' with '>>' when collapsed."""
-    return f"── {name} ({count}) ──" + (" >>" if collapsed else "")
-
-
-@dataclasses.dataclass
-class SelectionCommand:
-    """Records what changed for one undoable action."""
-    pair_changes: dict   # {pair_tuple: (old_state, new_state)}
-    group_changes: list  # [(group_name, session, pair, 'add'|'remove')]
-
-
-class BiIndex:
-    """Generic bidirectional multimap: A ↔ set(B) and B ↔ set(A), both O(1).
-
-    Items can be any hashable type. Maintains two dicts in sync so both
-    forward (key → values) and inverse (value → keys) lookups are O(1).
-
-    Usage
-    -----
-    For groups: a = gname, b = (sess, ref, tgt)
-        idx.add(gname, (sess, ref, tgt))
-        idx.inverse((sess, ref, tgt))   → set of gnames
-        idx.forward(gname)              → set of (sess, ref, tgt)
-    """
-
-    def __init__(self):
-        self._fwd: dict = {}
-        self._inv: dict = {}
-
-    # ── Mutations ──────────────────────────────────────────────────────
-
-    def add(self, a, b) -> None:
-        self._fwd.setdefault(a, set()).add(b)
-        self._inv.setdefault(b, set()).add(a)
-
-    def discard(self, a, b) -> None:
-        fa = self._fwd.get(a)
-        if fa is not None:
-            fa.discard(b)
-            if not fa:
-                del self._fwd[a]
-        ib = self._inv.get(b)
-        if ib is not None:
-            ib.discard(a)
-            if not ib:
-                del self._inv[b]
-
-    def delete_key(self, a) -> None:
-        """Remove a and clean up all its b associations in the inverse."""
-        for b in self._fwd.pop(a, ()):
-            ib = self._inv.get(b)
-            if ib is not None:
-                ib.discard(a)
-                if not ib:
-                    del self._inv[b]
-
-    def rename_key(self, old_a, new_a) -> None:
-        """Rename key old_a → new_a in both directions."""
-        bs = self._fwd.pop(old_a, None)
-        if bs is None:
-            return
-        self._fwd[new_a] = bs
-        for b in bs:
-            ib = self._inv.get(b)
-            if ib is not None:
-                ib.discard(old_a)
-                ib.add(new_a)
-
-    def clear(self) -> None:
-        self._fwd.clear()
-        self._inv.clear()
-
-    # ── Lookups ────────────────────────────────────────────────────────
-
-    def forward(self, a) -> set:
-        return self._fwd.get(a, set())
-
-    def inverse(self, b) -> set:
-        return self._inv.get(b, set())
-
-    # ── Dict-style protocol over forward index ─────────────────────────
-
-    def __contains__(self, a) -> bool: return a in self._fwd
-    def __len__(self)         -> int:  return len(self._fwd)
-    def __iter__(self):                return iter(self._fwd)
-    def get(self, a, default=None):    return self._fwd.get(a, default)
-    def keys(self):                    return self._fwd.keys()
-    def values(self):                  return self._fwd.values()
-    def items(self):                   return self._fwd.items()
-
-
-class CollapseState:
-    """Tracks which named sections are collapsed in a list widget. UI-package independent."""
-
-    def __init__(self, initial: set | None = None):
-        self._collapsed: set = set(initial or [])
-
-    def is_collapsed(self, name: str) -> bool:
-        return name in self._collapsed
-
-    def toggle(self, name: str) -> None:
-        self._collapsed.discard(name) if name in self._collapsed else self._collapsed.add(name)
-
-    def collapse_all(self, names) -> None:
-        self._collapsed = set(names)
-
-    def expand_all(self) -> None:
-        self._collapsed.clear()
-
-    def as_set(self) -> set:
-        return set(self._collapsed)
-
-
-def collapsible_section(parent: 'tk.Widget', title: str, expanded: bool = True):
-    """Separator-line collapsible section.  Returns (inner_frame, fold_var)."""
-    import tkinter as tk
-    from tkinter import ttk
-    outer = ttk.Frame(parent)
-    outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(3, 0))
-
-    hdr = ttk.Frame(outer)
-    hdr.pack(fill=tk.X, pady=(2, 0))
-    hdr.columnconfigure(2, weight=1)
-
-    fold_var = tk.BooleanVar(value=expanded)
-    tri = ttk.Label(hdr, text='▾' if expanded else '▸',
-                    cursor='hand2', font=('Arial', 10))
-    tri.grid(row=0, column=0, padx=(4, 0))
-    ttk.Label(hdr, text=title, font=('Arial', 9, 'bold')).grid(
-        row=0, column=1, padx=(3, 6))
-    ttk.Separator(hdr, orient='horizontal').grid(
-        row=0, column=2, sticky='ew', padx=(0, 4), pady=6)
-
-    inner = ttk.Frame(outer, padding=(8, 2, 4, 2))
-    if expanded:
-        inner.pack(fill=tk.X)
-
-    def _toggle(e=None):
-        v = not fold_var.get()
-        fold_var.set(v)
-        (inner.pack(fill=tk.X) if v else inner.pack_forget())
-        tri.config(text='▾' if v else '▸')
-
-    tri.bind('<Button-1>', _toggle)
-    hdr.bind('<Button-1>', _toggle)
-    return inner, fold_var
+    def __init__(self, parent=None, *, min_width: int = 108, nav_width: int = 160):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.nav_list = QListWidget()
+        self.nav_list.setMinimumWidth(min_width)
+        self.stack = QStackedWidget()
+        self.splitter.addWidget(self.nav_list)
+        self.splitter.addWidget(self.stack)
+        self.splitter.setStretchFactor(0, 0)   # nav keeps its width on resize
+        self.splitter.setStretchFactor(1, 1)   # content absorbs the extra space
+        self.splitter.setSizes([nav_width, max(nav_width, 360)])
+        self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+        lay.addWidget(self.splitter)
+
+    @property
+    def currentChanged(self):
+        """Signal(int) emitted when the selected page changes (compat alias)."""
+        return self.nav_list.currentRowChanged
+
+    def add_page(self, label: str, widget: QWidget) -> int:
+        self.nav_list.addItem(label)
+        idx = self.stack.addWidget(widget)
+        if self.nav_list.currentRow() < 0:
+            self.nav_list.setCurrentRow(0)
+        return idx
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.nav_list.setCurrentRow(index)
+
+    def count(self) -> int:
+        return self.stack.count()
+
+
+
+
+class ArrowChipBar(QWidget):
+    """[arrowed chip bar] ◀ [chips] ▶ — horizontal scroll row for chip widgets."""
+
+    def __init__(self, parent=None, height: int = 22):
+        super().__init__(parent)
+        self.setMaximumHeight(height + 4)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(2)
+        self._left = QToolButton()
+        self._left.setText('◀')
+        self._left.setFixedSize(18, height)
+        root.addWidget(self._left)
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll_area.setFixedHeight(height)
+        self._host = QWidget()
+        self._lay = QHBoxLayout(self._host)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(3)
+        self._lay.addStretch()
+        self._scroll_area.setWidget(self._host)
+        root.addWidget(self._scroll_area, stretch=1)
+        self._right = QToolButton()
+        self._right.setText('▶')
+        root.addWidget(self._right)
+        self._left.clicked.connect(lambda: self._scroll(-80))
+        self._right.clicked.connect(lambda: self._scroll(80))
+
+    def _scroll(self, delta: int):
+        bar = self._scroll_area.horizontalScrollBar()
+        bar.setValue(max(0, min(bar.maximum(), bar.value() + delta)))
+
+    def _sync_host_width(self):
+        w = 0
+        for i in range(self._lay.count() - 1):
+            item = self._lay.itemAt(i)
+            if item and item.widget():
+                w += item.widget().sizeHint().width() + self._lay.spacing()
+        self._host.setMinimumWidth(
+            max(w + 8, self._scroll_area.viewport().width()))
+
+    def clear(self):
+        while self._lay.count() > 1:
+            item = self._lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def add_widget(self, w: QWidget):
+        self._lay.insertWidget(self._lay.count() - 1, w)
+        self._sync_host_width()
+
+    def set_widgets(self, widgets: list):
+        self.clear()
+        for w in widgets:
+            self.add_widget(w)
+        self._sync_host_width()
+
+
+_UI_FS = 'font-size: 8pt;'
+
+class CollapsibleSection(QWidget):
+    """Base class for a titled collapsible panel. Subclasses add widgets to body_layout."""
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet('QWidget { border: 1px solid #ccc; }')
+        sec_lay = QVBoxLayout(self)
+        sec_lay.setContentsMargins(2, 2, 2, 2)
+        sec_lay.setSpacing(1)
+
+        hdr = QWidget()
+        hdr.setStyleSheet('QWidget { border: none; }')
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(0, 0, 0, 0)
+        hdr_lay.setSpacing(2)
+        self._arrow_btn = QPushButton(('▾ ' if expanded else '▸ ') + title)
+        self._arrow_btn.setFlat(True)
+        self._arrow_btn.setStyleSheet(
+            f'font-weight: bold; {_UI_FS} text-align: left; border: none;')
+        hdr_lay.addWidget(self._arrow_btn)
+        hdr_lay.addStretch()
+        sec_lay.addWidget(hdr)
+
+        self._body = QWidget()
+        self._body.setStyleSheet('QWidget { border: none; }')
+        self._body.setVisible(expanded)
+        self.body_layout = QVBoxLayout(self._body)
+        self.body_layout.setContentsMargins(4, 2, 4, 2)
+        self.body_layout.setSpacing(2)
+        sec_lay.addWidget(self._body)
+
+        self._title = title
+        self._arrow_btn.clicked.connect(self._toggle)
+
+    def _toggle(self):
+        visible = self._body.isVisible()
+        self._body.setVisible(not visible)
+        self._arrow_btn.setText(('▾ ' if not visible else '▸ ') + self._title)
+
+    @staticmethod
+    def make_spin(options, default: str, width: int = 70) -> 'QComboBox':
+        from pyqtgraph.Qt.QtWidgets import QComboBox
+        cb = QComboBox()
+        for v in options:
+            cb.addItem(str(v), v)
+        cb.setCurrentText(default)
+        cb.setEditable(True)
+        cb.setFixedWidth(width)
+        return cb
+
+
+def make_collapsible_section(parent_layout, title: str,
+                             *, expanded: bool = True) -> tuple:
+    """Deprecated — use CollapsibleSection base class instead."""
+    sec = CollapsibleSection(title, expanded)
+    parent_layout.addWidget(sec)
+    return sec, sec._arrow_btn, sec._body, sec.body_layout
+
+class GroupHotkeysBar(QWidget):
+    """Horizontal group hotkey chip bar below the index bar."""
+
+    _SLOT_ORDER = ([str(i) for i in range(1, 10)] + ['0']
+                   + list('abcdefghijklmnopqrstuvwxyz'))
+
+    def __init__(self, ui, parent=None):
+        super().__init__(parent)
+        self._ui = ui
+        self.frame = self  # compat alias
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 0, 4, 0)
+        root.setSpacing(6)
+        title = QLabel('Hotkeys')
+        title.setStyleSheet('font-size: 8pt; font-weight: bold;')
+        root.addWidget(title)
+        del_lbl = QLabel('Del/⌫: deleted')
+        del_lbl.setStyleSheet('color: #888; font-size: 8pt;')
+        root.addWidget(del_lbl)
+        self._bar = ArrowChipBar(self, height=20)
+        root.addWidget(self._bar, stretch=1)
+        self._dark_btn = QPushButton()
+        self._dark_btn.setFixedSize(22, 22)
+        self._dark_btn.setToolTip('Toggle dark mode')
+        self._dark_btn.clicked.connect(lambda: self._ui.toggle_dark_mode())
+        root.addWidget(self._dark_btn)
+        self._update_dark_btn()
+        self.refresh()
+
+    def _update_dark_btn(self):
+        self._dark_btn.setText('☀' if qt_dark_mode() else '🌙')
+
+    def refresh(self):
+        import random
+        win = self._ui
+        nav = win._nav
+        gr = nav.groups
+        hk_map = {g.hotkey: name
+                  for name in gr.defined_groups
+                  for g in [gr.get_group_metadata(name)] if g.hotkey}
+        dark = qt_dark_mode()
+        bg, fg, border = (('#3a3a3a', '#e0e0e0', '#666') if dark
+                          else ('#fafafa', '#202020', '#aaa'))
+        chips: list = []
+        for key_str in self._SLOT_ORDER:
+            if key_str not in hk_map:
+                continue
+            gname = hk_map[key_str]
+            chip = QLabel(f'{key_str}: {gname}')
+            chip.setStyleSheet(
+                f'font-size: 8pt; padding: 2px 4px; border: 1px solid {border}; '
+                f'background: {bg}; color: {fg};')
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            def _select(_, g=gname):
+                pairs = gr.pairs_in_group(g, nav.current_session_str)
+                if pairs:
+                    nav.set_current_pair(nav.get_pair_index(sorted(pairs)[0]))
+                    win.request_redraw()
+            chip.mousePressEvent = _select
+
+            def _dbl(_, g=gname):
+                pairs = gr.pairs_in_group(g, nav.current_session_str)
+                if not pairs:
+                    return
+                nav.set_current_pair(nav.get_pair_index(random.choice(sorted(pairs))))
+                win.request_redraw()
+                win.neuron_network.draw()
+
+            chip.mouseDoubleClickEvent = _dbl
+            chips.append(chip)
+        self._bar.set_widgets(chips)
+
+GroupHotkeysPanel = GroupHotkeysBar

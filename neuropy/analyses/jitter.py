@@ -682,7 +682,7 @@ class JitterManager:
             self._proc = _mp.Process(
                 target=jitter_worker,
                 args=(self._result_queue, self.key, self.neurons,
-                      self.ccg_data, self.ccg_ptr.edge_times,
+                      self.ccg_data, None,
                       ref, tgt, njitter, bin_size_eff),
                 daemon=True,
             )

@@ -7,7 +7,7 @@ from skimage.measure import regionprops
 from pathlib import Path
 
 from neuropy.utils.minian_util import load_variable
-from neuropy.utils.misc import flatten
+from neuropy.utils.data_storage_util import flatten
 
 
 class CaNeurons(DataWriter):

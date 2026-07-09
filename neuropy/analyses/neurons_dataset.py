@@ -22,25 +22,21 @@ class Key:
     key.session      # Top level
     key.epoch        # Mid level
     key.segment      # Finest time division
-    key.conn_type    # Connection type (ref, target)
-    key.ref_ind      # Source neuron index
-    key.target_ind   # Target neuron index
+    key.conn_type    # Connection type (ref -> target)
+    key.resolution   # Resolution (lowres, highres)
 
     [Dependencies]
     conn_type -> excitability
-    ref_ind
-        Do not set a ref_ind unless the analysis is one reference neuron vs the rest of the population.
-        All other neurons in a NeuronDataset are targets; remove any unecessary neurons from NeuronDataset.
     """
 
     session: Optional[str] = None
     epoch: Optional[str] = None
-    ref_ind: Optional[int] = None
-    target_ind: Optional[int] = None
     segment: Optional[int] = None
     excitability: Optional[str] = None
     conn_type: Optional[tuple[str, str]] = None
     resolution: Optional[str] = 'lowres'
+    ref: Optional[int] = None
+    tgt: Optional[int] = None
 
     def __eq__(self, other):
         try:
@@ -80,30 +76,98 @@ class Key:
     def change(self, **kwargs) -> 'Key':
         return replace(self, **kwargs)
 
+    def is_excitatory(self) -> bool:
+        return self.excitability == 'E'
+
+    @staticmethod
+    def format_conn_type(ct) -> str:
+        if ct is None:
+            return "unknown"
+        _map = {'pyr': 'PYR', 'inter': 'INT', 'int': 'INT'}
+        if isinstance(ct, (tuple, list)) and len(ct) == 2:
+            a = _map.get(str(ct[0]).lower(), str(ct[0]).upper())
+            b = _map.get(str(ct[1]).lower(), str(ct[1]).upper())
+            return f"{a}→{b}"
+        return str(ct)
+
+    def type_label(self) -> str:
+        parts = []
+        if self.excitability:
+            parts.append(self.excitability)
+        if self.conn_type:
+            parts.append(Key.format_conn_type(self.conn_type))
+        if self.epoch:
+            parts.append(f'[{self.epoch}]')
+        return ' '.join(parts) if parts else str(self)
+
     def nd(self) -> 'Key':
         return self.get('session')
+
+    def json_str(self) -> str:
+        """Canonical JSON key for this Key (stable serialization at JSON boundary)."""
+        return str(self)
+
+    def ct_label(self) -> str:
+        """Conn-type label string, e.g. 'pyr-inter'."""
+        ct = self.conn_type
+        if ct and len(ct) == 2:
+            return f"{ct[0]}-{ct[1]}"
+        return str(ct) if ct else ''
+
+    @classmethod
+    def pair(cls, session: str, ref: int, tgt: int) -> 'Key':
+        """Pair identity for cross-group matching (session + ref + tgt)."""
+        return cls(session=str(session), ref=int(ref), tgt=int(tgt))
 
     def __str__(self):
         parts = [
             f"sess_{self.session}" if self.session else "",
             f"epoch_{self.epoch}" if self.epoch else "",
-            f"ref_{self.ref_ind}" if self.ref_ind is not None else "",
-            f"tgt_{self.target_ind}" if self.target_ind is not None else "",
             f"seg_{self.segment}" if self.segment is not None else "",
             f"ex_{self.excitability}" if self.excitability else "",
             f"type_{self.conn_type[0]}-{self.conn_type[1]}" if self.conn_type else "",
             f"res_{self.resolution}" if self.resolution != 'lowres' else "",
+            f"ref_{self.ref}" if self.ref is not None else "",
+            f"tgt_{self.tgt}" if self.tgt is not None else "",
         ]
         return ".".join(filter(None, parts)) or "root"
+
+    @classmethod
+    def from_str(cls, s: str) -> 'Key':
+        """Inverse of __str__. Parses the canonical dot-separated form back to a Key."""
+        if s == 'root':
+            return cls()
+        fields: dict = {}
+        for part in s.split('.'):
+            if part.startswith('sess_'):
+                fields['session'] = part[5:]
+            elif part.startswith('epoch_'):
+                fields['epoch'] = part[6:]
+            elif part.startswith('seg_'):
+                fields['segment'] = int(part[4:])
+            elif part.startswith('ex_'):
+                fields['excitability'] = part[3:]
+            elif part.startswith('type_'):
+                a, b = part[5:].split('-', 1)
+                fields['conn_type'] = (a, b)
+            elif part.startswith('res_'):
+                fields['resolution'] = part[4:]
+            elif part.startswith('ref_'):
+                fields['ref'] = int(part[4:])
+            elif part.startswith('tgt_'):
+                fields['tgt'] = int(part[4:])
+        return cls(**fields)
 
 
 class NeuronsDatasetConfig(Config):
     """NeuronsDataset build config.
 
     themes:
-        None (Default)=All available, []=No themes
+        None (Default)=All available
+        []=No themes
     epochs (neuron behav_slice via paradigm only):
-        None (Default)=All available, [list]=try loading all epochs in list and silent skip missing labels
+        None (Default)=All available
+        [list]=try loading all epochs in list and silent skip missing labels
     """
     def __init__(
         self,
@@ -165,6 +229,10 @@ class NeuronsDataset(AnalysisDataset):
         self.conf = conf
         self._prep(self._sessions)
 
+    @property
+    def data(self):
+        return self.neurons
+
     def _prep(self, sessions):
         """
         Init ND
@@ -196,6 +264,7 @@ class NeuronsDataset(AnalysisDataset):
                               labels=epochs)
         return n
 
+    # TODO
     def _load_probe_info(self, session):
         """Load ProbeGroup info.
         TODO Probe-related info is incomplete and needs to be gathered from recinfo and by user input"""
@@ -414,22 +483,22 @@ class NeuronsDataset(AnalysisDataset):
     #         print(printstr)
 
 
-class EpochSlicingConfig(Config):
-    """
-    Config to slice a behavioral epoch
-    """
-    def __init__(
-        self,
-        labels: Union[list[str], str, None] = None,
-        min_dur=0,
-        discard=False,
-    ):
-        super().__init__()
-        self.labels = _san(labels)
-        self.min_dur = min_dur
-        self.discard = discard
+# class EpochSlicingConfig(Config):
+#     """
+#     Config to slice a behavioral epoch
+#     """
+#     def __init__(
+#         self,
+#         labels: Union[list[str], str, None] = None,
+#         min_dur=0,
+#         discard=False,
+#     ):
+#         super().__init__()
+#         self.labels = _san(labels)
+#         self.min_dur = min_dur
+#         self.discard = discard
 
-    def __str__(self):
-        return self.__class__.__name__ + ': ' + '\n'.join(
-            [f"{key}={val}" for key, val in self.__dict__.items()])
+#     def __str__(self):
+#         return self.__class__.__name__ + ': ' + '\n'.join(
+#             [f"{key}={val}" for key, val in self.__dict__.items()])
 

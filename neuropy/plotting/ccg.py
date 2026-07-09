@@ -14,6 +14,30 @@ from matplotlib.figure import Figure
 import neuropy.plotting.probe as probe
 
 
+def test_window_bin_mask(
+    bins_ms: np.ndarray,
+    min_lag_s: float,
+    max_lag_s: float,
+    bin_w_ms: float,
+) -> np.ndarray:
+    """True for bin centers whose bar body overlaps [min_lag, max_lag] (seconds)."""
+    lo_ms = min_lag_s * 1000.0
+    hi_ms = max_lag_s * 1000.0
+    return ((bins_ms > lo_ms - bin_w_ms / 2 - 1e-9)
+            & (bins_ms < hi_ms + bin_w_ms / 2 + 1e-9))
+
+
+def test_window_span_ms(
+    min_lag_s: float,
+    max_lag_s: float,
+    bin_w_ms: float,
+) -> tuple[float, float]:
+    """Span edges in ms — matches test_window_bin_mask bar geometry."""
+    lo_ms = min_lag_s * 1000.0
+    hi_ms = max_lag_s * 1000.0
+    return lo_ms - bin_w_ms / 2, hi_ms + bin_w_ms / 2
+
+
 def plot_ccg_panel(
     ax,
     ccg,
@@ -128,13 +152,9 @@ def plot_ccg_panel(
                        label="Baseline", color=_base_color)
 
         if conn_strength_baseline is not None and min_lag is not None and max_lag is not None:
-            min_lag_ms = min_lag * 1000
-            max_lag_ms = max_lag * 1000
             bl = np.asarray(conn_strength_baseline)
             if len(bl) == len(bins):
-                # Select bins whose bar body [center-bin_w/2, center+bin_w/2]
-                # overlaps [min_lag_ms, max_lag_ms] — matches axvspan geometry exactly.
-                mask = (bins > min_lag_ms - bin_w / 2 - 1e-9) & (bins < max_lag_ms + bin_w / 2 + 1e-9)
+                mask = test_window_bin_mask(bins, min_lag, max_lag, bin_w)
                 bottoms = bl[mask]
                 heights = np.maximum(ccg[mask] - bottoms, 0)
                 ax.bar(bins[mask], heights, width=bin_w, bottom=bottoms,
@@ -186,13 +206,12 @@ def plot_ccg_panel(
         _draw_span = (show_test_window if show_test_window is not None
                       else (min_lag is not None and max_lag is not None))
         if _draw_span and min_lag is not None and max_lag is not None:
+            span_lo, span_hi = test_window_span_ms(min_lag, max_lag, bin_w)
             ml_ms = min_lag * 1000
             xl_ms = max_lag * 1000
-            # Span covers all tested bins: centers from min_lag to max_lag,
-            # each bar extends ±bin_w/2 around its center
             _tw_color = test_window_color if test_window_color else 'green'
             _tw_alpha = test_window_alpha if test_window_alpha is not None else 0.12
-            ax.axvspan(ml_ms - bin_w/2, xl_ms + bin_w/2, alpha=_tw_alpha,
+            ax.axvspan(span_lo, span_hi, alpha=_tw_alpha,
                        color=_tw_color, label=f'Test window ({ml_ms:.0f}–{xl_ms:.0f} ms)')
 
         ax.set_xlabel("Time (ms)")
@@ -557,77 +576,6 @@ def plot_strength(key,
     # mean, pvals = ttest_1samp(plot_data,0,axis=0)
     # print("pvals",pvals[1:],'threshold',0.05/len(pvals[1:]),"\n")
     # print("mean values",mean[1:],"\n")
-
-
-def plot_network(self):
-    pass
-
-
-# def plot_connection_strength(key,n_segments_total,
-#                              pairs, x_coords, plot_data, significant,
-#                              n_segments_threshold=0,
-#                     norm_by_n_sess=False,
-#                     norm_by_total_strength=False,
-#                     zero_first_timepoint=False,
-#                     show_legend=False,
-#                     skips=None,
-#                     save=False,root=None,
-#                     legend_column_size=25):
-#         # TODO  n_segments_total needs to be per pair for spike count chunking
-#         # TODO  x ticks need to be aligned for spike count chunking
-#             # x_ticks = list(np.arange(13))
-#             # plt.xticks(x_ticks,x_ticks)
-
-#         n_significant=np.sum(significant,axis=1,keepdims=True)
-#         plt.figure()
-#         if pairs.shape[0]==0:
-#             print(f"{key}: No pairs fit the criteria min_n_segment={n_segments_threshold}, nothing is plotted")
-#             return
-
-#         # Modifications to connection strength
-#         ylabel = "connection strength"
-#         if skips is not None:
-#             ylabel+="\nremoving outliers"
-#         if norm_by_total_strength:
-#             plot_data/=np.nansum(plot_data,axis=1,keepdims=True)
-#             ylabel=ylabel+" \nnormalized by total strength"
-#         if norm_by_n_sess: # normalize by the inverse of number of sessions where this pair appeared
-#             plot_data=plot_data*n_significant/n_segments_total
-#             ylabel=ylabel+" \n(normalized by number of sessions)"
-#         if zero_first_timepoint:
-#             # dmax = np.nanmax(plot_data,axis=1,keepdims=True)
-#             # dmin = np.nanmin(plot_data,axis=1,keepdims=True)
-#             plot_data= (plot_data-plot_data[:,0:1])
-#             ylabel=ylabel+" \naligning the first timepoint"
-#         colors = plt.cm.hsv(np.linspace(0, 1, plot_data.shape[0]))
-#         legend_keys = []
-
-#         max_pairs=np.max(plot_data,axis=1).argsort()[-5:][::-1]
-#         min_pairs=np.min(plot_data,axis=1).argsort()[:5]
-#         print("max",pairs[max_pairs],"min",pairs[min_pairs])
-
-#         x_coords = x_coords or np.full(pairs.shape[0],None)
-#         for i, (pair, x, y, c, sig) in enumerate(zip(pairs,x_coords,plot_data,colors,significant)):
-#             x = list(np.arange(n_segments_total)) if x is None else x
-#             plt.plot(x,y,c=c,alpha=0.3)  # normalized
-#             plt.scatter(x[sig], y[sig], s=8, c=c,label="_nolegend_")
-#             if show_legend: legend_keys.append(f"{i}:{pair}")
-#         plt.title(f"{key}")
-#         plt.xlabel("time segment")
-#         plt.xticks(np.arange(n_segments_total),np.arange(n_segments_total))
-#         plt.ylabel(ylabel)
-#         if show_legend:
-#             # spacing
-#             ncol = 1+int(i//legend_column_size)
-#             i_per_col=i//ncol
-#             offset = -.3-.5*(i_per_col/legend_column_size)
-#             plt.legend(legend_keys,loc='right', bbox_to_anchor=(1, offset), ncol=ncol)
-
-#         if save:
-#             assert os.path.isdir(os.path.expanduser(root))
-#             plt.savefig(f"{os.path.expanduser(root)}/{key}.png", bbox_inches='tight')
-#         else:
-#             plt.show()
 
 
 def plot_spike_attribution_raster(

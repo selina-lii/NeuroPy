@@ -6,7 +6,7 @@ import zarr
 
 from neuropy.core.ca_neurons import CaNeurons
 from neuropy.io.miniscopeio import MiniscopeIO
-from neuropy.utils.misc import flatten, flatten_all
+from neuropy.utils.data_storage_util import flatten, flatten_all
 
 
 class MinianIO:

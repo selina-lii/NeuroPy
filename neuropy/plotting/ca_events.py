@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import numpy as np
-from neuropy.utils.misc import interp_nans, arg_find_nearest
+from neuropy.utils.data_storage_util import interp_nans, arg_find_nearest
 from copy import deepcopy
 
 

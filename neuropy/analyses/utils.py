@@ -1,3 +1,4 @@
+import datetime
 import numpy as np
 from dataclasses import dataclass, field, replace
 from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
@@ -40,33 +41,29 @@ def _hasvalue(x):
 
 
 class Savable:
-
-    _save_format: str = 'hkl'  # subclasses override to 'npz'
+    """Base: state serialization helpers. Subclass HklSavable/NpzSavable/JsonSavable for I/O."""
 
     def __init__(self, ignored_attrs: list = []):
         self._ignored_attrs = ignored_attrs
 
     def __getstate__(self):
-        return {
-            k: v
-            for k, v in self.__dict__.items()
-            if k not in self._ignored_attrs
-        }
+        return {k: v for k, v in self.__dict__.items() if k not in self._ignored_attrs}
 
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-    def pack(self):
-        """Pickle-safe state dict (respects ``_ignored_attrs``)."""
+    def serialize(self) -> dict:
         return self.__getstate__()
+
+    def save_path(self, **kwargs) -> str | None:
+        return None
 
     @staticmethod
     def _to_state(obj):
-        return obj.pack() if isinstance(obj, Savable) else obj
+        return obj.serialize() if isinstance(obj, Savable) else obj
 
     @classmethod
     def save_mapping(cls, mapping: dict, path: str) -> None:
-        """Write a dict of Savable instances (or plain dict states) to one .hkl file."""
         hkl.dump({k: cls._to_state(v) for k, v in mapping.items()}, path)
 
     @staticmethod
@@ -75,68 +72,38 @@ class Savable:
         try:
             answer = input("  Overwrite? [y/N]: ").strip().lower()
         except EOFError:
-            answer = ''
+            print("y  (non-interactive)")
+            answer = 'y'
         return answer in ('y', 'yes')
 
-    def save_path(self, **kwargs):
-        return "./tmp"
 
-    def save(self,
-             path: str = None,
-             ignored_attrs: list = [],
-             split_into_chunks=False,
-             chunk_size_MB: int = 20):
+class HklSavable(Savable):
+    """Savable backed by hickle (.hkl)."""
+
+    def save(self, path: str = None, ignored_attrs: list = [],
+             split_into_chunks=False, chunk_size_MB: int = 20):
         if ignored_attrs:
             self._ignored_attrs = _san(ignored_attrs)
-        fmt = getattr(self, '_save_format', 'hkl')
-        if fmt == 'npz':
-            p = (path or self.save_path()) + '.npz'
-            os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-            state = {k: v for k, v in self.pack().items() if isinstance(v, np.ndarray)}
-            np.savez_compressed(p, **state)
-            return
-        if fmt == 'json':
-            p = (path or self.save_path()) + '.json'
-            os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-            with open(p, 'w') as _f:
-                json.dump(self.pack(), _f)
-            return
         p = (path or self.save_path()) + '.hkl'
         os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-        state = self.pack()
+        state = self.serialize()
         if not split_into_chunks:
             hkl.dump(state, p)
-        else:
-            chunk_size = chunk_size_MB * 1024 * 1024
-            folder = p if os.path.isdir(p) else p + "_files"
-            os.makedirs(folder, exist_ok=True)
-            file = os.path.join(folder, "temp.hkl")
-            hkl.dump(state, file)
-            with open(file, "rb") as f:
-                i = 0
-                while chunk := f.read(chunk_size):
-                    with open(os.path.join(folder, f"part{i}"), "wb") as out:
-                        out.write(chunk)
-                    i += 1
-            os.remove(file)
+            return
+        chunk_size = chunk_size_MB * 1024 * 1024
+        folder = p if os.path.isdir(p) else p + "_files"
+        os.makedirs(folder, exist_ok=True)
+        tmp = os.path.join(folder, "temp.hkl")
+        hkl.dump(state, tmp)
+        with open(tmp, "rb") as f:
+            i = 0
+            while chunk := f.read(chunk_size):
+                with open(os.path.join(folder, f"part{i}"), "wb") as out:
+                    out.write(chunk)
+                i += 1
+        os.remove(tmp)
 
     def load(self, path: str = None):
-        fmt = getattr(self, '_save_format', 'hkl')
-        if fmt == 'npz':
-            p = (path or self.save_path()) + '.npz'
-            if not os.path.exists(p):
-                print(f"File not found: {p}")
-                return
-            self.__setstate__(dict(np.load(p, allow_pickle=False)))
-            return
-        if fmt == 'json':
-            p = (path or self.save_path()) + '.json'
-            if not os.path.exists(p):
-                print(f"File not found: {p}")
-                return
-            with open(p) as _f:
-                self.__setstate__(json.load(_f))
-            return
         p = (path or self.save_path()) + '.hkl'
         splitted = False
         file = p
@@ -147,11 +114,11 @@ class Savable:
             with open(file, "wb") as out:
                 i = 0
                 while True:
-                    part_file = os.path.join(folder, f"part{i}")
-                    if not os.path.exists(part_file):
+                    part = os.path.join(folder, f"part{i}")
+                    if not os.path.exists(part):
                         break
-                    with open(part_file, "rb") as part:
-                        out.write(part.read())
+                    with open(part, "rb") as pf:
+                        out.write(pf.read())
                     i += 1
         try:
             loaded = hkl.load(file)
@@ -161,26 +128,22 @@ class Savable:
                 for k, v in loaded.__dict__.items():
                     setattr(self, k, v)
         except Exception as e:
-            print(f"Failed to load {self.__class__} object: {e}")
+            print(f"Failed to load {self.__class__}: {e}")
         finally:
             if splitted:
                 os.remove(file)
 
     @property
     def is_saved(self) -> bool:
-        fmt = getattr(self, '_save_format', 'hkl')
-        ext = {'npz': '.npz', 'json': '.json'}.get(fmt, '.hkl')
-        return os.path.isfile(self.save_path() + ext)
+        return os.path.isfile(self.save_path() + '.hkl')
 
     def find_cached(self, suffix='') -> str:
-        """Return 'ok', 'missing', or 'stale' for save_path(suffix=suffix).hkl."""
         p = self.save_path(suffix=suffix) + '.hkl'
         if not os.path.isfile(p):
             return 'missing'
         return 'ok' if self.check_cache() else 'stale'
 
     def check_cache(self, group='key') -> bool:
-        """Return True if saved hkl matches current config for the given field group."""
         p = self.save_path() + '.hkl'
         if not os.path.isfile(p):
             return False
@@ -188,12 +151,210 @@ class Savable:
             saved = hkl.load(p)
             fields = self._groups.get(group, [])
             _sv = getattr(self.__class__, 'serialize_value', lambda v: v)
-            for f in fields:
-                if _sv(getattr(saved, f, None)) != _sv(getattr(self, f, None)):
-                    return False
-            return True
+            return all(_sv(getattr(saved, f, None)) == _sv(getattr(self, f, None))
+                       for f in fields)
         except Exception:
             return False
+
+
+class NpzSavable(Savable):
+    """Savable backed by numpy .npz."""
+
+    def save(self, path: str = None, **_):
+        p = (path or self.save_path()) + '.npz'
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+        state = {k: v for k, v in self.serialize().items() if isinstance(v, np.ndarray)}
+        np.savez_compressed(p, **state)
+
+    def load(self, path: str = None):
+        p = (path or self.save_path()) + '.npz'
+        if not os.path.exists(p):
+            print(f"File not found: {p}")
+            return
+        self.__setstate__(dict(np.load(p, allow_pickle=False)))
+
+    @property
+    def is_saved(self) -> bool:
+        return os.path.isfile(self.save_path() + '.npz')
+
+
+def _json_key(k):
+    """Serialize a non-string dict key to a JSON-native form."""
+    if isinstance(k, (str, int, float, bool)) or k is None:
+        return k
+    if isinstance(k, (list, tuple)):
+        return [_to_json(x) for x in k]
+    return str(k)
+
+
+def _to_json(v):
+    """Recursively convert a value to a JSON-serializable form.
+
+    JsonSavable with save_path() → saves to own file, returns {"__ref__": path}.
+    Other Savable                → inline serialize().
+    set / frozenset              → sorted plain list.
+    dict with 2-int-tuple keys   → {"r,t": value} str-key dict.
+    dict with other non-str keys → [[key, value], ...] list-of-pairs.
+    """
+    if isinstance(v, JsonSavable):
+        sp = v.save_path()
+        if sp is not None:
+            v.save()
+            return {"__ref__": sp + '.json'}
+        return v.serialize()
+    if isinstance(v, Savable):
+        return v.serialize()
+    if isinstance(v, dict):
+        if v and not all(isinstance(k, str) for k in v):
+            if all(isinstance(k, (tuple, list)) and len(k) == 2
+                   and all(isinstance(x, (int, np.integer)) for x in k)
+                   for k in v):
+                return {f"{k[0]},{k[1]}": _to_json(v2) for k, v2 in v.items()}
+            return [[_json_key(k), _to_json(v2)] for k, v2 in v.items()]
+        return {str(k): _to_json(v2) for k, v2 in v.items()}
+    if isinstance(v, (set, frozenset)):
+        return sorted(_to_json(x) for x in v)
+    if isinstance(v, (list, tuple)):
+        return [_to_json(x) for x in v]
+    return v
+
+
+def _from_json(v):
+    """Reverse _to_json. Handles legacy __set__/__dict__ tags for backward compat."""
+    if isinstance(v, dict):
+        if '__set__' in v:
+            return {tuple(x) if isinstance(x, list) else x for x in v['__set__']}
+        if '__dict__' in v:
+            return {(tuple(k) if isinstance(k, list) else k): _from_json(val)
+                    for k, val in v['__dict__']}
+        return {k: _from_json(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_from_json(x) for x in v]
+    return v
+
+
+def _json_default(o):
+    if isinstance(o, np.integer): return int(o)
+    if isinstance(o, np.floating): return float(o)
+    if isinstance(o, np.ndarray): return o.tolist()
+    raise TypeError(f"not JSON serializable: {type(o)}")
+
+
+def _compact_json_str(obj) -> str:
+    """JSON with indent=2, but short arrays and flat objects kept on one line."""
+    s = json.dumps(obj, indent=2, ensure_ascii=False, default=_json_default)
+    # Compact [int, int] pair arrays
+    s = re.sub(r'\[\s*(-?\d+),\s*(-?\d+)\s*\]', r'[\1, \2]', s)
+    # Compact arrays of only string literals
+    def _join_str_array(m):
+        inner = re.sub(r'\s+', ' ', m.group(1)).strip().rstrip(',')
+        return f'[{inner}]'
+    s = re.sub(r'\[\s*((?:"[^"]*",?\s*)+)\s*\]', _join_str_array, s)
+    # Compact flat objects (no nested {}) that fit within 100 chars
+    def _compact_obj(m):
+        flat = re.sub(r'\s+', ' ', m.group(0)).strip()
+        return flat if len(flat) <= 100 else m.group(0)
+    s = re.sub(r'\{[^{}]*\}', _compact_obj, s, flags=re.DOTALL)
+    return s
+
+
+class JsonSavable(Savable):
+    """Savable backed by JSON (atomic write).
+
+    serialize(): walks __dict__, skips _-prefixed and explicitly ignored attrs.
+    __setstate__(): reverse; use _custom_types = {'field': Type} for dict-value
+                    reconstruction when Type.__init__() is zero-arg (or all-defaulted).
+    _ignored_attrs: list of non-_-prefixed attrs to exclude (pass to __init__ or set as
+                    class attr).
+    """
+
+    _custom_types: dict = {}
+
+    def __init__(self, ignored_attrs: list = []):
+        self._ignored_attrs = list(ignored_attrs)
+
+    def _public_state(self) -> dict:
+        ignored = getattr(self, '_ignored_attrs', [])
+        return {k: v for k, v in self.__dict__.items()
+                if not k.startswith('_') and k not in ignored}
+
+    def serialize(self) -> dict:
+        return {k: _to_json(v) for k, v in self._public_state().items()}
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from a JSON-loaded dict.
+
+        _custom_types = {'field': Type or (key_type, value_type)}
+            Reconstructs dict values as typed Savable objects.
+            key_type must have from_str(s) classmethod; omit for str keys.
+        _set_fields: frozenset of field names that are sets of tuples.
+        _pair_key_dict_fields: frozenset of field names whose str keys are "r,t" → (r,t).
+        {"__ref__": path} on a JsonSavable field calls load() on the existing instance.
+        """
+        ignored = getattr(self, '_ignored_attrs', [])
+        custom: dict = {}
+        set_fields: set = set()
+        pair_key_dict_fields: set = set()
+        for cls in type(self).__mro__:
+            custom.update(getattr(cls, '_custom_types', {}))
+            set_fields |= getattr(cls, '_set_fields', set())
+            pair_key_dict_fields |= getattr(cls, '_pair_key_dict_fields', set())
+        for k, v in state.items():
+            if k.startswith('_') or k in ignored:
+                continue
+            if isinstance(v, dict) and '__ref__' in v:
+                existing = getattr(self, k, None)
+                if isinstance(existing, JsonSavable):
+                    existing.load(v['__ref__'][:-len('.json')])
+                continue
+            v = _from_json(v)
+            if k in set_fields and isinstance(v, list):
+                setattr(self, k, {tuple(x) if isinstance(x, list) else x for x in v})
+                continue
+            if k in pair_key_dict_fields and isinstance(v, dict):
+                setattr(self, k, {
+                    tuple(int(i) for i in dk.split(',')): _from_json(dv)
+                    for dk, dv in v.items()
+                })
+                continue
+            vtype = custom.get(k)
+            if vtype is not None and isinstance(v, dict):
+                ktype, vtype_inner = vtype if isinstance(vtype, tuple) else (None, vtype)
+                existing = getattr(self, k, None)
+                result = defaultdict(vtype_inner) if isinstance(existing, defaultdict) else {}
+                for dk, dv in v.items():
+                    key = ktype.from_str(dk) if ktype is not None else dk
+                    obj = vtype_inner.__new__(vtype_inner)
+                    vtype_inner.__init__(obj)
+                    obj.__setstate__(dv if isinstance(dv, dict) else {})
+                    result[key] = obj
+                setattr(self, k, result)
+            else:
+                setattr(self, k, v)
+
+    def save(self, path: str = None, **_):
+        from neuropy.utils.data_storage_util import atomic_write_json
+        p = (path or self.save_path()) + '.json'
+        atomic_write_json(p, text=_compact_json_str(self.serialize()))
+
+    def load(self, path: str = None):
+        p = (path or self.save_path()) + '.json'
+        if not os.path.exists(p):
+            print(f"File not found: {p}")
+            return
+        with open(p, encoding='utf-8') as f:
+            raw = json.load(f)
+        if isinstance(raw, dict) and 'selections' in raw:
+            sel = raw['selections']
+            sample_tags = {}
+            for k, v in (list(sel.items())[:2] if isinstance(sel, dict) else []):
+                if isinstance(v, dict):
+                    sample_tags[k] = {sk: sv for sk, sv in list(v.items())[:3]}
+        self.__setstate__(raw)
+
+    @property
+    def is_saved(self) -> bool:
+        return os.path.isfile(self.save_path() + '.json')
 
 
 class Cacheable:
@@ -246,9 +407,29 @@ class Cacheable:
                 json.dump(payload, f, indent=2)
 
 
-class Config(Savable):
+class Config(JsonSavable):
 
     _groups: dict = {}
+
+    def check_cache(self, group: str = 'key') -> bool:
+        """True if saved JSON matches current key fields."""
+        p = self.save_path() + '.json'
+        if not os.path.isfile(p):
+            return False
+        try:
+            with open(p, encoding='utf-8') as f:
+                saved = json.load(f)
+            fields = self._groups.get(group, [])
+            sv = self.__class__.serialize_value
+            return all(sv(saved.get(f)) == sv(getattr(self, f, None)) for f in fields)
+        except Exception:
+            return False
+
+    def find_cached(self) -> str:
+        p = self.save_path() + '.json'
+        if not os.path.isfile(p):
+            return 'missing'
+        return 'ok' if self.check_cache() else 'stale'
 
     def matches(self, other: 'Config', group: str) -> bool:
         return all(getattr(self, f) == getattr(other, f)
@@ -275,23 +456,20 @@ class Config(Savable):
         return s
 
     @staticmethod
-    def _serialize_conf_value(v):
+    def serialize_value(v):
         """JSON-safe config value for cache metadata."""
         if hasattr(v, 'name'):
             return v.name
         if isinstance(v, (list, tuple)):
-            return [Config._serialize_conf_value(x) for x in v]
+            return [Config.serialize_value(x) for x in v]
         if isinstance(v, dict):
-            return {str(k): Config._serialize_conf_value(val) for k, val in v.items()}
+            return {str(k): Config.serialize_value(val) for k, val in v.items()}
         try:
             import json as _json
             _json.dumps(v)
             return v
         except (TypeError, ValueError):
             return str(v)
-
-
-Config.serialize_value = Config._serialize_conf_value
 
 
 from enum import Enum
@@ -384,7 +562,7 @@ class AnalysisDataset(Savable):
 
     def __init__(self, conf=None):
         super().__init__()
-        self.data: Dict[K, Any] = {}
+        # self.data: Dict[K, Any] = {}
         self._conf = conf
 
     def __len__(self):
@@ -552,59 +730,6 @@ class SetOp():
         return np.unique(x, axis=0)
 
 
-def filter_neurons_to_intervals(neurons, intervals, t0: float, t1: float):
-    """Return a deepcopy of *neurons* with spiketrains masked to *intervals*.
-
-    Safe to call from background threads — deepcopy stays off the main thread.
-    """
-    from copy import deepcopy
-    from neuropy.core.neurons import Neurons
-    neurons = deepcopy(neurons)
-    filtered_trains = []
-    for st in neurons.spiketrains:
-        mask = np.zeros(len(st), dtype=bool)
-        for s, e in intervals:
-            mask |= (st >= s) & (st <= e)
-        filtered_trains.append(st[mask])
-    return Neurons(
-        spiketrains=filtered_trains,
-        t_stop=t1, t_start=t0,
-        sampling_rate=neurons.sampling_rate,
-        neuron_ids=neurons.neuron_ids,
-        neuron_type=neurons.neuron_type,
-        waveforms=neurons.waveforms,
-        waveforms_amplitude=neurons.waveforms_amplitude,
-        peak_channels=getattr(neurons, 'peak_channels', None),
-        shank_ids=getattr(neurons, 'shank_ids', None),
-        metadata=neurons.metadata,
-    )
-
-
-def split_time_range(t0: float, t1: float, n_splits: int, overlap_sec: float,
-                     base_name: str) -> list:
-    """Partition [t0, t1] into n_splits overlapping chunks.
-
-    Returns list of (chunk_t0, chunk_t1, chunk_name) tuples.
-    """
-    n_splits = max(1, int(n_splits))
-    overlap_sec = max(0.0, float(overlap_sec))
-    if n_splits == 1 and overlap_sec == 0.0:
-        return [(t0, t1, base_name)]
-    total = t1 - t0
-    if total <= 0:
-        return [(t0, t1, base_name)]
-    chunk_len = (total + (n_splits - 1) * overlap_sec) / n_splits
-    stride = chunk_len - overlap_sec
-    if stride <= 0:
-        stride = total / n_splits
-        chunk_len = stride
-    chunks = []
-    for i in range(n_splits):
-        cs = t0 + i * stride
-        ce = min(cs + chunk_len, t1)
-        chunks.append((cs, ce, base_name + str(i + 1)))
-    return chunks
-
 
 class SessionMemoryCache:
     """LRU eviction for the CCGDataset.ccg dict (keyed by Key with resolution)."""
@@ -647,133 +772,109 @@ class SessionMemoryCache:
             self.evict(lru_key)
 
 
-class IntervalOp:
-    """Set algebra on interval lists [(t0, t1), ...]. All ops return sorted, non-overlapping lists."""
+class Autosave:
+    """Mixin: periodic autosave + purge. Parallel to Savable, not type-specific.
 
-    @staticmethod
-    def merge(intervals) -> list:
-        """Merge overlapping/adjacent intervals."""
-        iv = sorted((float(a), float(b)) for a, b in intervals if b > a)
-        if not iv:
-            return []
-        out = [list(iv[0])]
-        for t0, t1 in iv[1:]:
-            if t0 <= out[-1][1]:
-                out[-1][1] = max(out[-1][1], t1)
-            else:
-                out.append([t0, t1])
-        return [tuple(x) for x in out]
+    Config (override as class or instance attrs):
+        autosave_subdir          : str = '.autosave'
+        autosave_interval_minutes: int = 30
+        autosave_retain_days     : int = 7
+        autosave_suffix          : str = '.json'
+    """
+    autosave_subdir          : str = '.autosave'
+    autosave_interval_minutes: int = 30
+    autosave_retain_days     : int = 7
+    autosave_suffix          : str = '.json'
 
-    @staticmethod
-    def clip(intervals, t_start=None, t_stop=None) -> list:
-        """Clip interval list to [t_start, t_stop] bounds."""
-        out = []
-        for t0, t1 in intervals:
-            if t_start is not None:
-                t0 = max(t0, t_start)
-            if t_stop is not None:
-                t1 = min(t1, t_stop)
-            if t0 < t1:
-                out.append((t0, t1))
-        return out
+    def autosave_base_dir(self) -> str:
+        sp = self.save_path()  # type: ignore[attr-defined]
+        return os.path.dirname(sp) if sp else '.'
 
-    @staticmethod
-    def union(a: list, b: list) -> list:
-        return IntervalOp.merge(list(a) + list(b))
+    def autosave_label(self) -> str:           raise NotImplementedError
+    def do_autosave(self, path: str) -> None:
+        p = path[:-len(self.autosave_suffix)] if path.endswith(self.autosave_suffix) else path
+        self.save(p)  # type: ignore[attr-defined]
 
-    @staticmethod
-    def intersect(a: list, b: list) -> list:
-        out, i, j = [], 0, 0
-        a, b = IntervalOp.merge(a), IntervalOp.merge(b)
-        while i < len(a) and j < len(b):
-            lo = max(a[i][0], b[j][0])
-            hi = min(a[i][1], b[j][1])
-            if lo < hi:
-                out.append((lo, hi))
-            if a[i][1] < b[j][1]:
-                i += 1
-            else:
-                j += 1
-        return out
+    def autosave_active(self) -> bool:         return True
 
-    @staticmethod
-    def difference(a: list, b: list) -> list:
-        """Intervals in a not covered by b."""
-        out = []
-        a, b = IntervalOp.merge(a), IntervalOp.merge(b)
-        j = 0
-        for t0, t1 in a:
-            cur = t0
-            while j < len(b) and b[j][1] <= cur:
-                j += 1
-            k = j
-            while k < len(b) and b[k][0] < t1:
-                if cur < b[k][0]:
-                    out.append((cur, b[k][0]))
-                cur = max(cur, b[k][1])
-                k += 1
-            if cur < t1:
-                out.append((cur, t1))
-        return out
-
-    @staticmethod
-    def complement(a: list, t_start: float, t_end: float) -> list:
-        return IntervalOp.difference([(t_start, t_end)], a)
-
-    @staticmethod
-    def duration(intervals) -> float:
-        return sum(float(t1) - float(t0) for t0, t1 in intervals)
-
-    @staticmethod
-    def mask_spikes(spikes: np.ndarray, intervals) -> np.ndarray:
-        """Keep only spikes falling within any of the intervals (binary search, fast)."""
-        intervals = IntervalOp.merge(intervals)
-        keep = []
-        for t0, t1 in intervals:
-            i0 = np.searchsorted(spikes, t0, 'left')
-            i1 = np.searchsorted(spikes, t1, 'right')
-            if i1 > i0:
-                keep.append(spikes[i0:i1])
-        return np.concatenate(keep) if keep else np.array([], dtype=spikes.dtype)
-
-
-@dataclass(frozen=True)
-class IntervalSet:
-    """Named, immutable set of time intervals with set algebra."""
-    label: str
-    intervals: tuple                     # tuple of (t0, t1) float pairs
-    tags: dict = field(default_factory=dict, compare=False, hash=False)
-
-    def __post_init__(self):
-        object.__setattr__(self, 'intervals',
-                           tuple(IntervalOp.merge(self.intervals)))
+    def schedule_autosave(self) -> None:
+        from pyqtgraph.Qt.QtCore import QTimer
+        t = QTimer()
+        t.setInterval(self.autosave_interval_minutes * 60 * 1000)
+        t.timeout.connect(lambda: self.write_autosave('.periodic') if self.autosave_active() else None)
+        t.start()
 
     @property
-    def active_duration(self) -> float:
-        return IntervalOp.duration(self.intervals)
+    def autosave_dir(self) -> str:
+        return os.path.join(self.autosave_base_dir(), self.autosave_subdir)
 
-    def intersect(self, other: 'IntervalSet', label: str) -> 'IntervalSet':
-        return IntervalSet(label, IntervalOp.intersect(self.intervals, other.intervals))
+    def write_autosave(self, suffix: str = '') -> str:
+        hdir = self.autosave_dir
+        os.makedirs(hdir, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%y-%m-%d-%H-%M-%S')
+        fname = f"{self.autosave_label()}__{ts}{suffix}{self.autosave_suffix}"
+        path = os.path.join(hdir, fname)
+        self.do_autosave(path)
+        return path
 
-    def union(self, other: 'IntervalSet', label: str) -> 'IntervalSet':
-        return IntervalSet(label, IntervalOp.union(self.intervals, other.intervals))
+    def write_autosave_fixed(self, filename: str) -> None:
+        hdir = self.autosave_dir
+        os.makedirs(hdir, exist_ok=True)
+        self.do_autosave(os.path.join(hdir, filename))
 
-    def difference(self, other: 'IntervalSet', label: str) -> 'IntervalSet':
-        return IntervalSet(label, IntervalOp.difference(self.intervals, other.intervals))
+    def purge_autosaves(self) -> None:
+        hdir = self.autosave_dir
+        if not os.path.isdir(hdir):
+            return
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=self.autosave_retain_days)
+        removed = 0
+        for fname in os.listdir(hdir):
+            if not fname.endswith(self.autosave_suffix):
+                continue
+            fpath = os.path.join(hdir, fname)
+            try:
+                if datetime.datetime.fromtimestamp(os.path.getmtime(fpath)) < cutoff:
+                    os.remove(fpath)
+                    removed += 1
+            except OSError:
+                pass
+        if removed:
+            print(f"[Autosave] purged {removed} files older than {self.autosave_retain_days} days")
 
-    def complement(self, t_start: float, t_end: float, label: str) -> 'IntervalSet':
-        return IntervalSet(label, IntervalOp.complement(self.intervals, t_start, t_end))
 
-    def clip(self, t_start: float, t_end: float) -> 'IntervalSet':
-        return IntervalSet(self.label, IntervalOp.clip(self.intervals, t_start, t_end), self.tags)
+class UndoRedo:
+    """Mixin: undo/redo command stack. Parallel to Savable, not type-specific.
 
-    def mask_spikes(self, spikes: np.ndarray) -> np.ndarray:
-        return IntervalOp.mask_spikes(spikes, self.intervals)
+    Config:
+        undo_limit: int = 50
+    """
+    undo_limit: int = 50
 
-    @classmethod
-    def from_arrays(cls, t_starts, t_stops, label: str) -> 'IntervalSet':
-        return cls(label, list(zip(t_starts, t_stops)))
+    def apply_command(self, cmd, reverse: bool = False) -> None: raise NotImplementedError
 
-    def __hash__(self):
-        return hash((self.label, self.intervals))
+    def __init_undo__(self):
+        self._undo_stack: list = []
+        self._redo_stack: list = []
 
+    def push_undo(self, cmd) -> None:
+        self._undo_stack.append(cmd)
+        if len(self._undo_stack) > self.undo_limit:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def undo(self) -> None:
+        if not self._undo_stack:
+            return
+        cmd = self._undo_stack.pop()
+        self._redo_stack.append(cmd)
+        self.apply_command(cmd, reverse=True)
+
+    def redo(self) -> None:
+        if not self._redo_stack:
+            return
+        cmd = self._redo_stack.pop()
+        self._undo_stack.append(cmd)
+        self.apply_command(cmd, reverse=False)
+
+
+from neuropy.core.intervals import IntervalOp, IntervalSet  # noqa: F401

@@ -1040,42 +1040,35 @@ def cp_spike_correlations_1toN(
 def np_spike_correlations_snapshots(
     neurons,
     neuron_inds,
-    edge_times: pd.DataFrame,
+    start_end_times,
     bin_size=None,
     window_size=None,
     symmetrize=True,
 ):
     """
-    Compute N pairwise cross-correlations at once using multiple subsets from one set of spike trains.
+    Compute N pairwise cross-correlations across multiple time segments.
 
     Parameters
     ----------
     neurons : core.neurons
-        neurons obj containing spiketrains and related info
-    bin_size : float
-        Size of the bin, in seconds.
-    window_size : float
-        Size of the window (width of entire CCG), in seconds.
-    symmetrize : boolean (True)
-        Whether the output matrix should be symmetrized or not.
+    bin_size : float, seconds
+    window_size : float, seconds
+    symmetrize : bool
+    start_end_times : ndarray (2, n_segments) — row 0 = starts, row 1 = stops (seconds)
 
     Returns
     -------
-    correlograms : array
-        A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
+    correlograms : ndarray (n_clusters, n_clusters, winsize_samples)
     """
 
     assert bin_size >= 1 / neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = edge_times.shape[0]
+    n_segments = start_end_times.shape[1]
 
-    # Convert to array if int
     neuron_inds = _san(neuron_inds)
-
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
-    # Get spike times from neurons
     spike_times, spike_clusters, spike_samples, spike_segment_ids = \
-    _np_assemble_spike_arrays(neurons,segments=edge_times[['start', 'stop']].values.T)
+    _np_assemble_spike_arrays(neurons, segments=start_end_times)
 
     # Find `binsize`.
     bin_size = np.clip(
@@ -1167,43 +1160,34 @@ def np_spike_correlations_snapshots(
 def cp_spike_correlations_snapshots(
     neurons,
     neuron_inds,
-    edge_times: pd.DataFrame,
+    start_end_times,
     bin_size=None,
     window_size=None,
     symmetrize=True,
 ):
     """
-    Compute N pairwise cross-correlations at once using multiple subsets from one set of spike trains.
+    Compute N pairwise cross-correlations across multiple time segments (GPU path).
 
     Parameters
     ----------
     neurons : core.neurons
-        neurons obj containing spiketrains and related info
-    bin_size : float
-        Size of the bin, in seconds.
-    window_size : float
-        Size of the window (width of entire CCG), in seconds.
-    symmetrize : boolean (True)
-        Whether the output matrix should be symmetrized or not.
-    edge_times: pd.DataFrame
-        Two element list, first item is an array of t_starts and 
-        the second item is an array of t_stops.
+    bin_size : float, seconds
+    window_size : float, seconds
+    symmetrize : bool
+    start_end_times : ndarray (2, n_segments) — row 0 = starts, row 1 = stops (seconds)
+
     Returns
     -------
-    correlograms : array
-        A `(n_clusters, n_clusters, winsize_samples)` array with all pairwise CCGs.
+    correlograms : ndarray (n_clusters, n_clusters, winsize_samples)
     """
 
     assert bin_size >= 1 / neurons.sampling_rate, f"Bin size {bin_size} is too small for sampling rate {neurons.sampling_rate}. Bins must be longer than one sampling interval"
-    n_segments = edge_times.shape[0]
-    # Convert to array if int
+    n_segments = start_end_times.shape[1]
     neuron_inds = _san(neuron_inds)
-
     neurons = neurons.neuron_slice(neuron_inds=neuron_inds)
 
-    # Get spike times from neurons
     spike_times, spike_clusters, spike_samples, spike_segment_ids = \
-    _cp_assemble_spike_arrays(neurons,segments=edge_times[['start', 'stop']].values.T)
+    _cp_assemble_spike_arrays(neurons, segments=start_end_times)
 
     # Find `binsize`.
     bin_size = np.clip(
@@ -1302,7 +1286,7 @@ def spike_correlations(
     window_size=None,
     symmetrize=True,
     use_acceleration=False,
-    edge_times=None,
+    start_end_times=None,
     ref_neuron_inds=None,
     one_to_many=False,
 ):
@@ -1310,20 +1294,20 @@ def spike_correlations(
     Switch between spike correlation cases.
     """
     n_total_spikes = sum(len(st) for st in neurons.spiketrains)
-    mode = ('snapshots' if edge_times is not None
+    mode = ('snapshots' if start_end_times is not None
             else '1toN' if (ref_neuron_inds is not None and one_to_many)
             else '2groups' if ref_neuron_inds is not None
             else 'all')
     print(f"[spike_correlations] mode={mode}  n_neurons={neurons.n_neurons}  "
           f"total_spikes={n_total_spikes}  bin={bin_size}  window={window_size}")
-    if edge_times is not None:
+    if start_end_times is not None:
 
         spike_correlations_snapshots = cp_spike_correlations_snapshots \
         if use_acceleration else np_spike_correlations_snapshots
 
         correlograms = spike_correlations_snapshots(neurons,
                                                     neuron_inds=neuron_inds,
-                                                    edge_times=edge_times,
+                                                    start_end_times=start_end_times,
                                                     bin_size=bin_size,
                                                     window_size=window_size,
                                                     symmetrize=symmetrize)

@@ -1,1530 +1,1540 @@
-"""
-TimeSliderPanel — extracted from CCGReviewUI.
+"""Qt time-slider panel: epoch display, zoom, custom-segment CCG creation.
 
-Full-width time-window selector with epoch display, zoom, and
-custom-segment CCG creation.
+Replaces the tkinter TimeSliderPanel. Uses pyqtgraph for epoch timeline and
+emits a spec dict instead of directly calling CustomCCGManager, so it can be
+wired to any parent that handles CCG computation.
+
+Architecture
+------------
+HHMMSTicker          — pyqtgraph AxisItem with HH:MM:SS tick labels
+EpochPlotWidget      — pg.PlotWidget: colored epoch blocks + draggable cursors; drag/wheel to zoom x
+TimeSliderPanelQt    — top-level QWidget; owns plot + all controls
+
+Signals
+-------
+ccg_enqueue_requested(dict)  — parent calls enqueue_task(spec)
+save_requested()             — parent opens CCG file-management dialog
+load_requested()             — parent opens load-custom-CCG dialog
 """
 from __future__ import annotations
 
-import collections
-import glob as _glob
+import datetime
 import json
 import os
-import re
 import threading
 import traceback
-import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path as _Path
-from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from neuropy.core.epoch import Epoch as _Epoch
-from neuropy.analyses.utils import filter_neurons_to_intervals
-from neuropy.ui.utils import intersect_intervals, UITheme
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+from pyqtgraph.Qt.QtCore import Qt, Signal, QObject, QPointF, QPoint, QRectF, QTimer
+from pyqtgraph.Qt.QtWidgets import (
+    QAbstractItemView, QDialog, QListWidget, QMessageBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
+    QPushButton, QCheckBox, QComboBox, QLineEdit,
+    QSpinBox, QDoubleSpinBox, QSizePolicy, QScrollArea,
+    QGraphicsRectItem, QToolButton,
+)
+from pyqtgraph.Qt.QtGui import QFont
+from pyqtgraph.Qt.QtGui import QPainter, QPen, QColor, QBrush
+from neuropy.analyses.epoch_filter import EpochFilter
+import glob as _glob
+from neuropy.analyses.ms_connectivity import CCGData, CCGDataset, CCGSourceConfig
+from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.utils import JsonSavable, Savable
+from neuropy.core.intervals import IntervalOp as _SetOp
+from neuropy.ui.ui_common import BackgroundTaskRunner
+from neuropy.ui.utils import chip_button, ListPickerButton
+from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
+    from neuropy.ui.app_state import AppState
     from neuropy.ui.ccg_ui import CCGReviewUI
 
-class TimeSliderPanel:
-    """Time-slider panel: epoch display, zoom, custom-segment CCG creation."""
+_TS_COLORS = [
+    '#BBDEFB', '#C8E6C9', '#FFF9C4', '#FFE0B2', '#E1BEE7',
+    '#F8BBD0', '#D7CCC8', '#B2EBF2', '#DCEDC8', '#F0F4C3',
+]
+_TS_NONE_COLOR = '#E0E0E0'
 
-    _TS_COLORS = ['#BBDEFB', '#C8E6C9', '#FFF9C4', '#FFE0B2', '#E1BEE7',
-                  '#F8BBD0', '#D7CCC8', '#B2EBF2', '#DCEDC8', '#F0F4C3']
-    _TS_NONE_COLOR = '#E0E0E0'
-    _TS_NONE = 'NONE'
+_ALL_SEGS = "All"  # must match ccg_ui._ALL_SEGS
+_MAX_QUEUE = 50
 
+class EpochPlotWidget(pg.PlotWidget):
+    """Epoch timeline with click-to-place timing cursors."""
 
-    # ── Init / setup ────────────────────────────────────────────────────────
+    handle_moved = Signal(float, float)
 
-    def __init__(self, parent: tk.Widget, ui: "CCGReviewUI"):
-        self.ui = ui
-        self._slider_t_start: float = None
-        self._slider_t_end: float = None
-        self._slider_dragging: str = None
-        self._epoch_bounds: list = []
-        self._total_sec: float = 0.0
-        self._active_label: str = None
-        self._segment_name: str = ""
-        self._load_custom_ccg_win = None
-        self._load_custom_ccg_refresh = None
-        self._themes: dict = {}
-        self._current_theme: str = 'segments'
-        self._all_theme_bounds: dict = {}
-        self._theme_flag_vars: dict = {}
-        self._filter_btn = None
-        self._per_theme_label_state: dict = {}
-        self._zoom_start: float = None
-        self._zoom_end: float = None
-        self._zoom_dragging: str = None
-        self._batch_next_id: int = 1
-        self._batch_counts: dict = {}
-        self._batch_names: dict = {}
-        self._setup(parent)
+    _CURSOR_COLOR = '#1565C0'
+    _DRAG_COLOR   = '#C62828'
+    _BAR_Y0       = 0.2    # epoch bars occupy y=0.2..1.0 (2x height); axis zone=0..0.2
+    _DOT_Y        = 0.1    # cursor dots in axis zone
 
-    def _setup(self, parent):
-        """Full-width time-window selector — hidden by default."""
-        self.time_slider_frame = ttk.LabelFrame(
-            parent, text="Time Slider - Behavioral Epochs")
-        # Not packed — shown when 'Time Slider' panel is enabled
+    def __init__(self, parent=None):
+        from neuropy.ui.ui_common import qt_dark_mode
+        _axis = pg.AxisItem(orientation='bottom')
+        _axis.setStyle(tickLength=10)
+        _axis.tickStrings = lambda values, *_: [
+            f"{int(max(0.0,float(v))//3600):02d}:"
+            f"{int((max(0.0,float(v))%3600)//60):02d}:"
+            f"{int(max(0.0,float(v))%60):02d}"
+            for v in values]
+        super().__init__(parent, axisItems={'bottom': _axis})
+        bg = '#2b2b2b' if qt_dark_mode() else None
+        self.setBackground(bg)
+        if bg is None:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.viewport().setAutoFillBackground(False)
+        self.hideAxis('left')
+        self.setMouseEnabled(x=True, y=False)
+        self.setMenuEnabled(False)
+        self.setYRange(0, 1, padding=0)
+        self.setFixedHeight(60)
 
-        # Theme selector row
-        theme_row = ttk.Frame(self.time_slider_frame)
-        theme_row.pack(fill=tk.X, padx=4, pady=(2, 0))
-        ttk.Label(theme_row, text="Theme:").pack(side=tk.LEFT)
-        self._theme_var = tk.StringVar(value='segments')
-        self._theme_combo = ttk.Combobox(
-            theme_row, textvariable=self._theme_var,
-            values=['segments'], width=16, state='readonly')
-        self._theme_combo.pack(side=tk.LEFT, padx=4)
-        self._theme_combo.bind('<<ComboboxSelected>>', self._on_theme_change)
-        self._theme_info_var = tk.StringVar(value="")
-        ttk.Label(theme_row, textvariable=self._theme_info_var,
-                  font=('Courier', 8), foreground='#666').pack(
-            side=tk.LEFT, padx=6)
-        # Single per-theme "include in filter" toggle — variable swapped by _on_theme_change
-        self._filter_btn = ttk.Checkbutton(
-            theme_row, text="Include in filter",
-            variable=tk.BooleanVar())  # placeholder; replaced when themes are discovered
-        self._filter_btn.pack(side=tk.LEFT, padx=(4, 2))
+        self._t_min:    float = 0.0
+        self._t_max:    float = 1.0
+        self._start_t:  float = 0.0
+        self._end_t:    float = 0.0
+        self._epoch_rects: list = []
+        self._snap_times:  list[float] = []
+        self._snap_enabled: bool = True
+        self._locked:       bool = False
+        self._has_start:    bool = False
+        self._has_end:      bool = False
 
-        # ── Overlap label selector (inline, hidden until multi-label theme) ──
-        self._overlap_row = ttk.Frame(theme_row)
-        # Not packed initially — shown inline when theme has multiple labels
-        ttk.Label(self._overlap_row, text="Show:").pack(side=tk.LEFT, padx=(0, 2))
-        self._label_var = tk.StringVar(value='All')
-        self._label_combo = ttk.Combobox(
-            self._overlap_row, textvariable=self._label_var,
-            values=['All'], width=12, state='readonly')
-        self._label_combo.pack(side=tk.LEFT)
-        self._label_combo.bind('<<ComboboxSelected>>', self._on_label_change)
-        ttk.Button(self._overlap_row, text="All",
-                   command=self._on_label_reset).pack(side=tk.LEFT, padx=2)
+        _dot_brush = pg.mkBrush(QColor(self._CURSOR_COLOR))
+        _dot_pen   = pg.mkPen(QColor('#ffffff'), width=1)
+        self._start_dot = pg.ScatterPlotItem(
+            symbol='o', size=20, brush=_dot_brush, pen=_dot_pen)
+        self._end_dot = pg.ScatterPlotItem(
+            symbol='o', size=20, brush=_dot_brush, pen=_dot_pen)
+        for dot in (self._start_dot, self._end_dot):
+            dot.setZValue(10)
+            dot.setVisible(False)
+            self.addItem(dot)
 
-        # ── Tool bar (right side of theme row) ──
-        toolbar = ttk.Frame(theme_row)
-        toolbar.pack(side=tk.RIGHT, padx=(0, 4))
-        ttk.Button(toolbar, text="💾", width=2,
-                   command=self._save_custom_ccg).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="📂", width=2,
-                   command=self._load_custom_ccg).pack(side=tk.LEFT, padx=1)
-        ttk.Label(toolbar, text="|", foreground='#BBB').pack(side=tk.LEFT, padx=2)
-        self._snap_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text="Snap",
-                        variable=self._snap_var).pack(side=tk.LEFT, padx=2)
-        self._tool_var = tk.StringVar(value='none')
-        self._selection_btn = ttk.Checkbutton(
-            toolbar, text="Zoom-in", variable=self._tool_var,
-            onvalue='selection', offvalue='none',
-            command=self._on_tool_change)
-        self._selection_btn.pack(side=tk.LEFT, padx=2)
-        self._lock_var = tk.BooleanVar(value=False)
-        self._lock_btn = ttk.Checkbutton(
-            toolbar, text="\U0001F512 Lock", variable=self._lock_var,
-            command=self._on_tool_change)
-        self._lock_btn.pack(side=tk.LEFT, padx=2)
+        _box_pen = pg.mkPen(QColor(self._CURSOR_COLOR), width=1, style=Qt.PenStyle.DashLine)
+        self._box_top    = pg.PlotDataItem(pen=_box_pen)
+        self._box_bottom = pg.PlotDataItem(pen=_box_pen)
+        self._box_left   = pg.PlotDataItem(pen=_box_pen)
+        self._box_right  = pg.PlotDataItem(pen=_box_pen)
+        for item in (self._box_top, self._box_bottom, self._box_left, self._box_right):
+            item.setZValue(5)
+            item.setVisible(False)
+            self.addItem(item)
 
-        # ── Legend row (below theme row, populated by _update_legend) ──
-        self._legend_frame = ttk.Frame(self.time_slider_frame)
-        # Packed dynamically by _update_legend
+        self._drag_start_t:  float | None = None
+        self._grabbed_dot = None   # _start_dot | _end_dot | None
+        self._drag_rect = pg.LinearRegionItem(
+            movable=False,
+            brush=pg.mkBrush(QColor(self._DRAG_COLOR)),
+            pen=pg.mkPen(QColor(self._DRAG_COLOR), width=1))
+        self._drag_rect.setZValue(20)
+        self._drag_rect.setVisible(False)
+        self.addItem(self._drag_rect)
 
-        # ── Main canvas ──
-        self._main_canvas_frame = ttk.Frame(self.time_slider_frame)
-        top = self._main_canvas_frame
-        top.pack(fill=tk.X, padx=4, pady=(2, 0))
+        vb = self.getViewBox()
+        _orig_press   = vb.mousePressEvent
+        _orig_move    = vb.mouseMoveEvent
+        _orig_release = vb.mouseReleaseEvent
 
-        self.ts_canvas = tk.Canvas(top, height=56, bg='#F5F5F5', cursor='crosshair')
-        self.ts_canvas.pack(fill=tk.X, expand=True)
-        self.ts_canvas.bind('<Configure>',      self._redraw)
-        self.ts_canvas.bind('<Button-1>',        self._mouse_press)
-        self.ts_canvas.bind('<B1-Motion>',       self._mouse_drag)
-        self.ts_canvas.bind('<ButtonRelease-1>', self._mouse_release)
+        def _dot_px(dot, t):
+            scene_pt = vb.mapToScene(QPointF(t, self._DOT_Y))
+            return float(self.mapFromScene(scene_pt).x())
 
-        # ── CCG time range bar (below main canvas, always visible) ──
-        self._ccg_ctrl = ttk.Frame(self.time_slider_frame)
-        ccg_ctrl = self._ccg_ctrl
-        ccg_ctrl.pack(fill=tk.X, padx=4, pady=(2, 0))
-        self._start_var = tk.StringVar(value="00:00:00")
-        self._end_var   = tk.StringVar(value="00:00:00")
-        self._build_time_range_bar(ccg_ctrl, "CCG time range",
-                                   self._start_var, self._end_var,
-                                   self._on_time_slider_set)
-        ttk.Label(ccg_ctrl, text="Name:").pack(side=tk.LEFT, padx=(8, 0))
-        self._name_var = tk.StringVar(value="")
-        ttk.Entry(ccg_ctrl, textvariable=self._name_var,
-                  width=14).pack(side=tk.LEFT, padx=2)
-        ttk.Label(ccg_ctrl, text="Splits:").pack(side=tk.LEFT, padx=(6, 0))
-        self._splits_var = tk.IntVar(value=1)
-        ttk.Spinbox(ccg_ctrl, from_=1, to=99, textvariable=self._splits_var,
-                    width=3).pack(side=tk.LEFT, padx=2)
-        ttk.Label(ccg_ctrl, text="Overlap(s):").pack(side=tk.LEFT, padx=(4, 0))
-        self._overlap_sec_var = tk.StringVar(value="0")
-        ttk.Entry(ccg_ctrl, textvariable=self._overlap_sec_var,
-                  width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ccg_ctrl, text="Clear",
-                   command=self._on_time_slider_clear).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Button(ccg_ctrl, text="Apply to Multiple Sessions",
-                   command=self._on_time_slider_apply_multiple_sessions).pack(side=tk.LEFT, padx=(2, 2))
-        self._status_var = tk.StringVar(value="")
-        ttk.Label(ccg_ctrl, textvariable=self._status_var,
-                  font=('Courier', 8), foreground='#555').pack(side=tk.LEFT, padx=8)
+        def _vb_press(ev):
+            if self._locked or ev.button() != Qt.MouseButton.LeftButton:
+                _orig_press(ev); return
+            px = ev.pos().x()
+            grabbed = None
+            if self._has_start:
+                if abs(px - _dot_px(self._start_dot, self._start_t)) < 10:
+                    grabbed = 'start'
+            if grabbed is None and self._has_end:
+                if abs(px - _dot_px(self._end_dot, self._end_t)) < 10:
+                    grabbed = 'end'
+            if grabbed:
+                self._grabbed_dot = grabbed
+            else:
+                self._drag_start_t = vb.mapToView(ev.pos()).x()
+                self._drag_rect.setRegion([self._drag_start_t, self._drag_start_t])
+                self._drag_rect.setVisible(True)
+            ev.accept()
 
-        # ── Zoom detail canvas (hidden until zoom is active) ──
-        self._zoom_frame = ttk.Frame(self.time_slider_frame)
-        self._radiate_canvas = tk.Canvas(
-            self._zoom_frame, height=16, bg='#FEFEFE', highlightthickness=0)
-        self._radiate_canvas.pack(fill=tk.X, expand=True, side=tk.TOP)
-        self._zoom_canvas = tk.Canvas(
-            self._zoom_frame, height=56, bg='#FAFAFA', cursor='crosshair')
-        self._zoom_canvas.pack(fill=tk.X, expand=True)
-        self._zoom_canvas.bind('<Configure>', self._zoom_redraw)
+        def _vb_move(ev):
+            if self._grabbed_dot:
+                t = self._clamp_t(vb.mapToView(ev.pos()).x())
+                if self._grabbed_dot == 'start':
+                    self._start_t = t
+                    self._start_dot.setData([t], [self._DOT_Y])
+                else:
+                    self._end_t = t
+                    self._end_dot.setData([t], [self._DOT_Y])
+                self._on_cursor_moved()
+                ev.accept()
+            elif self._drag_start_t is not None:
+                t = vb.mapToView(ev.pos()).x()
+                lo, hi = sorted([self._drag_start_t, t])
+                self._drag_rect.setRegion([lo, hi])
+                ev.accept()
+            else:
+                _orig_move(ev)
 
-        # ── Zoom time range bar (below zoom canvas, shown with zoom) ──
-        self._zoom_ctrl = ttk.Frame(self._zoom_frame)
-        self._zoom_ctrl.pack(fill=tk.X, padx=4, pady=(2, 0))
-        self._zoom_start_var = tk.StringVar(value="00:00:00")
-        self._zoom_end_var   = tk.StringVar(value="00:00:00")
-        self._build_time_range_bar(self._zoom_ctrl, "Zoom range",
-                                   self._zoom_start_var, self._zoom_end_var,
-                                   self._on_zoom_range_set)
+        def _vb_release(ev):
+            if ev.button() != Qt.MouseButton.LeftButton:
+                _orig_release(ev); return
+            if self._grabbed_dot:
+                self._grabbed_dot = None
+                ev.accept()
+            elif self._drag_start_t is not None:
+                t = vb.mapToView(ev.pos()).x()
+                lo, hi = sorted([self._snap_near(self._clamp_t(self._drag_start_t)),
+                                  self._snap_near(self._clamp_t(t))])
+                self._drag_rect.setVisible(False)
+                self._drag_start_t = None
+                if hi - lo > (self._t_max - self._t_min) * 0.01:
+                    self.setXRange(lo, hi, padding=0.01)
+                else:
+                    self._place_cursor_at(lo)
+                ev.accept()
+            else:
+                _orig_release(ev)
 
-    def _bind_time_entry(self, entry, var):
-        """Bind Return/FocusOut on *entry* to parse and normalise a HH:MM:SS time value."""
-        def _resolve(_=None):
-            raw = var.get().strip().lower()
-            if raw in ('start', 'end'):
-                var.set(raw)  # keep sentinel as-is
-                return
-            try:
-                sec = self._hms_to_sec(raw)
-                var.set(self._sec_to_hms(sec))
-            except (ValueError, IndexError):
-                pass
-        entry.bind('<Return>', _resolve)
-        entry.bind('<FocusOut>', _resolve)
+        vb.mousePressEvent   = _vb_press
+        vb.mouseMoveEvent    = _vb_move
+        vb.mouseReleaseEvent = _vb_release
 
-    def _build_time_range_bar(self, parent, title, start_var, end_var, set_cmd):
-        """Pack [title label] [Start entry] [End entry] [Set button] into *parent*."""
-        ttk.Label(parent, text=title,
-                  font=('Arial', 8, 'bold'), foreground='#444').pack(side=tk.LEFT, padx=(0, 6))
-        for lbl, var in [("Start:", start_var), ("End:", end_var)]:
-            ttk.Label(parent, text=lbl).pack(
-                side=tk.LEFT, padx=(6, 0) if lbl == "End:" else 0)
-            e = ttk.Entry(parent, textvariable=var, width=10)
-            e.pack(side=tk.LEFT, padx=2)
-            self._bind_time_entry(e, var)
-        ttk.Button(parent, text="Set", command=set_cmd).pack(side=tk.LEFT, padx=4)
+    def update_epochs(self, bounds: list[tuple], label_colors: dict,
+                      t_min: float, t_max: float):
+        vb = self.getViewBox()
+        for item in self._epoch_rects:
+            vb.removeItem(item)
+        self._epoch_rects.clear()
 
-    def toggle(self):
-        show = self.ui._panel_vars['Time Slider'].get()
-        print(f"[CCGReviewUI] _toggle_time_slider show={show}")
+        self._t_min = t_min
+        self._t_max = max(t_max, t_min + 1.0)
+        self.setXRange(t_min, self._t_max, padding=0.01)
+
+        snap = {t_min, t_max}
+        bar_h = 1.0 - self._BAR_Y0
+        for t0, t1, lbl in bounds:
+            color = label_colors.get(lbl, _TS_NONE_COLOR)
+            rect = QGraphicsRectItem(t0, self._BAR_Y0, t1 - t0, bar_h)
+            rect.setBrush(QBrush(QColor(color)))
+            rect.setPen(QPen(QColor(color), 0))
+            rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect.setZValue(-1)
+            vb.addItem(rect)
+            self._epoch_rects.append(rect)
+            snap.add(t0)
+            snap.add(t1)
+        self._snap_times = sorted(snap)
+        self._update_box()
+
+    def clear_selection(self):
+        self._has_start = False
+        self._has_end = False
+        self._start_dot.setVisible(False)
+        self._end_dot.setVisible(False)
+        self._set_box_visible(False)
+
+    def set_selection(self, t_start: float, t_end: float, *, show: bool = True):
+        t_start = max(self._t_min, min(self._t_max, float(t_start)))
+        t_end   = max(self._t_min, min(self._t_max, float(t_end)))
+        if t_start > t_end:
+            t_start, t_end = t_end, t_start
+        self._start_t, self._end_t = t_start, t_end
         if show:
-            try:
-                self.time_slider_frame.pack(
-                    in_=self.ui._main_frame, side=tk.TOP,
-                    fill=tk.X, before=self.ui._paned, pady=(0, 4))
-                self._discover_themes()
-                self._init_times()
-                print(f"[CCGReviewUI]   epoch_bounds={len(self._epoch_bounds)} "
-                      f"total_sec={self._total_sec:.1f}")
-                self._redraw()
-            except Exception as ex:
-                print(f"[CCGReviewUI]   ERROR in _toggle_time_slider: {ex}")
-                traceback.print_exc()
+            self._has_start = True
+            self._has_end   = True
+            self._start_dot.setData([t_start], [self._DOT_Y])
+            self._end_dot.setData(  [t_end],   [self._DOT_Y])
+            self._start_dot.setVisible(True)
+            self._end_dot.setVisible(True)
+        self._update_box()
+
+    def get_selection(self) -> tuple[float, float]:
+        if not self._has_start and not self._has_end:
+            return 0.0, 0.0
+        t0 = self._start_t if self._has_start else self._t_min
+        t1 = self._end_t   if self._has_end   else self._t_max
+        if t0 > t1:
+            t0, t1 = t1, t0
+        return t0, t1
+
+    def has_full_selection(self) -> bool:
+        return self._has_start and self._has_end
+
+    def reset_zoom(self):
+        self.setXRange(self._t_min, self._t_max, padding=0.01)
+
+    def _clamp_t(self, t: float) -> float:
+        return max(self._t_min, min(self._t_max, float(t)))
+
+    def _snap_threshold(self) -> float:
+        return max((self._t_max - self._t_min) * 0.05, 1.0)
+
+    def _snap_near(self, v: float) -> float:
+        if not self._snap_enabled or not self._snap_times:
+            return v
+        thresh = self._snap_threshold()
+        best, best_d = None, thresh + 1.0
+        for t in self._snap_times:
+            d = abs(t - v)
+            if d <= thresh and d < best_d:
+                best_d, best = d, t
+        return best if best is not None else v
+
+    def _set_box_visible(self, visible: bool):
+        for item in (self._box_top, self._box_bottom, self._box_left, self._box_right):
+            item.setVisible(visible)
+
+    def _update_box(self):
+        if self._has_start and self._has_end:
+            t0, t1 = self.get_selection()
+            y0, y1 = self._BAR_Y0, 1.0
+            self._box_top.setData(   [t0, t1], [y1, y1])
+            self._box_bottom.setData([t0, t1], [y0, y0])
+            self._box_left.setData(  [t0, t0], [y0, y1])
+            self._box_right.setData( [t1, t1], [y0, y1])
+            self._set_box_visible(True)
         else:
-            self.time_slider_frame.pack_forget()
+            self._set_box_visible(False)
 
-    # ── Key / session change callbacks ──────────────────────────────────────
+    def _on_cursor_moved(self):
+        t0, t1 = self.get_selection()
+        self._update_box()
+        self.handle_moved.emit(t0, t1)
 
-    def on_key_changed(self):
-        self._reinit_times_for_current_key()
-
-    def on_session_mode_changed(self):
-        self._refresh_union_if_all_sessions_mode()
-
-    def _reinit_times_for_current_key(self):
-        """Refresh time-slider bounds from the current CCG pointer / theme (same session)."""
-        if getattr(self, '_theme_combo', None) is None:
+    def _snap_start(self):
+        if not self._has_start:
             return
+        v = self._snap_near(self._start_t)
+        if self._has_end:
+            v = min(v, self._end_t - 1.0)
+        self._start_t = self._clamp_t(v)
+        self._start_dot.setData([self._start_t], [self._DOT_Y])
+        self._on_cursor_moved()
+
+    def _snap_end(self):
+        if not self._has_end:
+            return
+        v = self._snap_near(self._end_t)
+        if self._has_start:
+            v = max(v, self._start_t + 1.0)
+        self._end_t = self._clamp_t(v)
+        self._end_dot.setData([self._end_t], [self._DOT_Y])
+        self._on_cursor_moved()
+
+    def _place_cursor_at(self, t: float):
+        t = self._snap_near(self._clamp_t(t))
+        if not self._has_start:
+            self._start_t = t
+            self._start_dot.setData([t], [self._DOT_Y])
+            self._start_dot.setVisible(True)
+            self._has_start = True
+        elif not self._has_end:
+            if t <= self._start_t:
+                self._start_t = t
+                self._start_dot.setData([t], [self._DOT_Y])
+            else:
+                self._end_t = t
+                self._end_dot.setData([t], [self._DOT_Y])
+                self._end_dot.setVisible(True)
+                self._has_end = True
+        else:
+            self._end_dot.setVisible(False)
+            self._has_end = False
+            self._start_t = t
+            self._start_dot.setData([t], [self._DOT_Y])
+            self._start_dot.setVisible(True)
+            self._has_start = True
+        self._on_cursor_moved()
+
+
+class TimeSliderPanelQt(QWidget):
+    """Qt replacement for TimeSliderPanel.
+
+    Reads session/key from AppState, raw data from CCGDataset.
+    Custom CCG creation is delegated to the parent via ccg_enqueue_requested.
+    """
+
+    ccg_enqueue_requested = Signal(object)   # spec dict
+    save_requested        = Signal()
+    load_requested        = Signal()
+
+    def __init__(self, nav: 'AppState', cd: 'CCGDataset', parent=None):
+        super().__init__(parent)
+        self._nav = nav
+        self._cd  = cd
+
+        # Epoch state
+        self._epoch_bounds:    list = []
+        self._total_sec:       float = 0.0
+        self._themes:          dict = {}     # theme_name → Epoch object
+        self._all_theme_bounds: dict = {}    # theme_name → [(s,e,label)]
+        self._current_theme:   str  = 'segments'
+        self._label_colors:    dict | None = None
+        self._per_theme_label_state: dict = {}  # theme → {label: bool}
+        self._legend_toggles:  dict = {}     # label → bool (current theme)
+        self._batch_counts:    dict = {}
+        self._batch_names:     dict = {}
+        self._batch_next_id:   int = 1
+
+        self._build()
+        self._connect_nav()
+        self._discover_themes(self._nav._build_themes(self._nav.key))
+
+    def reload_themes(self):
+        self._discover_themes(self._nav._build_themes(self._nav.key))
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 1, 4, 1)
+        root.setSpacing(1)
+
+        title_lbl = QLabel("Time Slider - Behavioral Epochs")
+        title_lbl.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        root.addWidget(title_lbl)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Theme:"))
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItem('segments')
+        self._theme_combo.setFixedWidth(140)
+        self._theme_combo.currentTextChanged.connect(self._on_theme_change)
+        row1.addWidget(self._theme_combo)
+
+        self._theme_info_lbl = QLabel("")
+        self._theme_info_lbl.setStyleSheet("color:#888; font-size:8pt;")
+        row1.addWidget(self._theme_info_lbl)
+
+        # "Include in filter" chip (per-theme flag)
+        self._filter_checks: dict[str, bool] = {}
+        self._filter_check = chip_button("Include in filter", checked=False)
+        self._filter_check.toggled.connect(lambda on: self._filter_check.setText(
+            "✓ Include in filter" if on else "Include in filter"))
+        self._filter_check.toggled.connect(self._on_filter_toggle)
+        row1.addWidget(self._filter_check)
+
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("Show:"))
+        self._label_combo = QComboBox()
+        self._label_combo.setFixedWidth(110)
+        self._label_combo.currentTextChanged.connect(self._on_label_change)
+        row1.addWidget(self._label_combo)
+        reset_btn = QPushButton("All")
+        reset_btn.setFixedWidth(40)
+        reset_btn.clicked.connect(self._on_label_reset)
+        row1.addWidget(reset_btn)
+
+        row1.addStretch()
+
+        save_btn = QToolButton(); save_btn.setText("💾")
+        save_btn.clicked.connect(self.save_requested)
+        row1.addWidget(save_btn)
+        load_btn = QToolButton(); load_btn.setText("📂")
+        load_btn.clicked.connect(self.load_requested)
+        row1.addWidget(load_btn)
+
+        sep_tb = QFrame()
+        sep_tb.setFrameShape(QFrame.VLine)
+        sep_tb.setStyleSheet('color: #ccc;')
+        row1.addWidget(sep_tb)
+
+        self._snap_check = QCheckBox("Snap")
+        self._snap_check.setChecked(True)
+        self._snap_check.toggled.connect(self._on_snap_toggle)
+        row1.addWidget(self._snap_check)
+        self._reset_zoom_btn = QPushButton("Reset")
+        self._reset_zoom_btn.setFixedWidth(50)
+        self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
+        row1.addWidget(self._reset_zoom_btn)
+        self._lock_check = QCheckBox("Lock")
+        self._lock_check.toggled.connect(self._on_lock_toggle)
+        row1.addWidget(self._lock_check)
+        root.addLayout(row1)
+
+        self._legend_widget = QWidget()
+        self._legend_layout = QHBoxLayout(self._legend_widget)
+        self._legend_layout.setContentsMargins(0, 0, 0, 0)
+        self._legend_layout.setSpacing(4)
+        self._legend_layout.addStretch()
+        root.addSpacing(12)
+        root.addWidget(self._legend_widget)
+        root.addSpacing(12)
+
+        self._any_mode_lbl = QLabel(
+            "All-sessions view: no single behavioral timeline — "
+            "switch to one session to use the time slider.")
+        self._any_mode_lbl.setWordWrap(True)
+        self._any_mode_lbl.setStyleSheet('color:#666; font-size:9pt; padding:4px;')
+        self._any_mode_lbl.setVisible(False)
+        root.addWidget(self._any_mode_lbl)
+
+        self._main_plot = EpochPlotWidget()
+        self._main_plot.handle_moved.connect(self._on_main_handle_moved)
+        root.addWidget(self._main_plot)
+
+        self._on_snap_toggle(self._snap_check.isChecked())
+
+        self._timing_row_widget = QWidget()
+        timing_row = QHBoxLayout(self._timing_row_widget)
+        timing_row.setContentsMargins(0, 0, 0, 0)
+        self._timing_lbl = QLabel("CCG time range")
+        timing_row.addWidget(self._timing_lbl)
+        timing_row.addWidget(QLabel("Start:"))
+        self._start_entry = QLineEdit("00:00:00")
+        self._start_entry.setFixedWidth(72)
+        self._start_entry.editingFinished.connect(self._validate_start)
+        timing_row.addWidget(self._start_entry)
+        timing_row.addWidget(QLabel("End:"))
+        self._end_entry = QLineEdit("00:00:00")
+        self._end_entry.setFixedWidth(72)
+        self._end_entry.editingFinished.connect(self._validate_end)
+        timing_row.addWidget(self._end_entry)
+
+        set_btn = QPushButton("Set")
+        set_btn.clicked.connect(self._on_set)
+        timing_row.addWidget(set_btn)
+
+        self._ccg_extra_widget = QWidget()
+        extra_lay = QHBoxLayout(self._ccg_extra_widget)
+        extra_lay.setContentsMargins(0, 0, 0, 0)
+        extra_lay.setSpacing(4)
+        clr_btn = QPushButton("Clear")
+        clr_btn.clicked.connect(self._on_clear)
+        extra_lay.addWidget(clr_btn)
+        _sessions = [str(k.session) for k in self._nav.real_nd_keys()]
+        self._sessions_picker = ListPickerButton("Sessions", items=_sessions,
+                                                 plural="sessions")
+        self._sessions_picker.set_selected([str(self._nav.key.session)])
+        self._sessions_picker.setFixedWidth(120)
+        extra_lay.addWidget(self._sessions_picker)
+        extra_lay.addWidget(QLabel("Name:"))
+        self._name_entry = QLineEdit("")
+        self._name_entry.setFixedWidth(100)
+        extra_lay.addWidget(self._name_entry)
+        extra_lay.addWidget(QLabel("Splits:"))
+        self._splits_spin = QSpinBox()
+        self._splits_spin.setRange(1, 99)
+        self._splits_spin.setValue(1)
+        self._splits_spin.setFixedWidth(45)
+        extra_lay.addWidget(self._splits_spin)
+        extra_lay.addWidget(QLabel("Overlap:"))
+        self._overlap_entry = QLineEdit("0")
+        self._overlap_entry.setFixedWidth(45)
+        extra_lay.addWidget(self._overlap_entry)
+        self._overlap_unit = QComboBox()
+        for u in ('%', 'hr', 'min', 's'):
+            self._overlap_unit.addItem(u)
+        self._overlap_unit.setFixedWidth(45)
+        extra_lay.addWidget(self._overlap_unit)
+        timing_row.addWidget(self._ccg_extra_widget)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color:#555; font-size:8pt;")
+        timing_row.addWidget(self._status_lbl)
+        timing_row.addStretch()
+        root.addWidget(self._timing_row_widget)
+
+    def _connect_nav(self):
+        nav = self._nav
+        nav.themes_changed.connect(self._on_themes_changed)
+        nav.session_mode_changed.connect(self._on_session_mode_changed)
+
+    def _on_themes_changed(self, themes: dict):
+        self._discover_themes(themes)
+        self._label_colors = None
         self._init_times()
-        self._redraw()
-
-    def _refresh_epochs_for_current_key(self):
-        """Re-discover behavioral Epoch objects for the current session and refresh bounds."""
-        combo = getattr(self, '_theme_combo', None)
-        if combo is None:
-            return
-        self._discover_themes()
-        vals = tuple(combo.cget('values') or ())
-        if vals and self._theme_var.get() not in vals:
-            self._theme_var.set('segments')
-        self._on_theme_change()
-
-    def _refresh_union_if_all_sessions_mode(self):
-        """Recompute All-session label union without resetting the time-slider theme/handles."""
-        if not getattr(self.ui, '_session_any_mode', False):
-            return
-        if getattr(self, '_theme_combo', None) is None:
-            return
-        self._rebuild_theme_label_union_for_all_sessions()
-        self._label_colors = None
-        self._update_overlap_ui()
-        self._redraw()
-
-    def _rebuild_theme_label_union_for_all_sessions(self):
-        """When Session=All, map each theme to sorted unique labels seen on any session."""
-        self._theme_label_union_all_sessions = {}
-        if not getattr(self.ui, '_session_any_mode', False):
-            return
-        session_objs = self._all_process_data_sessions()
-        if not session_objs:
-            return
-        for attr in self._themes.keys():
-            acc = set()
-            for s in session_objs:
-                obj = getattr(s, attr, None)
-                if obj is None or _Epoch is None or not isinstance(obj, _Epoch):
-                    continue
-                if obj.n_epochs <= 0:
-                    continue
-                for lbl in obj.labels:
-                    lbl_str = str(lbl).strip()
-                    if lbl_str:
-                        acc.add(lbl_str)
-            if acc:
-                self._theme_label_union_all_sessions[attr] = sorted(acc)
-        # segments: union of segment labels across every loaded CCG pointer
-        seg = set()
-        data = getattr(self.ui.cd, 'ptr', None)
-        if data:
-            for ptr in data.values():
-                if ptr is None:
-                    continue
-                try:
-                    et = ptr.edge_times
-                except Exception:
-                    continue
-                cols = getattr(et, 'columns', None)
-                if cols is None or 'label' not in cols:
-                    continue
-                for v in et['label'].values:
-                    s = str(v).strip()
-                    if s:
-                        seg.add(s)
-        if seg:
-            self._theme_label_union_all_sessions['segments'] = sorted(seg)
-
-    # ── Theme / label data ──────────────────────────────────────────────────
-
-    def _discover_themes(self):
-        """Discover available Epoch objects from the session for theme switching."""
-        self._themes = {}
-        self._theme_label_union_all_sessions = {}
-        # Known Epoch attribute names on session objects (ProcessData)
-        _EPOCH_ATTRS = [
-            'paradigm', 'brainstates', 'theta', 'theta_epochs',
-            'ripple', 'sw', 'spindle', 'pbe', 'off_epochs',
-            'micro_arousals', 'artifact', 'handling',
-            'maze1_run', 'maze2_run', 'maze_run', 'remaze_run',
-        ]
-        sessions = getattr(getattr(self.ui.cd, 'nd', None), '_sessions', None)
-        if not sessions:
-            return
-        if not isinstance(sessions, (list, tuple)):
-            sessions = [sessions]
-        # Use the first session that matches our current key
-        session_name = getattr(self.ui.key, 'session', None)
-        session = None
-        for s in sessions:
-            nd = getattr(self.ui.cd, 'nd', None)
-            if nd is not None:
-                sname = nd._short_session_name(s)
-                if sname == session_name:
-                    session = s
-                    break
-        if session is None:
-            print(f"[TimeSlider] no matching session object for {session_name}")
-            return
-        for attr in _EPOCH_ATTRS:
-            obj = getattr(session, attr, None)
-            if obj is not None and _Epoch is not None and isinstance(obj, _Epoch):
-                if obj.n_epochs > 0:
-                    self._themes[attr] = obj
-        # Update combobox values
-        theme_names = ['segments'] + sorted(self._themes.keys())
-        self._theme_combo['values'] = theme_names
-        n_themes = len(self._themes)
-        self._theme_info_var.set(
-            f"{n_themes} theme{'s' if n_themes != 1 else ''} available")
-        self._rebuild_theme_label_union_for_all_sessions()
-        # Pre-compute interval bounds for all themes
-        self._all_theme_bounds = {}
-        for theme_name, epoch_obj in self._themes.items():
-            labs = [str(x).strip() for x in epoch_obj.labels]
-            self._all_theme_bounds[theme_name] = [
-                (float(s), float(e), lb)
-                for s, e, lb in zip(epoch_obj.starts, epoch_obj.stops, labs)
-            ]
-        # Add BoolVars for any newly discovered themes (preserve existing state)
-        for tname in self._all_theme_bounds:
-            if tname not in self._theme_flag_vars:
-                self._theme_flag_vars[tname] = tk.BooleanVar(value=False)
-        # Wire the single filter button to the current theme's BoolVar
-        cur = getattr(self, '_current_theme', None)
-        if cur and cur in self._theme_flag_vars and self._filter_btn is not None:
-            self._filter_btn.configure(variable=self._theme_flag_vars[cur])
-
-    def _active_labels_for_theme(self, theme_name: str) -> set:
-        """Active label set for a theme: live legend for current display theme, saved state for others."""
-        if theme_name == getattr(self, '_current_theme', None):
-            return {lb for lb, v in getattr(self, '_legend_toggles', {}).items() if v.get()}
-        saved = self._per_theme_label_state.get(theme_name, {})
-        all_labels = {lb for _, _, lb in self._all_theme_bounds.get(theme_name, [])}
-        return {lb for lb in all_labels if saved.get(lb, True)}
-
-    def _all_process_data_sessions(self):
-        """ProcessData objects for every loaded session (for cross-session label union)."""
-        nd = getattr(self.ui.cd, 'nd', None)
-        if nd is None:
-            return []
-        raw = getattr(nd, '_sessions', None)
-        if raw is None:
-            raw = []
-        elif not isinstance(raw, (list, tuple)):
-            raw = [raw]
-        objs = [s for s in raw if s is not None]
-        if objs:
-            return objs
-        out = []
-        seen = set()
-        for nk in self.ui._sess_mgr._real_nd_keys_ordered():
-            s = self.ui._sess_mgr._session_obj_for_nd_key(nk)
-            if s is None:
-                continue
-            sid = id(s)
-            if sid in seen:
-                continue
-            seen.add(sid)
-            out.append(s)
-        return out
-
-    def _collect_theme_ui_labels(self) -> list[str]:
-        """Non-blank labels for overlap + legend; Session=All includes union (also stripped)."""
-        theme = getattr(self, '_current_theme', 'segments')
-        acc = {str(lb).strip() for _, _, lb in self._epoch_bounds if str(lb).strip()}
-        if getattr(self.ui, '_session_any_mode', False):
-            extra = (getattr(self, '_theme_label_union_all_sessions', None)
-                     or {}).get(theme, ())
-            acc |= {str(x).strip() for x in (extra or ()) if str(x).strip()}
-        out = sorted(acc)
-        if not out and theme != 'segments' and theme in getattr(self, '_themes', {}):
-            return [theme]
-        return out
-
-    def _update_overlap_ui(self):
-        """Update the label-filter dropdown for the current theme."""
-        theme = getattr(self, '_current_theme', 'segments')
-        all_labels = self._collect_theme_ui_labels()
-        if len(all_labels) > 1:
-            self._label_combo['values'] = ['All'] + all_labels + ['NONE']
-            self._label_var.set('All')
-        else:
-            # Single-label theme (e.g. ripple): show theme name + NONE
-            display_name = theme if theme != 'segments' else all_labels[0] if all_labels else 'segments'
-            self._label_combo['values'] = [display_name, 'NONE']
-            self._label_var.set(display_name)
-        self._overlap_row.pack(side=tk.LEFT, padx=(8, 0))
-        self._active_label = None
-        # Reset label color cache so it rebuilds for new theme
-        self._label_colors = None
         self._update_legend()
+        self._redraw_main()
+
+    def _on_session_mode_changed(self, any_mode: bool):
+        self._any_mode_lbl.setVisible(any_mode)
+        self._main_plot.setVisible(not any_mode)
+        self._legend_widget.setVisible(not any_mode)
+        self._timing_row_widget.setEnabled(not any_mode)
+        if any_mode:
+            self._main_plot.update_epochs([], {}, 0, 1)
+        else:
+            self._redraw_main()
+
+    def _discover_themes(self, themes: dict):
+        self._themes = themes
+        self._all_theme_bounds = {
+            attr: [(float(s), float(e), str(lb).strip())
+                   for s, e, lb in zip(obj.starts, obj.stops, obj.labels)]
+            for attr, obj in themes.items()
+        }
+        theme_names = ['segments'] + sorted(themes)
+        cur = self._theme_combo.currentText()
+        self._theme_combo.blockSignals(True)
+        self._theme_combo.clear()
+        self._theme_combo.addItems(theme_names)
+        if cur in theme_names:
+            self._theme_combo.setCurrentText(cur)
+        self._theme_combo.blockSignals(False)
+        n = len(themes)
+        self._theme_info_lbl.setText(f"{n} theme{'s' if n != 1 else ''}")
 
     def _init_times(self):
-        """Populate epoch bounds from the selected theme or edge_times."""
-        theme = getattr(self, '_current_theme', 'segments')
-
+        theme = self._current_theme
         if theme != 'segments' and theme in self._themes:
-            # Use Epoch object directly
             epoch = self._themes[theme]
             labs = [str(x).strip() for x in epoch.labels]
-            self._epoch_bounds = [
-                (float(s), float(e), lb)
-                for s, e, lb in zip(epoch.starts, epoch.stops, labs)]
-            unique_nonblank = {lb for lb in labs if lb}
-            # No usable labels (e.g. ripple): collapse to theme name for UI/chips
-            if len(unique_nonblank) <= 1:
-                self._epoch_bounds = [
-                    (s, e, theme) for s, e, _ in self._epoch_bounds]
-            self._total_sec = (float(epoch.stops.max())
-                                  if len(epoch.stops) else 1.0)
-            self._update_overlap_ui()
-            return
-
-        # Default: use CCG segment edge_times
-        et = self.ui.ccg_ptr.edge_times
-        cols = et.columns.tolist()
-
-        # Find start/stop columns by common name conventions
-        def _find_col(candidates):
-            for c in candidates:
-                if c in cols:
-                    return c
-            return None
-
-        start_col = _find_col(['start', 't_start', 'start_time', 'start_s'])
-        stop_col  = _find_col(['stop',  't_end',   'end_time',   'stop_s', 'end'])
-
-        self._epoch_bounds = []
-        if start_col and stop_col:
-            for _, row in et.iterrows():
-                t0 = float(row[start_col])
-                t1 = float(row[stop_col])
-                self._epoch_bounds.append((t0, t1, str(row['label'])))
-            self._total_sec = (
-                max((b[1] for b in self._epoch_bounds), default=1.0)
-                if self._epoch_bounds else 1.0)
+            bounds = [(float(s), float(e), lb)
+                      for s, e, lb in zip(epoch.starts, epoch.stops, labs)]
+            unique = {lb for lb in labs if lb}
+            if len(unique) <= 1:
+                bounds = [(s, e, theme) for s, e, _ in bounds]
+            self._epoch_bounds = bounds
+            self._total_sec = float(epoch.stops.max()) if len(epoch.stops) else 1.0
         else:
-            # Fall back: reconstruct from cumulative effective_time_hours
-            t = 0.0
-            for _, row in et.iterrows():
-                dur = float(row['effective_time_hours']) * 3600.0
-                self._epoch_bounds.append((t, t + dur, str(row['label'])))
-                t += dur
-            self._total_sec = t if t > 0 else 1.0
-        self._update_overlap_ui()
+            ptr = self._nav.ccg_ptr
+            if ptr is None:
+                self._epoch_bounds = []
+                return
+            et = self._cd.edge_times_for(self._nav.key)
+            if et is None:
+                fallback = self._all_theme_bounds.get('paradigm')
+                self._epoch_bounds = list(fallback) if fallback else []
+                if self._epoch_bounds:
+                    self._total_sec = max(b[1] for b in self._epoch_bounds)
+                return
+            cols = et.columns.tolist()
+            def _col(*names):
+                return next((c for c in names if c in cols), None)
+            sc = _col('start', 't_start', 'start_time')
+            ec = _col('stop',  't_end',   'end_time', 'stop_s', 'end')
+            self._epoch_bounds = []
+            if sc and ec:
+                for _, row in et.iterrows():
+                    self._epoch_bounds.append(
+                        (float(row[sc]), float(row[ec]), str(row['label'])))
+                self._total_sec = max(
+                    (b[1] for b in self._epoch_bounds), default=1.0)
+            else:
+                t = 0.0
+                for _, row in et.iterrows():
+                    dur = float(row['effective_time_hours']) * 3600.0
+                    self._epoch_bounds.append((t, t + dur, str(row['label'])))
+                    t += dur
+                self._total_sec = t or 1.0
 
-    # ── Event handlers ──────────────────────────────────────────────────────
+        # Initialise overlap from source config if available
+        source = getattr(self._cd, 'source', None)
+        if isinstance(source, CCGSourceConfig):
+            self._overlap_entry.setText(str(source.overlap_sec))
+            self._overlap_unit.setCurrentText('s')
 
-    def _on_theme_change(self, _event=None):
-        """Handle theme combobox selection — repopulate epoch bounds."""
-        # Save current legend toggle state before switching away
-        old_theme = getattr(self, '_current_theme', None)
-        if old_theme:
-            toggles = getattr(self, '_legend_toggles', {})
-            if toggles:
-                self._per_theme_label_state[old_theme] = {
-                    lb: v.get() for lb, v in toggles.items()}
-        theme = self._theme_var.get()
+        self._filter_check.blockSignals(True)
+        self._filter_check.setChecked(self._filter_checks.get(theme, False))
+        self._filter_check.blockSignals(False)
+        self._update_legend()
+        self._reset_handles()
+
+    def _reset_handles(self):
+        self._main_plot.clear_selection()
+        self._start_entry.setText("00:00:00")
+        self._end_entry.setText("00:00:00")
+
+    def _on_snap_toggle(self, checked: bool):
+        self._main_plot._snap_enabled = checked
+
+    def _on_lock_toggle(self, checked: bool):
+        self._main_plot._locked = checked
+
+    def _on_reset_zoom(self):
+        self._main_plot.reset_zoom()
+
+    def _update_legend(self):
+        lyt = self._legend_layout
+        # Clear existing chips (leave stretch)
+        while lyt.count() > 1:
+            item = lyt.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        cmap = self._label_color_map()
+        saved = self._per_theme_label_state.get(self._current_theme, {})
+        self._legend_toggles = {}
+
+        for lbl, color in cmap.items():
+            active = saved.get(lbl, True)
+            self._legend_toggles[lbl] = active
+            chip = chip_button(lbl, checked=active)
+            chip.setStyleSheet(
+                f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
+                f"padding: 1px 6px; font-size: 8pt; background: {color}; }}"
+                f"QPushButton:checked {{ font-weight: bold; }}"
+                f"QPushButton:!checked {{ color: #888; background: #f0f0f0; }}")
+            chip.toggled.connect(lambda on, lb=lbl: self._on_legend_toggle(lb, on))
+            lyt.insertWidget(lyt.count() - 1, chip)
+
+        none_active = saved.get('NONE', True)
+        self._legend_toggles['NONE'] = none_active
+        none_chip = chip_button("NONE", checked=none_active)
+        none_chip.setStyleSheet(
+            f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
+            f"padding: 1px 6px; font-size: 8pt; background: {_TS_NONE_COLOR}; "
+            f"color: #444; }}"
+            f"QPushButton:checked {{ font-weight: bold; }}"
+            f"QPushButton:!checked {{ color: #aaa; background: #f0f0f0; }}")
+        none_chip.toggled.connect(lambda on: self._on_legend_toggle('NONE', on))
+        lyt.insertWidget(lyt.count() - 1, none_chip)
+
+        labels = sorted({lb for _, _, lb in self._epoch_bounds})
+        self._label_combo.blockSignals(True)
+        cur = self._label_combo.currentText()
+        self._label_combo.clear()
+        self._label_combo.addItem('')
+        for lb in labels:
+            self._label_combo.addItem(lb)
+        if cur in labels:
+            self._label_combo.setCurrentText(cur)
+        else:
+            self._label_combo.setCurrentIndex(0)
+        self._label_combo.blockSignals(False)
+
+        self._redraw_main()
+
+    def _on_legend_toggle(self, label: str, active: bool):
+        self._legend_toggles[label] = active
+        state = self._per_theme_label_state.setdefault(self._current_theme, {})
+        state[label] = active
+        self._redraw_main()
+
+    def _label_color_map(self) -> dict[str, str]:
+        if self._label_colors is not None:
+            return self._label_colors
+        labels = sorted({lb for _, _, lb in self._epoch_bounds})
+        cmap = {}
+        ci = 0
+        for lb in labels:
+            if lb == 'NONE':
+                cmap[lb] = _TS_NONE_COLOR
+            else:
+                cmap[lb] = _TS_COLORS[ci % len(_TS_COLORS)]
+                ci += 1
+        self._label_colors = cmap
+        return cmap
+
+    def _redraw_main(self):
+        if self._nav.session_any_mode:
+            self._main_plot.update_epochs([], {}, 0, 1)
+            return
+        if not self._epoch_bounds:
+            return
+        cmap = self._label_color_map()
+        visible = [b for b in self._epoch_bounds
+                   if self._legend_toggles.get(b[2], True)]
+        self._main_plot.update_epochs(visible, cmap, 0.0, self._total_sec)
+
+    def _on_theme_change(self, theme: str):
+        if theme == self._current_theme:
+            return
+        self._filter_checks[self._current_theme] = self._filter_check.isChecked()
         self._current_theme = theme
-        # Swap filter button to the new theme's BoolVar (creates one if first visit)
-        if self._filter_btn is not None:
-            if theme not in self._theme_flag_vars:
-                self._theme_flag_vars[theme] = tk.BooleanVar(value=False)
-            self._filter_btn.configure(variable=self._theme_flag_vars[theme])
-        # Reset handles
-        self._slider_t_start = None
-        self._slider_t_end = None
-        if hasattr(self, '_start_var'):
-            self._start_var.set("00:00:00")
-        if hasattr(self, '_end_var'):
-            self._end_var.set("00:00:00")
-        # Reset zoom
-        self._zoom_start = None
-        self._zoom_end = None
-        self._zoom_start_var.set("00:00:00")
-        self._zoom_end_var.set("00:00:00")
-        self._zoom_frame.pack_forget()
-        # Reset label color cache for new theme
         self._label_colors = None
         self._init_times()
-        self._redraw()
+        self._filter_check.blockSignals(True)
+        self._filter_check.setChecked(self._filter_checks.get(theme, False))
+        self._filter_check.blockSignals(False)
+        self._redraw_main()
 
-    def _on_label_change(self, _event=None):
-        """Handle overlap label combobox selection."""
-        val = self._label_var.get()
-        if val == 'All':
-            self._active_label = None
-        elif val == self._TS_NONE:
-            self._active_label = self._TS_NONE
+    def _on_label_change(self, label: str):
+        label = (label or '').strip()
+        if not self._legend_toggles:
+            return
+        if not label:
+            for lb in self._legend_toggles:
+                self._legend_toggles[lb] = True
         else:
-            # Could be a real label or the theme display name (single-label themes)
-            all_labels = self._collect_theme_ui_labels()
-            if val in all_labels:
-                self._active_label = val
-            else:
-                # Theme display name for single-label theme → show all intervals
-                self._active_label = None
-        self._redraw()
+            for lb in self._legend_toggles:
+                self._legend_toggles[lb] = (lb == label)
+        state = self._per_theme_label_state.setdefault(self._current_theme, {})
+        for lb, on in self._legend_toggles.items():
+            state[lb] = on
+        self._redraw_main()
 
     def _on_label_reset(self):
-        """Revert to showing all labels."""
-        self._active_label = None
-        vals = list(self._label_combo['values'])
-        self._label_var.set(vals[0] if vals else 'All')
-        self._redraw()
+        self._label_combo.blockSignals(True)
+        self._label_combo.setCurrentIndex(0)
+        self._label_combo.blockSignals(False)
+        for lb in list(self._legend_toggles):
+            self._legend_toggles[lb] = True
+        self._per_theme_label_state.pop(self._current_theme, None)
+        self._update_legend()
 
-    def _on_tool_change(self):
-        """Handle toolbar selection / lock toggle."""
-        locked = self._lock_var.get()
-        selection = self._tool_var.get() == 'selection'
-        if locked:
-            self.ts_canvas.config(cursor='arrow')
-        elif selection:
-            self.ts_canvas.config(cursor='plus')
+    def _on_filter_toggle(self, checked: bool):
+        self._filter_checks[self._current_theme] = checked
+
+    def _parse_time_text(self, text: str) -> float:
+        s = text.strip().lower()
+        if self._nav.session_any_mode:
+            if s == 'start':
+                return 0.0
+            if s == 'end':
+                return self._total_sec
         else:
-            self.ts_canvas.config(cursor='crosshair')
-        # Hide zoom panel when selection is off
-        if not selection:
-            self._zoom_frame.pack_forget()
-            self._zoom_start = None
-            self._zoom_end = None
-        self._redraw()
+            if s == 'start':
+                return 0.0
+            if s == 'end':
+                return self._total_sec
+        return self._hms_to_sec(text)
 
-    def _on_time_slider_set(self):
-        spec = self.ui._custom_mgr._build_custom_spec(for_all=False)
-        if spec is None:
-            return
-        filter_state = spec.get('filter_state', {})
-        # Resolve sentinels for current session (use min/max times, not first/last table row)
-        t_sess_start, t_sess_end = self.ui._sess_mgr._session_wall_clock_extent_for_key(self.ui.key)
-        t0 = self.ui._resolve_time(spec['t0'], t_sess_start, t_sess_end)
-        t1 = self.ui._resolve_time(spec['t1'], t_sess_start, t_sess_end)
-        lone = self.ui._single_exclusive_segment_filter_label(filter_state)
-        if lone is not None:
-            span = self.ui._union_span_for_segment_label(self.ui.key, lone)
-            if span is not None:
-                t0, t1 = span[0], span[1]
-                t0 = self.ui._resolve_time(t0, t_sess_start, t_sess_end)
-                t1 = self.ui._resolve_time(t1, t_sess_start, t_sess_end)
-        self._slider_t_start = t0
-        self._slider_t_end = t1
-        n_splits = max(1, int(spec.get('n_splits') or 1))
-        overlap_sec = max(0.0, float(spec.get('overlap_sec') or 0.0))
-        chunks = self.ui._split_time_range(t0, t1, n_splits, overlap_sec, spec['name'])
-        split_bid = None
-        if n_splits > 1:
-            split_bid = self._batch_next_id
-            self._batch_next_id += 1
-        split_names: list[str] = []
-        queued = 0
-        flagged = [tn for tn, v in getattr(self, '_theme_flag_vars', {}).items() if v.get()]
+    def _sync_timing_entries(self, t0: float, t1: float):
+        self._start_entry.setText(self._sec_to_hms(t0))
+        self._end_entry.setText(self._sec_to_hms(t1))
 
-        for chunk_t0, chunk_t1, chunk_name in chunks:
-            if flagged:
-                per_theme = []
-                ok = True
-                for tn in flagged:
-                    active = self._active_labels_for_theme(tn)
-                    ivs = sorted(
-                        (max(s, chunk_t0), min(e, chunk_t1))
-                        for s, e, lb in self._all_theme_bounds.get(tn, [])
-                        if lb in active and min(e, chunk_t1) > max(s, chunk_t0)
-                    )
-                    if not ivs:
-                        ok = False
-                        break
-                    merged = [list(ivs[0])]
-                    for s, e in ivs[1:]:
-                        if s <= merged[-1][1]:
-                            merged[-1][1] = max(merged[-1][1], e)
-                        else:
-                            merged.append([s, e])
-                    per_theme.append([(s, e) for s, e in merged])
-                if not ok:
-                    continue
-                result_ivs = per_theme[0]
-                for other in per_theme[1:]:
-                    result_ivs = intersect_intervals(result_ivs, other)
-                if not result_ivs:
-                    continue
-                intervals = result_ivs
-                active_duration = sum(e - s for s, e in result_ivs)
-            else:
-                bs_result = self._brain_state_intervals(chunk_t0, chunk_t1)
-                if bs_result is False:
-                    continue
-                intervals, active_duration = bs_result
-            metadata = {
-                'name': chunk_name,
-                'theme': filter_state.get('theme', 'segments'),
-                'labels': filter_state.get('labels', {}),
-                'scope': spec.get('scope', self.ui._setup_mgr._current_session_str()),
-                'session': str(self.ui.key.session),
-                'timing': {'t0': chunk_t0, 't1': chunk_t1},
-            }
-            ok = self.ui._enqueue_custom_ccg_task(
-                key=self.ui.key,
-                t0=chunk_t0,
-                t1=chunk_t1,
-                name=chunk_name,
-                intervals=intervals,
-                active_duration=active_duration,
-                filter_state=filter_state,
-                metadata=metadata,
-                auto_save=True,
-                load_into_ui=True,
-                batch_id=split_bid,
-            )
-            if ok:
-                queued += 1
-                if split_bid is not None:
-                    split_names.append(chunk_name)
-        if split_bid is not None and split_names:
-            self._batch_counts[split_bid] = len(split_names)
-            self._batch_names[split_bid] = split_names
-        if queued:
-            self.ui._custom_mgr.state._record_custom_ccg_suggestion(spec)
-            label = spec['name'] if n_splits == 1 else f"{spec['name']} ({queued} chunks)"
-            self._status_var.set(f"Queued: {label}")
-            self.ui._custom_mgr._custom_ccg_start_next()
+    def _apply_timing_cursors(self, t0: float, t1: float):
+        if t0 > t1:
+            t0, t1 = t1, t0
+        self._main_plot.set_selection(t0, t1)
+        self._sync_timing_entries(t0, t1)
 
-    def _on_time_slider_apply_multiple_sessions(self):
-        spec = self.ui._custom_mgr._build_custom_spec(for_all=False)
-        if spec is None:
-            return
-        all_nd_keys = self.ui._sess_mgr._real_nd_keys_ordered()
-        if not all_nd_keys:
-            messagebox.showinfo("Sessions", "No sessions available.")
-            return
-        session_labels = [str(nk.session) for nk in all_nd_keys]
-        current_sess = str(self.ui.key.session) if not getattr(self.ui, '_session_any_mode', False) else None
-        selected = self.ui._pick_sessions_dialog(
-            title="Apply custom CCG to sessions",
-            sessions=session_labels,
-            current_session=current_sess,
-        )
-        if not selected:
-            return
-        is_all = len(selected) == len(session_labels)
-        spec['sessions'] = selected
-        spec['scope'] = 'All' if is_all else (
-            selected[0] if len(selected) == 1 else ', '.join(selected[:2]) + ('…' if len(selected) > 2 else ''))
-        self.ui._custom_mgr.state._record_custom_ccg_suggestion(spec)
-        queued = self.ui._queue_custom_ccg_for_spec(
-            spec, for_all=is_all, auto_save=True,
-            target_sessions=None if is_all else selected,
-        )
-        if queued:
-            sess_label = "all sessions" if is_all else f"{len(selected)} session(s)"
-            self._status_var.set(f"Queued {queued} task(s) for {sess_label}")
-            self.ui._custom_mgr._custom_ccg_start_next()
-        else:
-            self._status_var.set("No missing custom CCGs for selected sessions")
+    def _on_main_handle_moved(self, t0: float, t1: float):
+        self._sync_timing_entries(t0, t1)
 
-    def _on_time_slider_clear(self):
-        self.ui._custom_segments.clear()
-        self._status_var.set("")
-        # Reset time selection
-        self._slider_t_start = None
-        self._slider_t_end = None
-        self._start_var.set("00:00:00")
-        self._end_var.set("00:00:00")
-        # Reset zoom
-        self._zoom_start = None
-        self._zoom_end = None
-        self._zoom_start_var.set("00:00:00")
-        self._zoom_end_var.set("00:00:00")
-        self._zoom_frame.pack_forget()
-        # Reset to first real segment
-        self.ui.current_segment = self.ui._seg_name(0)
-        self.ui._build_sig_chips()
-        self.ui._update_segment_label()
-        self.ui._plot_mgr.update_plot()
-
-    def _on_zoom_range_set(self):
-        """Set zoom range from the zoom time entry boxes."""
+    def _validate_start(self):
         try:
-            t0 = self._hms_to_sec(self._zoom_start_var.get())
-            t1 = self._hms_to_sec(self._zoom_end_var.get())
-        except (ValueError, IndexError):
+            v = self._parse_time_text(self._start_entry.text())
+            _, t1 = self._main_plot.get_selection()
+            self._apply_timing_cursors(v, t1)
+        except ValueError:
+            pass
+
+    def _validate_end(self):
+        try:
+            v = self._parse_time_text(self._end_entry.text())
+            t0, _ = self._main_plot.get_selection()
+            self._apply_timing_cursors(t0, v)
+        except ValueError:
+            pass
+
+    def _on_set(self):
+        if self._lock_check.isChecked():
+            return
+        if not self._main_plot.has_full_selection():
+            return
+        try:
+            t0 = self._parse_time_text(self._start_entry.text())
+            t1 = self._parse_time_text(self._end_entry.text())
+        except ValueError:
             return
         if t1 <= t0:
             return
-        self._zoom_start = max(0.0, min(t0, self._total_sec))
-        self._zoom_end = max(0.0, min(t1, self._total_sec))
-        self._zoom_start_var.set(self._sec_to_hms(self._zoom_start))
-        self._zoom_end_var.set(self._sec_to_hms(self._zoom_end))
-        self._redraw()
+        self._apply_timing_cursors(t0, t1)
 
-    # ── Coordinate helpers ──────────────────────────────────────────────────
+        overlap_raw = float(self._overlap_entry.text() or 0)
+        unit = self._overlap_unit.currentText()
+        dur = t1 - t0
+        if unit == '%':
+            overlap_sec = overlap_raw / 100.0 * dur
+        elif unit == 'min':
+            overlap_sec = overlap_raw * 60.0
+        elif unit == 'hr':
+            overlap_sec = overlap_raw * 3600.0
+        else:
+            overlap_sec = overlap_raw
 
-    def _t_to_x(self, t: float) -> int:
-        w = max(self.ts_canvas.winfo_width(), 20)
-        return int((t / max(self._total_sec, 1)) * (w - 20) + 10)
+        active_labels = {lb: on for lb, on in self._legend_toggles.items()}
+        filter_state = {
+            'theme':  self._current_theme,
+            'labels': active_labels,
+            'flags':  {'include_in_filter': self._filter_checks.get(
+                self._current_theme, self._filter_check.isChecked())},
+        }
 
-    def _x_to_t(self, x: int) -> float:
-        w = max(self.ts_canvas.winfo_width(), 20)
-        return max(0.0, min(self._total_sec,
-                            (x - 10) / max(w - 20, 1) * self._total_sec))
+        spec = {
+            't0':         t0,
+            't1':         t1,
+            'name':       self._name_entry.text() or 'custom',
+            'n_splits':   self._splits_spin.value(),
+            'overlap_sec': max(0.0, overlap_sec),
+            'filter_state': filter_state,
+            'sessions':   self._sessions_picker.selected,
+            'scope':      str(getattr(self._nav.key, 'session', '')),
+        }
+        self._status_lbl.setText(f"Queued: {spec.get('name', 'custom')}")
+        self.ccg_enqueue_requested.emit(spec)
 
-    def _hms_to_sec(self, hms: str) -> float:
-        s = hms.strip().lower()
-        if s == 'start':
-            return 0.0
-        if s == 'end':
-            return float(getattr(self, '_total_sec', 0))
-        parts = s.split(':')
+    def _on_clear(self):
+        self._reset_handles()
+        self._name_entry.clear()
+        self._status_lbl.setText("")
+
+    def save_state(self, path: str):
+        import json
+        state = {
+            'theme': self._current_theme,
+            'legend_toggles': dict(self._legend_toggles),
+            'per_theme_label_state': {k: dict(v) for k, v in self._per_theme_label_state.items()},
+            'include_in_filter': self._filter_checks.get(
+                self._current_theme, self._filter_check.isChecked()),
+        }
+        with open(path, 'w') as f:
+            json.dump(state, f, indent=2)
+
+    def load_state(self, path: str):
+        import json
+        with open(path) as f:
+            state = json.load(f)
+        if 'theme' in state:
+            idx = self._theme_combo.findText(state['theme'])
+            if idx >= 0:
+                self._theme_combo.setCurrentIndex(idx)
+        self._per_theme_label_state = state.get('per_theme_label_state', {})
+        inc = state.get('include_in_filter', False)
+        self._filter_checks[self._current_theme] = inc
+        self._filter_check.setChecked(inc)
+        self._update_legend()
+
+    @staticmethod
+    def _hms_to_sec(hms: str) -> float:
+        parts = hms.strip().split(':')
         if len(parts) == 3:
             return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        elif len(parts) == 2:
+        if len(parts) == 2:
             return int(parts[0]) * 60 + float(parts[1])
         return float(parts[0])
 
-    @staticmethod
-
-    def _sec_to_hms(sec) -> str:
-        if sec is None:
-            return "end"
-        sec = int(sec)
-        return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
-
-    # ── Draw / render ───────────────────────────────────────────────────────
-
-    def _label_color_map(self):
-        """Return {label: color} mapping — consistent color per unique label."""
-        all_labels = self._collect_theme_ui_labels()
-        expected = set(all_labels) | {'NONE'}
-        if getattr(self, '_label_colors', None) is None or expected != set(self._label_colors.keys()):
-            self._label_colors = {
-                lbl: self._TS_COLORS[i % len(self._TS_COLORS)]
-                for i, lbl in enumerate(all_labels)
-            }
-            self._label_colors['NONE'] = self._TS_NONE_COLOR
-        return self._label_colors
-
-    def _visible_bounds(self):
-        """Return epoch bounds filtered by active label (or all if None).
-        NONE returns gaps between all epoch intervals."""
-        if self._active_label is None:
-            return self._epoch_bounds
-        if self._active_label == self._TS_NONE:
-            return self._compute_gaps()
-        return [(t0, t1, lbl) for t0, t1, lbl in self._epoch_bounds
-                if lbl == self._active_label]
-
-    def _compute_gaps(self):
-        """Compute time gaps between all epoch intervals."""
-        if not self._epoch_bounds:
-            return [(0, self._total_sec, 'NONE')]
-        # Merge overlapping intervals first
-        sorted_bounds = sorted(self._epoch_bounds, key=lambda x: x[0])
-        merged = []
-        cur_start, cur_end = sorted_bounds[0][0], sorted_bounds[0][1]
-        for t0, t1, _ in sorted_bounds[1:]:
-            if t0 <= cur_end:
-                cur_end = max(cur_end, t1)
-            else:
-                merged.append((cur_start, cur_end))
-                cur_start, cur_end = t0, t1
-        merged.append((cur_start, cur_end))
-        # Build gaps
-        gaps = []
-        if merged[0][0] > 0:
-            gaps.append((0, merged[0][0], 'NONE'))
-        for i in range(len(merged) - 1):
-            gap_start = merged[i][1]
-            gap_end = merged[i + 1][0]
-            if gap_end > gap_start:
-                gaps.append((gap_start, gap_end, 'NONE'))
-        if merged[-1][1] < self._total_sec:
-            gaps.append((merged[-1][1], self._total_sec, 'NONE'))
-        return gaps
-
-    def _draw_epochs(self, canvas, t_to_x, bounds, h):
-        """Draw epoch rectangles on a canvas using given t_to_x mapping."""
-        cmap = self._label_color_map()
-        y_bot = h - 16  # leave room for time axis
-        for t0, t1, lbl in bounds:
-            x0, x1 = t_to_x(t0), t_to_x(t1)
-            color = cmap.get(lbl, '#E0E0E0')
-            canvas.create_rectangle(x0, 6, x1, y_bot,
-                                    fill=color, outline='#90A4AE')
-            if x1 - x0 > 22:
-                canvas.create_text((x0 + x1) // 2, (6 + y_bot) // 2,
-                                   text=lbl, font=('Arial', 7), fill='#333')
-
-    def _draw_time_axis(self, canvas, t_to_x, t_min, t_max, h):
-        """Draw time axis tick marks and labels at the bottom of a canvas."""
-        w = canvas.winfo_width()
-        if w < 40:
-            return
-        span = t_max - t_min
-        if span <= 0:
-            return
-        # Choose tick interval: aim for ~6-10 ticks
-        raw = span / 8.0
-        # Round to nice intervals (in seconds)
-        nice_intervals = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600,
-                          900, 1800, 3600, 7200, 14400, 28800]
-        tick_step = nice_intervals[-1]
-        for ni in nice_intervals:
-            if ni >= raw:
-                tick_step = ni
-                break
-        # Draw ticks
-        y_tick = h - 2
-        y_label = h - 1
-        t = (int(t_min / tick_step) + 1) * tick_step if t_min % tick_step != 0 else t_min
-        # Always draw first and last
-        endpoints = {t_min, t_max}
-        drawn_x = []
-        for tp in sorted(endpoints):
-            x = t_to_x(tp)
-            if 5 <= x <= w - 5:
-                canvas.create_line(x, y_tick - 4, x, y_tick, fill='#888')
-                canvas.create_text(x, y_label, text=self._sec_to_hms(tp),
-                                   font=('Courier', 6), fill='#666', anchor='s')
-                drawn_x.append(x)
-        while t <= t_max:
-            x = t_to_x(t)
-            # Skip if too close to an already-drawn label
-            if 5 <= x <= w - 5 and all(abs(x - dx) > 38 for dx in drawn_x):
-                canvas.create_line(x, y_tick - 4, x, y_tick, fill='#888')
-                canvas.create_text(x, y_label, text=self._sec_to_hms(t),
-                                   font=('Courier', 6), fill='#666', anchor='s')
-                drawn_x.append(x)
-            t += tick_step
-
-    def _draw_handles(self, canvas, t_to_x, h, t_start, t_end,
-                         color_start='#1565C0', color_end='#B71C1C'):
-        """Draw cursor handles and selection range on a canvas."""
-        for t, color in [(t_start, color_start), (t_end, color_end)]:
-            if t is not None:
-                x = t_to_x(t)
-                canvas.create_line(x, 2, x, h - 2, fill=color, width=2)
-                canvas.create_polygon(x - 5, 2, x + 5, 2, x, 10,
-                                      fill=color, outline='')
-        if t_start is not None and t_end is not None:
-            x0, x1 = t_to_x(t_start), t_to_x(t_end)
-            canvas.create_rectangle(x0, 8, x1, h - 8,
-                                    fill='', outline=color_start,
-                                    width=2, dash=(4, 2))
-
-    def _draw_radiate_lines(self):
-        """Draw radiating lines connecting zoom region on main canvas to zoom canvas."""
-        rc = self._radiate_canvas
-        rc.delete('all')
-        if self._zoom_start is None or self._zoom_end is None:
-            return
-        w = rc.winfo_width()
-        rh = rc.winfo_height()
-        if w < 20:
-            return
-
-        # Top points: zoom region edges on main canvas
-        zx0_main = self._t_to_x(self._zoom_start)
-        zx1_main = self._t_to_x(self._zoom_end)
-
-        # Bottom points: full width of zoom canvas
-        zx0_zoom = 10
-        zx1_zoom = max(self._zoom_canvas.winfo_width(), 20) - 10
-
-        # Draw radiating lines
-        rc.create_line(zx0_main, 0, zx0_zoom, rh,
-                       fill='#E65100', width=1, dash=(3, 3))
-        rc.create_line(zx1_main, 0, zx1_zoom, rh,
-                       fill='#E65100', width=1, dash=(3, 3))
-
-    def _update_legend(self):
-        """Populate legend row with toggle-able swatches for each unique label."""
-        frame = self._legend_frame
-        for w in frame.winfo_children():
-            w.destroy()
-        cmap = self._label_color_map()
-        self._legend_toggles = {}
-        _fs = max(7, self.ui._settings_mgr.min_font_size())
-        _saved = self._per_theme_label_state.get(self._current_theme, {})
-        for lbl, color in cmap.items():
-            initial = _saved.get(lbl, True)
-            var = tk.BooleanVar(value=initial)
-            self._legend_toggles[lbl] = var
-            # Combined swatch+label as a single clickable button
-            btn = tk.Frame(frame, cursor='hand2')
-            btn.pack(side=tk.LEFT, padx=(4, 6), pady=1)
-            swatch = tk.Frame(btn, width=12, height=10,
-                              bg=color if initial else '#D0D0D0',
-                              highlightbackground='#90A4AE', highlightthickness=1)
-            swatch.pack(side=tk.LEFT, padx=(0, 2))
-            swatch.pack_propagate(False)
-            lbl_w = tk.Label(btn, text=lbl, font=('Arial', _fs),
-                             fg='#333' if initial else '#AAA',
-                             relief=tk.RAISED if initial else tk.SUNKEN,
-                             bd=1, padx=2)
-            lbl_w.pack(side=tk.LEFT)
-
-            def _toggle(v=var, s=swatch, l=lbl_w, c=color):
-                v.set(not v.get())
-                if v.get():
-                    s.config(bg=c)
-                    l.config(fg='#333', relief=tk.RAISED)
-                else:
-                    s.config(bg='#D0D0D0')
-                    l.config(fg='#AAA', relief=tk.SUNKEN)
-            for w in (swatch, lbl_w, btn):
-                w.bind('<Button-1>', lambda e, t=_toggle: t())
-        frame.pack(fill=tk.X, padx=4, pady=(1, 0),
-                   before=self._main_canvas_frame)
-
-    def _redraw(self, event=None):
-        c = self.ts_canvas
-        c.delete('all')
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 20:
-            return
-
-        if getattr(self.ui, '_session_any_mode', False):
-            c.create_text(
-                w // 2, h // 2,
-                text="All sessions view — no single behavioral timeline to display.\n"
-                     "Use 'Set' + 'Apply to Multiple Sessions' to compute custom CCGs for sessions.",
-                anchor='center', font=('Arial', 9), fill='#555', justify='center')
-            return
-
-        if not self._epoch_bounds:
-            return
-
-        self._draw_epochs(c, self._t_to_x, self._visible_bounds(), h)
-        self._draw_time_axis(c, self._t_to_x, 0, self._total_sec, h)
-
-        # Draw select-mode handles (custom window cursors)
-        self._draw_handles(c, self._t_to_x, h,
-                              self._slider_t_start, self._slider_t_end)
-
-        # Draw selection/zoom handles (orange) when selection tool active
-        if self._tool_var.get() == 'selection':
-            self._draw_handles(c, self._t_to_x, h,
-                                  self._zoom_start, self._zoom_end,
-                                  color_start='#E65100', color_end='#BF360C')
-            # Shade zoom region
-            if self._zoom_start is not None and self._zoom_end is not None:
-                zx0 = self._t_to_x(self._zoom_start)
-                zx1 = self._t_to_x(self._zoom_end)
-                c.create_rectangle(zx0, 4, zx1, h - 4,
-                                   fill='#FFF3E0', outline='#E65100',
-                                   width=1, stipple='gray25')
-            self._zoom_redraw()
-            self._draw_radiate_lines()
-
-    def _zoom_t_to_x(self, t: float) -> int:
-        """Map time to x within the zoom canvas, using zoom region bounds."""
-        w = max(self._zoom_canvas.winfo_width(), 20)
-        z0 = self._zoom_start if self._zoom_start is not None else 0
-        z1 = self._zoom_end if self._zoom_end is not None else self._total_sec
-        span = max(z1 - z0, 1e-6)
-        return int(((t - z0) / span) * (w - 20) + 10)
-
-    def _zoom_redraw(self, event=None):
-        """Redraw the zoomed-in detail canvas."""
-        zc = self._zoom_canvas
-        zc.delete('all')
-        if self._zoom_start is None or self._zoom_end is None:
-            return
-        w = zc.winfo_width()
-        h = zc.winfo_height()
-        if w < 20:
-            return
-
-        z0, z1 = self._zoom_start, self._zoom_end
-
-        # Filter epoch bounds that overlap the zoom region (respects active label)
-        zoomed_bounds = [
-            (max(t0, z0), min(t1, z1), lbl)
-            for t0, t1, lbl in self._visible_bounds()
-            if t1 > z0 and t0 < z1
-        ]
-        self._draw_epochs(zc, self._zoom_t_to_x, zoomed_bounds, h)
-        self._draw_time_axis(zc, self._zoom_t_to_x, z0, z1, h)
-
-        # Draw select-mode handles within zoom view
-        self._draw_handles(zc, self._zoom_t_to_x, h,
-                              self._slider_t_start, self._slider_t_end)
-
-    # ── Mouse interaction ───────────────────────────────────────────────────
-
-    def _snap_t(self, t: float, canvas_x: int) -> float:
-        """Snap t to the nearest epoch boundary if within 25px."""
-        if self._snap_var.get() and self._epoch_bounds:
-            for t0, t1, _ in self._epoch_bounds:
-                for bt in (t0, t1):
-                    if abs(self._t_to_x(bt) - canvas_x) <= 25:
-                        return bt
-        return t
-
-    def _update_handle(self, canvas_x: int, snap: bool = False):
-        t = self._x_to_t(canvas_x)
-        if snap:
-            t = self._snap_t(t, canvas_x)
-        if self._slider_dragging == 'start':
-            cap = self._slider_t_end if self._slider_t_end is not None else self._total_sec
-            self._slider_t_start = min(t, cap)
-            self._start_var.set(self._sec_to_hms(self._slider_t_start))
-        elif self._slider_dragging == 'end':
-            floor = self._slider_t_start if self._slider_t_start is not None else 0.0
-            self._slider_t_end = max(t, floor)
-            self._end_var.set(self._sec_to_hms(self._slider_t_end))
-        self._redraw()
-
-    def _mouse_press(self, event):
-        if self._lock_var.get():
-            return  # all cursor interaction disabled
-        selection = self._tool_var.get() == 'selection'
-        if selection:
-            self._zoom_mouse_press(event)
-            return
-        # Default: custom CCG window tool
-        if self._slider_t_start is None:
-            self._slider_dragging = 'start'
-        elif self._slider_t_end is None:
-            self._slider_dragging = 'end'
-        else:
-            xs = self._t_to_x(self._slider_t_start)
-            xe = self._t_to_x(self._slider_t_end)
-            self._slider_dragging = ('start'
-                                     if abs(event.x - xs) <= abs(event.x - xe)
-                                     else 'end')
-        self._update_handle(event.x)
-
-    def _mouse_drag(self, event):
-        if self._lock_var.get():
-            return
-        if self._tool_var.get() == 'selection':
-            self._zoom_mouse_drag(event)
-            return
-        self._update_handle(event.x)
-
-    def _mouse_release(self, event):
-        if self._lock_var.get():
-            return
-        if self._tool_var.get() == 'selection':
-            self._zoom_mouse_release(event)
-            return
-        self._update_handle(event.x, snap=True)
-        self._slider_dragging = None
-
-    def _zoom_mouse_press(self, event):
-        if self._zoom_start is None:
-            self._zoom_dragging = 'start'
-        elif self._zoom_end is None:
-            self._zoom_dragging = 'end'
-        else:
-            xs = self._t_to_x(self._zoom_start)
-            xe = self._t_to_x(self._zoom_end)
-            self._zoom_dragging = ('start'
-                                      if abs(event.x - xs) <= abs(event.x - xe)
-                                      else 'end')
-        self._zoom_update(event.x)
-
-    def _zoom_mouse_drag(self, event):
-        self._zoom_update(event.x)
-
-    def _zoom_mouse_release(self, event):
-        self._zoom_update(event.x, snap=True)
-        self._zoom_dragging = None
-        # Show zoom canvas once both ends are placed
-        if self._zoom_start is not None and self._zoom_end is not None:
-            self._zoom_frame.pack(fill=tk.X, padx=4, pady=(0, 0),
-                                     after=self._ccg_ctrl)
-            self._zoom_redraw()
-            self._draw_radiate_lines()
-
-    def _zoom_update(self, canvas_x: int, snap: bool = False):
-        t = self._x_to_t(canvas_x)
-        if snap:
-            t = self._snap_t(t, canvas_x)
-        if self._zoom_dragging == 'start':
-            cap = self._zoom_end if self._zoom_end is not None else self._total_sec
-            self._zoom_start = min(t, cap)
-            self._zoom_start_var.set(self._sec_to_hms(self._zoom_start))
-        elif self._zoom_dragging == 'end':
-            floor = self._zoom_start if self._zoom_start is not None else 0.0
-            self._zoom_end = max(t, floor)
-            self._zoom_end_var.set(self._sec_to_hms(self._zoom_end))
-        self._redraw()
-
-    # ── Brain state / interval filtering ────────────────────────────────────
-
-    def _brain_state_intervals(self, t0, t1):
-        """Validate brain-state toggles and return the active intervals (main-thread, fast).
-
-        Returns:
-            (None, t1-t0)        — no restriction (all toggles on or no toggles)
-            (intervals, active_sec) — filtered intervals list with total active seconds
-            False                 — abort (no active labels or no intervals in range)
-        """
-        toggles = getattr(self, '_legend_toggles', {})
-        if not toggles or all(v.get() for v in toggles.values()):
-            return (None, t1 - t0)
-        active_labels = {lbl for lbl, v in toggles.items() if v.get()}
-        if not active_labels:
-            messagebox.showwarning("Brain-state filter",
-                                   "All epoch labels are toggled off. "
-                                   "Enable at least one label to compute CCG.")
-            return False
-        if self.ui.neurons is None:
-            return (None, t1 - t0)
-        available_labels = {lbl for _, _, lbl in self._epoch_bounds}
-        none_active = 'NONE' in active_labels
-        real_active = active_labels - {'NONE'}
-        real_labels = real_active & available_labels
-        intervals = []
-        for s, e, lbl in self._epoch_bounds:
-            if lbl in real_labels:
-                s_clipped, e_clipped = max(s, t0), min(e, t1)
-                if e_clipped > s_clipped:
-                    intervals.append((s_clipped, e_clipped))
-        if none_active:
-            epoch_times = sorted(
-                (max(s, t0), min(e, t1))
-                for s, e, _ in self._epoch_bounds
-                if min(e, t1) > max(s, t0))
-            cursor = t0
-            for es, ee in epoch_times:
-                if es > cursor:
-                    intervals.append((cursor, es))
-                cursor = max(cursor, ee)
-            if cursor < t1:
-                intervals.append((cursor, t1))
-        if not intervals:
-            messagebox.showwarning("Brain-state filter",
-                                   "No active epoch intervals in the selected time range.")
-            return False
-        active_sec = sum(e - s for s, e in intervals)
-        return (intervals, active_sec)
-
-    # ── Custom CCG save / load ──────────────────────────────────────────────
-
-    def _save_custom_ccg(self):
-        """Manage auto-saved custom segments: list by name, delete any the user unchecks."""
-        buckets = getattr(self.ui, '_custom_segments_by_session', None) or {}
-
-        # List all .npz files in the cache dir by filename only — no array loading
-        pattern = os.path.join(self.ui._ccg_cache_dir, "*.npz")
-        all_paths = sorted(_glob.glob(pattern))
-        handles: list[tuple[str, str]] = [
-            (os.path.basename(p)[:-4], p) for p in all_paths
-        ]
-
-        if not handles:
-            messagebox.showinfo("Custom CCG segments",
-                                "No auto-saved custom segments found.")
-            return
-
-        # Dialog: all segments pre-checked; uncheck to delete
-        win = tk.Toplevel(self.ui.root)
-        win.title("Custom CCG segments")
-        win.geometry("400x300")
-        win.grab_set()
-        ttk.Label(win, text="Saved segments — uncheck to delete from disk:").pack(
-            anchor='w', padx=8, pady=(8, 2))
-        lb = tk.Listbox(win, selectmode=tk.MULTIPLE, height=10)
-        lb.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
-        for handle, _ in handles:
-            lb.insert(tk.END, handle)
-        lb.select_set(0, tk.END)
-
-        confirmed: list[bool] = []
-
-        def _ok():
-            confirmed.append(True)
-            win.destroy()
-
-        btn_f = ttk.Frame(win)
-        btn_f.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(btn_f, text="Keep selected", command=_ok).pack(
-            side=tk.RIGHT, padx=4)
-        ttk.Button(btn_f, text="Cancel",
-                   command=win.destroy).pack(side=tk.RIGHT)
-        win.wait_window(win)
-        if not confirmed:
-            return
-
-        keep_idx = set(lb.curselection())
-        to_delete = [(handle, p) for i, (handle, p) in enumerate(handles)
-                     if i not in keep_idx]
-        if not to_delete:
-            return
-
-        delete_paths = {p for _, p in to_delete}
-        delete_handles = {h for h, _ in to_delete}
-        for p in delete_paths:
+    def _resolve_ts_time(self, raw, t_start: float, t_end: float) -> float:
+        if isinstance(raw, str):
+            s = raw.strip().lower()
+            if s == 'start':
+                return float(t_start)
+            if s == 'end':
+                return float(t_end)
             try:
-                os.remove(p)
-            except OSError:
+                return float(self._hms_to_sec(raw))
+            except (ValueError, TypeError):
                 pass
-
-        # Remove deleted entries from in-memory segment lists
-        from neuropy.analyses.custom_ccg import CustomSegment
-        for lst in buckets.values():
-            lst[:] = [
-                cs for cs in lst
-                if isinstance(cs, CustomSegment) and (
-                    cs.src_path not in delete_paths
-                    and re.sub(r'[^A-Za-z0-9_\-]', '_',
-                               str(cs.source.name).replace(' ', '_'))
-                    not in delete_handles
-                )
-            ]
-
         try:
-            self.ui._build_sig_chips()
-            self.ui._update_segment_label()
-        except Exception:
-            pass
-        self.ui._custom_mgr._emit_inventory_event()
-        self.ui._settings_mgr.save_ui_state()
-        ts = self
-        fn, win = ts._load_custom_ccg_refresh, ts._load_custom_ccg_win
-        if fn is not None and win is not None:
-            try:
-                if win.winfo_exists():
-                    fn()
-            except Exception:
-                ts._load_custom_ccg_win = ts._load_custom_ccg_refresh = None
-        self._status_var.set(f"Deleted {len(to_delete)} segment(s)")
+            return float(raw)
+        except (TypeError, ValueError):
+            return float(t_start)
 
-    def _load_custom_ccg(self):
-        """Scan cache dir for saved custom segments and load selected ones additively."""
-        # Archive stale files (those missing total_time_hours) before showing dialog
-        n_archived, trash_dir = self.ui._custom_mgr.store._archive_stale_custom_ccgs()
-        if n_archived:
-            messagebox.showinfo(
-                "Stale custom CCGs archived",
-                f"{n_archived} old custom CCG file(s) were moved to:\n  {trash_dir}\n\n"
-                "These files lack the 'total_time' field required for correct Time Span "
-                "normalisation and cannot be loaded. They are preserved in the trash folder.")
-        pattern = os.path.join(self.ui._ccg_cache_dir, "*.npz")
-        paths = sorted(_glob.glob(pattern))
-        if not paths:
-            messagebox.showinfo(
-                "Load custom CCG",
-                "No saved custom CCGs found.")
-            return
+    @staticmethod
+    def single_exclusive_segment_filter_label(filter_state: dict):
+        """Return the one active label from filter_state, or None if 0 or 2+."""
+        labels = (filter_state or {}).get('labels') or {}
+        on = [lb for lb, v in labels.items() if v and lb != 'NONE']
+        return on[0] if len(on) == 1 else None
 
-        win = tk.Toplevel(self.ui.root)
-        win.title("Load custom CCG")
-        win.geometry("560x380")
-        win.grab_set()
-        ttk.Label(win, text="Select segments to load (click ▶ to expand details):").pack(
-            anchor='w', padx=8, pady=(8, 2))
+    def _union_span_for_segment_label(self, key, label: str):
+        et = self._cd.edge_times_for(key)
+        if et is None:
+            return None
+        cols = et.columns.tolist()
+        sc = next((c for c in ('start', 't_start', 'start_time') if c in cols), None)
+        ec = next((c for c in ('stop', 't_end', 'end_time', 'stop_s', 'end') if c in cols), None)
+        if not sc or not ec:
+            return None
+        spans = [(float(row[sc]), float(row[ec]))
+                 for _, row in et.iterrows() if str(row['label']) == label]
+        if not spans:
+            return None
+        return min(s for s, _ in spans), max(e for _, e in spans)
 
-        tree_frame = ttk.Frame(win)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8)
-        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
-        tv = ttk.Treeview(tree_frame, selectmode='extended',
-                          yscrollcommand=vsb.set, show='tree')
-        vsb.config(command=tv.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tv.column('#0', width=520, stretch=True)
+    def _intervals_for_spec_on_key(self, spec, key):
+        if hasattr(spec, 'filter_state'):
+            fs = spec.filter_state or {}
+            t0_raw = spec.t0
+            t1_raw = spec.t1
+        else:
+            fs = spec.get('filter_state') or {}
+            t0_raw = spec.get('t0', 0.0)
+            t1_raw = spec.get('t1', 'end')
+        theme = fs.get('theme', 'segments')
+        labels = fs.get('labels') or {}
+        flags = fs.get('flags') or {}
+        include = bool(flags.get('include_in_filter', False))
+        wall_extent = self._session_wall_clock_extent_for_key(key)
+        t0 = self._resolve_ts_time(t0_raw, *wall_extent)
+        t1 = self._resolve_ts_time(t1_raw, *wall_extent)
+        if t1 <= t0:
+            return None, None
+        bounds = []
+        if theme == 'segments':
+            et = self._cd.edge_times_for(key)
+            if et is not None:
+                cols = et.columns.tolist()
+                sc = next((c for c in ('start', 't_start', 'start_time') if c in cols), None)
+                ec = next((c for c in ('stop', 't_end', 'end_time', 'stop_s', 'end') if c in cols), None)
+                if sc and ec:
+                    for _, row in et.iterrows():
+                        bounds.append((float(row[sc]), float(row[ec]), str(row['label'])))
+        elif theme in self._themes:
+            ep = self._themes[theme]
+            labs = [str(x).strip() for x in ep.labels]
+            bounds = [(float(s), float(e), lb)
+                      for s, e, lb in zip(ep.starts, ep.stops, labs)]
+        active = {lb for lb, on in labels.items() if on}
+        if include and active:
+            bounds = [b for b in bounds if b[2] in active]
+        elif labels:
+            bounds = [b for b in bounds if labels.get(b[2], True)]
+        if not bounds:
+            return [(t0, t1)], t1 - t0
+        active = ({lb for lb, on in labels.items() if on} if labels
+                  else set(lb for _, _, lb in bounds))
+        if include and not active:
+            active = set(lb for _, _, lb in bounds)
+        ef = EpochFilter(bounds)
+        result = ef.filter(active or set(lb for _, _, lb in bounds), t0, t1)
+        if result is False:
+            return [], 0.0
+        intervals, active_dur = result
+        if intervals is None:
+            return [(t0, t1)], active_dur
+        return intervals, active_dur
 
-        # tag: detail rows shown in muted color; adapt to dark mode
-        _t = self.ui.theme
-        _fg_main, _fg_muted, _fg_header, _bg = _t.fg, _t.fg_muted, _t.fg_header, _t.bg
-        win.configure(bg=_bg)
-        if _t.dark:
-            import tkinter.ttk as _ttk
-            _s = _ttk.Style(win)
-            _s.configure('Dark.Treeview',
-                          background=_bg, foreground=_fg_main,
-                          fieldbackground=_bg, rowheight=22)
-            _s.map('Dark.Treeview', background=[('selected', '#4a6fa5')])
-            tv.configure(style='Dark.Treeview')
-        tv.tag_configure('detail', foreground=_fg_muted)
-        tv.tag_configure('file',   foreground=_fg_main)
-        tv.tag_configure('group',  foreground=_fg_header, font=('TkDefaultFont', 9, 'bold'))
+    def _session_wall_clock_extent_for_key(self, key) -> tuple:
+        if self._epoch_bounds and str(getattr(key, 'session', '')) == str(getattr(self._nav.key, 'session', '')):
+            t = self._total_sec
+            return (0.0, t if t > 0 else 1.0)
+        return (0.0, 1.0)
 
-        name_cov, _n_total_sessions = self.ui._custom_mgr.store._custom_ccg_name_session_coverage()
-        _n_sess_denom = max(1, _n_total_sessions)
+    @staticmethod
+    def _sec_to_hms(sec: float) -> str:
+        sec = max(0.0, float(sec))
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
-        def _dur_str(dur):
-            if dur != dur:  return ""          # nan
-            if dur >= 60:   return f"  ⏱ {dur/60:.1f}min"
-            return f"  ⏱ {dur:.0f}s"
 
-        def _parse_meta(p, *, child_session_line: bool = False):
-            """Return (summary_line, [bullet_strings]) from npz metadata."""
-            base = os.path.basename(p)
-            file_sess = base.split("__", 1)[0] if "__" in base else ""
-            parts = base.replace('.npz', '').rsplit('__', 1)
-            date_str = parts[1] if len(parts) > 1 else ''
-            safe_name = parts[0].replace('_', ' ') if parts else base
-            bullets = []
-            t0, t1 = None, None
-            try:
-                m = np.load(p, allow_pickle=False)
-                if 'name_' in m:
-                    safe_name = str(m['name_'])
-                t0 = float(m['t0_']) if 't0_' in m else None
-                t1 = float(m['t1_']) if 't1_' in m else None
-                if t0 is not None and t1 is not None:
-                    bullets.append(
-                        f"Time range: {self._sec_to_hms(t0)} – {self._sec_to_hms(t1)}")
-                act = float(m['active_duration_']) if 'active_duration_' in m else float('nan')
-                if act == act:
-                    bullets.append(f"Active duration: {act:.1f}s")
-                if 'filter_state_' in m:
-                    fs = json.loads(str(m['filter_state_']))
-                    theme = fs.get('theme', '')
-                    labels = fs.get('labels', {})
-                    if theme:
-                        bullets.append(f"Theme: {theme}")
-                    if labels:
-                        on  = [l for l, v in labels.items() if v]
-                        off = [l for l, v in labels.items() if not v]
-                        if on:
-                            bullets.append(f"Active labels: {', '.join(on)}")
-                        if off:
-                            bullets.append(f"Inactive labels: {', '.join(off)}")
-                if 'metadata_' in m:
-                    md = json.loads(str(m['metadata_']))
-                    src = md.get('session')
-                    if src:
-                        bullets.append(f"Derived from session: {src}")
-                has_fr = 'firing_rates' in m
-                has_hi = 'ccg_hi' in m
-                flags = []
-                if has_fr: flags.append("firing rates")
-                if has_hi: flags.append("hi-res CCG")
-                if flags:
-                    bullets.append(f"Contains: {', '.join(flags)}")
-            except Exception:
-                pass
-            if child_session_line:
-                tr = ""
-                if t0 is not None and t1 is not None:
-                    tr = (f"{self._sec_to_hms(t0)}–{self._sec_to_hms(t1)}  ·  ")
-                summary = f"{file_sess or '?'}  ·  {tr}[{date_str}]"
-            else:
-                summary = f"{safe_name}  [{date_str}]"
-            return summary, bullets
+@dataclass
+class CCGTask:
+    spec: CCGSourceConfig   # name, t0, t1, filter_state, active_duration, etc.
+    key: object             # routing TypeKey
+    intervals: object       # resolved epoch intervals or None
+    auto_save: bool
+    load_into_ui: bool
+    batch_id: int | None = None
 
-        # file_meta maps iid → path
-        file_meta = {}
 
-        def _populate(path_list):
-            for top in tv.get_children():
-                tv.delete(top)
-            file_meta.clear()
-            _groups: dict[str, list[str]] = collections.defaultdict(list)
-            for p in path_list:
-                spec = self.ui._custom_mgr.store._custom_npz_spec(p) or {}
-                nm = str(spec.get('name', '')).strip()
-                if not nm:
-                    nm = os.path.basename(p).replace('.npz', '')
-                _groups[nm].append(p)
-            for gname in sorted(_groups.keys(), key=lambda s: s.lower()):
-                plist = sorted(
-                    _groups[gname],
-                    key=lambda pp: (os.path.basename(pp).split('__', 1)[0], pp),
-                )
-                n_have = len(name_cov.get(gname, set()))
-                parent_text = (
-                    f"▶ {gname}  ({n_have}/{_n_sess_denom} sessions)")
-                pid = tv.insert('', tk.END, text=parent_text,
-                                tags=('group',), open=True)
-                for p in plist:
-                    summary, bullets = _parse_meta(p, child_session_line=True)
-                    iid = tv.insert(pid, tk.END, text=f"☐  {summary}",
-                                    tags=('file',), open=False)
-                    file_meta[iid] = p
-                    for b in bullets:
-                        tv.insert(iid, tk.END, text=f"    • {b}", tags=('detail',))
+@dataclass
+class CCGTaskResult:
+    value: object           # CCGDataset on success
+    error: str | None       # error message if failed
+    session: str            # session label for routing
 
-        _populate(paths)
+    @property
+    def ok(self) -> bool:
+        return self.error is None
 
-        # Clicking a file row toggles its checkbox marker (selection via Treeview selection)
-        # Prevent detail rows from being selected
-        def _on_click(event):
-            iid = tv.identify_row(event.y)
-            if iid:
-                tags = tv.item(iid, 'tags')
-                if 'detail' in tags or 'group' in tags:
-                    tv.selection_remove(iid)
 
-        tv.bind('<ButtonRelease-1>', _on_click)
+class CustomCCGWorker:
+    """Wraps BackgroundTaskRunner + thread result buffer for CCG computation."""
 
-        def _refresh_list():
-            new_paths = sorted(_glob.glob(pattern))
-            _populate(new_paths)
-            self.ui._custom_mgr._emit_inventory_event()
-            if not file_meta:
-                win.destroy()
+    def __init__(self, mgr: 'CustomCCGManager'):
+        self._mgr = mgr
+        self._ui = mgr._ui
+        self._runner = BackgroundTaskRunner(max_queue=_MAX_QUEUE, use_result_queue=False)
+        self._thread_result: list = []
 
-        def _selected_file_iids():
-            return [iid for iid in tv.selection()
-                    if 'file' in tv.item(iid, 'tags')]
-
-        def _delete():
-            sel = _selected_file_iids()
-            if not sel:
-                return
-            names = [tv.item(iid, 'text').lstrip('☐ ').split('  [')[0] for iid in sel]
-            if not messagebox.askyesno(
-                    "Delete files",
-                    f"Permanently delete {len(sel)} file(s)?\n"
-                    + "\n".join(f"  • {n}" for n in names)):
-                return
-            for iid in sel:
-                try:
-                    os.remove(file_meta[iid])
-                except Exception as ex:
-                    print(f"[LoadCustomCCG] delete failed: {ex}")
-            _refresh_list()
-            self.ui._custom_mgr._emit_inventory_event()
-
-        def _ok():
-            sel = _selected_file_iids()
-            if not sel:
-                win.destroy()
-                return
-            added = []
-            touched_view = False
-            last_idx = 0
-            from neuropy.analyses.custom_ccg import CustomSegment
-            for iid in sel:
-                p = file_meta[iid]
-                try:
-                    cs = CustomSegment.load(p)
-                    bn = os.path.basename(p)
-                    file_sess = bn.split("__", 1)[0] if "__" in bn else str(self.ui.key.session)
-                    lst = self.ui._custom_segments_by_session.setdefault(file_sess, [])
-                    last_idx, _ = self.ui._custom_mgr.store._upsert_custom_segment_by_name(lst, cs)
-                    if lst is self.ui._custom_segments:
-                        touched_view = True
-                    added.append(cs.source.name)
-                except Exception as ex:
-                    print(f"[LoadCustomCCG] failed to load {p}: {ex}")
-            win.destroy()
-            if added and touched_view:
-                self.ui._build_sig_chips()
-                self.ui.current_segment = self.ui._seg_name(self.ui.n_segments + 1 + last_idx)
-                self.ui._clamp_current_segment_for_session()
-                self.ui._update_segment_label()
-                self.ui._plot_mgr.update_plot()
-                if hasattr(self, '_status_var'):
-                    from collections import Counter as _Ctr
-                    _cnts = _Ctr(added)
-                    _parts = [f"{n} ({c})" if c > 1 else n for n, c in _cnts.items()]
-                    self._status_var.set(f"Loaded: {', '.join(_parts)}")
-                self.ui._settings_mgr.save_ui_state()
-            elif added:
-                if hasattr(self, '_status_var'):
-                    self._status_var.set(
-                        f"Loaded {len(added)} segment(s) for other session(s); "
-                        "switch pairs to that session to view chips.")
-                self.ui._settings_mgr.save_ui_state()
-
-        def _clear_load_dialog_ref(_e=None):
-            if getattr(self, '_load_custom_ccg_win', None) is win:
-                self._load_custom_ccg_win = None
-                self._load_custom_ccg_refresh = None
-
-        self._load_custom_ccg_win = win
-        self._load_custom_ccg_refresh = _refresh_list
-        win.bind(
-            '<Destroy>',
-            lambda e: _clear_load_dialog_ref() if e.widget is win else None,
+    def enqueue_task(self, *, spec: CCGSourceConfig, key, intervals,
+                     auto_save: bool, load_into_ui: bool,
+                     batch_id: int | None = None) -> bool:
+        task = CCGTask(
+            spec=spec, key=key, intervals=intervals,
+            auto_save=bool(auto_save), load_into_ui=bool(load_into_ui),
+            batch_id=batch_id,
         )
+        if not self._runner.enqueue(task):
+            n = len(self._runner._pending)
+            QMessageBox.warning(None, "Task queue full",
+                f"Custom CCG queue full ({n}/{_MAX_QUEUE}). "
+                "Wait for running tasks to complete.")
+            return False
+        return True
 
-        btn_f = ttk.Frame(win)
-        btn_f.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(btn_f, text="Refresh list", command=_refresh_list).pack(
-            side=tk.LEFT, padx=4)
-        ttk.Button(btn_f, text="Load selected", command=_ok).pack(
-            side=tk.RIGHT, padx=4)
-        ttk.Button(btn_f, text="Delete selected",
-                   command=_delete).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_f, text="Cancel",
-                   command=win.destroy).pack(side=tk.RIGHT)
+    def on_done(self, completed_task, _result):
+        ui, mgr = self._ui, self._mgr
+        r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
+
+        if r is None or not r.ok:
+            QMessageBox.critical(None, "Custom CCG",
+                f"Computation failed:\n{r.error if r else 'unknown error'}")
+        else:
+            nm = r.value.src_conf.name
+
+            if completed_task.auto_save:
+                self._save_custom_to_dir(r.value)
+                mgr.state._emit_inventory_event()
+
+            lst = mgr._by_session.setdefault(r.session, [])
+            idx = next((i for i, cd in enumerate(lst) if cd.src_conf.name == nm), -1)
+            if idx >= 0:
+                lst[idx] = r.value
+            else:
+                lst.append(r.value)
+                idx = len(lst) - 1
+
+            if r.session == str(ui._nav.key.session):
+                ui._nav._custom_seg_index[nm] = r.value
+                ui._nav.custom_segs_changed.emit()
+                ui.request_redraw()
+
+            ui.time_slider._status_lbl.setText(f"Done: {nm}")
+
+        self._on_chunk_done(completed_task)
+        self._custom_ccg_start_next()
+
+    def _save_custom_to_dir(self, cd) -> None:
+        """Persist a custom-segment CCGDataset's CCGData items into the project's
+        custom_ccg/ dir via explicit paths. Never calls CCGDataset.save(), so it
+        never spawns a project_<src_conf.name> folder."""
+        save_dir = self._ui.paths.custom_ccg_dir
+        os.makedirs(save_dir, exist_ok=True)
+        nm = cd.src_conf.name
+        for k, cdata in cd.ccg.items():
+            res = getattr(k, 'resolution', 'lowres') or 'lowres'
+            suffix = '_highres' if res == 'highres' else ''
+            cdata.save(path=os.path.join(save_dir, f"{nm}{suffix}"))
+
+    def _custom_ccg_start_next(self):
+        ui = self._ui
+        nav = ui._nav
+
+        def _launch(task: CCGTask, _q):
+            nd_key = task.key.nd()
+            def _read():
+                return (
+                    nav.cd.ccg_for(nd_key, 'lowres'),
+                    (nav.cd.nd.data[nd_key] if getattr(nav.cd, 'nd', None) is not None else None),
+                )
+
+            ccg_data_obj = neurons_obj = None
+            for attempt in range(2):
+                ccg_data_obj, neurons_obj = _read()
+                if ccg_data_obj is not None and neurons_obj is not None:
+                    break
+                if attempt == 0:
+                    try:
+                        nav.cd.get_ccg()
+                    except Exception as ex:
+                        print(f"[CustomCCG] ERROR: session load failed for {task.key.session}: {ex}")
+                        self._on_chunk_done(task)
+                        return None
+            if ccg_data_obj is None or neurons_obj is None:
+                self._on_chunk_done(task)
+                return None
+            self._thread_result.clear()
+
+            def _ccg_worker():
+                sess = str(task.key.session)
+                try:
+                    neurons_override = (
+                        neurons_obj.time_multislices(*zip(*task.intervals))
+                        if task.intervals is not None else None)
+                    value = self._compute_custom_segment(
+                        task.spec.t0, task.spec.t1, task.spec.name,
+                        neurons_override=neurons_override,
+                        active_duration=task.spec.active_duration,
+                        key_override=task.key,
+                        neurons_obj=neurons_obj,
+                        ccg_data_obj=ccg_data_obj)
+                    if value is None:
+                        self._thread_result.append(CCGTaskResult(None, 'compute returned None', sess))
+                        return
+                    value.src_conf.filter_state = task.spec.filter_state
+                    self._thread_result.append(CCGTaskResult(value, None, sess))
+                except Exception as ex:
+                    self._thread_result.append(CCGTaskResult(None, str(ex), sess))
+
+            t = threading.Thread(target=_ccg_worker, daemon=True)
+            t.start()
+            return t
+
+        started = self._runner.start_next(_launch)
+        if started:
+            self._runner.start_polling_qt(300, self.on_done)
+
+    def _compute_custom_segment(self, t0: float, t1: float, name: str,
+                                 neurons_override=None, active_duration=None,
+                                 key_override=None, neurons_obj=None,
+                                 ccg_data_obj=None):
+        ui = self._ui
+        nav = ui._nav
+        key_eff = key_override or nav.key
+        neurons_eff = neurons_obj if neurons_obj is not None else nav.neurons
+        cd_eff = ccg_data_obj if ccg_data_obj is not None else nav.ccg_data
+        if neurons_eff is None:
+            print(f"[CustomCCG] ERROR: No neuron data available for {key_eff}")
+            return None
+        try:
+            neurons_slice = (neurons_override if neurons_override is not None
+                             else neurons_eff.time_slice(t0, t1))
+            _full = sum(len(st) for st in neurons_eff.spiketrains)
+            _win  = sum(len(st) for st in neurons_slice.spiketrains)
+            print(f"[CustomCCG] '{name}' window=[{t0:.1f},{t1:.1f}]s "
+                  f"spikes windowed={_win}/{_full} "
+                  f"(override={neurons_override is not None})")
+            has_highres = nav.cd.ccg_for(nav.key.nd(), 'highres') is not None
+            cd = CCGDataset(conf=cd_eff.conf, nd=nav.cd.nd,
+                            save_path=str(ui.paths.data_root),
+                            src_conf=CCGSourceConfig(
+                                name=name, t0=t0, t1=t1, active_duration=active_duration,
+                            ))
+            cd.get_ccg_custom(neurons_slice, has_highres=has_highres,
+                              excitability=getattr(key_eff, 'excitability', 'E'))
+            return cd
+        except Exception as ex:
+            print(f"[CustomCCG] ERROR: {ex}")
+            traceback.print_exc()
+            return None
+
+    def _on_chunk_done(self, task: CCGTask):
+        bid = task.batch_id
+        if bid is None:
+            return
+        ts = self._ui.time_slider
+        if bid not in ts._batch_counts:
+            return
+        ts._batch_counts[bid] -= 1
+        if ts._batch_counts[bid] > 0:
+            return
+        del ts._batch_counts[bid]
+        names = list(ts._batch_names.pop(bid, []))
+        QTimer.singleShot(100, lambda n=names: self._prompt_save_chunks(n))
+
+    def _prompt_save_chunks(self, names: list[str]):
+        name_set = set(names)
+        if not name_set:
+            return
+        unsaved: list = []
+        for lst in self._mgr._by_session.values():
+            for cd in lst or []:
+                lo_key = next((k for k in cd.ccg if getattr(k, 'resolution', None) == 'lowres'), None)
+                if cd.src_conf.name in name_set and (lo_key is None or not cd.ccg[lo_key].is_saved):
+                    unsaved.append(cd)
+        if not unsaved:
+            return
+        n = len(unsaved)
+        reply = QMessageBox.question(None, "Save split windows",
+            f"{n} split window(s) finished computing but are not saved to disk yet.\n\n"
+            "Save them as .npz files now? (You can reload them later from the cache.)")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        saved = []
+        for cd in unsaved:
+            try:
+                self._save_custom_to_dir(cd)
+                saved.append(cd.src_conf.name)
+            except Exception as exc:
+                print(f"[CustomCCG] save failed '{cd.src_conf.name}': {exc}")
+        if saved:
+            QMessageBox.information(None, "Saved", "Saved:\n" + "\n".join(saved))
+
+
+class CustomCCGState(JsonSavable):
+    """Active session, inventory change-detection, and suggestion list management."""
+
+    def __init__(self, ui: 'CCGReviewUI', mgr: 'CustomCCGManager'):
+        super().__init__()
+        self._mgr = mgr
+        self._ui = ui
+        self.active_sess: str = ''
+        self.inventory_sig: tuple = ()
+        self._stacked_segments: set = set()
+
+    def save_path(self, **kwargs) -> str:
+        return os.path.join(self._mgr.save_path(), "suggested_custom_ccgs")
+
+    def _emit_inventory_event(self):
+        specs = self.load_suggestions()
+        sig = tuple(sorted((s._key(), s.scope) for s in specs))
+        if sig != self.inventory_sig:
+            self.inventory_sig = sig
+            self.refresh_suggestions(silent=True)
+
+    def load_suggestions(self) -> list:
+        path = self.save_path() + ".json"
+        if not os.path.isfile(path):
+            return []
+        try:
+            with open(path, encoding='utf-8') as f:
+                raw = json.load(f)
+            sess = self._ui._nav.current_session_str
+            out = [CCGSourceConfig.deserialize(x, default_session=sess)
+                   for x in (raw.get('items') or []) if isinstance(x, dict)]
+            return out
+        except Exception as ex:
+            print(f"[CustomCCG] suggestion list load failed: {ex}")
+            return []
+
+    def save_suggestions(self, specs: list) -> None:
+        payload = {'version': 1, 'items': [{k: v for k, v in s.__dict__.items() if k in s._JSON_KEYS} for s in specs]}
+        atomic_write_json(self.save_path() + ".json", payload)
+
+    def refresh_suggestions(self, silent: bool = False):
+        specs = self.load_suggestions()
+        if not silent:
+            QMessageBox.information(None, "Custom CCG suggestions",
+                                    f"Updated suggestion list with {len(specs)} item(s).")
+
+    def update_suggestion(self, spec: 'CCGSourceConfig'):
+        specs = self.load_suggestions()
+        if spec not in specs:
+            specs.append(spec)
+            self.save_suggestions(specs)
+
+    def show_dialog(self):
+        ui = self._ui
+        specs = self.load_suggestions()
+        def _on_run(selected_specs):
+            queued = sum(
+                self._mgr._queue_custom_ccgs(
+                    s, for_all=(str(s.scope).lower() == 'all'),
+                    auto_save=True)
+                for s in selected_specs)
+            if queued:
+                if getattr(ui, "time_slider", None) is not None: ui.time_slider._status_lbl.setText(f"Queued {queued} suggested custom CCG task(s)")
+                self._mgr.worker._custom_ccg_start_next()
+            else:
+                if getattr(ui, "time_slider", None) is not None: ui.time_slider._status_lbl.setText("All suggested custom CCGs already exist")
+        SuggestedCCGDialog.show(ui, specs, _on_run)
+
+
+class CustomCCGManager(Savable):
+    """Coordinator: owns worker/state and _by_session; houses cross-cutting UI methods."""
+
+    def __init__(self, ui: 'CCGReviewUI'):
+        super().__init__()
+        self._ui = ui
+        self._by_session: dict = {}
+        os.makedirs(self.save_path(), exist_ok=True)
+        self.state = CustomCCGState(ui, self)
+        self.worker = CustomCCGWorker(self)
+        ui._custom_ccg_pending = self.worker._runner._pending
+        self.state.active_sess = str(ui._nav.key.session)
+        self._by_session.setdefault(self.state.active_sess, [])
+
+    def save_path(self, **kwargs) -> str:
+        return self._ui.paths.custom_ccg_dir
+
+    @property
+    def _active_list(self) -> list:
+        return self._by_session.setdefault(self.state.active_sess, [])
+
+    def _is_custom_segment(self, seg: str = None) -> bool:
+        seg = self._ui.current_segment if seg is None else seg
+        return seg in self._ui._nav.custom_seg_index
+
+    def _custom_seg_index(self, seg: str = None) -> int:
+        seg = self._ui.current_segment if seg is None else seg
+        for ci, cs in enumerate(self._active_list):
+            if cs.src_conf.name == seg:
+                return ci
+        return -1
+
+    def _remove_custom_segment(self, name: str):
+        ci = self._custom_seg_index(name)
+        if ci < 0:
+            return
+        self._active_list.pop(ci)
+        if self._ui.current_segment == name:
+            self._ui.current_segment = _ALL_SEGS
+        self._ui._build_sig_chips()
+        self._ui._update_segment_label()
+        self._ui.request_redraw()
+
+    def load_saved_from_disk(self) -> int:
+        """Register saved .npz custom CCGs from custom_ccg_dir that aren't already in memory.
+        The npz stores only arrays (no conf/key/src_conf), so t0/t1 aren't recoverable and
+        default to 0; the segment key uses session=<name> to match freshly-computed customs
+        (get_ccg_custom keys on src.name)."""
+        save_dir = self.save_path()
+        if not os.path.isdir(save_dir):
+            return 0
+        conf = self._ui._nav.cd.conf
+        root = str(self._ui.paths.data_root)
+        known = {cd.src_conf.name for lst in self._by_session.values()
+                 for cd in lst if getattr(cd, 'src_conf', None)}
+        bases: dict = {}
+        for p in _glob.glob(os.path.join(save_dir, '*.npz')):
+            stem = os.path.splitext(os.path.basename(p))[0]
+            base, res = ((stem[:-8], 'highres') if stem.endswith('_highres')
+                         else (stem, 'lowres'))
+            bases.setdefault(base, {})[res] = os.path.splitext(p)[0]
+        sess = self.state.active_sess
+        added = 0
+        for base, files in sorted(bases.items()):
+            if base in known:
+                continue
+            try:
+                ds = CCGDataset(conf=conf, nd=None, save_path=root,
+                                src_conf=CCGSourceConfig(name=base, t0=0.0, t1=0.0))
+                for res, path in files.items():
+                    key = Key(session=base, resolution=res)
+                    cd = CCGData(key=key, conf=conf, ccg=None, ccg_null=None,
+                                 pval=None, qval=None, root=root)
+                    cd.load(path=path)
+                    ds.ccg[key] = cd
+            except Exception as exc:
+                print(f"[CustomCCG] skip {base}: {exc}")
+                continue
+            self._by_session.setdefault(sess, []).append(ds)
+            added += 1
+        if added:
+            print(f"[CustomCCG] loaded {added} saved custom CCG(s) from {save_dir}")
+        return added
+
+    def _generate_suggested_custom_ccgs(self):
+        self.state.show_dialog()
+
+    def _queue_custom_ccgs(self, spec: 'CCGSourceConfig', *, for_all: bool, auto_save: bool,
+                           target_sessions: list | None = None) -> int:
+        ui = self._ui
+        nav = ui._nav
+        queued = 0
+        if for_all and target_sessions is None:
+            targets = nav.available_type_keys_any()
+        else:
+            sess_set = ({str(s) for s in target_sessions}
+                        if target_sessions is not None
+                        else {str(s) for s in (spec.sessions or []) if s != 'All'})
+            targets = ([tk_ for nk in nav.real_nd_keys()
+                        if str(nk.session) in sess_set
+                        for tk_ in (nav.type_key_for_nd(nk),) if tk_ is not None]
+                       if sess_set else [nav.key])
+        n_splits = max(1, int(spec.n_splits or 1))
+        overlap_sec = max(0.0, float(spec.overlap_sec or 0.0))
+        _any = nav.session_any_mode
+        for tk_ in targets:
+            t_sess_start, t_sess_end = ui.time_slider._session_wall_clock_extent_for_key(tk_)
+            t0_r = ui.time_slider._resolve_ts_time(spec.t0, t_sess_start, t_sess_end)
+            t1_r = ui.time_slider._resolve_ts_time(spec.t1, t_sess_start, t_sess_end)
+            lone = ui.time_slider.single_exclusive_segment_filter_label(spec.filter_state)
+            if lone is not None:
+                span = ui.time_slider._union_span_for_segment_label(tk_, lone)
+                if span is not None:
+                    t0_r, t1_r = span[0], span[1]
+                    t0_r = ui.time_slider._resolve_ts_time(t0_r, t_sess_start, t_sess_end)
+                    t1_r = ui.time_slider._resolve_ts_time(t1_r, t_sess_start, t_sess_end)
+            chunks = _SetOp.partition(t0_r, t1_r, n_splits, overlap_sec, str(spec.name))
+            split_bid = None
+            if len(chunks) > 1 and (_any or str(tk_.session) == str(nav.key.session)):
+                split_bid = ui.time_slider._batch_next_id
+                ui.time_slider._batch_next_id += 1
+            split_names: list[str] = []
+            for chunk_t0, chunk_t1, chunk_name in chunks:
+                lo = min(t_sess_start, t_sess_end)
+                hi = max(t_sess_start, t_sess_end)
+                cs = min(max(float(chunk_t0), lo), hi)
+                ce = min(max(float(chunk_t1), lo), hi)
+                if ce <= cs:
+                    continue
+                chunk_t0, chunk_t1 = cs, ce
+                chunk_spec = CCGSourceConfig(
+                    name=chunk_name, t0=chunk_t0, t1=chunk_t1,
+                    filter_state=spec.filter_state,
+                    scope=spec.scope, sessions=spec.sessions,
+                )
+                iv = ui.time_slider._intervals_for_spec_on_key(chunk_spec, tk_)
+                if iv is None or iv is False:
+                    continue
+                intervals, active_duration = iv
+                if (isinstance(intervals, list) and len(intervals) == 0
+                        and (active_duration is None or float(active_duration) <= 0.0)):
+                    print(f"[CustomCCG] skip chunk (no overlap with filter): "
+                          f"{chunk_name} session={tk_.session}")
+                    continue
+                chunk_source = CCGSourceConfig(
+                    name=chunk_name, t0=chunk_t0, t1=chunk_t1,
+                    active_duration=active_duration,
+                    filter_state=spec.filter_state,
+                    scope=spec.scope, sessions=spec.sessions,
+                )
+                ok = self.worker.enqueue_task(
+                    spec=chunk_source,
+                    key=tk_,
+                    intervals=intervals,
+                    auto_save=auto_save,
+                    load_into_ui=(_any or str(tk_.session) == str(nav.key.session)),
+                    batch_id=split_bid,
+                )
+                if ok:
+                    queued += 1
+                    if split_bid is not None:
+                        split_names.append(chunk_name)
+            if split_bid is not None and split_names:
+                ui.time_slider._batch_counts[split_bid] = len(split_names)
+                ui.time_slider._batch_names[split_bid] = split_names
+        return queued
+
+
+class SuggestedCCGDialog:
+    """List suggested custom CCG specs; user picks which to generate."""
+
+    def __init__(self, specs: list, n_total: int, on_run, parent=None):
+        self._specs = specs
+        self._on_run = on_run
+
+        self._dlg = QDialog(parent)
+        self._dlg.setWindowTitle("Suggested custom CCGs")
+        self._dlg.resize(640, 380)
+
+        lay = QVBoxLayout(self._dlg)
+        lay.addWidget(QLabel("Generate custom CCGs from availability list:"))
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        _mf = QFont(); _mf.setStyleHint(QFont.StyleHint.Monospace); _mf.setPointSize(9)
+        self._list.setFont(_mf)
+        for i, spec in enumerate(specs):
+            name  = str(spec.name)
+            t0    = self._format_time(spec.t0)
+            t1    = self._format_time(spec.t1)
+            scope = str(spec.scope)
+            n_have = len(spec.sessions or [])
+            label = (f"[{name} | {t0}–{t1}] "
+                     f"{'ALL' if scope == 'All' else scope} "
+                     f"({n_have}/{n_total})")
+            self._list.addItem(label)
+            self._list.item(i).setSelected(True)
+        lay.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        for label, slot in [("Generate selected", self._run_selected),
+                             ("Generate all",      self._run_all),
+                             ("Cancel",            self._dlg.reject)]:
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+    @staticmethod
+    def _format_time(v) -> str:
+        if isinstance(v, str) and v.lower() in ('start', 'end'):
+            return v
+        try:
+            return str(datetime.timedelta(seconds=int(float(v))))
+        except Exception:
+            return str(v)
+
+    def _run_selected(self):
+        idxs = [self._list.row(it) for it in self._list.selectedItems()]
+        self._dlg.accept()
+        self._on_run([self._specs[i] for i in idxs])
+
+    def _run_all(self):
+        self._dlg.accept()
+        self._on_run(list(self._specs))
+
+    @classmethod
+    def show(cls, ui, specs: list, on_run):
+        if not specs:
+            QMessageBox.information(None, "Suggested custom CCGs",
+                                    "No suggested entries found. Use 'Refresh' first.")
+            return
+        n_total = max(1, len(ui._nav.real_nd_keys()))
+        cls(specs, n_total, on_run)._dlg.exec()

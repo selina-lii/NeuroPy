@@ -10,7 +10,7 @@ from joblib import Parallel, delayed
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from typing import Self, Union
-from neuropy.analyses.utils import IntervalOp
+from neuropy.core.intervals import IntervalOp
 
 
 class Neurons(DataWriter):
@@ -293,33 +293,13 @@ class Neurons(DataWriter):
             metadata=neurons.metadata,
         )
     
-    def _edges_time_split(self, n_segments=1, t_start=None,t_stop=None):
+    def _edges_time_split(self, n_segments=1, t_start=None, t_stop=None):
         t_start, t_stop = super()._time_slice_params(t_start, t_stop)
+        return IntervalOp.split_n(t_start, t_stop, n_segments)
 
-        seg_starts = np.histogram_bin_edges([],bins=n_segments,range=(t_start,t_stop))[:-1]
-        seg_stops = np.histogram_bin_edges([],bins=n_segments,range=(t_start,t_stop))[1:]
-        
-        return seg_starts,seg_stops
-    
-    def _edges_time_window(self, stride=None, seg_len=None, keep_incomplete=False, t_start=None,t_stop=None):
+    def _edges_time_window(self, stride=None, seg_len=None, keep_incomplete=False, t_start=None, t_stop=None):
         t_start, t_stop = super()._time_slice_params(t_start, t_stop)
-
-        if seg_len>=t_stop-t_start:
-            print(f"segment length overflowed, using maximum recording time {t_stop-t_start}") 
-            return np.array([t_start]),np.array([t_stop])
-
-        seg_starts = np.arange(start=t_start,stop=t_stop-seg_len+1,step=stride)
-        seg_stops = seg_starts+seg_len
-
-        # Remainder
-        if keep_incomplete and seg_stops[-1]<t_stop:
-            start = seg_starts[-1]+stride
-            stop = start+seg_len
-            seg_starts=np.append(seg_starts,start)
-            seg_stops=np.append(seg_stops,min(t_stop,stop))
-            print(f"length of last bin is {seg_stops[-1]-seg_starts[-1]} while all other bins are {seg_len}")        
-        
-        return seg_starts, seg_stops
+        return IntervalOp.sliding_windows(t_start, t_stop, stride, seg_len, keep_incomplete)
 
     def _edges_spikecount(self, i, n=1000, discard_tail=False):
         """

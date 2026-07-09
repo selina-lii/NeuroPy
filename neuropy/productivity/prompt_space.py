@@ -116,20 +116,7 @@ def _assign_avatar(hyp_id: str) -> bool:
     except Exception:
         return False
 
-def _atomic_write_json(path: str, data: dict):
-    """Write JSON atomically using a temp file + rename."""
-    dir_ = os.path.dirname(path)
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+from neuropy.utils.data_storage_util import atomic_write_json as _atomic_write_json
 
 # ---------------------------------------------------------------------------
 # _TicketSection
