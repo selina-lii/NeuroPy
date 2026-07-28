@@ -15,7 +15,7 @@ from neuropy.ui.pair_selection_panel import SelectionData
 if TYPE_CHECKING:
     pass
 
-_ALL_SEGS = "All"
+_ALL_SEGS = "all"
 
 class ExportManager:
     """Export methods for CCGReviewUI."""
@@ -70,8 +70,8 @@ class ExportManager:
             ref = tgt = None
         seg = ui.current_segment
         if seg == _ALL_SEGS:
-            seg_tag = "All"
-        elif seg not in ui._nav.all_segment_names():
+            seg_tag = "all"
+        elif seg not in ui.nav.available_segments():
             seg_tag = "custom"
         else:
             seg_tag = seg
@@ -117,17 +117,17 @@ class ExportManager:
         try:
             if (not getattr(ui, '_stacked_segments', None) and
                     not getattr(ui, 'together_pairs', None) and
-                    not (getattr(ui._nav, 'resolution', 'lo') == "lo_hi")):
+                    not (getattr(ui.nav, 'resolution', 'lo') == "lo_hi")):
                 # Single-pair view: render directly to path, bypassing the viewer cache
-                inds = ui.all_inds[ui.current_pair_idx]
-                seg  = ui.seg_idx(ui.current_segment)
-                hr   = getattr(ui._nav, 'resolution', 'lo') in ("hi", "lo_hi")
+                inds = ui.all_pairs_np[ui.current_pair_idx]
+                seg  = ui.segment_index(ui.current_segment)
+                hr   = getattr(ui.nav, 'resolution', 'lo') in ("hi", "lo_hi")
                 ctx  = ui._render_engine.build_context(inds, seg, hr, None, None)
                 dpi  = 300 if fmt == 'png' else None
                 ui._render_engine.write_png(ctx, path, dpi=dpi)
             else:
                 # Multi-view (stacked/SBS): save composite figure as-is
-                ui.root.request_redraw()
+                ui.root.mainview.request_render()
                 ui.canvas.draw()
                 ui.fig.savefig(path, bbox_inches='tight', dpi=300 if fmt == 'png' else None)
         finally:
@@ -163,11 +163,11 @@ class ExportManager:
             'ccg_data': ui.ccg_data,
             'neurons': ui.neurons,
             'n_segments': getattr(ui, 'n_segments', 0),
-            'segment_names': ui._nav.all_segment_names(),
+            'segment_names': ui.nav.available_segments(),
             'current_pair_idx': int(getattr(ui, 'current_pair_idx', 0)),
             'current_segment': getattr(ui, 'current_segment', _ALL_SEGS),
             '_custom_segments': getattr(ui, '_custom_segments', []),
-            'resolution': getattr(ui._nav, 'resolution', 'lo'),
+            'resolution': getattr(ui.nav, 'resolution', 'lo'),
         }
 
         n_ok = 0
@@ -180,50 +180,34 @@ class ExportManager:
                 ui.ccg_ptr = ptr
                 nd_key = tk_.nd()
                 sess = str(getattr(tk_, 'session', getattr(nd_key, 'session', '')))
-                ui.neurons = (ui.cd.nd.data.get(nd_key)
-                                if getattr(ui.cd, 'nd', None) is not None else None)
-                ui.n_segments = ui.cd.n_segments_for(tk_)
-                # Swap custom segments to this session's list so custom indices resolve correctly
-                ui._custom_segments = _cs_by_sess.get(sess, []) or []
-                # Resolve segment indices for this pointer.
-                # - Current: use UI's current_segment (clamped to this ptr)
-                # - All: use n_segments sentinel
-                # - Named: first try regular segment label, then try custom segment name (silent skip)
-                _reg_labels = ui.cd.segment_names_for(tk_)
+                ui.neurons = (ui.cd.nd.neurons_for(nd_key)
+                              if getattr(ui.cd, 'nd', None) is not None else None)
+                ui.n_segments = ui.cd.n_segments(tk_)
+                # Every segment (whole-session 'full' + appended windows) is a dim0 label of
+                # this session's array; resolve export names against that ordered label list.
+                _reg_labels = ui.cd.segment_names(tk_)
                 seg_indices: list[int] = []
                 for export_seg in export_segs:
-                    if export_seg == 'All':
-                        seg_indices.append(int(ui.cd.n_segments_for(tk_)))
+                    if export_seg in ('All', _ALL_SEGS):   # whole session = dim0[0]='full'
+                        seg_indices.append(0)
                         continue
                     if export_seg == 'Current':
                         saved = old_state.get('current_segment', _ALL_SEGS)
-                        if isinstance(saved, int):
-                            seg_indices.append(saved)  # legacy int
-                        else:
-                            seg_indices.append(ui.seg_idx(saved))
+                        seg_indices.append(saved if isinstance(saved, int) else ui.segment_index(saved))
                         continue
-                    # Try regular segment label
-                    try:
+                    if export_seg in _reg_labels:
                         seg_indices.append(int(_reg_labels.index(export_seg)))
-                        continue
-                    except ValueError:
-                        pass
-                    # Try custom segment name for this session (silent skip if absent)
-                    _ci = next((i for i, _cs in enumerate(ui._custom_segments)
-                                if isinstance(_cs, _CCGDataset) and _cs.src_conf.name == export_seg), None)
-                    if _ci is not None:
-                        seg_indices.append(int(ui.cd.n_segments_for(tk_)) + 1 + _ci)
-                    # else: silently skip — this session doesn't have that custom segment
+                    # else: silently skip — this session doesn't have that segment
                 # de-dupe while preserving order
                 _seen_seg = set()
                 seg_indices = [s for s in seg_indices if not (s in _seen_seg or _seen_seg.add(s))]
                 if not seg_indices:
                     continue
-                if getattr(ui._nav, 'resolution', 'lo') in ("hi", "lo_hi"):
-                    ui.ccg_data = (ui.cd.ccg_for(nd_key, 'highres')
+                if getattr(ui.nav, 'resolution', 'lo') in ("hi", "lo_hi"):
+                    ui.ccg_data = (ui.cd.ccg_for(nd_key.change(resolution='highres'))
                                    if hasattr(ui.cd, 'ccg_for') else ui.ccg_data)
                 else:
-                    ui.ccg_data = (ui.cd.ccg_for(nd_key, 'lowres')
+                    ui.ccg_data = (ui.cd.ccg_for(nd_key.change(resolution='lowres'))
                                    if hasattr(ui.cd, 'ccg_for') else ui.ccg_data)
                 try:
                     ui.current_pair_idx = ui.get_pair_index((ref, tgt))
@@ -296,14 +280,14 @@ class ExportManager:
 
                 def _has_hires():
                     return (hasattr(ui.cd, 'ccg_for')
-                            and ui.cd.ccg_for(nd_key, 'highres') is not None)
+                            and ui.cd.ccg_for(nd_key.change(resolution='highres')) is not None)
 
                 def _render_one(seg, highres: bool, path: str):
-                    ui._nav.set_resolution("hi" if highres else "lo")
+                    ui.nav.set_resolution("hi" if highres else "lo")
                     if highres and _has_hires():
-                        ui.ccg_data = ui.cd.ccg_for(nd_key, 'highres')
+                        ui.ccg_data = ui.cd.ccg_for(nd_key.change(resolution='highres'))
                     else:
-                        ui.ccg_data = (ui.cd.ccg_for(nd_key, 'lowres')
+                        ui.ccg_data = (ui.cd.ccg_for(nd_key.change(resolution='lowres'))
                                        if hasattr(ui.cd, 'ccg_for') else ui.ccg_data)
                     old_eo = getattr(ui, '_export_overrides', None)
                     ui._export_overrides = opt
@@ -317,18 +301,13 @@ class ExportManager:
 
                 # Export one file per selected segment (render directly; bypass viewer cache)
                 for seg_idx in seg_indices:
-                    ui.current_segment = ui._seg_name(int(seg_idx))
-                    seg = ui.seg_idx(ui.current_segment)
-                    n_sess_segs = ui.cd.n_segments_for(tk_)
-                    if seg == int(n_sess_segs):
-                        seg_tag = "All"
-                    elif ui._custom_mgr._is_custom_segment(seg):
-                        ci_tag = ui._custom_mgr._custom_seg_index(seg)
-                        cs_name = (ui._custom_segments[ci_tag].get('name', f'custom{ci_tag}')
-                                   if ci_tag < len(ui._custom_segments) else f'custom{ci_tag}')
-                        seg_tag = re.sub(r'[^A-Za-z0-9_\-]', '_', str(cs_name))
+                    ui.current_segment = ui.nav.segment_name(int(seg_idx))
+                    seg = ui.segment_index(ui.current_segment)
+                    seg_label = ui.current_segment
+                    if seg == 0 or seg_label == _ALL_SEGS:
+                        seg_tag = "all"
                     else:
-                        seg_tag = f"seg{seg}"
+                        seg_tag = re.sub(r'[^A-Za-z0-9_\-]', '_', str(seg_label))
                     base_name = f"{sess}_{type_str}{sh}_ccg_{ref}_{tgt}_{seg_tag}"
                     if not bool((opt or {}).get('title_show_norm_details', True)):
                         _active_norms = sorted(nm.name for nm in getattr(ui, 'active_norms', set()))
@@ -380,12 +359,12 @@ class ExportManager:
             ui.current_pair_idx = old_state['current_pair_idx']
             saved_seg = old_state.get('current_segment', ui.current_segment)
             if isinstance(saved_seg, int):
-                saved_seg = ui._seg_name(saved_seg)
+                saved_seg = ui.nav.segment_name(saved_seg)
             ui.current_segment = saved_seg
             ui._custom_segments = old_state.get('_custom_segments', ui._custom_segments)
-            ui._nav.set_resolution(old_state.get('resolution', 'lo'))
+            ui.nav.set_resolution(old_state.get('resolution', 'lo'))
             try:
-                ui.root.request_redraw()
+                ui.root.mainview.request_render()
             except Exception:
                 pass
 
@@ -426,7 +405,7 @@ class ExportManager:
     def _collect_all_sessions_selected(self) -> list[tuple]:
         """Return (tk_, ptr, ref, tgt) for every selected pair in every session/type."""
         ui = self._ui
-        sd = ui._nav.sd
+        sd = ui.nav.sd
         items = []
         for tk_, ptr in ui.cd.ptr.items():
             b = sd.get_selection_by_session(tk_).selections.get(tk_)
@@ -453,7 +432,7 @@ class ExportManager:
             if ptr is None:
                 continue
             sess = str(getattr(tk_, 'session', getattr(tk_.nd(), 'session', '')))
-            inds = getattr(ptr, 'inds2', None)
+            inds = getattr(ptr, 'pairs', None)
             if inds is None:
                 continue
             for pair in inds:
@@ -499,7 +478,7 @@ class ExportManager:
         elif action in ('groups', 'all_groups'):
             # Group data is stored as {session_str: [[ref,tgt], ...]}.
             # IMPORTANT: we must NOT “guess” a handle for (session, pair). Instead,
-            # we scan each (tk_, ptr).inds2 and include it only if that pair is
+            # we scan each (tk_, ptr).pairs and include it only if that pair is
             # explicitly in the chosen group(s) for that session.
             if action == 'all_groups':
                 gnames = [g for g in ui.groups
@@ -532,7 +511,7 @@ class ExportManager:
                 want = want_by_sess.get(sess)
                 if not want:
                     continue
-                inds = getattr(ptr, 'inds2', None)
+                inds = getattr(ptr, 'pairs', None)
                 if inds is None:
                     continue
                 for pair in inds:

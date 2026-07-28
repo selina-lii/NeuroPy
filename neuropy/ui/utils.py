@@ -21,13 +21,23 @@ from pyqtgraph.Qt.QtWidgets import (
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
-    QSplitter, QStackedWidget,
+    QSplitter, QStackedWidget, QComboBox
 )
 from neuropy.ui.ui_common import qt_dark_mode
 
 if TYPE_CHECKING:
     from neuropy.ui.pair_selection_panel import LeftPanel
 
+
+# Platform primary shortcut modifier: Cmd on macOS, Ctrl elsewhere. Qt maps macOS Cmd →
+# ControlModifier; we accept Meta too so the physical Cmd key always registers regardless of
+# Qt's Ctrl/Meta swap. Single source of truth for every "Ctrl-click" style shortcut.
+PRIMARY_MODIFIER = Qt.ControlModifier | Qt.MetaModifier
+
+
+def has_primary_modifier(mods) -> bool:
+    """True if the platform primary modifier (Cmd on macOS, Ctrl elsewhere) is held."""
+    return bool(mods & PRIMARY_MODIFIER)
 
 
 class CheckboxVar:
@@ -156,9 +166,7 @@ class PairListWidget(QListWidget):
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()   # per-event modifiers: reliable on macOS, unlike the global state
-        ctrl = bool(mods & Qt.ControlModifier)
-        cmd = bool(mods & Qt.MetaModifier)
-        print(f"[hk] keyPress key={key} text={event.text()!r} ctrl={ctrl} cmd={cmd}")
+        primary = has_primary_modifier(mods)
 
         if key in (Qt.Key_Up, Qt.Key_Down):
             super().keyPressEvent(event)
@@ -167,7 +175,7 @@ class PairListWidget(QListWidget):
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self._panel._on_enter_key(self)
             return
-        if key in (Qt.Key_Delete, Qt.Key_Backspace) and not (ctrl or cmd):
+        if key in (Qt.Key_Delete, Qt.Key_Backspace) and not primary:
             self._panel._on_delete_pair()
             return
         self._panel._on_list_key(event)
@@ -190,17 +198,37 @@ def chip_button(label: str, checkable: bool = True, checked: bool = False,
     return btn
 
 
+def make_combo(items: list[str], width: int, current: str = None) -> 'QComboBox':
+    """Fixed-width QComboBox pre-filled with items (and optional current selection)."""
+    cb = QComboBox()
+    cb.addItems(items)
+    if current:
+        cb.setCurrentText(current)
+    cb.setFixedWidth(width)
+    return cb
+
+
+def make_button(text: str, slot, width: int = None) -> 'QPushButton':
+    """QPushButton wired to slot, optionally fixed-width."""
+    b = QPushButton(text)
+    b.clicked.connect(slot)
+    if width:
+        b.setFixedWidth(width)
+    return b
+
+
 class ListPickerButton(QPushButton):
     """Button that opens a multi-select dialog. Text auto-summarizes selection."""
     selection_changed = Signal(list)
 
     def __init__(self, title: str, items: list[str] = (), plural: str = "items",
-                 parent=None):
+                 refresh_provider=None, parent=None):
         super().__init__(parent)
         self._title  = title
         self._plural = plural
         self._items: list[str] = list(items)
         self._selected: list[str] = list(items)
+        self._refresh_provider = refresh_provider   # callable → fresh item list, or None
         self._update_label()
         self.clicked.connect(self._open_dialog)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -227,21 +255,37 @@ class ListPickerButton(QPushButton):
         lay = QVBoxLayout(dlg)
         lst = QListWidget()
         lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        for item in self._items:
-            it = QListWidgetItem(item)
-            lst.addItem(it)
-            if item in self._selected:
-                it.setSelected(True)
+
+        def _populate():
+            keep = {lst.item(i).text() for i in range(lst.count())
+                    if lst.item(i).isSelected()} or set(self._selected)
+            lst.clear()
+            for item in self._items:
+                it = QListWidgetItem(item)
+                lst.addItem(it)
+                if item in keep:
+                    it.setSelected(True)
+
+        _populate()
         lay.addWidget(lst)
         btns = QHBoxLayout()
         sel_all = QPushButton("Select all")
         sel_none = QPushButton("Select none")
         sel_all.clicked.connect(lst.selectAll)
         sel_none.clicked.connect(lst.clearSelection)
+        btns.addWidget(sel_all); btns.addWidget(sel_none)
+        if self._refresh_provider is not None:
+            def _refresh():
+                self._items = list(self._refresh_provider())
+                _populate()
+            refresh_btn = QPushButton("Refresh")
+            refresh_btn.clicked.connect(_refresh)
+            btns.addWidget(refresh_btn)
+        btns.addStretch()
         apply_btn = QPushButton("Apply")
         cancel_btn = QPushButton("Cancel")
-        btns.addWidget(sel_all); btns.addWidget(sel_none)
-        btns.addStretch()
+        apply_btn.setDefault(True)   # Enter → apply
+        apply_btn.setAutoDefault(True)
         btns.addWidget(apply_btn); btns.addWidget(cancel_btn)
         lay.addLayout(btns)
         apply_btn.clicked.connect(dlg.accept)
@@ -262,6 +306,37 @@ class ListPickerButton(QPushButton):
             self.setText(self._selected[0])
         else:
             self.setText(f"{self._title}: {n} {self._plural}")
+
+
+class ResultsDialog(QDialog):
+    """Small read-only run-report dialog (Windows-style small monospace text).
+
+    Reused for custom-CCG batch results, jitter save summaries, and any other
+    "here is what ran / where it saved / what was skipped" output.
+    """
+
+    def __init__(self, title: str, body: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 360)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(body)
+        text.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        mf = QFont()
+        mf.setStyleHint(QFont.StyleHint.Monospace)
+        mf.setPointSize(8)
+        text.setFont(mf)
+        lay.addWidget(text)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        btns.accepted.connect(self.accept)
+        lay.addWidget(btns)
+
+    @classmethod
+    def show_report(cls, title: str, body: str, parent=None) -> None:
+        cls(title, body, parent).exec()
 
 
 class SliderWithInput(QWidget):
@@ -556,8 +631,10 @@ class SideNavPanel(QWidget):
 class ArrowChipBar(QWidget):
     """[arrowed chip bar] ◀ [chips] ▶ — horizontal scroll row for chip widgets."""
 
-    def __init__(self, parent=None, height: int = 22):
+    def __init__(self, parent=None, height: int = 22, on_left=None, on_right=None):
         super().__init__(parent)
+        self._on_left = on_left     # if set, ◀ calls this instead of scrolling
+        self._on_right = on_right   # if set, ▶ calls this instead of scrolling
         self.setMaximumHeight(height + 4)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -584,8 +661,10 @@ class ArrowChipBar(QWidget):
         self._right = QToolButton()
         self._right.setText('▶')
         root.addWidget(self._right)
-        self._left.clicked.connect(lambda: self._scroll(-80))
-        self._right.clicked.connect(lambda: self._scroll(80))
+        self._left.clicked.connect(
+            lambda: self._on_left() if self._on_left else self._scroll(-80))
+        self._right.clicked.connect(
+            lambda: self._on_right() if self._on_right else self._scroll(80))
 
     def _scroll(self, delta: int):
         bar = self._scroll_area.horizontalScrollBar()
@@ -603,8 +682,10 @@ class ArrowChipBar(QWidget):
     def clear(self):
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.setParent(None)   # hide immediately; deleteLater alone leaves stale paints
+                w.deleteLater()
 
     def add_widget(self, w: QWidget):
         self._lay.insertWidget(self._lay.count() - 1, w)
@@ -659,8 +740,7 @@ class CollapsibleSection(QWidget):
         self._arrow_btn.setText(('▾ ' if not visible else '▸ ') + self._title)
 
     @staticmethod
-    def make_spin(options, default: str, width: int = 70) -> 'QComboBox':
-        from pyqtgraph.Qt.QtWidgets import QComboBox
+    def make_spin(options, default: str, width: int = 70):
         cb = QComboBox()
         for v in options:
             cb.addItem(str(v), v)
@@ -698,21 +778,12 @@ class GroupHotkeysBar(QWidget):
         root.addWidget(del_lbl)
         self._bar = ArrowChipBar(self, height=20)
         root.addWidget(self._bar, stretch=1)
-        self._dark_btn = QPushButton()
-        self._dark_btn.setFixedSize(22, 22)
-        self._dark_btn.setToolTip('Toggle dark mode')
-        self._dark_btn.clicked.connect(lambda: self._ui.toggle_dark_mode())
-        root.addWidget(self._dark_btn)
-        self._update_dark_btn()
         self.refresh()
-
-    def _update_dark_btn(self):
-        self._dark_btn.setText('☀' if qt_dark_mode() else '🌙')
 
     def refresh(self):
         import random
         win = self._ui
-        nav = win._nav
+        nav = win.nav
         gr = nav.groups
         hk_map = {g.hotkey: name
                   for name in gr.defined_groups
@@ -734,7 +805,7 @@ class GroupHotkeysBar(QWidget):
                 pairs = gr.pairs_in_group(g, nav.current_session_str)
                 if pairs:
                     nav.set_current_pair(nav.get_pair_index(sorted(pairs)[0]))
-                    win.request_redraw()
+                    win.mainview.request_render()
             chip.mousePressEvent = _select
 
             def _dbl(_, g=gname):
@@ -742,11 +813,9 @@ class GroupHotkeysBar(QWidget):
                 if not pairs:
                     return
                 nav.set_current_pair(nav.get_pair_index(random.choice(sorted(pairs))))
-                win.request_redraw()
+                win.mainview.request_render()
                 win.neuron_network.draw()
 
             chip.mouseDoubleClickEvent = _dbl
             chips.append(chip)
         self._bar.set_widgets(chips)
-
-GroupHotkeysPanel = GroupHotkeysBar

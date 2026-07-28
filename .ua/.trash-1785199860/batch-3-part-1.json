@@ -1,0 +1,833 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/core/datawriter.py",
+   "type": "file",
+   "name": "datawriter.py",
+   "filePath": "neuropy/core/datawriter.py",
+   "summary": "DataWriter \u57fa\u7c7b\uff1a\u4e3a\u6240\u6709 core \u6570\u636e\u7ed3\u6784\u63d0\u4f9b metadata \u7ba1\u7406\u3001to_dict/from_dict \u5e8f\u5217\u5316\u4e0e .npy \u843d\u76d8 (save/save_with_date)\u3002",
+   "tags": [
+    "base-class",
+    "serialization",
+    "data-model",
+    "persistence"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "class",
+   "name": "DataWriter",
+   "filePath": "neuropy/core/datawriter.py",
+   "summary": "Root base class for every neuropy core object; owns metadata dict, dict/file round-trip helpers, and time-slice parameter validation.",
+   "tags": [
+    "base-class",
+    "serialization",
+    "persistence",
+    "data-model"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    7,
+    93
+   ]
+  },
+  {
+   "id": "file:neuropy/core/epoch.py",
+   "type": "file",
+   "name": "epoch.py",
+   "filePath": "neuropy/core/epoch.py",
+   "summary": "Epoch \u6570\u636e\u7ed3\u6784\uff1a\u4ee5 DataFrame (start/stop/label) \u8868\u793a\u65f6\u95f4\u533a\u95f4\u96c6\u5408\uff0c\u652f\u6301 union/intersection/shift/scale\u3001\u6807\u7b7e\u64cd\u4f5c\u4e0e\u533a\u95f4\u5408\u5e76\u5de5\u5177\u51fd\u6570\u3002",
+   "tags": [
+    "data-model",
+    "time-intervals",
+    "core",
+    "dataframe"
+   ],
+   "complexity": "complex",
+   "languageNotes": "Heavy pandas-DataFrame-backed interval algebra with operator overloading (__add__, __getitem__)."
+  },
+  {
+   "id": "class:neuropy/core/epoch.py:Epoch",
+   "type": "class",
+   "name": "Epoch",
+   "filePath": "neuropy/core/epoch.py",
+   "summary": "Interval container backed by a DataFrame with start/stop/label columns; provides set algebra (union/intersection), label management, shifting/scaling, and slicing.",
+   "tags": [
+    "data-model",
+    "time-intervals",
+    "core",
+    "interval-algebra"
+   ],
+   "complexity": "complex",
+   "lineRange": [
+    24,
+    827
+   ]
+  },
+  {
+   "id": "function:neuropy/core/epoch.py:combine_epochs",
+   "type": "function",
+   "name": "combine_epochs",
+   "filePath": "neuropy/core/epoch.py",
+   "summary": "Merges/combines multiple Epoch objects into a single interval set.",
+   "tags": [
+    "utility",
+    "time-intervals",
+    "merge"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    859,
+    904
+   ]
+  },
+  {
+   "id": "function:neuropy/core/epoch.py:add_epoch_buffer",
+   "type": "function",
+   "name": "add_epoch_buffer",
+   "filePath": "neuropy/core/epoch.py",
+   "summary": "Expands each epoch's start/stop by a buffer duration.",
+   "tags": [
+    "utility",
+    "time-intervals"
+   ],
+   "complexity": "simple",
+   "lineRange": [
+    829,
+    839
+   ]
+  },
+  {
+   "id": "function:neuropy/core/epoch.py:get_epoch_overlap_duration",
+   "type": "function",
+   "name": "get_epoch_overlap_duration",
+   "filePath": "neuropy/core/epoch.py",
+   "summary": "Computes total overlap duration between two epoch sets.",
+   "tags": [
+    "utility",
+    "time-intervals",
+    "overlap"
+   ],
+   "complexity": "simple",
+   "lineRange": [
+    842,
+    851
+   ]
+  },
+  {
+   "id": "file:neuropy/core/event.py",
+   "type": "file",
+   "name": "event.py",
+   "filePath": "neuropy/core/event.py",
+   "summary": "\u6781\u7b80 Event \u6570\u636e\u7ed3\u6784 stub\uff1a\u70b9\u4e8b\u4ef6\u5bb9\u5668\uff0c\u4ec5\u6709 to_dataframe/add_event/remove_event \u7684\u5360\u4f4d\u63a5\u53e3\u3002",
+   "tags": [
+    "data-model",
+    "core",
+    "stub",
+    "events"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/core/neurons.py",
+   "type": "file",
+   "name": "neurons.py",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "\u6838\u5fc3 spiking \u6570\u636e\u7ed3\u6784\uff1aNeurons (spiketrains + neuron_type/shank/peak channel \u5143\u6570\u636e\u3001\u65f6\u95f4\u5207\u7247\u4e0e\u5206\u6bb5)\u3001BinnedSpiketrain\u3001Mua\uff0c\u5916\u52a0 PETH raster \u8f85\u52a9\u51fd\u6570\u3002",
+   "tags": [
+    "data-model",
+    "core",
+    "spike-trains",
+    "time-slicing"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/core/neurons.py:Neurons",
+   "type": "class",
+   "name": "Neurons",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "Primary spike-train container: per-neuron spike times plus ids/types/waveforms/shank metadata, with rich time_slice / time_split / spikecount_split / neuron_slice slicing API.",
+   "tags": [
+    "data-model",
+    "core",
+    "spike-trains",
+    "time-slicing"
+   ],
+   "complexity": "complex",
+   "lineRange": [
+    16,
+    891
+   ]
+  },
+  {
+   "id": "class:neuropy/core/neurons.py:BinnedSpiketrain",
+   "type": "class",
+   "name": "BinnedSpiketrain",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "Binned spike-count matrix derived from Neurons, exposing firing rates and pairwise correlation.",
+   "tags": [
+    "data-model",
+    "binning",
+    "firing-rate"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    893,
+    996
+   ]
+  },
+  {
+   "id": "class:neuropy/core/neurons.py:Mua",
+   "type": "class",
+   "name": "Mua",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "Multi-unit activity time series (binned population spike counts) with smoothing and time slicing.",
+   "tags": [
+    "data-model",
+    "mua",
+    "time-series"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    999,
+    1082
+   ]
+  },
+  {
+   "id": "function:neuropy/core/neurons.py:binned_pe_raster",
+   "type": "function",
+   "name": "binned_pe_raster",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "Builds a binned peri-event raster/PETH matrix around a set of event times.",
+   "tags": [
+    "analysis",
+    "peth",
+    "binning"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    1103,
+    1146
+   ]
+  },
+  {
+   "id": "function:neuropy/core/neurons.py:pe_raster",
+   "type": "function",
+   "name": "pe_raster",
+   "filePath": "neuropy/core/neurons.py",
+   "summary": "Extracts peri-event spike times around given event times for raster plotting.",
+   "tags": [
+    "analysis",
+    "peth",
+    "raster"
+   ],
+   "complexity": "simple",
+   "lineRange": [
+    1085,
+    1100
+   ]
+  },
+  {
+   "id": "file:neuropy/core/nwb_session.py",
+   "type": "file",
+   "name": "nwb_session.py",
+   "filePath": "neuropy/core/nwb_session.py",
+   "summary": "NWBSession\uff1a\u4ee5 NWB \u6587\u4ef6\u4e3a\u540e\u7aef\u7684 session \u95e8\u9762\uff0clazily \u66b4\u9732 neurons_stable / paradigm / brainstates / ripple \u7b49 core \u5bf9\u8c61\uff0c\u652f\u6301 context manager\u3002",
+   "tags": [
+    "session",
+    "nwb",
+    "facade",
+    "io"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/core/nwb_session.py:NWBSession",
+   "type": "class",
+   "name": "NWBSession",
+   "filePath": "neuropy/core/nwb_session.py",
+   "summary": "Session facade over an NWB file; lazy properties construct Neurons and Epoch objects from the underlying NWBFile reader.",
+   "tags": [
+    "session",
+    "nwb",
+    "facade",
+    "lazy-loading"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    29,
+    132
+   ]
+  },
+  {
+   "id": "file:neuropy/core/position.py",
+   "type": "file",
+   "name": "position.py",
+   "filePath": "neuropy/core/position.py",
+   "summary": "Position \u6570\u636e\u7ed3\u6784\uff1a\u52a8\u7269\u4f4d\u7f6e\u8f68\u8ff9 (x/y/z + sampling_rate)\uff0c\u63d0\u4f9b speed\u3001\u5e73\u6ed1\u3001\u6309 epoch \u53d6\u901f\u5ea6\u4e0e\u65f6\u95f4\u5207\u7247\u3002",
+   "tags": [
+    "data-model",
+    "core",
+    "behavior",
+    "tracking"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/core/position.py:Position",
+   "type": "class",
+   "name": "Position",
+   "filePath": "neuropy/core/position.py",
+   "summary": "Tracked position time series (x/y/z) with derived speed, smoothing, epoch-restricted speed, and time slicing.",
+   "tags": [
+    "data-model",
+    "behavior",
+    "tracking",
+    "core"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    9,
+    173
+   ]
+  },
+  {
+   "id": "file:neuropy/core/probe.py",
+   "type": "file",
+   "name": "probe.py",
+   "filePath": "neuropy/core/probe.py",
+   "summary": "\u63a2\u9488\u51e0\u4f55\u6a21\u578b\u4e09\u5c42\u7ed3\u6784\uff1aShank (contacts \u5750\u6807/\u901a\u9053) \u2192 Probe (\u591a shank) \u2192 ProbeGroup (\u591a probe)\uff0c\u8d1f\u8d23 channel\u2194shank\u2194probe \u6620\u5c04\u4e0e\u5e8f\u5217\u5316\u3002",
+   "tags": [
+    "data-model",
+    "core",
+    "probe-geometry",
+    "channel-mapping"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/core/probe.py:ProbeGroup",
+   "type": "class",
+   "name": "ProbeGroup",
+   "filePath": "neuropy/core/probe.py",
+   "summary": "Top-level container of multiple probes; resolves channel\u2192shank/probe lookups, connected/disconnected channels, and dict/file serialization.",
+   "tags": [
+    "data-model",
+    "probe-geometry",
+    "channel-mapping"
+   ],
+   "complexity": "complex",
+   "lineRange": [
+    216,
+    397
+   ]
+  },
+  {
+   "id": "class:neuropy/core/probe.py:Probe",
+   "type": "class",
+   "name": "Probe",
+   "filePath": "neuropy/core/probe.py",
+   "summary": "A single probe composed of shanks, exposing aggregated contact coordinates and channel ids.",
+   "tags": [
+    "data-model",
+    "probe-geometry"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    129,
+    213
+   ]
+  },
+  {
+   "id": "class:neuropy/core/probe.py:Shank",
+   "type": "class",
+   "name": "Shank",
+   "filePath": "neuropy/core/probe.py",
+   "summary": "One shank's contact layout: coordinates, contact/channel ids, connectivity flags, auto-generation and library presets.",
+   "tags": [
+    "data-model",
+    "probe-geometry",
+    "layout"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    6,
+    126
+   ]
+  },
+  {
+   "id": "file:neuropy/core/session.py",
+   "type": "file",
+   "name": "session.py",
+   "filePath": "neuropy/core/session.py",
+   "summary": "ProcessData\uff1asession \u5165\u53e3\u5bf9\u8c61\uff0c\u4ece basepath \u53d1\u73b0 .xml/.dat \u5e76\u6302\u8f7d NeuroscopeIO \u4e0e BinarysignalIO\uff0c\u540c\u65f6\u628a\u76ee\u5f55\u4e0b\u7684 .npy \u6570\u636e\u6587\u4ef6\u4f5c\u4e3a\u5c5e\u6027\u52a0\u8f7d\u3002",
+   "tags": [
+    "session",
+    "entry-point",
+    "io",
+    "loader"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/core/session.py:ProcessData",
+   "type": "class",
+   "name": "ProcessData",
+   "filePath": "neuropy/core/session.py",
+   "summary": "Session loader that wires NeuroscopeIO + BinarysignalIO from a recording basepath and attaches discovered .npy artifacts as attributes.",
+   "tags": [
+    "session",
+    "loader",
+    "io",
+    "entry-point"
+   ],
+   "complexity": "simple",
+   "lineRange": [
+    10,
+    61
+   ]
+  },
+  {
+   "id": "file:neuropy/core/signal.py",
+   "type": "file",
+   "name": "signal.py",
+   "filePath": "neuropy/core/signal.py",
+   "summary": "Signal \u6570\u636e\u7ed3\u6784\uff1a\u591a\u901a\u9053\u8fde\u7eed\u4fe1\u53f7 (traces + sampling_rate + t_start)\uff0c\u63d0\u4f9b time \u5411\u91cf\u3001\u65f6\u95f4\u5207\u7247\u4e0e\u5e45\u5ea6\u7f29\u653e\u3002",
+   "tags": [
+    "data-model",
+    "core",
+    "lfp",
+    "time-series"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/core/signal.py:Signal",
+   "type": "class",
+   "name": "Signal",
+   "filePath": "neuropy/core/signal.py",
+   "summary": "Multichannel continuous (LFP/analog) trace container with sampling-rate-derived time vector, time slicing, and rescaling.",
+   "tags": [
+    "data-model",
+    "lfp",
+    "time-series",
+    "core"
+   ],
+   "complexity": "moderate",
+   "lineRange": [
+    5,
+    106
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/core/datawriter.py",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/datawriter.py",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "class:neuropy/core/epoch.py:Epoch",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "class:neuropy/core/epoch.py:Epoch",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:combine_epochs",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:combine_epochs",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:add_epoch_buffer",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:add_epoch_buffer",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:get_epoch_overlap_duration",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "function:neuropy/core/epoch.py:get_epoch_overlap_duration",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:Neurons",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:Neurons",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:BinnedSpiketrain",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:BinnedSpiketrain",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:Mua",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "class:neuropy/core/neurons.py:Mua",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "function:neuropy/core/neurons.py:binned_pe_raster",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "function:neuropy/core/neurons.py:binned_pe_raster",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "function:neuropy/core/neurons.py:pe_raster",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "function:neuropy/core/neurons.py:pe_raster",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/nwb_session.py",
+   "target": "class:neuropy/core/nwb_session.py:NWBSession",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/nwb_session.py",
+   "target": "class:neuropy/core/nwb_session.py:NWBSession",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/position.py",
+   "target": "class:neuropy/core/position.py:Position",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/position.py",
+   "target": "class:neuropy/core/position.py:Position",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:ProbeGroup",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:ProbeGroup",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:Probe",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:Probe",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:Shank",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "class:neuropy/core/probe.py:Shank",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/session.py",
+   "target": "class:neuropy/core/session.py:ProcessData",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/session.py",
+   "target": "class:neuropy/core/session.py:ProcessData",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/signal.py",
+   "target": "class:neuropy/core/signal.py:Signal",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/signal.py",
+   "target": "class:neuropy/core/signal.py:Signal",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/epoch.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/event.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "file:neuropy/core/__init__.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/neurons.py",
+   "target": "file:neuropy/core/intervals.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/nwb_session.py",
+   "target": "file:neuropy/core/epoch.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/nwb_session.py",
+   "target": "file:neuropy/core/neurons.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/nwb_session.py",
+   "target": "file:neuropy/io/nwbio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/position.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/position.py",
+   "target": "file:neuropy/core/epoch.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/probe.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/session.py",
+   "target": "file:neuropy/core/__init__.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/session.py",
+   "target": "file:neuropy/io/binarysignalio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/session.py",
+   "target": "file:neuropy/io/neuroscopeio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/signal.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "class:neuropy/core/epoch.py:Epoch",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/neurons.py:Neurons",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/neurons.py:BinnedSpiketrain",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/neurons.py:Mua",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/position.py:Position",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/signal.py:Signal",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/probe.py:Shank",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/probe.py:Probe",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/core/probe.py:ProbeGroup",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  }
+ ]
+}

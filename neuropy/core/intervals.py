@@ -108,6 +108,33 @@ class IntervalOp:
                 for i in range(n_splits)]
 
     @staticmethod
+    def time_at_effective(intervals, e: float) -> float:
+        """Real time at effective-axis offset *e* (cumulative active duration)."""
+        merged = IntervalOp.merge(intervals)
+        for t0, t1 in merged:
+            if e <= t1 - t0:
+                return t0 + e
+            e -= t1 - t0
+        return merged[-1][1]
+
+    @staticmethod
+    def partition_effective(intervals, n_splits: int, base_name: str = '') -> list[tuple[float, float, str]]:
+        """Split non-empty active *intervals* into n_splits equal-effective-duration chunks → [(lo, hi, name), ...]."""
+        iv = IntervalOp.merge(intervals)
+        n_splits = max(1, int(n_splits))
+        total = IntervalOp.duration(iv)
+        if n_splits == 1 or total <= 0:
+            return [(iv[0][0], iv[-1][1], base_name)]
+        step = total / n_splits
+        cuts = []
+        for i in range(n_splits + 1):
+            cuts.append(IntervalOp.time_at_effective(iv, i * step))
+        chunks = []
+        for i in range(n_splits):
+            chunks.append((cuts[i], cuts[i + 1], base_name + str(i + 1)))
+        return chunks
+
+    @staticmethod
     def split_n(t0: float, t1: float, n: int) -> tuple[np.ndarray, np.ndarray]:
         """Equal n-way split → (starts, stops) arrays."""
         edges = np.linspace(t0, t1, n + 1)

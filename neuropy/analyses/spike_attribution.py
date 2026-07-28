@@ -21,16 +21,6 @@ def bin_ms_from_input(bin_val: float, unit: str, ccg_data) -> float:
     return float(bin_val)
 
 
-def segment_spike_bounds(edge_times, seg_idx: int, n_segments: int):
-    """Return (t0, t1) for a real segment, or (None, None) for All/custom."""
-    if edge_times is None or seg_idx >= n_segments:
-        return None, None
-    if seg_idx < len(edge_times):
-        return (float(edge_times.iloc[seg_idx]['start']),
-                float(edge_times.iloc[seg_idx]['stop']))
-    return None, None
-
-
 def compute_spike_pairs(
     neurons,
     ref: int,
@@ -38,11 +28,12 @@ def compute_spike_pairs(
     bin_val: float,
     unit: str,
     ccg_data,
-    seg_idx: int,
-    n_segments: int,
-    edge_times,
+    t0: float | None = None,
+    t1: float | None = None,
 ) -> list[tuple[float, float]]:
-    """Find (ref_t, tgt_t) pairs contributing to a CCG bin for the current pair."""
+    """Find (ref_t, tgt_t) pairs contributing to a CCG bin for the current pair.
+
+    ``t0``/``t1`` bound the segment window (seconds); ``None`` = whole session."""
     if neurons is None or ccg_data is None:
         return []
     if ref >= len(neurons.spiketrains) or tgt >= len(neurons.spiketrains):
@@ -52,7 +43,6 @@ def compute_spike_pairs(
     bin_size_eff = (conf.duration / (n_bins - 1)
                     if n_bins > 1 else conf.bin_size)
     bin_ms = bin_ms_from_input(bin_val, unit, ccg_data)
-    t0, t1 = segment_spike_bounds(edge_times, seg_idx, n_segments)
     return find_spike_pairs(
         np.asarray(neurons.spiketrains[ref]),
         np.asarray(neurons.spiketrains[tgt]),

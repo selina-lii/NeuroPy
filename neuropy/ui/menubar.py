@@ -41,8 +41,8 @@ class IndexBar:
         self.session_combo.addItem("All sessions", _ALL_SESSION_MARKER)
         if hasattr(self.session_combo, 'insertSeparator'):
             self.session_combo.insertSeparator(1)
-        for nk in win._nav.real_nd_keys():
-            self.session_combo.addItem(win._nav.session_label(nk), nk)
+        for nk in win.nav.real_nd_keys():
+            self.session_combo.addItem(win.nav.session_label(nk), nk)
         self.session_combo.blockSignals(False)
         self.session_combo.currentIndexChanged.connect(self._on_session_changed)
         row.addWidget(self.session_combo)
@@ -66,10 +66,10 @@ class IndexBar:
     def sync(self):
         """Align session/type combos with nav.key (nav is canonical context)."""
         w = self._win
-        nd_key = w._nav.key.nd()
+        nd_key = w.nav.key.nd()
         target_sess = str(getattr(nd_key, 'session', nd_key))
         self.session_combo.blockSignals(True)
-        if w._nav.session_any_mode:
+        if w.nav.session_any_mode:
             self.session_combo.setCurrentIndex(0)
         else:
             for i in range(self.session_combo.count()):
@@ -89,39 +89,39 @@ class IndexBar:
                 nk = self.session_combo.itemData(idx)
                 if nk is not None and nk is not _ALL_SESSION_MARKER:
                     return nk
-        return self._win._nav.key.nd()
+        return self._win.nav.key.nd()
 
     def _type_key_at_index(self, idx: int):
         w = self._win
-        labeled = getattr(getattr(w._cd, 'conf', None), 'conn_types_labeled', None) or []
+        labeled = getattr(getattr(w.cd, 'conf', None), 'conn_types_labeled', None) or []
         if idx < 0 or idx >= len(labeled):
             return None
         ei, conn_type = labeled[idx]
         nk = self._current_session_nd_key()
-        return Key(session=nk.session, epoch=nk.epoch, excitability=ei, conn_type=conn_type)
+        return Key(session=nk.session, excitability=ei, conn_type=conn_type)
 
     def refresh_type_combo(self):
         w = self._win
         nd_key = self._current_session_nd_key()
         self.type_combo.blockSignals(True)
         self.type_combo.clear()
-        for ei, conn_type in w._cd.conf.conn_types_labeled:
-            tk = Key(session=nd_key.session, epoch=nd_key.epoch, excitability=ei, conn_type=conn_type)
+        for ei, conn_type in w.cd.conf.conn_types_labeled:
+            tk = Key(session=nd_key.session, excitability=ei, conn_type=conn_type)
             ref, tgt = conn_type
             _m = {'pyr': 'PYR', 'inter': 'INT'}
             label = f"{ei}: {_m.get(ref, ref)}→{_m.get(tgt, tgt)}"
             self.type_combo.addItem(label, tk)
-        cur_lbl = w._nav.key.type_label() if w._nav.key else None
+        cur_lbl = w.nav.key.type_label() if w.nav.key else None
         for i in range(self.type_combo.count()):
             cand = self.type_combo.itemData(i)
-            if cand == w._nav.key or (cur_lbl and cand.type_label() == cur_lbl):
+            if cand == w.nav.key or (cur_lbl and cand.type_label() == cur_lbl):
                 self.type_combo.setCurrentIndex(i)
                 break
         self.type_combo.blockSignals(False)
 
     def populate_project_combo(self):
         w = self._win
-        root = _Path(str(w.paths.data_root))
+        root = _Path(str(w.nav.cd.data_root))
         projects = sorted(d.name for d in root.iterdir()
                           if d.is_dir() and d.name.startswith('project_')) if root.is_dir() else []
         current = getattr(w, '_project_dir', None)
@@ -145,9 +145,9 @@ class IndexBar:
         if nk is _ALL_SESSION_MARKER:
             w._enter_all_session_mode()
             return
-        if w._nav.session_any_mode:
+        if w.nav.session_any_mode:
             w._exit_all_session_mode()
-        prev_lbl = w._nav.key.type_label()
+        prev_lbl = w.nav.key.type_label()
         self.refresh_type_combo()
         tk = None
         for i in range(self.type_combo.count()):
@@ -156,8 +156,8 @@ class IndexBar:
                 tk = cand
                 break
         if tk is None:
-            for ei, ct in w._cd.conf.conn_types_labeled:
-                cand = Key(session=nk.session, epoch=nk.epoch, excitability=ei, conn_type=ct)
+            for ei, ct in w.cd.conf.conn_types_labeled:
+                cand = Key(session=nk.session, excitability=ei, conn_type=ct)
                 if cand.type_label() == prev_lbl:
                     tk = cand
                     break
@@ -208,17 +208,17 @@ class ReviewMenuBar:
             self.panel_actions[attr] = act
 
         groups_menu = mb.addMenu("Groups")
-        groups_menu.addAction("Create group…", lambda: CreateGroupDialog.show(w._nav.sel_data, w.pairs_view.pair_selection, w))
+        groups_menu.addAction("Create group…", lambda: CreateGroupDialog.show(w.nav.sel_data, w.pairs_view.pair_selection, w))
         groups_menu.addAction("Manage groups…", w._manage_groups)
         groups_menu.addSeparator()
-        groups_menu.addAction("Export groups…", lambda: w._nav.groups.save())
-        groups_menu.addAction("Import groups…", lambda: w._nav.groups.load())
+        groups_menu.addAction("Export groups…", lambda: w.nav.groups.save())
+        groups_menu.addAction("Import groups…", lambda: w.nav.groups.load())
 
         sel_menu = mb.addMenu("Selections")
         sel_menu.addAction("Save (Ctrl+S)", lambda: QuickSaveDialog.show(w.pairs_view, w))
-        sel_menu.addAction("Load…", lambda: LoadSelectionDialog.show(w.pairs_view, w.paths.selections_dir, w))
+        sel_menu.addAction("Load…", lambda: LoadSelectionDialog.show(w.pairs_view, w.nav.cd.selections_dir, w))
         sel_menu.addSeparator()
-        sel_menu.addAction("Export PNGs…", lambda: ExportOptionsDialog.show(w._nav))
+        sel_menu.addAction("Export PNGs…", lambda: ExportOptionsDialog.show(w.nav))
         sel_menu.addSeparator()
         panel = w.pairs_view.pair_selection
         sel_menu.addAction("Bookmark current pair (Ctrl+B)",
@@ -229,8 +229,8 @@ class ReviewMenuBar:
         stats_menu = mod_menu.addMenu("Stats tests")
         stats_menu.addAction("Run stats test…", w._show_stats_panel)
         jitter_menu = mod_menu.addMenu("Jitter")
-        jitter_menu.addAction("View queue…", lambda: JitterQueueDialog(w._jitter_ctrl, w).exec())
-        jitter_menu.addAction("Clear queue", w.jitter_controller.clear_queue)
+        jitter_menu.addAction("View queue…", lambda: JitterQueueDialog(w.jitter_mgr, w).exec())
+        jitter_menu.addAction("Clear queue", w.jitter_mgr.clear_queue)
         mod_menu.addSeparator()
         classify_menu = mod_menu.addMenu("Classify")
         classify_menu.addAction("Run classifier", w._run_classifier)

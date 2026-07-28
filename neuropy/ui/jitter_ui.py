@@ -2,7 +2,7 @@
 Jitter UI glue for the CCG Review UI.
 
 JitterWorker        — low-level process-pool / cache management (no Tk).
-JitterControllerQt  — Qt-native orchestration; uses QTimer + signals.
+JitterManager  — Qt-native orchestration; uses QTimer + signals.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # maximum queued jitter tasks (running + pending)
 _MAX_JITTER_QUEUE = 50
 
-_ALL_SEGS = "All"
+_ALL_SEGS = "all"
 
 class JitterWorker:
     """Manages on-demand jitter computation queue, process lifecycle, and in-memory cache.
@@ -41,9 +41,9 @@ class JitterWorker:
     VIEWED_BG   = '#FFF9C4'
     VIEWED_FG   = '#333333'
 
-    def __init__(self):
+    def __init__(self, max_queue: int = _MAX_JITTER_QUEUE):
         self._runner = BackgroundTaskRunner(
-            max_queue=_MAX_JITTER_QUEUE, use_result_queue=True)
+            max_queue=max_queue, use_result_queue=True)
         self._cache: LRUCache = LRUCache(self.CACHE_MAX)
         self.unviewed: set = set()
 
@@ -57,7 +57,8 @@ class JitterWorker:
     def is_running(self) -> bool:
         return self._runner.is_running()
 
-    def start_next(self, key, neurons, ccg_data_lo, ccg_data_hi, edge_times) -> bool:
+    def start_next(self, key, neurons, ccg_data_lo, ccg_data_hi, edge_times,
+                   ccg_conf) -> bool:
         def _launch(task, q):
             ccg_data = ccg_data_hi if task.res_key == 'hi' else ccg_data_lo
             if ccg_data is None:
@@ -65,7 +66,7 @@ class JitterWorker:
             return _mp.Process(
                 target=jitter_worker,
                 args=(q, key, neurons, ccg_data, edge_times,
-                      task.ref, task.tgt, task.njitter, task.bin_size_eff),
+                      task.ref, task.tgt, task.njitter, task.bin_size_eff, ccg_conf),
                 kwargs={'segment': task.seg_arg, 't0': task.t0, 't1': task.t1},
                 daemon=True,
             )
@@ -79,11 +80,13 @@ class JitterWorker:
 from pyqtgraph.Qt.QtCore import QObject, QTimer, Signal as _Signal
 from pyqtgraph.Qt.QtWidgets import QMessageBox
 
+from neuropy.ui.utils import ResultsDialog
+
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
 
 
-class JitterControllerQt(QObject):
+class JitterManager(QObject):
     """Qt-native jitter orchestration.
 
     Drop-in replacement for JitterController that owns no tkinter objects.
@@ -92,10 +95,10 @@ class JitterControllerQt(QObject):
 
     Signals
     -------
-    jitter_completed(ref, tgt, res_key, seg_key)
+    completed(ref, tgt, res_key, seg_key)
         Emitted after a successful jitter run.  Panels should call
         request_render() when they receive this if the pair matches.
-    jitter_failed(msg)
+    failed(msg)
         Emitted on worker error.
     status_changed(text)
         Button-label text: empty string means "idle / Run Jitter".
@@ -103,45 +106,42 @@ class JitterControllerQt(QObject):
         Request list-color refresh.  None = all rows; (ref,tgt) = one row.
     """
 
-    jitter_completed = _Signal(int, int, str, object)
-    jitter_failed    = _Signal(str)
+    completed = _Signal(int, int, str, object)
+    failed    = _Signal(str)
     status_changed   = _Signal(str)
     colors_changed   = _Signal(object)
 
     def __init__(self, nav: 'AppState', cd):
         super().__init__()
-        self._nav = nav
-        self.jitter_worker = JitterWorker()
+        self.nav = nav
+        self.cd  = cd
+        self.jitter_worker = JitterWorker(max_queue=nav.max_jitter_queue)
         self._timer = QTimer()
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._poll)
 
-    @property
-    def _cd(self):
-        """Live current dataset. Always nav.cd so session/project switches are tracked
-        (the controller is built once; nav.set_cd swaps the dataset underneath it)."""
-        return self._nav.cd
-
     def run_jitter(self, ref: int, tgt: int, njitter: int,
                    run_lo: bool = True, run_hi: bool = False):
         """Enqueue jitter for (ref, tgt) at current segment and start polling."""
-        nav = self._nav
+        nav = self.nav
         if nav.neurons is None:
             QMessageBox.critical(None, "Jitter", "No neuron data attached.")
             return
 
         total = ((1 if self.jitter_worker.is_running() else 0)
                  + self.jitter_worker._runner.pending_count())
-        if total >= _MAX_JITTER_QUEUE:
+        cap = self.jitter_worker._runner._max_queue
+        if total >= cap:
             QMessageBox.warning(None, "Jitter",
-                                f"Queue full ({total}/{_MAX_JITTER_QUEUE}).")
+                                f"Queue full ({total}/{cap}).")
             return
 
         seg_arg = self.seg()
-        et = self._cd.edge_times_for(nav.key)
-        if seg_arg is not None and et is not None:
-            jitter_t0 = float(et.iloc[seg_arg]['start'])
-            jitter_t1 = float(et.iloc[seg_arg]['stop'])
+        # An appended window jitters over its own extent (source config); 'full' = whole session.
+        label = nav.segment_name(seg_arg) if seg_arg is not None else _ALL_SEGS
+        src = self.cd.source_config(nav.key, label) if label and label != _ALL_SEGS else None
+        if src is not None and not isinstance(src.t0, str) and not isinstance(src.t1, str):
+            jitter_t0, jitter_t1 = float(src.t0), float(src.t1)
         else:
             jitter_t0 = jitter_t1 = None
 
@@ -152,9 +152,8 @@ class JitterControllerQt(QObject):
             if idx < len(hl):
                 nd_key = hl[idx][0].nd()
 
-        lo_ccg = (self._cd.ccg_for(nd_key, 'lowres') if hasattr(self._cd, 'ccg_for')
-                  else self._cd.ccg.get(nd_key)) or nav.ccg_data
-        hi_ccg = self._cd.ccg_for(nd_key, 'highres') if hasattr(self._cd, 'ccg_for') else None
+        lo_ccg = self.cd.ccg_for(nd_key.change(resolution='lowres')) or nav.ccg_data
+        hi_ccg = self.cd.ccg_for(nd_key.change(resolution='highres'))
 
         for res_key, ccg_data, should_run in [('lo', lo_ccg, run_lo),
                                                ('hi', hi_ccg, run_hi)]:
@@ -166,8 +165,8 @@ class JitterControllerQt(QObject):
                                         "High-res CCG not loaded; cannot run hi jitter.")
                 continue
             n = ccg_data.ccg.shape[-1]
-            bin_size_eff = (ccg_data.conf.duration / (n - 1)
-                            if n > 1 else ccg_data.conf.bin_size)
+            bin_size_eff = (self.cd.conf.duration / (n - 1)
+                            if n > 1 else self.cd.conf.bin_size)
             self.jitter_worker.enqueue('jitter', ref, tgt, njitter,
                                        res_key, bin_size_eff,
                                        seg_arg, jitter_t0, jitter_t1, nd_key)
@@ -176,18 +175,17 @@ class JitterControllerQt(QObject):
         self._start_next()
 
     def _start_next(self):
-        nav = self._nav
+        nav = self.nav
         if not self.jitter_worker._runner.pending_count():
             self._update_status()
             return
         task = self.jitter_worker._runner._pending[0]
         nd_key = task.nd_key if task.nd_key is not None else nav.key.nd()
-        lo = (self._cd.ccg_for(nd_key, 'lowres') if hasattr(self._cd, 'ccg_for')
-              else self._cd.ccg.get(nd_key)) or nav.ccg_data
-        hi = self._cd.ccg_for(nd_key, 'highres') if hasattr(self._cd, 'ccg_for') else None
+        lo = self.cd.ccg_for(nd_key.change(resolution='lowres')) or nav.ccg_data
+        hi = self.cd.ccg_for(nd_key.change(resolution='highres'))
         started = self.jitter_worker.start_next(
             nav.key, nav.neurons, lo, hi,
-            self._cd.edge_times_for(nav.key))
+            None, self.cd.conf)   # no CCG-derived edge times; window bounds ride on the task
         self._update_status()
         if started and not self._timer.isActive():
             self._timer.start()
@@ -206,54 +204,57 @@ class JitterControllerQt(QObject):
                           result.get('j_pval_bins'), result.get('j_lo'), result.get('j_hi'))
             self.jitter_worker._cache.put(cache_key, jitter_val)
 
-            nd_key = self._nav.key.nd()
-            if hasattr(self._cd, '_jitter_results'):
-                self._cd._jitter_results.setdefault(nd_key, {})[cache_key] = jitter_val
+            nd_key = self.nav.key.nd()
+            if hasattr(self.cd, '_jitter_results'):
+                self.cd._jitter_results.setdefault(nd_key, {})[cache_key] = jitter_val
 
             self.jitter_worker.unviewed.add((ref, tgt))
-            self.jitter_completed.emit(ref, tgt, res_key, seg_key)
+            self.completed.emit(ref, tgt, res_key, seg_key)
             self.colors_changed.emit((ref, tgt))
         elif result is not None and result.get('error'):
-            self.jitter_failed.emit(str(result['error']))
+            self.failed.emit(str(result['error']))
         self._start_next()
 
 
     def load_from_cd(self):
-        nav = self._nav
-        if not hasattr(self._cd, '_jitter_results'):
+        nav = self.nav
+        if not hasattr(self.cd, '_jitter_results'):
             return
         nd_key = nav.key.nd()
-        for cache_key, val in self._cd._jitter_results.get(nd_key, {}).items():
+        for cache_key, val in self.cd._jitter_results.get(nd_key, {}).items():
             if len(cache_key) == 3:
                 cache_key = cache_key + (None,)
             self.jitter_worker._cache.put(cache_key, val)
         self.colors_changed.emit(None)
 
     def on_save(self):
-        if not hasattr(self._cd, 'save_jitter'):
+        if not hasattr(self.cd, 'save_jitter'):
             QMessageBox.critical(None, "Save Jitter",
                                  "CCGDataset does not support jitter persistence.")
             return
         try:
-            self._cd.save_jitter()
-            total = sum(len(v) for v in self._cd._jitter_results.values())
-            QMessageBox.information(None, "Save Jitter", f"Saved {total} pair(s).")
+            self.cd.save_jitter()
+            total = sum(len(v) for v in self.cd._jitter_results.values())
+            lines = [f"Saved {total} jitter pair(s).", ""]
+            lines += [f"  {str(nd.session)}: {len(v)} pair(s)"
+                      for nd, v in self.cd._jitter_results.items() if v]
+            ResultsDialog.show_report("Save Jitter", "\n".join(lines))
         except Exception as exc:
             QMessageBox.critical(None, "Save Jitter", f"Save failed:\n{exc}")
 
 
     def seg(self, seg=None) -> int | None:
-        """Segment key for jitter cache: None for All/custom, int for real segments."""
-        nav = self._nav
+        """Segment key for jitter cache: None for the whole-session 'full' segment, else the
+        appended window's dim0 index (so each window keeps a distinct cache entry)."""
+        nav = self.nav
         if seg is None:
             seg = nav.current_segment
         if isinstance(seg, str):
-            if seg == _ALL_SEGS:
+            if seg == _ALL_SEGS:                 # 'full' = whole session
                 return None
-            names = self._cd.segment_names_for(nav.key)
-            return names.index(seg) if seg in names else None  # custom → None
-        n = nav.n_segments
-        return None if seg >= n else int(seg)
+            idx = nav.segment_index(seg)
+            return idx if idx > 0 else None
+        return None if seg <= 0 else int(seg)
 
     def clear_queue(self) -> int:
         """Remove all pending (non-running) tasks. Returns count removed."""
@@ -270,9 +271,9 @@ class JitterControllerQt(QObject):
         seg_key = self.seg()
         for rk in ('lo', 'hi'):
             self.jitter_worker._cache.pop((ref, tgt, rk, seg_key), None)
-        nd_key = self._nav.key.nd()
-        if hasattr(self._cd, '_jitter_results'):
-            res = self._cd._jitter_results.get(nd_key, {})
+        nd_key = self.nav.key.nd()
+        if hasattr(self.cd, '_jitter_results'):
+            res = self.cd._jitter_results.get(nd_key, {})
             for rk in ('lo', 'hi'):
                 res.pop((ref, tgt, rk, seg_key), None)
         self.jitter_worker.unviewed.discard((ref, tgt))
@@ -285,7 +286,7 @@ class JitterControllerQt(QObject):
     def mark_viewed(self, ref: int = None, tgt: int = None) -> bool:
         """Mark pair as viewed. Returns True if newly marked."""
         if ref is None or tgt is None:
-            inds = self._nav.current_pair_inds
+            inds = self.nav.current_pair_inds
             if inds is None:
                 return False
             ref, tgt = int(inds[0]), int(inds[1])
@@ -310,11 +311,11 @@ class JitterControllerQt(QObject):
         pending = self.jitter_worker._runner._pending
         if running and pending:
             task = pending[0]
-            nav = self._nav
+            nav = self.nav
             seg_name = _ALL_SEGS
             if task.seg_arg is not None:
                 try:
-                    seg_name = str(self._cd.segment_names_for(nav.key)[int(task.seg_arg)])
+                    seg_name = str(nav.segment_name(int(task.seg_arg)))
                 except Exception:
                     seg_name = f"seg{task.seg_arg}"
             n_extra = len(pending) - 1
@@ -332,9 +333,9 @@ from pyqtgraph.Qt.QtWidgets import (
 class JitterQueueDialog(QDialog):
     """Shows pending jitter tasks; allows deleting from queue."""
 
-    def __init__(self, jitter_ctrl, parent=None):
+    def __init__(self, jitter_mgr, parent=None):
         super().__init__(parent)
-        self._ctrl = jitter_ctrl
+        self._ctrl = jitter_mgr
         self.setWindowTitle("Jitter Queue")
         self.resize(420, 280)
         layout = QVBoxLayout(self)

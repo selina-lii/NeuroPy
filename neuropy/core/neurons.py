@@ -883,6 +883,12 @@ class Neurons(DataWriter):
 
         return spkcount, nbins
 
+    def pair_count(self, ref_t, tgt_t):
+        """(n_ref, n_tgt, n_poss) for one session's neurons; None if type absent."""
+        n_ref = self.get_neuron_type(ref_t).n_neurons
+        n_tgt = self.get_neuron_type(tgt_t).n_neurons
+        n_poss = n_ref * (n_ref - 1) if ref_t == tgt_t else n_ref * n_tgt
+        return n_ref, n_tgt, n_poss
 
 class BinnedSpiketrain(DataWriter):
     """Class to hold binned spiketrains"""

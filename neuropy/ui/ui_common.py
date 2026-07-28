@@ -35,10 +35,10 @@ V = TypeVar('V')
 
 
 _SEPARATOR_ROW   = "__separator_row__"
-_SPECIAL_PREFIX  = "__special_"
 
 is_separator_row = lambda e: isinstance(e, tuple) and bool(e) and e[0] == _SEPARATOR_ROW
-is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
+
+from neuropy.analyses.utils import _SPECIAL_PREFIX, is_special_group  # noqa: F401
 
 
 
@@ -100,68 +100,9 @@ class SelectionCommand:
 
 
 
-class BiIndex:
-    """Generic bidirectional multimap: A ↔ set(B) and B ↔ set(A), both O(1).
-
-    For groups: a = gname, b = (sess, ref, tgt)
-    """
-
-    def __init__(self):
-        self._fwd: dict = {}
-        self._inv: dict = {}
-
-    def add(self, a, b) -> None:
-        self._fwd.setdefault(a, set()).add(b)
-        self._inv.setdefault(b, set()).add(a)
-
-    def discard(self, a, b) -> None:
-        fa = self._fwd.get(a)
-        if fa is not None:
-            fa.discard(b)
-            if not fa:
-                del self._fwd[a]
-        ib = self._inv.get(b)
-        if ib is not None:
-            ib.discard(a)
-            if not ib:
-                del self._inv[b]
-
-    def delete_key(self, a) -> None:
-        for b in self._fwd.pop(a, ()):
-            ib = self._inv.get(b)
-            if ib is not None:
-                ib.discard(a)
-                if not ib:
-                    del self._inv[b]
-
-    def rename_key(self, old_a, new_a) -> None:
-        bs = self._fwd.pop(old_a, None)
-        if bs is None:
-            return
-        self._fwd[new_a] = bs
-        for b in bs:
-            ib = self._inv.get(b)
-            if ib is not None:
-                ib.discard(old_a)
-                ib.add(new_a)
-
-    def clear(self) -> None:
-        self._fwd.clear()
-        self._inv.clear()
-
-    def forward(self, a) -> set:
-        return self._fwd.get(a, set())
-
-    def inverse(self, b) -> set:
-        return self._inv.get(b, set())
-
-    def __contains__(self, a) -> bool: return a in self._fwd
-    def __len__(self)         -> int:  return len(self._fwd)
-    def __iter__(self):                return iter(self._fwd)
-    def get(self, a, default=None):    return self._fwd.get(a, default)
-    def keys(self):                    return self._fwd.keys()
-    def values(self):                  return self._fwd.values()
-    def items(self):                   return self._fwd.items()
+# BiIndex moved to analyses/utils.py (pure data, no Qt). Re-exported here so
+# existing `from neuropy.ui.ui_common import BiIndex` call sites keep working.
+from neuropy.analyses.utils import BiIndex  # noqa: F401 (re-export)
 
 
 
@@ -206,13 +147,7 @@ def bm_key(inds, any_mode: bool) -> tuple:
 def group_names_for_pair(data, ui, inds) -> list:
     """Sorted group names containing this pair in the current session."""
     sess, pair = ui.pair_sess_rt(inds)
-    pair = tuple(int(x) for x in pair)
-    names: set = ui.groups.groups_for_pair(sess, pair[0], pair[1])
-    for sel_d in data.selections.values():
-        for g in (sel_d.tags.get(pair) or {}).get('groups', []):
-            if isinstance(g, str) and g:
-                names.add(g)
-    return sorted(names)
+    return data.group_names_for_pair(sess, pair, ui.groups)
 
 
 def pair_label(inds, *, bookmarked=False, group_names=None, pair_tags=None,

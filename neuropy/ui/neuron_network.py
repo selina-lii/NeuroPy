@@ -348,7 +348,6 @@ class NetworkPanel:
         self._data_cache: LRUCache = LRUCache(max_size=8)
         self._net_any_idx:             int  = 0
         self._net_any_sessions_cache:  list = []
-        self._nav_bar_visible:         bool = False
 
         self._qt_app   = None
         self._plot_win = None
@@ -369,6 +368,25 @@ class NetworkPanel:
         container_lay.setContentsMargins(0, 0, 0, 0)
         container_lay.setSpacing(0)
 
+        # Session caption (any-session mode only) — sits above the flanked plot.
+        self._net_nav_label = QLabel('')
+        self._net_nav_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._net_nav_label.setStyleSheet('font-size: 9pt; color: #444; padding: 2px;')
+        self._net_nav_label.setVisible(False)
+        container_lay.addWidget(self._net_nav_label)
+
+        # ◀ | plot | ▶ — arrows flank the plot edges (any-session session paging).
+        row = QWidget()
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(0)
+        self._net_nav_left = QPushButton('◀')
+        self._net_nav_left.setFixedWidth(24)
+        self._net_nav_left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._net_nav_left.setVisible(False)
+        self._net_nav_left.clicked.connect(self._on_net_arrow_left)
+        row_lay.addWidget(self._net_nav_left)
+
         pw = _NavPlotWidget()
         pw._nav_key_cb = self._on_plot_nav_key
         pw.setBackground('w')
@@ -376,7 +394,18 @@ class NetworkPanel:
         pw.hideAxis('bottom')
         pw.hideAxis('left')
         self._plot_win = pw
-        self._legend_overlay = QLabel(container)
+        row_lay.addWidget(pw, stretch=1)
+
+        self._net_nav_right = QPushButton('▶')
+        self._net_nav_right.setFixedWidth(24)
+        self._net_nav_right.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._net_nav_right.setVisible(False)
+        self._net_nav_right.clicked.connect(self._on_net_arrow_right)
+        row_lay.addWidget(self._net_nav_right)
+
+        # Legend floats over the plot itself (parented to pw, not the container) so the
+        # top caption and flanking arrows never overlap it.
+        self._legend_overlay = QLabel(pw)
         self._legend_overlay.setStyleSheet(
             'background: rgba(255,255,255,0.9); padding: 3px 6px; '
             'border: 1px solid #ccc; font-size: 8pt;')
@@ -385,7 +414,7 @@ class NetworkPanel:
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._legend_overlay.raise_()
 
-        container_lay.addWidget(pw)
+        container_lay.addWidget(row, stretch=1)
         # Slot 1 of the vertical splitter (below config panel)
         if hasattr(self, '_main_splitter'):
             self._main_splitter.addWidget(container)
@@ -648,23 +677,6 @@ class NetworkPanel:
         ac_lay.addStretch()
         ann_lay.addWidget(ann_chip_row)
 
-        self._net_nav_bar = QWidget()
-        self._net_nav_bar.setVisible(False)
-        nav_lay = QHBoxLayout(self._net_nav_bar)
-        nav_lay.setContentsMargins(0, 0, 0, 0)
-        self._net_nav_left  = QPushButton('◀')
-        self._net_nav_left.setFixedWidth(24)
-        self._net_nav_left.clicked.connect(self._on_net_arrow_left)
-        nav_lay.addWidget(self._net_nav_left)
-        self._net_nav_label = QLabel('')
-        self._net_nav_label.setStyleSheet('font-size: 8pt;')
-        nav_lay.addWidget(self._net_nav_label)
-        self._net_nav_right = QPushButton('▶')
-        self._net_nav_right.setFixedWidth(24)
-        self._net_nav_right.clicked.connect(self._on_net_arrow_right)
-        nav_lay.addWidget(self._net_nav_right)
-        layout.addWidget(self._net_nav_bar)
-
     def _set_bool(self, attr: str, value: bool):
         setattr(self, attr, value)
         self.draw()
@@ -749,7 +761,7 @@ class NetworkPanel:
             _sess_nk       = None
             _sessions      = None
             _type_key      = ui.key
-            segment_filter = None if ui.current_segment in (None, _ALL_SEGS) else ui.seg_idx(ui.current_segment)
+            segment_filter = None if ui.current_segment in (None, _ALL_SEGS) else ui.segment_index(ui.current_segment)
 
         cache_key = self._make_cache_key(_nd_key, _type_key,
                                          segment_filter, any_mode)
@@ -781,7 +793,7 @@ class NetworkPanel:
         ui = self.ui
 
         if any_mode:
-            _neurons = (ui.cd.nd.data.get(sess_nk)
+            _neurons = (ui.cd.nd.neurons_for(sess_nk)
                         if ui.cd.nd is not None else None)
             _ptr = (ui.cd.ptr.get(type_key)
                     if type_key is not None else None)
@@ -800,26 +812,24 @@ class NetworkPanel:
         pg_info     = self._probegroups().get(nd_key)
 
         if any_mode:
-            _raw = getattr(_ptr, 'inds2', None) if _ptr is not None else None
-            visible_pairs = (set(map(tuple, _raw))
-                             if _raw is not None and len(_raw) else set())
+            visible_pairs = _ptr.pair_set if _ptr is not None else set()
             current_pair  = None
         else:
-            visible_pairs = self._pairs_for_segment_filter()
-            current_pair  = (tuple(ui.all_inds[ui.current_pair_idx])
-                             if ui.current_pair_idx < len(ui.all_inds)
+            visible_pairs = ui.all_pairs_set
+            current_pair  = (tuple(ui.all_pairs_np[ui.current_pair_idx])
+                             if ui.current_pair_idx < len(ui.all_pairs_np)
                              else None)
 
         pair_entries: dict = {}
         for tk_ in ui.available_type_keys(nd_key):
             pt = ui.cd.ptr.get(tk_)
-            raw = getattr(pt, 'inds2', None) if pt is not None else None
-            if raw is None or len(raw) == 0:
+            inds = pt.pairs
+            if inds is None or len(inds) == 0:
                 continue
             ct     = getattr(tk_, 'conn_type',    None)
             ei     = getattr(tk_, 'excitability', 'E')
             is_cur = (tk_ == type_key)
-            for ref, tgt in map(tuple, raw):
+            for ref, tgt in map(tuple, inds):
                 key_t = (ref, tgt)
                 if key_t not in pair_entries:
                     pair_entries[key_t] = []
@@ -866,10 +876,18 @@ class NetworkPanel:
         # probe df / neuron shank_ids are guaranteed populated here, unlike at panel build).
         self._sync_shank_chips(self._shanks_from_data(data))
 
-        # Live current pair (not in cache)
-        current_pair = (None if any_mode else
-                        (tuple(ui.all_inds[ui.current_pair_idx])
-                         if ui.current_pair_idx < len(ui.all_inds) else None))
+        # Live current pair (not in cache). In any-session mode the current pair belongs to
+        # one session (its cross-session handle); highlight it only on that session's plot.
+        if any_mode:
+            handle = ui.current_pair   # (ckey, ref, tgt) | None
+            current_pair = None
+            if handle is not None:
+                ckey, cr, ct = handle
+                if str(ckey.session) == str(getattr(sess_nk, 'session', sess_nk)):
+                    current_pair = (int(cr), int(ct))
+        else:
+            current_pair = (tuple(ui.all_pairs_np[ui.current_pair_idx])
+                            if ui.current_pair_idx < len(ui.all_pairs_np) else None)
 
         # Group filter
         fp            = self._focused_pair
@@ -1358,11 +1376,11 @@ class NetworkPanel:
             if target_idx != self._net_any_idx:
                 self._net_any_idx = target_idx
             pidx = ui.get_pair_index(pair)
-            if pidx < len(ui.all_inds):
+            if pidx < len(ui.all_pairs_np):
                 ui.set_current_pair(pidx)
                 ui.root.pairs_view.pair_selection._select_pair_in_list(pair)
             self.draw()
-            ui.root.request_redraw()
+            ui.root.mainview.request_render()
             return
 
         if key_str is not None:
@@ -1376,11 +1394,11 @@ class NetworkPanel:
                     lambda ck=clicked_key: root._switch_session(ck))
 
         idx = ui.get_pair_index(pair)
-        if idx < len(ui.all_inds):
+        if idx < len(ui.all_pairs_np):
             ui.set_current_pair(idx)
             ui.root.pairs_view.pair_selection._select_pair_in_list(pair)
         self.draw()
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
 
     def _on_plot_nav_key(self, key) -> bool:
         """Up/Down step through the visible edges (as drawn), navigating each in turn.
@@ -1389,8 +1407,8 @@ class NetworkPanel:
         if not edges:
             return False
         ui  = self.ui
-        cur = (tuple(ui.all_inds[ui.current_pair_idx])
-               if ui.current_pair_idx < len(ui.all_inds) else None)
+        cur = (tuple(ui.all_pairs_np[ui.current_pair_idx])
+               if ui.current_pair_idx < len(ui.all_pairs_np) else None)
         at  = next((i for i, (r, t, _) in enumerate(edges) if (r, t) == cur), None)
         if at is None:
             nxt = 0 if key == Qt.Key.Key_Down else len(edges) - 1
@@ -1423,7 +1441,7 @@ class NetworkPanel:
 
     def _on_save_selections_to_group(self):
         ui    = self.ui
-        pairs = self._pairs_for_segment_filter()
+        pairs = ui.all_pairs_set
         if not pairs:
             QMessageBox.information(None, 'Save selections', 'No pairs visible to save.')
             return
@@ -1463,13 +1481,30 @@ class NetworkPanel:
                 continue
             sess  = str(ckey.session)
             ptr   = ui.cd.ptr.get(ckey)
-            valid = ui._all_inds_set_for_ptr(ptr)
+            valid = ptr.pair_set
             for g in active_groups:
                 if any((int(a), int(b)) in valid
                        for a, b in ui.groups.pairs_in_group(g, sess)):
                     filtered.append(nk)
                     break
         return filtered
+
+    def follow_current_pair(self):
+        """Redraw; in any-session mode first page the plot to the current pair's own
+        session so its highlighted edge is on screen (mirrors edge-click navigation)."""
+        ui = self.ui
+        if ui.session_any_mode:
+            handle = ui.current_pair   # (ckey, ref, tgt) | None
+            if handle is not None:
+                sess     = str(handle[0].session)
+                sessions = self._net_any_sessions_cache or self._net_any_sessions()
+                for i, nk in enumerate(sessions):
+                    if str(getattr(nk, 'session', nk)) == sess:
+                        if i != self._net_any_idx:
+                            self._net_any_idx = i
+                            self.refresh_group_buttons()
+                        break
+        self.draw()
 
     def _on_net_arrow_left(self):
         if not self.ui.session_any_mode:
@@ -1489,24 +1524,17 @@ class NetworkPanel:
             self.refresh_group_buttons()
 
     def _update_nav_bar(self):
-        any_mode   = self.ui.session_any_mode
-        was_vis    = self._nav_bar_visible
+        any_mode = self.ui.session_any_mode
         if any_mode:
             sessions = self._net_any_sessions_cache or self._net_any_sessions()
             n   = len(sessions)
             idx = max(0, min(self._net_any_idx, n - 1)) if n else 0
-            lbl = (self.ui.session_label(sessions[idx])
-                   if sessions else '')
-            self._net_nav_label.setText(f'{idx + 1}/{n}  {lbl}')
-            if not was_vis:
-                self._net_nav_bar.setVisible(True)
-                self._nav_bar_visible = True
+            lbl = self.ui.session_label(sessions[idx]) if sessions else ''
+            self._net_nav_label.setText(f'{idx + 1}/{n} · {lbl}')
             self._net_nav_left.setEnabled(idx > 0)
             self._net_nav_right.setEnabled(idx < n - 1)
-        else:
-            if was_vis:
-                self._net_nav_bar.setVisible(False)
-                self._nav_bar_visible = False
+        for w in (self._net_nav_label, self._net_nav_left, self._net_nav_right):
+            w.setVisible(any_mode)
 
     def _highlighted_ct_labels(self) -> set:
         labels = set()
@@ -1626,7 +1654,6 @@ class NetworkPanel:
         # Rebuild only when the shank set changes; toggles just flip vars (avoid churn/loop).
         if set(shanks) == set(self._net_shank_cbs):
             return
-        print(f"[shank] rebuild n={len(shanks)} shanks={shanks}")
         while flow_lay.count():
             item = flow_lay.takeAt(0)
             if item.widget():
@@ -1699,16 +1726,15 @@ class NetworkPanel:
 
     def _update_focus_info(self, nid: int):
         ui      = self.ui
-        cur_out = sum(1 for r, t in map(tuple, ui.all_inds) if r == nid)
-        cur_in  = sum(1 for r, t in map(tuple, ui.all_inds) if t == nid)
+        cur_out = sum(1 for r, t in map(tuple, ui.all_pairs_np) if r == nid)
+        cur_in  = sum(1 for r, t in map(tuple, ui.all_pairs_np) if t == nid)
         tot_out = tot_in = 0
         for tk_ in ui.available_type_keys(ui.key.nd()):
             pt = ui.cd.ptr.get(tk_)
             if pt is None or pt.inds is None:
                 continue
-            arr = pt.inds[:, -2:]
-            tot_out += sum(1 for r, t in set(map(tuple, arr)) if r == nid)
-            tot_in  += sum(1 for r, t in set(map(tuple, arr)) if t == nid)
+            tot_out += sum(1 for r, t in pt.pair_set if r == nid)
+            tot_in  += sum(1 for r, t in pt.pair_set if t == nid)
         self._focus_info_label.setText(
             f'{ui.key.type_label()}: in={cur_in} out={cur_out}'
             f'  |  all: in={tot_in} out={tot_out}')
@@ -1741,7 +1767,7 @@ class NetworkPanel:
                 return
         pair        = (ref, tgt)
         pair_exists = any(
-            pair in set(map(tuple, ui.cd.ptr.get(tk_).inds2))
+            pair in ui.cd.ptr.get(tk_).pair_set
             for tk_ in ui.available_type_keys(ui.key.nd())
             if ui.cd.ptr.get(tk_) is not None
             and ui.cd.ptr.get(tk_).inds is not None)
@@ -1755,7 +1781,7 @@ class NetworkPanel:
         self._update_pair_focus_info(pair, pair_exists)
         ui.refresh_lists()
         self.draw()
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
 
     def _update_pair_focus_info(self, pair: tuple, exists: bool):
         ui       = self.ui
@@ -1764,14 +1790,14 @@ class NetworkPanel:
             nt       = ui.neurons.neuron_type
             ref_type = nt[ref] if nt is not None and ref < len(nt) else '?'
             tgt_type = nt[tgt] if nt is not None and tgt < len(nt) else '?'
-            in_avail = pair in set(map(tuple, ui.all_inds))
+            in_avail = pair in ui.all_pairs_set
             status   = ('sig' if exists
                         else ('admitted' if in_avail else 'not sig'))
             self._focus_pair_info_label.setText(
                 f'{ref}({ref_type})→{tgt}({tgt_type}) [{status}]')
         else:
             self._focus_pair_info_label.setText(f'{ref}→{tgt}')
-        in_avail = pair in set(map(tuple, ui.all_inds))
+        in_avail = pair in ui.all_pairs_set
         self._add_pair_btn.setEnabled(not in_avail)
 
     def _on_pair_focus_clear(self):
@@ -1781,7 +1807,7 @@ class NetworkPanel:
         self._add_pair_btn.setEnabled(False)
         self.ui.refresh_lists()
         self.draw()
-        self.ui.root.request_redraw()
+        self.ui.root.mainview.request_render()
 
     def _probegroups(self) -> dict:
         return getattr(getattr(self.ui.cd, 'nd', None), 'probe_info', {})
@@ -1803,18 +1829,6 @@ class NetworkPanel:
         y = pg_df['y'].reindex(peak_ch).fillna(0.0).to_numpy(dtype=float)
         return np.stack([x, y], axis=1), peak_ch
 
-    def _pairs_for_segment_filter(self):
-        ui = self.ui
-        seg = ui.current_segment
-        if seg is None or seg == _ALL_SEGS:
-            return set(map(tuple, ui.all_inds))
-        pt = ui.ccg_ptr
-        seg_i = ui.seg_idx(seg)
-        if pt.inds.shape[1] >= 3 and seg_i is not None:
-            mask = pt.inds[:, 0] == seg_i
-            return set(map(tuple, pt.inds[mask, 1:3]))
-        return set(map(tuple, ui.all_inds))
-
     def _shank_label(self, idx: int) -> str:
         shank_ids = getattr(self.ui.neurons, 'shank_ids', None)
         if shank_ids is not None:
@@ -1832,13 +1846,25 @@ class NetworkPanel:
         fp = self._focused_pair
         hide_shank   = self._net_hide_same_shank
         hide_channel = self._net_hide_same_channel
-        neurons      = self.ui.neurons
-        peak_channels = getattr(neurons, 'peak_channels', None) if neurons else None
-        shank_ids     = getattr(neurons, 'shank_ids',     None) if neurons else None
+
+        def _meta(neurons):
+            return (getattr(neurons, 'peak_channels', None) if neurons else None,
+                    getattr(neurons, 'shank_ids',     None) if neurons else None)
+
+        cur_peak, cur_shank = _meta(self.ui.neurons)
+        cache: dict = {}   # nd_key → (peak_channels, shank_ids), for any_mode
 
         def _gray(inds) -> bool:
-            ref_i = int(inds[1] if any_mode else inds[0])
-            tgt_i = int(inds[2] if any_mode else inds[1])
+            if any_mode:
+                nd_key = inds[0].nd()
+                meta = cache.get(nd_key)
+                if meta is None:
+                    cache[nd_key] = meta = _meta(self.ui.cd.nd.neurons_for(nd_key))
+                peak_channels, shank_ids = meta
+                ref_i, tgt_i = int(inds[1]), int(inds[2])
+            else:
+                peak_channels, shank_ids = cur_peak, cur_shank
+                ref_i, tgt_i = int(inds[0]), int(inds[1])
             pair  = (ref_i, tgt_i)
             if fn is not None and ref_i != fn and tgt_i != fn:
                 return True

@@ -1,21 +1,4 @@
-"""Qt time-slider panel: epoch display, zoom, custom-segment CCG creation.
-
-Replaces the tkinter TimeSliderPanel. Uses pyqtgraph for epoch timeline and
-emits a spec dict instead of directly calling CustomCCGManager, so it can be
-wired to any parent that handles CCG computation.
-
-Architecture
-------------
-HHMMSTicker          — pyqtgraph AxisItem with HH:MM:SS tick labels
-EpochPlotWidget      — pg.PlotWidget: colored epoch blocks + draggable cursors; drag/wheel to zoom x
-TimeSliderPanelQt    — top-level QWidget; owns plot + all controls
-
-Signals
--------
-ccg_enqueue_requested(dict)  — parent calls enqueue_task(spec)
-save_requested()             — parent opens CCG file-management dialog
-load_requested()             — parent opens load-custom-CCG dialog
-"""
+"""Time slider UI: epoch timeline, zoom, custom CCG via signals."""
 from __future__ import annotations
 
 import datetime
@@ -23,9 +6,10 @@ import json
 import os
 import threading
 import traceback
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -41,14 +25,14 @@ from pyqtgraph.Qt.QtWidgets import (
 )
 from pyqtgraph.Qt.QtGui import QFont
 from pyqtgraph.Qt.QtGui import QPainter, QPen, QColor, QBrush
-from neuropy.analyses.epoch_filter import EpochFilter
-import glob as _glob
-from neuropy.analyses.ms_connectivity import CCGData, CCGDataset, CCGSourceConfig
+from neuropy.analyses.ms_connectivity import CCGData, CCGDataset, CCGSourceConfig, CCGBatchRequest
 from neuropy.analyses.neurons_dataset import Key
+
+_FULL_SEG = 'all'   # reserved label for the permanent whole-session segment (dim0[0])
 from neuropy.analyses.utils import JsonSavable, Savable
 from neuropy.core.intervals import IntervalOp as _SetOp
 from neuropy.ui.ui_common import BackgroundTaskRunner
-from neuropy.ui.utils import chip_button, ListPickerButton
+from neuropy.ui.utils import chip_button, ListPickerButton, ResultsDialog
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
@@ -61,11 +45,11 @@ _TS_COLORS = [
 ]
 _TS_NONE_COLOR = '#E0E0E0'
 
-_ALL_SEGS = "All"  # must match ccg_ui._ALL_SEGS
+_ALL_SEGS = "all"  # whole-session view == permanent dim0[0]='all' (must match ccg_ui._ALL_SEGS)
 _MAX_QUEUE = 50
 
 class EpochPlotWidget(pg.PlotWidget):
-    """Epoch timeline with click-to-place timing cursors."""
+    """Epoch timeline and draggable timing cursors."""
 
     handle_moved = Signal(float, float)
 
@@ -102,7 +86,6 @@ class EpochPlotWidget(pg.PlotWidget):
         self._epoch_rects: list = []
         self._snap_times:  list[float] = []
         self._snap_enabled: bool = True
-        self._locked:       bool = False
         self._has_start:    bool = False
         self._has_end:      bool = False
 
@@ -147,7 +130,7 @@ class EpochPlotWidget(pg.PlotWidget):
             return float(self.mapFromScene(scene_pt).x())
 
         def _vb_press(ev):
-            if self._locked or ev.button() != Qt.MouseButton.LeftButton:
+            if ev.button() != Qt.MouseButton.LeftButton:
                 _orig_press(ev); return
             px = ev.pos().x()
             grabbed = None
@@ -356,41 +339,46 @@ class EpochPlotWidget(pg.PlotWidget):
         self._on_cursor_moved()
 
 
-class TimeSliderPanelQt(QWidget):
-    """Qt replacement for TimeSliderPanel.
+class TimeSliderPanel(QWidget):
+    """Time slider panel; custom CCG work is emitted to the parent."""
 
-    Reads session/key from AppState, raw data from CCGDataset.
-    Custom CCG creation is delegated to the parent via ccg_enqueue_requested.
-    """
-
-    ccg_enqueue_requested = Signal(object)   # spec dict
+    queue_ccg_requested = Signal(object)   # CCGSourceConfig
     save_requested        = Signal()
     load_requested        = Signal()
 
     def __init__(self, nav: 'AppState', cd: 'CCGDataset', parent=None):
         super().__init__(parent)
-        self._nav = nav
-        self._cd  = cd
+        self.nav = nav
+        self.cd  = cd
 
         # Epoch state
         self._epoch_bounds:    list = []
         self._total_sec:       float = 0.0
-        self._themes:          dict = {}     # theme_name → Epoch object
         self._all_theme_bounds: dict = {}    # theme_name → [(s,e,label)]
         self._current_theme:   str  = 'segments'
         self._label_colors:    dict | None = None
         self._per_theme_label_state: dict = {}  # theme → {label: bool}
         self._legend_toggles:  dict = {}     # label → bool (current theme)
-        self._batch_counts:    dict = {}
+        self._batch_counts:    dict = {}     # batch_id → tasks remaining
+        self._batch_totals:    dict = {}     # batch_id → total tasks (lo + hi)
         self._batch_names:     dict = {}
+        self._batch_meta:      dict = {}     # batch_id → {spec_name, skipped, rows}
         self._batch_next_id:   int = 1
 
         self._build()
         self._connect_nav()
-        self._discover_themes(self._nav._build_themes(self._nav.key))
+        self._refresh_theme_ui(self.nav.cd.nd.get_themes(self.nav.key))
 
     def reload_themes(self):
-        self._discover_themes(self._nav._build_themes(self._nav.key))
+        """Theme combo and bounds only (no timeline reset)."""
+        self._discover_themes(self.nav.cd.nd.get_themes(self.nav.key))
+
+    def _refresh_theme_ui(self, themes: dict):
+        """Refresh combo, bounds, timeline, and legend."""
+        self._label_colors = None
+        self._discover_themes(themes)
+        self._init_times()
+        self._update_legend()
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -413,7 +401,7 @@ class TimeSliderPanelQt(QWidget):
         self._theme_info_lbl.setStyleSheet("color:#888; font-size:8pt;")
         row1.addWidget(self._theme_info_lbl)
 
-        # "Include in filter" chip (per-theme flag)
+        # per-theme "include in filter" flag (marks a theme for cross-theme intersection; see FUTURE_STEPS)
         self._filter_checks: dict[str, bool] = {}
         self._filter_check = chip_button("Include in filter", checked=False)
         self._filter_check.toggled.connect(lambda on: self._filter_check.setText(
@@ -422,15 +410,14 @@ class TimeSliderPanelQt(QWidget):
         row1.addWidget(self._filter_check)
 
         row1.addSpacing(12)
-        row1.addWidget(QLabel("Show:"))
-        self._label_combo = QComboBox()
-        self._label_combo.setFixedWidth(110)
-        self._label_combo.currentTextChanged.connect(self._on_label_change)
-        row1.addWidget(self._label_combo)
-        reset_btn = QPushButton("All")
-        reset_btn.setFixedWidth(40)
-        reset_btn.clicked.connect(self._on_label_reset)
-        row1.addWidget(reset_btn)
+        for text, width, slot in (
+            ("All", 40, self._on_label_reset),
+            ("None", 40, self._on_label_none),
+        ):
+            btn = QPushButton(text)
+            btn.setFixedWidth(width)
+            btn.clicked.connect(slot)
+            row1.addWidget(btn)
 
         row1.addStretch()
 
@@ -454,9 +441,6 @@ class TimeSliderPanelQt(QWidget):
         self._reset_zoom_btn.setFixedWidth(50)
         self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
         row1.addWidget(self._reset_zoom_btn)
-        self._lock_check = QCheckBox("Lock")
-        self._lock_check.toggled.connect(self._on_lock_toggle)
-        row1.addWidget(self._lock_check)
         root.addLayout(row1)
 
         self._legend_widget = QWidget()
@@ -470,7 +454,7 @@ class TimeSliderPanelQt(QWidget):
 
         self._any_mode_lbl = QLabel(
             "All-sessions view: no single behavioral timeline — "
-            "switch to one session to use the time slider.")
+            "type Start/End below to run custom CCG across the selected sessions.")
         self._any_mode_lbl.setWordWrap(True)
         self._any_mode_lbl.setStyleSheet('color:#666; font-size:9pt; padding:4px;')
         self._any_mode_lbl.setVisible(False)
@@ -490,12 +474,14 @@ class TimeSliderPanelQt(QWidget):
         timing_row.addWidget(QLabel("Start:"))
         self._start_entry = QLineEdit("00:00:00")
         self._start_entry.setFixedWidth(72)
-        self._start_entry.editingFinished.connect(self._validate_start)
+        self._start_entry.editingFinished.connect(
+            lambda: self._validate_timing_entry('start'))
         timing_row.addWidget(self._start_entry)
         timing_row.addWidget(QLabel("End:"))
-        self._end_entry = QLineEdit("00:00:00")
+        self._end_entry = QLineEdit("end")
         self._end_entry.setFixedWidth(72)
-        self._end_entry.editingFinished.connect(self._validate_end)
+        self._end_entry.editingFinished.connect(
+            lambda: self._validate_timing_entry('end'))
         timing_row.addWidget(self._end_entry)
 
         set_btn = QPushButton("Set")
@@ -509,15 +495,17 @@ class TimeSliderPanelQt(QWidget):
         clr_btn = QPushButton("Clear")
         clr_btn.clicked.connect(self._on_clear)
         extra_lay.addWidget(clr_btn)
-        _sessions = [str(k.session) for k in self._nav.real_nd_keys()]
+        _sessions = [str(k.session) for k in self.nav.real_nd_keys()]
         self._sessions_picker = ListPickerButton("Sessions", items=_sessions,
                                                  plural="sessions")
-        self._sessions_picker.set_selected([str(self._nav.key.session)])
+        self._sessions_picker.set_selected([str(self.nav.key.session)])
         self._sessions_picker.setFixedWidth(120)
         extra_lay.addWidget(self._sessions_picker)
         extra_lay.addWidget(QLabel("Name:"))
         self._name_entry = QLineEdit("")
         self._name_entry.setFixedWidth(100)
+        self._name_is_auto = True   # False once the user types their own name
+        self._name_entry.textEdited.connect(lambda _t: setattr(self, '_name_is_auto', False))
         extra_lay.addWidget(self._name_entry)
         extra_lay.addWidget(QLabel("Splits:"))
         self._splits_spin = QSpinBox()
@@ -534,6 +522,10 @@ class TimeSliderPanelQt(QWidget):
             self._overlap_unit.addItem(u)
         self._overlap_unit.setFixedWidth(45)
         extra_lay.addWidget(self._overlap_unit)
+        self._equal_effective_check = QCheckBox("Equal duration")
+        self._equal_effective_check.setToolTip(
+            "Splits share equal effective (filtered) time; real-time edges may differ.")
+        extra_lay.addWidget(self._equal_effective_check)
         timing_row.addWidget(self._ccg_extra_widget)
 
         self._status_lbl = QLabel("")
@@ -543,91 +535,62 @@ class TimeSliderPanelQt(QWidget):
         root.addWidget(self._timing_row_widget)
 
     def _connect_nav(self):
-        nav = self._nav
+        nav = self.nav
         nav.themes_changed.connect(self._on_themes_changed)
         nav.session_mode_changed.connect(self._on_session_mode_changed)
 
     def _on_themes_changed(self, themes: dict):
-        self._discover_themes(themes)
-        self._label_colors = None
-        self._init_times()
-        self._update_legend()
-        self._redraw_main()
+        self._refresh_theme_ui(themes)
 
     def _on_session_mode_changed(self, any_mode: bool):
         self._any_mode_lbl.setVisible(any_mode)
         self._main_plot.setVisible(not any_mode)
-        self._legend_widget.setVisible(not any_mode)
-        self._timing_row_widget.setEnabled(not any_mode)
+        self._legend_widget.setVisible(True)
+        self._timing_row_widget.setEnabled(True)
         if any_mode:
-            self._main_plot.update_epochs([], {}, 0, 1)
+            self._sessions_picker.set_selected(
+                [str(k.session) for k in self.nav.real_nd_keys()])
         else:
-            self._redraw_main()
+            self._sessions_picker.set_selected([str(self.nav.key.session)])
+        themes = (self.nav.cd.nd.get_themes_any() if any_mode
+                  else self.nav.cd.nd.get_themes(self.nav.key))
+        self._refresh_theme_ui(themes)
 
     def _discover_themes(self, themes: dict):
-        self._themes = themes
-        self._all_theme_bounds = {
-            attr: [(float(s), float(e), str(lb).strip())
-                   for s, e, lb in zip(obj.starts, obj.stops, obj.labels)]
-            for attr, obj in themes.items()
-        }
+        bounds_by_theme: dict = {}
+        for attr, obj in themes.items():
+            labs = [str(x).strip() for x in obj.labels]
+            bounds = [(float(s), float(e), lb)
+                      for s, e, lb in zip(obj.starts, obj.stops, labs)]
+            unique = {lb for lb in labs if lb}
+            if len(unique) <= 1:
+                bounds = [(s, e, attr) for s, e, _ in bounds]
+            bounds_by_theme[attr] = bounds
+        self._all_theme_bounds = bounds_by_theme
         theme_names = ['segments'] + sorted(themes)
         cur = self._theme_combo.currentText()
+        default = cur if cur in theme_names else (theme_names[1] if len(theme_names) > 1 else 'segments')
         self._theme_combo.blockSignals(True)
         self._theme_combo.clear()
         self._theme_combo.addItems(theme_names)
-        if cur in theme_names:
-            self._theme_combo.setCurrentText(cur)
+        self._theme_combo.setCurrentText(default)
         self._theme_combo.blockSignals(False)
+        self._current_theme = default
         n = len(themes)
         self._theme_info_lbl.setText(f"{n} theme{'s' if n != 1 else ''}")
 
     def _init_times(self):
         theme = self._current_theme
-        if theme != 'segments' and theme in self._themes:
-            epoch = self._themes[theme]
-            labs = [str(x).strip() for x in epoch.labels]
-            bounds = [(float(s), float(e), lb)
-                      for s, e, lb in zip(epoch.starts, epoch.stops, labs)]
-            unique = {lb for lb in labs if lb}
-            if len(unique) <= 1:
-                bounds = [(s, e, theme) for s, e, _ in bounds]
-            self._epoch_bounds = bounds
-            self._total_sec = float(epoch.stops.max()) if len(epoch.stops) else 1.0
-        else:
-            ptr = self._nav.ccg_ptr
-            if ptr is None:
-                self._epoch_bounds = []
-                return
-            et = self._cd.edge_times_for(self._nav.key)
-            if et is None:
-                fallback = self._all_theme_bounds.get('paradigm')
-                self._epoch_bounds = list(fallback) if fallback else []
-                if self._epoch_bounds:
-                    self._total_sec = max(b[1] for b in self._epoch_bounds)
-                return
-            cols = et.columns.tolist()
-            def _col(*names):
-                return next((c for c in names if c in cols), None)
-            sc = _col('start', 't_start', 'start_time')
-            ec = _col('stop',  't_end',   'end_time', 'stop_s', 'end')
+        if theme != 'segments' and theme in self._all_theme_bounds:
+            self._epoch_bounds = list(self._all_theme_bounds[theme])
+            self._total_sec = max((b[1] for b in self._epoch_bounds), default=1.0)
+        else:  # 'segments' = no label filter: empty legend, timeline spans the whole session
             self._epoch_bounds = []
-            if sc and ec:
-                for _, row in et.iterrows():
-                    self._epoch_bounds.append(
-                        (float(row[sc]), float(row[ec]), str(row['label'])))
-                self._total_sec = max(
-                    (b[1] for b in self._epoch_bounds), default=1.0)
-            else:
-                t = 0.0
-                for _, row in et.iterrows():
-                    dur = float(row['effective_time_hours']) * 3600.0
-                    self._epoch_bounds.append((t, t + dur, str(row['label'])))
-                    t += dur
-                self._total_sec = t or 1.0
+            _, t_stop = self.nav.cd.nd.session_bounds(self.nav.key)
+            self._total_sec = float(t_stop) or 1.0
 
         # Initialise overlap from source config if available
-        source = getattr(self._cd, 'source', None)
+        source = getattr(self.cd, 'source', None)
         if isinstance(source, CCGSourceConfig):
             self._overlap_entry.setText(str(source.overlap_sec))
             self._overlap_unit.setCurrentText('s')
@@ -641,13 +604,10 @@ class TimeSliderPanelQt(QWidget):
     def _reset_handles(self):
         self._main_plot.clear_selection()
         self._start_entry.setText("00:00:00")
-        self._end_entry.setText("00:00:00")
+        self._end_entry.setText("end")
 
     def _on_snap_toggle(self, checked: bool):
         self._main_plot._snap_enabled = checked
-
-    def _on_lock_toggle(self, checked: bool):
-        self._main_plot._locked = checked
 
     def _on_reset_zoom(self):
         self._main_plot.reset_zoom()
@@ -667,47 +627,47 @@ class TimeSliderPanelQt(QWidget):
         for lbl, color in cmap.items():
             active = saved.get(lbl, True)
             self._legend_toggles[lbl] = active
-            chip = chip_button(lbl, checked=active)
-            chip.setStyleSheet(
-                f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
-                f"padding: 1px 6px; font-size: 8pt; background: {color}; }}"
-                f"QPushButton:checked {{ font-weight: bold; }}"
-                f"QPushButton:!checked {{ color: #888; background: #f0f0f0; }}")
-            chip.toggled.connect(lambda on, lb=lbl: self._on_legend_toggle(lb, on))
-            lyt.insertWidget(lyt.count() - 1, chip)
+            self._add_legend_chip(lbl, color, active)
 
         none_active = saved.get('NONE', True)
         self._legend_toggles['NONE'] = none_active
-        none_chip = chip_button("NONE", checked=none_active)
-        none_chip.setStyleSheet(
-            f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
-            f"padding: 1px 6px; font-size: 8pt; background: {_TS_NONE_COLOR}; "
-            f"color: #444; }}"
-            f"QPushButton:checked {{ font-weight: bold; }}"
-            f"QPushButton:!checked {{ color: #aaa; background: #f0f0f0; }}")
-        none_chip.toggled.connect(lambda on: self._on_legend_toggle('NONE', on))
-        lyt.insertWidget(lyt.count() - 1, none_chip)
+        self._add_legend_chip('NONE', _TS_NONE_COLOR, none_active, none_style=True)
 
-        labels = sorted({lb for _, _, lb in self._epoch_bounds})
-        self._label_combo.blockSignals(True)
-        cur = self._label_combo.currentText()
-        self._label_combo.clear()
-        self._label_combo.addItem('')
-        for lb in labels:
-            self._label_combo.addItem(lb)
-        if cur in labels:
-            self._label_combo.setCurrentText(cur)
-        else:
-            self._label_combo.setCurrentIndex(0)
-        self._label_combo.blockSignals(False)
-
+        self._sync_name_to_labels()
         self._redraw_main()
+
+    def _add_legend_chip(self, label: str, color: str, active: bool, *,
+                         none_style: bool = False):
+        chip = chip_button(label, checked=active)
+        if none_style:
+            ss = (f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
+                  f"padding: 1px 6px; font-size: 8pt; background: {color}; "
+                  f"color: #444; }}"
+                  f"QPushButton:checked {{ font-weight: bold; }}"
+                  f"QPushButton:!checked {{ color: #aaa; background: #f0f0f0; }}")
+        else:
+            ss = (f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
+                  f"padding: 1px 6px; font-size: 8pt; background: {color}; }}"
+                  f"QPushButton:checked {{ font-weight: bold; }}"
+                  f"QPushButton:!checked {{ color: #888; background: #f0f0f0; }}")
+        chip.setStyleSheet(ss)
+        chip.toggled.connect(lambda on, lb=label: self._on_legend_toggle(lb, on))
+        self._legend_layout.insertWidget(self._legend_layout.count() - 1, chip)
 
     def _on_legend_toggle(self, label: str, active: bool):
         self._legend_toggles[label] = active
         state = self._per_theme_label_state.setdefault(self._current_theme, {})
         state[label] = active
+        self._sync_name_to_labels()
         self._redraw_main()
+
+    def _sync_name_to_labels(self):
+        """Name mirrors a lone selected label; clears when that stops holding (typed names kept)."""
+        if self._name_entry.text().strip() and not self._name_is_auto:
+            return
+        picked = [lb for lb in self._theme_whitelist(self._current_theme) if lb != 'NONE']
+        self._name_entry.setText(picked[0] if len(picked) == 1 else '')
+        self._name_is_auto = True
 
     def _label_color_map(self) -> dict[str, str]:
         if self._label_colors is not None:
@@ -725,7 +685,7 @@ class TimeSliderPanelQt(QWidget):
         return cmap
 
     def _redraw_main(self):
-        if self._nav.session_any_mode:
+        if self.nav.session_any_mode:
             self._main_plot.update_epochs([], {}, 0, 1)
             return
         if not self._epoch_bounds:
@@ -745,30 +705,16 @@ class TimeSliderPanelQt(QWidget):
         self._filter_check.blockSignals(True)
         self._filter_check.setChecked(self._filter_checks.get(theme, False))
         self._filter_check.blockSignals(False)
-        self._redraw_main()
-
-    def _on_label_change(self, label: str):
-        label = (label or '').strip()
-        if not self._legend_toggles:
-            return
-        if not label:
-            for lb in self._legend_toggles:
-                self._legend_toggles[lb] = True
-        else:
-            for lb in self._legend_toggles:
-                self._legend_toggles[lb] = (lb == label)
-        state = self._per_theme_label_state.setdefault(self._current_theme, {})
-        for lb, on in self._legend_toggles.items():
-            state[lb] = on
-        self._redraw_main()
 
     def _on_label_reset(self):
-        self._label_combo.blockSignals(True)
-        self._label_combo.setCurrentIndex(0)
-        self._label_combo.blockSignals(False)
-        for lb in list(self._legend_toggles):
-            self._legend_toggles[lb] = True
         self._per_theme_label_state.pop(self._current_theme, None)
+        self._update_legend()
+
+    def _on_label_none(self):
+        labels = sorted({lb for _, _, lb in self._epoch_bounds})
+        off = {lb: False for lb in labels}
+        off['NONE'] = False
+        self._per_theme_label_state[self._current_theme] = off
         self._update_legend()
 
     def _on_filter_toggle(self, checked: bool):
@@ -776,16 +722,8 @@ class TimeSliderPanelQt(QWidget):
 
     def _parse_time_text(self, text: str) -> float:
         s = text.strip().lower()
-        if self._nav.session_any_mode:
-            if s == 'start':
-                return 0.0
-            if s == 'end':
-                return self._total_sec
-        else:
-            if s == 'start':
-                return 0.0
-            if s == 'end':
-                return self._total_sec
+        if s in ('start', 'end'):
+            return 0.0 if s == 'start' else self._total_sec
         return self._hms_to_sec(text)
 
     def _sync_timing_entries(self, t0: float, t1: float):
@@ -801,72 +739,86 @@ class TimeSliderPanelQt(QWidget):
     def _on_main_handle_moved(self, t0: float, t1: float):
         self._sync_timing_entries(t0, t1)
 
-    def _validate_start(self):
+    def _validate_timing_entry(self, which: Literal['start', 'end']):
+        entry = self._start_entry if which == 'start' else self._end_entry
+        txt = entry.text().strip()
+        symbolic = txt.lower() in ('start', 'end')
         try:
-            v = self._parse_time_text(self._start_entry.text())
+            v = self._parse_time_text(txt)
+        except ValueError:
+            return
+        if self.nav.session_any_mode:   # no timeline to sync — text is source of truth
+            entry.setText(txt.lower() if symbolic else self._sec_to_hms(v))
+            return
+        if which == 'start':
             _, t1 = self._main_plot.get_selection()
             self._apply_timing_cursors(v, t1)
-        except ValueError:
-            pass
-
-    def _validate_end(self):
-        try:
-            v = self._parse_time_text(self._end_entry.text())
+        else:
             t0, _ = self._main_plot.get_selection()
             self._apply_timing_cursors(t0, v)
+        if symbolic:
+            entry.setText(txt.lower())   # cursor moved, but keep the per-session symbol
+
+    def _read_timing(self, any_mode: bool):
+        """Timing fields from the UI, or None if invalid."""
+        t0_txt = self._start_entry.text().strip()
+        t1_txt = self._end_entry.text().strip()
+        try:
+            t0 = self._parse_time_text(t0_txt)
+            t1 = self._parse_time_text(t1_txt)
         except ValueError:
-            pass
+            return None
+        if t1 <= t0:
+            return None
+        if not any_mode:
+            self._apply_timing_cursors(t0, t1)
+        # keep 'start'/'end' symbolic so each session resolves them against its own bounds
+        t0_spec = t0_txt.lower() if t0_txt.lower() in ('start', 'end') else t0
+        t1_spec = t1_txt.lower() if t1_txt.lower() in ('start', 'end') else t1
+        return (t0_spec, t1_spec, self._splits_spin.value(),
+                float(self._overlap_entry.text() or 0), self._overlap_unit.currentText())
+
+    def _theme_whitelist(self, theme: str) -> list:
+        """Labels checked in the legend for *theme* (unrecorded = checked, as the chips show)."""
+        saved = self._per_theme_label_state.get(theme, {})
+        labels = sorted({lb for _, _, lb in self._all_theme_bounds.get(theme, [])})
+        return [lb for lb in labels if saved.get(lb, True)]
+
+    def _read_filter(self) -> dict:
+        """Filter state: AND-list of themes. Include-checked themes if any; else current theme."""
+        checked = [t for t, on in self._filter_checks.items() if on]
+        names = checked or [self._current_theme]
+        return [{'name': t, 'labels': self._theme_whitelist(t)} for t in names]
 
     def _on_set(self):
-        if self._lock_check.isChecked():
+        any_mode = self.nav.session_any_mode
+        if not any_mode and not self._main_plot.has_full_selection():
             return
-        if not self._main_plot.has_full_selection():
+        if (self._name_entry.text().strip() or 'custom').lower() == _FULL_SEG:
+            QMessageBox.warning(None, "Custom CCG",
+                                f"'{_FULL_SEG}' is a reserved name — choose another.")
             return
-        try:
-            t0 = self._parse_time_text(self._start_entry.text())
-            t1 = self._parse_time_text(self._end_entry.text())
-        except ValueError:
+        timing = self._read_timing(any_mode)
+        if timing is None:
             return
-        if t1 <= t0:
-            return
-        self._apply_timing_cursors(t0, t1)
-
-        overlap_raw = float(self._overlap_entry.text() or 0)
-        unit = self._overlap_unit.currentText()
-        dur = t1 - t0
-        if unit == '%':
-            overlap_sec = overlap_raw / 100.0 * dur
-        elif unit == 'min':
-            overlap_sec = overlap_raw * 60.0
-        elif unit == 'hr':
-            overlap_sec = overlap_raw * 3600.0
-        else:
-            overlap_sec = overlap_raw
-
-        active_labels = {lb: on for lb, on in self._legend_toggles.items()}
-        filter_state = {
-            'theme':  self._current_theme,
-            'labels': active_labels,
-            'flags':  {'include_in_filter': self._filter_checks.get(
-                self._current_theme, self._filter_check.isChecked())},
-        }
-
-        spec = {
-            't0':         t0,
-            't1':         t1,
-            'name':       self._name_entry.text() or 'custom',
-            'n_splits':   self._splits_spin.value(),
-            'overlap_sec': max(0.0, overlap_sec),
-            'filter_state': filter_state,
-            'sessions':   self._sessions_picker.selected,
-            'scope':      str(getattr(self._nav.key, 'session', '')),
-        }
-        self._status_lbl.setText(f"Queued: {spec.get('name', 'custom')}")
-        self.ccg_enqueue_requested.emit(spec)
+        t0_spec, t1_spec, n_splits, overlap_raw, overlap_unit = timing
+        request = CCGBatchRequest(
+            name=self._name_entry.text() or 'custom',
+            t0=t0_spec, t1=t1_spec,
+            scope=('all' if self.nav.session_any_mode   # scope = session-mode marker
+                   else str(getattr(self.nav.key, 'session', ''))),
+            sessions=self._sessions_picker.selected,
+            n_splits=n_splits, overlap_raw=overlap_raw, overlap_unit=overlap_unit,
+            split_mode=('equal_effective' if self._equal_effective_check.isChecked() else 'raw_span'),
+            filter_state=self._read_filter())
+        self._status_lbl.setText(f"Queued: {request.name}")
+        self.queue_ccg_requested.emit(request)
 
     def _on_clear(self):
         self._reset_handles()
         self._name_entry.clear()
+        self._name_is_auto = True   # hand the name back to the chips
+        self._sync_name_to_labels()
         self._status_lbl.setText("")
 
     def save_state(self, path: str):
@@ -904,103 +856,6 @@ class TimeSliderPanelQt(QWidget):
             return int(parts[0]) * 60 + float(parts[1])
         return float(parts[0])
 
-    def _resolve_ts_time(self, raw, t_start: float, t_end: float) -> float:
-        if isinstance(raw, str):
-            s = raw.strip().lower()
-            if s == 'start':
-                return float(t_start)
-            if s == 'end':
-                return float(t_end)
-            try:
-                return float(self._hms_to_sec(raw))
-            except (ValueError, TypeError):
-                pass
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return float(t_start)
-
-    @staticmethod
-    def single_exclusive_segment_filter_label(filter_state: dict):
-        """Return the one active label from filter_state, or None if 0 or 2+."""
-        labels = (filter_state or {}).get('labels') or {}
-        on = [lb for lb, v in labels.items() if v and lb != 'NONE']
-        return on[0] if len(on) == 1 else None
-
-    def _union_span_for_segment_label(self, key, label: str):
-        et = self._cd.edge_times_for(key)
-        if et is None:
-            return None
-        cols = et.columns.tolist()
-        sc = next((c for c in ('start', 't_start', 'start_time') if c in cols), None)
-        ec = next((c for c in ('stop', 't_end', 'end_time', 'stop_s', 'end') if c in cols), None)
-        if not sc or not ec:
-            return None
-        spans = [(float(row[sc]), float(row[ec]))
-                 for _, row in et.iterrows() if str(row['label']) == label]
-        if not spans:
-            return None
-        return min(s for s, _ in spans), max(e for _, e in spans)
-
-    def _intervals_for_spec_on_key(self, spec, key):
-        if hasattr(spec, 'filter_state'):
-            fs = spec.filter_state or {}
-            t0_raw = spec.t0
-            t1_raw = spec.t1
-        else:
-            fs = spec.get('filter_state') or {}
-            t0_raw = spec.get('t0', 0.0)
-            t1_raw = spec.get('t1', 'end')
-        theme = fs.get('theme', 'segments')
-        labels = fs.get('labels') or {}
-        flags = fs.get('flags') or {}
-        include = bool(flags.get('include_in_filter', False))
-        wall_extent = self._session_wall_clock_extent_for_key(key)
-        t0 = self._resolve_ts_time(t0_raw, *wall_extent)
-        t1 = self._resolve_ts_time(t1_raw, *wall_extent)
-        if t1 <= t0:
-            return None, None
-        bounds = []
-        if theme == 'segments':
-            et = self._cd.edge_times_for(key)
-            if et is not None:
-                cols = et.columns.tolist()
-                sc = next((c for c in ('start', 't_start', 'start_time') if c in cols), None)
-                ec = next((c for c in ('stop', 't_end', 'end_time', 'stop_s', 'end') if c in cols), None)
-                if sc and ec:
-                    for _, row in et.iterrows():
-                        bounds.append((float(row[sc]), float(row[ec]), str(row['label'])))
-        elif theme in self._themes:
-            ep = self._themes[theme]
-            labs = [str(x).strip() for x in ep.labels]
-            bounds = [(float(s), float(e), lb)
-                      for s, e, lb in zip(ep.starts, ep.stops, labs)]
-        active = {lb for lb, on in labels.items() if on}
-        if include and active:
-            bounds = [b for b in bounds if b[2] in active]
-        elif labels:
-            bounds = [b for b in bounds if labels.get(b[2], True)]
-        if not bounds:
-            return [(t0, t1)], t1 - t0
-        active = ({lb for lb, on in labels.items() if on} if labels
-                  else set(lb for _, _, lb in bounds))
-        if include and not active:
-            active = set(lb for _, _, lb in bounds)
-        ef = EpochFilter(bounds)
-        result = ef.filter(active or set(lb for _, _, lb in bounds), t0, t1)
-        if result is False:
-            return [], 0.0
-        intervals, active_dur = result
-        if intervals is None:
-            return [(t0, t1)], active_dur
-        return intervals, active_dur
-
-    def _session_wall_clock_extent_for_key(self, key) -> tuple:
-        if self._epoch_bounds and str(getattr(key, 'session', '')) == str(getattr(self._nav.key, 'session', '')):
-            t = self._total_sec
-            return (0.0, t if t > 0 else 1.0)
-        return (0.0, 1.0)
-
     @staticmethod
     def _sec_to_hms(sec: float) -> str:
         sec = max(0.0, float(sec))
@@ -1012,12 +867,14 @@ class TimeSliderPanelQt(QWidget):
 
 @dataclass
 class CCGTask:
-    spec: CCGSourceConfig   # name, t0, t1, filter_state, active_duration, etc.
-    key: object             # routing TypeKey
-    intervals: object       # resolved epoch intervals or None
-    auto_save: bool
+    """Queued segment compute: spec + resolution + optional UI load."""
+    spec: CCGSourceConfig
     load_into_ui: bool
     batch_id: int | None = None
+    resolution: str = 'lowres'
+
+    def ccg_key(self) -> Key:
+        return self.spec.key.change(resolution=self.resolution)
 
 
 @dataclass
@@ -1032,122 +889,91 @@ class CCGTaskResult:
 
 
 class CustomCCGWorker:
-    """Wraps BackgroundTaskRunner + thread result buffer for CCG computation."""
+    """Background CCG compute worker."""
 
     def __init__(self, mgr: 'CustomCCGManager'):
         self._mgr = mgr
         self._ui = mgr._ui
-        self._runner = BackgroundTaskRunner(max_queue=_MAX_QUEUE, use_result_queue=False)
+        self._runner = BackgroundTaskRunner(
+            max_queue=self._ui.nav.max_ccg_queue, use_result_queue=False)
         self._thread_result: list = []
 
-    def enqueue_task(self, *, spec: CCGSourceConfig, key, intervals,
-                     auto_save: bool, load_into_ui: bool,
-                     batch_id: int | None = None) -> bool:
-        task = CCGTask(
-            spec=spec, key=key, intervals=intervals,
-            auto_save=bool(auto_save), load_into_ui=bool(load_into_ui),
-            batch_id=batch_id,
-        )
-        if not self._runner.enqueue(task):
-            n = len(self._runner._pending)
-            QMessageBox.warning(None, "Task queue full",
-                f"Custom CCG queue full ({n}/{_MAX_QUEUE}). "
-                "Wait for running tasks to complete.")
-            return False
-        return True
+    def enqueue_task(self, *, spec: CCGSourceConfig, load_into_ui: bool,
+                     batch_id: int | None = None, resolution: str = 'lowres') -> bool:
+        task = CCGTask(spec=spec, load_into_ui=bool(load_into_ui),
+                       batch_id=batch_id, resolution=resolution)
+        return self._runner.enqueue(task)
 
     def on_done(self, completed_task, _result):
         ui, mgr = self._ui, self._mgr
         r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
+        print(f"[CCGq] on_done {completed_task.spec.name} {completed_task.resolution} "
+              f"result={'none' if r is None else ('ok' if r.ok else r.error)}", flush=True)
+        bid = completed_task.batch_id
+        meta = ui.time_slider._batch_meta.get(bid) if bid is not None else None
 
         if r is None or not r.ok:
-            QMessageBox.critical(None, "Custom CCG",
-                f"Computation failed:\n{r.error if r else 'unknown error'}")
-        else:
-            nm = r.value.src_conf.name
-
-            if completed_task.auto_save:
-                self._save_custom_to_dir(r.value)
-                mgr.state._emit_inventory_event()
-
-            lst = mgr._by_session.setdefault(r.session, [])
-            idx = next((i for i, cd in enumerate(lst) if cd.src_conf.name == nm), -1)
-            if idx >= 0:
-                lst[idx] = r.value
+            err = r.error if r else 'unknown error'
+            if meta is not None:
+                meta['rows'].append(
+                    (r.session if r else '?', completed_task.spec.name, 'fail', err))
             else:
-                lst.append(r.value)
-                idx = len(lst) - 1
+                QMessageBox.critical(None, "Custom CCG",
+                    f"Computation failed:\n{err}")
+        else:
+            src, seg_data = r.value           # (CCGSourceConfig, single-segment CCGData)
+            nm = src.name
+            res_hi = completed_task.resolution == 'highres'
 
-            if r.session == str(ui._nav.key.session):
-                ui._nav._custom_seg_index[nm] = r.value
-                ui._nav.custom_segs_changed.emit()
-                ui.request_redraw()
+            cd = ui.nav.cd
+            try:
+                cd.attach_segment(completed_task.ccg_key(), src, seg_data)
+            except Exception as exc:
+                print(f"[CustomCCG] attach failed '{nm}'/{r.session}: {exc}")
+            try:
+                mgr.state._emit_inventory_event()
+                if r.session == str(ui.nav.key.session):
+                    ui.nav.custom_segs_changed.emit()
+                    ui.mainview.request_render()
+            except Exception:
+                import traceback; traceback.print_exc()   # a render error must not stall the queue
 
-            ui.time_slider._status_lbl.setText(f"Done: {nm}")
+            if meta is not None and not res_hi:
+                meta['rows'].append((r.session, nm, 'ok', str(r.session)))
 
-        self._on_chunk_done(completed_task)
+        try:
+            self._on_chunk_done(completed_task)
+        except Exception:
+            import traceback; traceback.print_exc()   # never let bookkeeping stall the queue
         self._custom_ccg_start_next()
-
-    def _save_custom_to_dir(self, cd) -> None:
-        """Persist a custom-segment CCGDataset's CCGData items into the project's
-        custom_ccg/ dir via explicit paths. Never calls CCGDataset.save(), so it
-        never spawns a project_<src_conf.name> folder."""
-        save_dir = self._ui.paths.custom_ccg_dir
-        os.makedirs(save_dir, exist_ok=True)
-        nm = cd.src_conf.name
-        for k, cdata in cd.ccg.items():
-            res = getattr(k, 'resolution', 'lowres') or 'lowres'
-            suffix = '_highres' if res == 'highres' else ''
-            cdata.save(path=os.path.join(save_dir, f"{nm}{suffix}"))
 
     def _custom_ccg_start_next(self):
         ui = self._ui
-        nav = ui._nav
+        nav = ui.nav
 
         def _launch(task: CCGTask, _q):
-            nd_key = task.key.nd()
-            def _read():
-                return (
-                    nav.cd.ccg_for(nd_key, 'lowres'),
-                    (nav.cd.nd.data[nd_key] if getattr(nav.cd, 'nd', None) is not None else None),
-                )
-
-            ccg_data_obj = neurons_obj = None
-            for attempt in range(2):
-                ccg_data_obj, neurons_obj = _read()
-                if ccg_data_obj is not None and neurons_obj is not None:
-                    break
-                if attempt == 0:
-                    try:
-                        nav.cd.get_ccg()
-                    except Exception as ex:
-                        print(f"[CustomCCG] ERROR: session load failed for {task.key.session}: {ex}")
-                        self._on_chunk_done(task)
-                        return None
-            if ccg_data_obj is None or neurons_obj is None:
-                self._on_chunk_done(task)
-                return None
             self._thread_result.clear()
+            seg_key = task.ccg_key()
 
             def _ccg_worker():
-                sess = str(task.key.session)
+                sess = str(seg_key.session)
+                import time as _t; _t0 = _t.time()
+                print(f"[CCGq] START {sess} {task.resolution} '{task.spec.name}'", flush=True)
                 try:
-                    neurons_override = (
-                        neurons_obj.time_multislices(*zip(*task.intervals))
-                        if task.intervals is not None else None)
-                    value = self._compute_custom_segment(
-                        task.spec.t0, task.spec.t1, task.spec.name,
-                        neurons_override=neurons_override,
-                        active_duration=task.spec.active_duration,
-                        key_override=task.key,
-                        neurons_obj=neurons_obj,
-                        ccg_data_obj=ccg_data_obj)
-                    if value is None:
-                        self._thread_result.append(CCGTaskResult(None, 'compute returned None', sess))
+                    nav.cd.ccg_for(seg_key.cd())   # base array only; the segment is what we are about to compute
+                    print(f"[CCGq]   base ready {sess} {task.resolution} {_t.time()-_t0:.1f}s", flush=True)
+                    sliced = nav.cd.nd.sliced_neurons_for(task.spec)
+                    if sliced is None:
+                        print(f"[CCGq]   NO OVERLAP {sess}", flush=True)
+                        self._thread_result.append(CCGTaskResult(None, 'no interval overlap', sess))
                         return
-                    value.src_conf.filter_state = task.spec.filter_state
-                    self._thread_result.append(CCGTaskResult(value, None, sess))
+                    neurons_slice, _active_dur = sliced
+                    seg_data = nav.cd.compute_segment(seg_key, task.spec, neurons_slice)
+                    print(f"[CCGq] DONE  {sess} {task.resolution} {_t.time()-_t0:.1f}s", flush=True)
+                    self._thread_result.append(CCGTaskResult((task.spec, seg_data), None, sess))
                 except Exception as ex:
+                    import traceback; traceback.print_exc()
+                    print(f"[CCGq] FAIL  {sess} {task.resolution}: {ex}", flush=True)
                     self._thread_result.append(CCGTaskResult(None, str(ex), sess))
 
             t = threading.Thread(target=_ccg_worker, daemon=True)
@@ -1155,42 +981,10 @@ class CustomCCGWorker:
             return t
 
         started = self._runner.start_next(_launch)
+        print(f"[CCGq] start_next -> {started}, pending={len(self._runner._pending)}, "
+              f"running={self._runner.is_running()}", flush=True)
         if started:
             self._runner.start_polling_qt(300, self.on_done)
-
-    def _compute_custom_segment(self, t0: float, t1: float, name: str,
-                                 neurons_override=None, active_duration=None,
-                                 key_override=None, neurons_obj=None,
-                                 ccg_data_obj=None):
-        ui = self._ui
-        nav = ui._nav
-        key_eff = key_override or nav.key
-        neurons_eff = neurons_obj if neurons_obj is not None else nav.neurons
-        cd_eff = ccg_data_obj if ccg_data_obj is not None else nav.ccg_data
-        if neurons_eff is None:
-            print(f"[CustomCCG] ERROR: No neuron data available for {key_eff}")
-            return None
-        try:
-            neurons_slice = (neurons_override if neurons_override is not None
-                             else neurons_eff.time_slice(t0, t1))
-            _full = sum(len(st) for st in neurons_eff.spiketrains)
-            _win  = sum(len(st) for st in neurons_slice.spiketrains)
-            print(f"[CustomCCG] '{name}' window=[{t0:.1f},{t1:.1f}]s "
-                  f"spikes windowed={_win}/{_full} "
-                  f"(override={neurons_override is not None})")
-            has_highres = nav.cd.ccg_for(nav.key.nd(), 'highres') is not None
-            cd = CCGDataset(conf=cd_eff.conf, nd=nav.cd.nd,
-                            save_path=str(ui.paths.data_root),
-                            src_conf=CCGSourceConfig(
-                                name=name, t0=t0, t1=t1, active_duration=active_duration,
-                            ))
-            cd.get_ccg_custom(neurons_slice, has_highres=has_highres,
-                              excitability=getattr(key_eff, 'excitability', 'E'))
-            return cd
-        except Exception as ex:
-            print(f"[CustomCCG] ERROR: {ex}")
-            traceback.print_exc()
-            return None
 
     def _on_chunk_done(self, task: CCGTask):
         bid = task.batch_id
@@ -1200,43 +994,41 @@ class CustomCCGWorker:
         if bid not in ts._batch_counts:
             return
         ts._batch_counts[bid] -= 1
+        total = ts._batch_totals.get(bid, 0)
         if ts._batch_counts[bid] > 0:
+            done = total - ts._batch_counts[bid]
+            ts._status_lbl.setText(f"Computing custom CCG… {done}/{total}")
             return
         del ts._batch_counts[bid]
+        ts._batch_totals.pop(bid, None)
+        self._ui.nav.cd.nd.clear_slice_cache()
+        spec_name = (ts._batch_meta.get(bid) or {}).get('spec_name', '')
+        ts._status_lbl.setText(f"Done: {spec_name} — {total} CCG(s)")
         names = list(ts._batch_names.pop(bid, []))
+        meta = ts._batch_meta.pop(bid, None)
+        if meta is not None:
+            QTimer.singleShot(100, lambda m=meta: self._show_batch_report(m))
         QTimer.singleShot(100, lambda n=names: self._prompt_save_chunks(n))
 
+    def _show_batch_report(self, meta: dict):
+        rows = meta.get('rows', [])
+        ok   = [f"  {s}  ->  {v}" for s, _n, st, v in rows if st == 'ok']
+        fail = [f"  {s}: {v}"     for s, _n, st, v in rows if st == 'fail']
+        skip = [f"  {s}: {w}"     for s, w in meta.get('skipped', [])]
+        if len(ok) <= 1 and not fail and not skip:
+            return
+        lines = [f"Custom CCG: {meta.get('spec_name', '')}"]
+        for title, items in (("Computed", ok), ("Failed", fail), ("Skipped", skip)):
+            if items or title == "Computed":
+                lines += ["", f"{title} ({len(items)}):", *(items or ["  (none)"])]
+        ResultsDialog.show_report("Custom CCG results", "\n".join(lines))
+
     def _prompt_save_chunks(self, names: list[str]):
-        name_set = set(names)
-        if not name_set:
-            return
-        unsaved: list = []
-        for lst in self._mgr._by_session.values():
-            for cd in lst or []:
-                lo_key = next((k for k in cd.ccg if getattr(k, 'resolution', None) == 'lowres'), None)
-                if cd.src_conf.name in name_set and (lo_key is None or not cd.ccg[lo_key].is_saved):
-                    unsaved.append(cd)
-        if not unsaved:
-            return
-        n = len(unsaved)
-        reply = QMessageBox.question(None, "Save split windows",
-            f"{n} split window(s) finished computing but are not saved to disk yet.\n\n"
-            "Save them as .npz files now? (You can reload them later from the cache.)")
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        saved = []
-        for cd in unsaved:
-            try:
-                self._save_custom_to_dir(cd)
-                saved.append(cd.src_conf.name)
-            except Exception as exc:
-                print(f"[CustomCCG] save failed '{cd.src_conf.name}': {exc}")
-        if saved:
-            QMessageBox.information(None, "Saved", "Saved:\n" + "\n".join(saved))
+        return
 
 
 class CustomCCGState(JsonSavable):
-    """Active session, inventory change-detection, and suggestion list management."""
+    """Custom CCG session state and suggestions."""
 
     def __init__(self, ui: 'CCGReviewUI', mgr: 'CustomCCGManager'):
         super().__init__()
@@ -1251,7 +1043,7 @@ class CustomCCGState(JsonSavable):
 
     def _emit_inventory_event(self):
         specs = self.load_suggestions()
-        sig = tuple(sorted((s._key(), s.scope) for s in specs))
+        sig = tuple(sorted(s._key() for s in specs))
         if sig != self.inventory_sig:
             self.inventory_sig = sig
             self.refresh_suggestions(silent=True)
@@ -1263,8 +1055,7 @@ class CustomCCGState(JsonSavable):
         try:
             with open(path, encoding='utf-8') as f:
                 raw = json.load(f)
-            sess = self._ui._nav.current_session_str
-            out = [CCGSourceConfig.deserialize(x, default_session=sess)
+            out = [CCGBatchRequest.deserialize(x)
                    for x in (raw.get('items') or []) if isinstance(x, dict)]
             return out
         except Exception as ex:
@@ -1272,7 +1063,7 @@ class CustomCCGState(JsonSavable):
             return []
 
     def save_suggestions(self, specs: list) -> None:
-        payload = {'version': 1, 'items': [{k: v for k, v in s.__dict__.items() if k in s._JSON_KEYS} for s in specs]}
+        payload = {'version': 1, 'items': [s.serialize() for s in specs]}
         atomic_write_json(self.save_path() + ".json", payload)
 
     def refresh_suggestions(self, silent: bool = False):
@@ -1281,7 +1072,7 @@ class CustomCCGState(JsonSavable):
             QMessageBox.information(None, "Custom CCG suggestions",
                                     f"Updated suggestion list with {len(specs)} item(s).")
 
-    def update_suggestion(self, spec: 'CCGSourceConfig'):
+    def update_suggestion(self, spec: 'CCGBatchRequest'):
         specs = self.load_suggestions()
         if spec not in specs:
             specs.append(spec)
@@ -1291,11 +1082,7 @@ class CustomCCGState(JsonSavable):
         ui = self._ui
         specs = self.load_suggestions()
         def _on_run(selected_specs):
-            queued = sum(
-                self._mgr._queue_custom_ccgs(
-                    s, for_all=(str(s.scope).lower() == 'all'),
-                    auto_save=True)
-                for s in selected_specs)
+            queued = sum(self._mgr._queue_custom_ccgs(s) for s in selected_specs)
             if queued:
                 if getattr(ui, "time_slider", None) is not None: ui.time_slider._status_lbl.setText(f"Queued {queued} suggested custom CCG task(s)")
                 self._mgr.worker._custom_ccg_start_next()
@@ -1305,175 +1092,87 @@ class CustomCCGState(JsonSavable):
 
 
 class CustomCCGManager(Savable):
-    """Coordinator: owns worker/state and _by_session; houses cross-cutting UI methods."""
+    """Custom CCG queue coordinator (arrays live on ``cd``)."""
 
     def __init__(self, ui: 'CCGReviewUI'):
         super().__init__()
         self._ui = ui
-        self._by_session: dict = {}
         os.makedirs(self.save_path(), exist_ok=True)
         self.state = CustomCCGState(ui, self)
         self.worker = CustomCCGWorker(self)
         ui._custom_ccg_pending = self.worker._runner._pending
-        self.state.active_sess = str(ui._nav.key.session)
-        self._by_session.setdefault(self.state.active_sess, [])
+        self.state.active_sess = str(ui.nav.key.session)
 
     def save_path(self, **kwargs) -> str:
-        return self._ui.paths.custom_ccg_dir
+        return self._ui.nav.cd.custom_dir
 
-    @property
-    def _active_list(self) -> list:
-        return self._by_session.setdefault(self.state.active_sess, [])
+    def _appended_labels(self) -> list:
+        """Custom segment labels (dim0 after ``full``)."""
+        return [lb for lb in self._ui.nav.available_segments() if lb != _FULL_SEG]
 
     def _is_custom_segment(self, seg: str = None) -> bool:
         seg = self._ui.current_segment if seg is None else seg
-        return seg in self._ui._nav.custom_seg_index
+        return seg in self._appended_labels()
 
     def _custom_seg_index(self, seg: str = None) -> int:
         seg = self._ui.current_segment if seg is None else seg
-        for ci, cs in enumerate(self._active_list):
-            if cs.src_conf.name == seg:
-                return ci
-        return -1
+        labels = self._appended_labels()
+        return labels.index(seg) if seg in labels else -1
 
     def _remove_custom_segment(self, name: str):
-        ci = self._custom_seg_index(name)
-        if ci < 0:
+        if name not in self._appended_labels():
             return
-        self._active_list.pop(ci)
+        cd = self._ui.nav.cd
+        cd.drop_segment([self._ui.nav.key.nd().change(segment=name)])  # all resolutions
         if self._ui.current_segment == name:
             self._ui.current_segment = _ALL_SEGS
+        self._ui.nav.custom_segs_changed.emit()
         self._ui._build_sig_chips()
         self._ui._update_segment_label()
-        self._ui.request_redraw()
-
-    def load_saved_from_disk(self) -> int:
-        """Register saved .npz custom CCGs from custom_ccg_dir that aren't already in memory.
-        The npz stores only arrays (no conf/key/src_conf), so t0/t1 aren't recoverable and
-        default to 0; the segment key uses session=<name> to match freshly-computed customs
-        (get_ccg_custom keys on src.name)."""
-        save_dir = self.save_path()
-        if not os.path.isdir(save_dir):
-            return 0
-        conf = self._ui._nav.cd.conf
-        root = str(self._ui.paths.data_root)
-        known = {cd.src_conf.name for lst in self._by_session.values()
-                 for cd in lst if getattr(cd, 'src_conf', None)}
-        bases: dict = {}
-        for p in _glob.glob(os.path.join(save_dir, '*.npz')):
-            stem = os.path.splitext(os.path.basename(p))[0]
-            base, res = ((stem[:-8], 'highres') if stem.endswith('_highres')
-                         else (stem, 'lowres'))
-            bases.setdefault(base, {})[res] = os.path.splitext(p)[0]
-        sess = self.state.active_sess
-        added = 0
-        for base, files in sorted(bases.items()):
-            if base in known:
-                continue
-            try:
-                ds = CCGDataset(conf=conf, nd=None, save_path=root,
-                                src_conf=CCGSourceConfig(name=base, t0=0.0, t1=0.0))
-                for res, path in files.items():
-                    key = Key(session=base, resolution=res)
-                    cd = CCGData(key=key, conf=conf, ccg=None, ccg_null=None,
-                                 pval=None, qval=None, root=root)
-                    cd.load(path=path)
-                    ds.ccg[key] = cd
-            except Exception as exc:
-                print(f"[CustomCCG] skip {base}: {exc}")
-                continue
-            self._by_session.setdefault(sess, []).append(ds)
-            added += 1
-        if added:
-            print(f"[CustomCCG] loaded {added} saved custom CCG(s) from {save_dir}")
-        return added
+        self._ui.mainview.request_render()
 
     def _generate_suggested_custom_ccgs(self):
         self.state.show_dialog()
 
-    def _queue_custom_ccgs(self, spec: 'CCGSourceConfig', *, for_all: bool, auto_save: bool,
-                           target_sessions: list | None = None) -> int:
-        ui = self._ui
-        nav = ui._nav
-        queued = 0
-        if for_all and target_sessions is None:
-            targets = nav.available_type_keys_any()
-        else:
-            sess_set = ({str(s) for s in target_sessions}
-                        if target_sessions is not None
-                        else {str(s) for s in (spec.sessions or []) if s != 'All'})
-            targets = ([tk_ for nk in nav.real_nd_keys()
-                        if str(nk.session) in sess_set
-                        for tk_ in (nav.type_key_for_nd(nk),) if tk_ is not None]
-                       if sess_set else [nav.key])
-        n_splits = max(1, int(spec.n_splits or 1))
-        overlap_sec = max(0.0, float(spec.overlap_sec or 0.0))
+    def _queue_custom_ccgs(self, spec: 'CCGBatchRequest') -> int:
+        nav = self._ui.nav
         _any = nav.session_any_mode
-        for tk_ in targets:
-            t_sess_start, t_sess_end = ui.time_slider._session_wall_clock_extent_for_key(tk_)
-            t0_r = ui.time_slider._resolve_ts_time(spec.t0, t_sess_start, t_sess_end)
-            t1_r = ui.time_slider._resolve_ts_time(spec.t1, t_sess_start, t_sess_end)
-            lone = ui.time_slider.single_exclusive_segment_filter_label(spec.filter_state)
-            if lone is not None:
-                span = ui.time_slider._union_span_for_segment_label(tk_, lone)
-                if span is not None:
-                    t0_r, t1_r = span[0], span[1]
-                    t0_r = ui.time_slider._resolve_ts_time(t0_r, t_sess_start, t_sess_end)
-                    t1_r = ui.time_slider._resolve_ts_time(t1_r, t_sess_start, t_sess_end)
-            chunks = _SetOp.partition(t0_r, t1_r, n_splits, overlap_sec, str(spec.name))
-            split_bid = None
-            if len(chunks) > 1 and (_any or str(tk_.session) == str(nav.key.session)):
-                split_bid = ui.time_slider._batch_next_id
-                ui.time_slider._batch_next_id += 1
-            split_names: list[str] = []
-            for chunk_t0, chunk_t1, chunk_name in chunks:
-                lo = min(t_sess_start, t_sess_end)
-                hi = max(t_sess_start, t_sess_end)
-                cs = min(max(float(chunk_t0), lo), hi)
-                ce = min(max(float(chunk_t1), lo), hi)
-                if ce <= cs:
-                    continue
-                chunk_t0, chunk_t1 = cs, ce
-                chunk_spec = CCGSourceConfig(
-                    name=chunk_name, t0=chunk_t0, t1=chunk_t1,
-                    filter_state=spec.filter_state,
-                    scope=spec.scope, sessions=spec.sessions,
-                )
-                iv = ui.time_slider._intervals_for_spec_on_key(chunk_spec, tk_)
-                if iv is None or iv is False:
-                    continue
-                intervals, active_duration = iv
-                if (isinstance(intervals, list) and len(intervals) == 0
-                        and (active_duration is None or float(active_duration) <= 0.0)):
-                    print(f"[CustomCCG] skip chunk (no overlap with filter): "
-                          f"{chunk_name} session={tk_.session}")
-                    continue
-                chunk_source = CCGSourceConfig(
-                    name=chunk_name, t0=chunk_t0, t1=chunk_t1,
-                    active_duration=active_duration,
-                    filter_state=spec.filter_state,
-                    scope=spec.scope, sessions=spec.sessions,
-                )
-                ok = self.worker.enqueue_task(
-                    spec=chunk_source,
-                    key=tk_,
-                    intervals=intervals,
-                    auto_save=auto_save,
-                    load_into_ui=(_any or str(tk_.session) == str(nav.key.session)),
-                    batch_id=split_bid,
-                )
-                if ok:
-                    queued += 1
-                    if split_bid is not None:
-                        split_names.append(chunk_name)
-            if split_bid is not None and split_names:
-                ui.time_slider._batch_counts[split_bid] = len(split_names)
-                ui.time_slider._batch_names[split_bid] = split_names
+        ts = self._ui.time_slider
+        bid = ts._batch_next_id
+        ts._batch_next_id += 1
+        work, skipped = nav.cd.parse_ccg_batch_request(spec)
+        split_names = [s.name for s in work] if len(work) > 1 else []
+        # PATCH: always queue both resolutions; the worker computes a missing base CCG in background
+        ordered = [(s, res) for s in work for res in ('lowres', 'highres')]
+        queued = dropped = 0
+        for src, res in ordered:
+            if self.worker.enqueue_task(
+                    spec=src,
+                    load_into_ui=(_any or str(src.key.session) == str(nav.key.session)),
+                    batch_id=bid, resolution=res):
+                queued += 1
+            else:
+                dropped += 1
+        if dropped:
+            runner = self.worker._runner
+            QMessageBox.warning(None, "Task queue full",
+                f"Custom CCG queue full — {dropped} task(s) not queued "
+                f"({len(runner._pending)}/{runner._max_queue}). "
+                "Wait for running tasks to complete, then retry.")
+        if queued:
+            ts._batch_counts[bid] = queued
+            ts._batch_totals[bid] = queued
+            ts._batch_names[bid] = split_names
+            ts._batch_meta[bid] = {'spec_name': str(spec.name),
+                                   'skipped': skipped, 'rows': []}
+        elif skipped:
+            self.worker._show_batch_report({'spec_name': str(spec.name),
+                                            'skipped': skipped, 'rows': []})
         return queued
 
 
 class SuggestedCCGDialog:
-    """List suggested custom CCG specs; user picks which to generate."""
+    """Dialog to pick suggested custom CCG specs to run."""
 
     def __init__(self, specs: list, n_total: int, on_run, parent=None):
         self._specs = specs
@@ -1536,5 +1235,5 @@ class SuggestedCCGDialog:
             QMessageBox.information(None, "Suggested custom CCGs",
                                     "No suggested entries found. Use 'Refresh' first.")
             return
-        n_total = max(1, len(ui._nav.real_nd_keys()))
+        n_total = max(1, len(ui.nav.real_nd_keys()))
         cls(specs, n_total, on_run)._dlg.exec()

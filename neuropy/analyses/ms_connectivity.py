@@ -1,6 +1,8 @@
 import glob
 import json
 import os
+import copy
+import shutil
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path as _Path
@@ -22,6 +24,9 @@ import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import (_san_np, _hasvalue, Config, AnalysisDataset, JsonSavable,
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDataset
+from neuropy.analyses.ccg_transforms import (
+    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig)
+from neuropy.utils.data_storage_util import atomic_write_json
 from collections import defaultdict
 
 _REPO_ROOT = _Path(__file__).resolve().parents[2]
@@ -33,8 +38,13 @@ _CCG_RESOLUTION = {
 }
 
 
+def _san(v) -> str:
+    """Sanitize for dir names ('.' → '-')."""
+    return str(v).replace('.', '-')
+
+
 class CCGConfig(Config):
-    """CCG config. 'key' fields require full recompute; 'derived' fields only re-run EranConv."""
+    """CCG compute config (`key` → recompute; `derived` → EranConv only)."""
 
     _groups = {
         'key': ['name', 'resolution', 'bin_size', 'duration', 'conv_window',
@@ -69,7 +79,7 @@ class CCGConfig(Config):
         super().__init__()
         self.name = name
         self.resolution = resolution
-        self._root = DATA_ROOT  # set by CCGDataset to enforce path consistency
+        self._root = DATA_ROOT
 
         # bin_size: explicit value takes priority; otherwise use resolution preset
         if bin_size is None:
@@ -103,8 +113,31 @@ class CCGConfig(Config):
 
     @property
     def conn_types_labeled(self):
-        """[(EI, conn_type), ...] — same order as conn_types_flat."""
+        """Same order as ``conn_types_flat``, with E/I labels."""
         return list(self.conn_types)
+
+    @staticmethod
+    def conn_type_label(ei, ct) -> str:
+        """Labeled conn-type string, e.g. "E PYR→PYR" (matches Key.type_label())."""
+        parts = [p for p in (ei, Key.format_conn_type(ct) if ct else '') if p]
+        return ' '.join(parts)
+
+    @property
+    def conn_type_labels(self) -> list[str]:
+        """All conn types as labeled strings, in config order."""
+        return [self.conn_type_label(ei, ct) for ei, ct in self.conn_types]
+
+    def parse_conn_type_label(self, label: str):
+        """(excitability, conn_type) for a label, or (None, None) if unknown."""
+        for ei, ct in self.conn_types:
+            if self.conn_type_label(ei, ct) == label:
+                return ei, ct
+        return None, None
+
+    def at(self, resolution: str) -> 'CCGConfig':
+        """This conf at another resolution — bin_size and every derived lag bin follow."""
+        return self if resolution == self.resolution else self.copy(
+            bin_size=_CCG_RESOLUTION[resolution], resolution=resolution)
 
     @property
     def center_bin(self) -> int:
@@ -135,7 +168,7 @@ class CCGConfig(Config):
         return self.center_bin + self.spkcnt_bins // 2 + 1
 
     def save_path(self, suffix='config') -> str:
-        """data/project_{name}/ccg/config/{name}_{resolution}_{suffix}"""
+        """Path under ``data/project_{name}/ccg/config/``."""
         base = os.path.join(self._root, f"project_{self.name}", "ccg", "config",
                             f"{self.name}_{self.resolution}")
         return f"{base}_{suffix}" if suffix else base
@@ -149,128 +182,123 @@ class CCGConfig(Config):
 
 
 @dataclass(eq=False)
-class CCGSourceConfig(Config):
-    """Data-source parameters for a custom CCG segment."""
+class CCGBatchRequest:
+    """UI batch ticket expanded into per-session ``CCGSourceConfig`` children."""
     name: str
     t0: float | str
     t1: float | str
-    scope: str = ''
-    created_from_session: str = ''
+    scope: str = ''                                      # '' | 'all' | a session
     sessions: list = field(default_factory=list)
     n_splits: int = 1
-    overlap_sec: float = 0.0
-    filter_state: dict = field(default_factory=dict)
-    active_duration: float = None
-    total_time_hours: float = None
-    windows: list = field(default_factory=list)          # list[Epoch]; each Epoch = one CCG segment
-    firing_rates: object = field(default=None, repr=False)  # ndarray [n_segs, n_neurons]
-    tags: dict = field(default_factory=dict)             # e.g. {'kind': 'custom'}
-    src_path: str = None
+    overlap_raw: float = 0.0
+    overlap_unit: str = 'sec'                            # 'sec' | 'min' | 'hr' | '%'
+    filter_state: list = field(default_factory=list)
+    split_mode: str = 'raw_span'                          # 'raw_span' | 'equal_effective'
+
+    _JSON_KEYS = frozenset([
+        'name', 't0', 't1', 'scope', 'sessions', 'n_splits',
+        'overlap_raw', 'overlap_unit', 'filter_state', 'split_mode',
+    ])
+
+    @staticmethod
+    def resolve_overlap_sec(t0, t1, overlap_raw, overlap_unit) -> float:
+        """Convert overlap value + unit to seconds (`%` needs numeric t0/t1)."""
+        dur = (t1 - t0) if not (isinstance(t0, str) or isinstance(t1, str)) else 0.0
+        factor = {'sec': 1.0, 'min': 60.0, 'hr': 3600.0, '%': dur / 100.0}[overlap_unit]
+        return max(0.0, overlap_raw * factor)
+
+    def _key(self) -> tuple:
+        fs = tuple((str(th['name']), tuple(str(x) for x in th['labels']))
+                   for th in self.filter_state)
+        return (str(self.name), str(self.t0), str(self.t1), str(self.scope),
+                str(self.split_mode), fs)
+    def __eq__(self, other) -> bool:
+        return isinstance(other, CCGBatchRequest) and self._key() == other._key()
+
+    def __hash__(self) -> int:
+        return hash(self._key())
+
+    def serialize(self) -> dict:
+        return {k: getattr(self, k) for k in self._JSON_KEYS}
+
+    @classmethod
+    def deserialize(cls, d: dict) -> 'CCGBatchRequest':
+        return cls(**{k: d[k] for k in cls._JSON_KEYS if k in d})
+
+
+class CCGSourceConfig(Config):
+    """One custom segment's timing/filter metadata (owns its ``Key``)."""
 
     _groups = {
         'key': ['name', 't0', 't1', 'filter_state'],
     }
     _JSON_KEYS = frozenset([
-        'name', 't0', 't1', 'scope', 'created_from_session', 'sessions',
-        'n_splits', 'overlap_sec', 'filter_state', 'active_duration',
-        'total_time_hours', 'tags', 'src_path',
+        't0', 't1', 'overlap_sec', 'filter_state', 'active_duration',
     ])
 
-    def __post_init__(self):
+    def __init__(self, key, t0=None, t1=None, overlap_sec=0.0,
+                 filter_state=None, active_duration=None, firing_rates=None):
         super().__init__()
-        self._root = DATA_ROOT  # set by CCGDataset
-        # Coerce t0/t1: sentinel strings ('start'/'end') stay str, else float
-        for attr in ('t0', 't1'):
-            v = getattr(self, attr)
-            if not (isinstance(v, str) and v.lower() in ('start', 'end')):
-                setattr(self, attr, float(v))
-        # Normalize sessions: sorted list of non-None strings
-        self.sessions = sorted(str(s) for s in (self.sessions or []) if s is not None)
-        # Normalize n_splits / overlap_sec types
-        self.n_splits = int(self.n_splits or 1)
-        self.overlap_sec = float(self.overlap_sec or 0.0)
-        # Normalize filter_state
-        fs = self.filter_state or {}
-        labels = fs.get('labels', {}) or {}
-        self.filter_state = {
-            'theme': str(fs.get('theme', 'segments')),
-            'labels': {str(k): bool(v) for k, v in labels.items()},
-        }
-        if self.active_duration is None and isinstance(self.t0, (int, float)) and isinstance(self.t1, (int, float)):
-            self.active_duration = self.t1 - self.t0
-        if self.total_time_hours is None and self.active_duration is not None:
-            self.total_time_hours = self.active_duration / 3600.0
+        self.key = key
+        self.t0 = self._coerce_time(t0)
+        self.t1 = self._coerce_time(t1)
+        self.overlap_sec = overlap_sec
+        self.firing_rates = firing_rates
+        self.filter_state = filter_state
+        # effective seconds; fall back to span only when both bounds are numeric
+        if active_duration is None and not (isinstance(self.t0, str) or self.t0 is None
+                                            or isinstance(self.t1, str) or self.t1 is None):
+            active_duration = self.t1 - self.t0
+        self.active_duration = active_duration
 
-    def __eq__(self, other) -> bool:
-        if not isinstance(other, CCGSourceConfig):
-            return NotImplemented
-        return self.matches(other, 'key')
+    @staticmethod
+    def _coerce_time(v):
+        """Pass through None/start/end; else float."""
+        if v is None or (isinstance(v, str) and v.lower() in ('start', 'end')):
+            return v
+        return float(v)
 
-    def windows_to_edge_times(self) -> pd.DataFrame | None:
-        """Pack self.windows (list[Epoch]) into an edge_times DataFrame."""
-        if not self.windows:
-            return None
-        frames = [w._epochs for w in self.windows if hasattr(w, '_epochs')]
-        if not frames:
-            return None
-        et = pd.concat(frames, ignore_index=True)
-        if 'total_time_hours' not in et.columns:
-            dur = (et['stop'] - et['start']) / 3600.0
-            et['total_time_hours'] = dur
-            et['effective_time_hours'] = dur
-        return et
+    @property
+    def name(self) -> str:
+        return self.key.segment
 
-    def _key(self) -> tuple:
-        fs = self.filter_state or {}
-        labels = fs.get('labels', {}) or {}
-        t0_key = str(self.t0) if isinstance(self.t0, str) else float(self.t0)
-        t1_key = str(self.t1) if isinstance(self.t1, str) else float(self.t1)
-        return (str(self.name), t0_key, t1_key,
-                str(fs.get('theme', 'segments')),
-                tuple(sorted((str(k), bool(v)) for k, v in labels.items())))
+    @property
+    def total_time_hours(self) -> float | None:
+        """From ``active_duration`` (not stored separately)."""
+        return None if self.active_duration is None else self.active_duration / 3600.0
 
-    def __hash__(self) -> int:
-        return hash(self._key())
+    def _stem(self) -> str:
+        return f"{_san(self.key.segment)}.{_san(self.key.session)}"
 
-    def save_path(self, suffix='source') -> str:
-        base = os.path.join(self._root, f"project_{self.name}", "ccg", "config",
-                            f"{self.name}_{suffix}")
-        return base
+    def data_dir(self, resolution) -> str:
+        return os.path.join(self._root, 'custom_ccg', 'ccgdata', f"{self._stem()}.{_san(resolution)}")
 
+    def save_path(self) -> str:
+        """Res-independent meta json path (``.json`` appended on save)."""
+        return os.path.join(self._root, 'custom_ccg', 'config', self._stem())
+
+    @staticmethod
+    def stem_to_key(stem: str) -> 'Key':
+        segment, session = stem.split('.')
+        return Key(segment=segment, session=session)
 
     @property
     def t0_sec(self) -> float:
-        """Resolved numeric t0; raises if still a sentinel string."""
+        """Numeric t0; raises if unresolved sentinel."""
         if isinstance(self.t0, str):
             raise ValueError(f"t0='{self.t0}' is unresolved — call resolve(session) first")
         return float(self.t0)
 
     @property
     def t1_sec(self) -> float:
-        """Resolved numeric t1; raises if still a sentinel string."""
+        """Numeric t1; raises if unresolved sentinel."""
         if isinstance(self.t1, str):
             raise ValueError(f"t1='{self.t1}' is unresolved — call resolve(session) first")
         return float(self.t1)
 
-    @classmethod
-    def deserialize(cls, d: dict, *, default_session: str = '') -> 'CCGSourceConfig':
-        return cls(
-            name=str(d.get('name', '')),
-            t0=d.get('t0', 0.0),
-            t1=d.get('t1', 0.0),
-            filter_state=d.get('filter_state', {}),
-            scope=str(d.get('scope', default_session)),
-            created_from_session=str(d.get('created_from_session', default_session)),
-            sessions=d.get('sessions', []),
-            n_splits=d.get('n_splits', 1),
-            overlap_sec=d.get('overlap_sec', 0.0),
-            active_duration=d.get('active_duration'),
-            total_time_hours=d.get('total_time_hours'),
-        )
-
 
 class CCGPointer(HklSavable):
-    """Positional pointer to CCGData locations for significant pairs."""
+    """Indices of significant pairs into ``CCGData``."""
     IGNORED_KEYS = ('conf', '_root', '_ignored_attrs')
 
     def __init__(
@@ -278,7 +306,7 @@ class CCGPointer(HklSavable):
         key,
         inds,
         conf: CCGConfig = None,
-        root: str = DATA_ROOT,
+        root=DATA_ROOT,
     ):
         super().__init__(ignored_attrs=self.IGNORED_KEYS)
         self.key = key
@@ -291,36 +319,35 @@ class CCGPointer(HklSavable):
 
     @property
     def inds(self):
-        return self._inds  # always (n, 3): [seg, ref, tgt]
+        if self._inds.ndim == 2 and self._inds.shape[1] == 2:
+            self._inds = np.column_stack(
+                [np.zeros(len(self._inds), dtype=int), self._inds])
+        return self._inds
 
     @property
-    def inds2(self):
-        return SetOp.unique(self._inds[:, 1:])  # unique (ref, tgt)
+    def pairs(self):
+        return SetOp.unique(self.inds[:, 1:])  # unique (ref, tgt)
+
+    @property
+    def pair_set(self) -> set:
+        """Unique ``(ref, tgt)`` pairs."""
+        return {(int(r), int(t)) for r, t in self.pairs}
 
     @property
     def n_pairs(self):
-        return self.inds2.shape[0]
+        return self.pairs.shape[0]
 
-    def get_segment(self, i: int) -> 'CCGPointer':
-        return CCGPointer(
-            key=self.key.add(segment=i),
-            inds=self._inds[self._inds[:, 0] == i],
-            conf=self.conf,
-            root=self._root,
-        )
-
-    def split(self, n_segments: int) -> list['CCGPointer']:
-        return [self.get_segment(i) for i in range(n_segments)]
+    @staticmethod
+    def _dir_base(root, conf) -> str:
+        """Pointer file stem under project root."""
+        return os.path.join(root, "ccg", "pointers", f"{conf.name}_{conf.resolution}")
 
     def save_path(self) -> str:
-        base = os.path.join(self._root, f"project_{self.conf.name}", "ccg", "pointers",
-                            f"{self.conf.name}_{self.conf.resolution}")
-        return f"{base}_ccgpointers_{self.key.session}"
+        return f"{self._dir_base(self._root, self.conf)}_ccgpointers_{self.key.session}"
 
     @classmethod
     def load(cls, ptr: dict, conf: 'CCGConfig', root: str = DATA_ROOT) -> str:
-        base = os.path.join(root, f"project_{conf.name}", "ccg", "pointers",
-                            f"{conf.name}_{conf.resolution}")
+        base = cls._dir_base(root, conf)
         files = glob.glob(base + '_ccgpointers_*.hkl')
         if not files:
             return 'missing'
@@ -332,7 +359,7 @@ class CCGPointer(HklSavable):
                     if isinstance(p, cls):
                         p.conf = conf
                         p._root = root
-                        ptr[p.key] = p
+                        ptr[p.key.ptr()] = p
             except Exception as exc:
                 print(f"[CCGPointer] skip {f}: {exc}")
         if not ptr:
@@ -347,65 +374,209 @@ class CCGPointer(HklSavable):
                 f"n_pairs={self.n_pairs}, inds={self._inds.shape})")
 
 
-class CCGData(NpzSavable):
-    """CCG arrays [n_seg, n_pair, n_bins] and p-values for one session."""
-    IGNORED_KEYS = ('conf', 'key', '_root', '_ignored_attrs')
-
-    def __init__(self, key, conf, ccg, ccg_null, pval, qval, root: str = DATA_ROOT):
-        super().__init__(ignored_attrs=self.IGNORED_KEYS)
+class _CCGData(NpzSavable):
+    def __init__(self, key, ccg=None, ccg_null=None, pval=None, qval=None, root=DATA_ROOT):
+        super().__init__()
         self.key = key
-        self.conf = conf
-        self._root = root
+        self._root = root  # caller-supplied npy target dir
         self.ccg = ccg
         self.ccg_null = ccg_null
         self.pval = pval
         self.qval = qval
-        self.significant = None
-        # Ensure all arrays are 4D [n_segs, n_neurons, n_neurons, n_bins]
-        for attr in ('ccg', 'ccg_null', 'pval', 'qval'):
-            a = getattr(self, attr, None)
-            if a is not None and hasattr(a, 'ndim') and a.ndim == 3:
-                setattr(self, attr, a[np.newaxis, ...])
+
+    def save(self):
+        super().save(path=self._root)  # writes npy into caller-supplied dir (meta saved by CCGData)
+
+
+class CCGData(NpzSavable):
+    """Session CCG arrays ``[seg, ref, tgt, bin]`` and p-values."""
+    IGNORED_KEYS = ('conf', 'key', '_root', '_ignored_attrs', 'sources')
+
+    def __init__(self, key, conf, ccg=None, ccg_null=None, pval=None, qval=None, root=None):
+        super().__init__(ignored_attrs=self.IGNORED_KEYS)
+        self.key = key
+        self.conf = conf
+        self._root = _Path(root) if root is not None else DATA_ROOT / f'project_{self.conf.name}'
+        self.ccg = ccg
+        self.ccg_null = ccg_null
+        self.pval = pval
+        self.qval = qval
+        self.sources = {}
+        self.pval_corrected = None
+        self.qval_corrected = None
+        self.set_arrays()
+
+    def copy(self) -> 'CCGData':
+        """Deep copy of arrays (safe for in-place transforms)."""
+        c = CCGData(key=self.key, conf=self.conf,
+                    ccg=None if self.ccg is None else self.ccg.copy(),
+                    ccg_null=None if self.ccg_null is None else self.ccg_null.copy(),
+                    pval=None if self.pval is None else self.pval.copy(),
+                    qval=None if self.qval is None else self.qval.copy(),
+                    root=str(self._root))
+        c.sources = dict(self.sources)
+        return c
+
+    def set_arrays(self):
+        """Ensure 4D arrays and refresh multiple-test correction."""
+        for name in ('ccg', 'ccg_null', 'pval', 'qval'):
+            setattr(self, name, CCGData._ensure_4d(getattr(self, name)))
+        self.refresh_corrected()
+
+    def load(self, path=None):
+        super().load(path=path)
+        self.set_arrays()
+        return self
+
+    def refresh_corrected(self):
+        if self.pval is not None: _, self.pval_corrected = _multiple_correction(
+            self.pval, self.conf.alpha, method=self.conf.multiple_correction)
+            
+        if self.qval is not None: _, self.qval_corrected = _multiple_correction(
+            self.qval, self.conf.alpha, method=self.conf.multiple_correction)
+
+    @staticmethod
+    def _ensure_4d(a):
+        return a[np.newaxis, ...] if a is not None and a.ndim == 3 else a
 
     @property
     def n_segment(self):
         return self.ccg.shape[0]
+    
+    @property
+    def n_ref(self):
+        return self.ccg.shape[1]
 
     @property
-    def pval_corrected(self):
-        if self.pval is None or self.conf is None:
-            return None
-        _, pc = _multiple_correction(
-            self.pval, self.conf.alpha, method=self.conf.multiple_correction)
-        return pc
+    def n_tgt(self):
+        return self.ccg.shape[2]
+
+    def _ref_tgt_grid(self):
+        n_ref, n_tgt = self.n_ref, self.n_tgt
+        return np.meshgrid(np.arange(n_ref), np.arange(n_tgt), indexing="ij")
+
+    @property
+    def segment_names(self) -> list:
+        """In-memory segment labels (dim0 stack order); index 0 is whole-session ``all``."""
+        return ['all'] + list(self.sources.keys())
+
+    def has_segment(self, label: str) -> bool:
+        """True if *label* is on dim0 of this array (index 0 'all' is always present)."""
+        if not label or label == 'all':
+            return self.ccg is not None
+        return label in self.segment_names and self.segment_index(label) < self.n_segment
+
+    def segment_index(self, label: str) -> int:
+        """dim0 index of *label*; unknown/'all'/None → 0 (whole session)."""
+        names = self.segment_names
+        return names.index(label) if label in names else 0
+
+    def segment_name(self, idx: int) -> str:
+        """Label at dim0 *idx* (inverse of segment_index)."""
+        return self.segment_names[idx]
+    
+    def attach_segment(self, src: 'CCGSourceConfig', seg: 'CCGData', *, save: bool = True):
+        self.drop_segment(src.name)
+        for attr in ('ccg', 'ccg_null', 'pval', 'qval'):
+            a, b = getattr(self, attr), CCGData._ensure_4d(getattr(seg, attr))
+            if a is not None and b is not None:
+                setattr(self, attr, np.concatenate([a, b[:1]], axis=0))
+        self.sources[src.name] = src
+        self.refresh_corrected()
+        if save:
+            self.save_segment(src.name)
+
+    def save(self):
+        _CCGData(key=self.key,
+                ccg=self.ccg[0],
+                ccg_null=self.ccg_null[0] if self.ccg_null is not None else None,
+                pval=self.pval[0] if self.pval is not None else None,
+                qval=self.qval[0] if self.qval is not None else None,
+                root =self.save_path()
+        ).save()
+
+    def save_segment(self, seg_name: str):
+        seg_idx = self.segment_index(seg_name)
+        src = self._src(seg_name)
+        _CCGData(key=self.key,
+                ccg=self.ccg[seg_idx],
+                ccg_null=self.ccg_null[seg_idx] if self.ccg_null is not None else None,
+                pval=self.pval[seg_idx] if self.pval is not None else None,
+                qval=self.qval[seg_idx] if self.qval is not None else None,
+                root=src.data_dir(self.key.resolution)
+        ).save()
+        src.save()
+
+    def drop_segment(self, seg_name: str):
+        """Drop segment from memory (index 0 is permanent)."""
+        if seg_name not in self.segment_names:  # not attached in this resolution → nothing to drop
+            return
+        i = self.segment_index(seg_name)
+        if i != 0:
+            for _ in ('ccg', 'ccg_null', 'pval', 'qval'):
+                a = getattr(self, _)
+                if a is not None:
+                    setattr(self, _, np.delete(a, i, axis=0))
+            self.sources.pop(seg_name, None)
+
+    def delete_segment(self, seg_name: str):
+        """Remove segment from disk and memory."""
+        src = CCGSourceConfig(key=self.key.change(segment=seg_name))
+        src._root = str(self._root)
+        if seg_name in self.sources:
+            self.drop_segment(seg_name)
+        for res in _CCG_RESOLUTION:
+            shutil.rmtree(src.data_dir(res), ignore_errors=True)
+        _Path(src.save_path() + '.json').unlink(missing_ok=True)
+
+    def load_segment(self, seg_name: str):
+        print("[load_segment]", str(self.key))
+        src = CCGSourceConfig(key=self.key.change(segment=seg_name))
+        src._root = str(self._root)
+        src.load()
+        d = src.data_dir(self.key.resolution)
+        seg = _CCGData(key=self.key, root=str(d))
+        seg.load(path=d)
+        self.attach_segment(src, seg, save=False)
 
     def __str__(self):
         shape = self.ccg.shape if self.ccg is not None else None
         return (f"CCGData(session={getattr(self.key,'session','?')}, "
                 f"resolution={getattr(self.key,'resolution','?')}, shape={shape})")
 
-    def save_path(self, suffix='ccgdata') -> str:
-        res = self.key.resolution or 'lowres'
-        base = os.path.join(self._root, f"project_{self.conf.name}", "ccg", "ccgdata",
-                            f"{self.conf.name}_{res}")
-        return f"{base}_{suffix}_{self.key.session}__{res}"
+    def to_save_name(self):
+        return f"{_san(self.key.session)}.{_san(self.key.resolution)}"
+
+    @staticmethod
+    def from_save_name(name):
+        session, resolution = name.split('.')
+        return Key(session=session, resolution=resolution)
+
+    def save_path(self) -> str:
+        return self._root / 'ccg' / 'ccgdata' / self.to_save_name()
+
+    def _src(self, seg_name) -> 'CCGSourceConfig':
+        """Segment ``CCGSourceConfig`` with project root set."""
+        src = self.sources[seg_name]
+        src._root = str(self._root)
+        return src
+
+    def pair(self, seg_idx: int, ref: int, tgt: int) -> tuple:
+        """Per-bin traces for one pair on one segment."""
+        def sl(a):
+            return None if a is None else a[seg_idx, ref, tgt, :]
+        return (sl(self.ccg), sl(self.ccg_null), sl(self.pval),
+                sl(self.pval_corrected), sl(self.qval))
 
     def mean_ccg(self, ref: int, tgt: int, seg_idx: int) -> float:
         ccg = self.ccg
-        if seg_idx >= ccg.shape[0]:
-            return float(np.mean(ccg[:, ref, tgt, :].sum(axis=0)))
         return float(np.mean(ccg[seg_idx, ref, tgt, :]))
 
     def min_pval(self, ref: int, tgt: int, seg_idx: int) -> float:
         if self.pval is None:
             return 1.0
-        pval = self.pval
         lb, ub = int(self.conf.min_lag_bin), int(self.conf.max_lag_bin)
-        if seg_idx >= pval.shape[0]:
-            arr = pval[:, ref, tgt, :].reshape(-1)
-        else:
-            arr = pval[seg_idx, ref, tgt, :]
-        sl = arr[lb:ub]
+        sl = self.pval[seg_idx, ref, tgt, lb:ub]
         if sl.size == 0:
             return 1.0
         m = float(np.nanmin(sl))
@@ -413,9 +584,9 @@ class CCGData(NpzSavable):
 
 
 class CCGDataset(AnalysisDataset, Cacheable):
-    """CCGs and significance for an experiment. ptr: significant pairs; nd: source neurons."""
+    """Experiment CCG store, pointers, and compute/load API."""
 
-    ccg: dict[CCGData]
+    _ccg: dict[CCGData]
     ptr: dict[CCGPointer] 
     src_conf: CCGSourceConfig
     conf: CCGConfig
@@ -425,98 +596,342 @@ class CCGDataset(AnalysisDataset, Cacheable):
         if conf is None:
             raise ValueError("CCGDataset requires a CCGConfig — conf must not be None")
         super().__init__(conf)
-        self._save_path = save_path  # project folder; anchor for all subcomponent paths
+        self.conf_meta = {
+            'resolution':['lowres', 'highres']
+            }
+        self.save_path = os.path.join(save_path, f"project_{self.conf.name}")
         self.conf._root = save_path
         self.nd = nd
-        self.ccg = {}   # Key(session, resolution) → CCGData
+        self._ccg = {}
         self.ptr = {}
-        self._seg_fr_cache = {}   # (nd_key, starts, stops) → per-segment firing-rate array
         self.src_conf = src_conf
         if self.src_conf is not None:
             self.src_conf._root = save_path
-        self.cache = SessionMemoryCache(self.ccg)
+        self.cache = SessionMemoryCache(self._ccg)
+        self._applied_norm_methods: list[str] | None = None
+        self.conn_strength_config: ConnStrengthConfig | None = None
+        self.conn_strength: dict = {}
         if src_conf is not None:
             return
-        ptr_status = CCGPointer.load(self.ptr, self.conf, root=save_path)
-        if ptr_status in ('missing', 'stale'):
-            self.get_ccg()
-            self._get_ccg_highres()
-        else:
-            self.load()   # ptr loaded → load CCGData arrays from disk
-            if self.load('highres') != 'loaded':
-                self._get_ccg_highres()
+        CCGPointer.load(self.ptr, self.conf, root=self.save_path)
 
-    def ccg_for(self, nd_key, resolution='lowres'):
-        """Return CCGData for session *nd_key* at *resolution* ('lowres'|'highres')."""
-        if nd_key is None:
+    def ccg_for(self, key: Key):
+        """Lazy-load ``CCGData`` for ``key`` (segments on dim0)."""
+        sk = key.cd()
+        data = self._ccg.get(sk)
+        if data is None:
+            self.get_ccg(sk)
+            data = self._ccg.get(sk)
+        if not data.has_segment(key.segment):
+            self._load_segment(key)
+        return data
+
+    def pair_slices(self, key: Key):
+        """Per-pair CCG slices for ``key.segment`` (label resolved against this resolution's array)."""
+        data = self.ccg_for(key)
+        if data is None or data.ccg is None:
             return None
-        k = (nd_key if getattr(nd_key, 'resolution', None) == resolution
-             else nd_key.change(resolution=resolution))
-        return self.ccg.get(k)
-
-    def edge_times_for(self, key) -> pd.DataFrame | None:
-        """Segment timing table from src_conf windows."""
-        if self.src_conf is None:
+        seg = self.segment_index(key, key.segment)
+        if seg >= data.ccg.shape[0]:   # segment not computed at this resolution
             return None
-        return self.src_conf.windows_to_edge_times()
+        return data.pair(seg, key.ref, key.tgt)
 
-    def n_segments_for(self, key) -> int:
-        et = self.edge_times_for(key)
-        return int(et.shape[0]) if et is not None else 0
+    def live_sessions(self) -> set:
+        """Sessions with in-memory ``CCGData``."""
+        return {str(k.session) for k in self._ccg}
 
-    def segment_names_for(self, key) -> list:
-        et = self.edge_times_for(key)
-        if et is None or 'label' not in et.columns:
-            return []
-        return list(et['label'].values)
+    @property
+    def ccg_dir(self):
+        return os.path.join(self.save_path, "ccg", "ccgdata")
 
-    def segment_firing_rates(self, nd_key) -> 'np.ndarray | None':
-        """Per-segment firing-rate table [n_seg, n_neuron] for one session (cached).
-        rate[s, n] = neuron n's spikes within segment s / segment duration. Returns
-        None when segment timing or neurons are unavailable (callers then fall back
-        to the whole-session rate). Cache is keyed by the segment bounds, so a theme
-        change that alters the segments recomputes automatically."""
-        et = self.edge_times_for(nd_key)
-        neurons = self.nd.data.get(nd_key) if self.nd is not None else None
-        if et is None or neurons is None:
-            return None
-        starts = tuple(float(s) for s in et['start'].values)
-        stops  = tuple(float(s) for s in et['stop'].values)
-        sig = (nd_key, starts, stops)
-        cached = self._seg_fr_cache.get(sig)
-        if cached is not None:
-            return cached
-        fr = np.zeros((len(starts), neurons.n_neurons), dtype=float)
-        for i, (t0, t1) in enumerate(zip(starts, stops)):
-            fr[i] = neurons.time_slice(t0, t1).firing_rate
-        self._seg_fr_cache[sig] = fr
-        return fr
+    def check_file_integrity(self, file_path):
+        pass
 
-    def _try_load_cached(self, conv, nd_key=None) -> bool:
-        """Load CCGData + pointers from disk. Returns True if fully loaded."""
-        if self.load(nd_key=nd_key) != 'loaded':
+    def _list_dir(self, dir, decode):
+        out = []
+        for d in glob.glob(os.path.join(dir, '*')):
+            if os.path.isdir(d):
+                out.append(decode(os.path.basename(d)))
+        return out
+
+    @property
+    def data_root(self):
+        """Parent of all ``project_*`` dirs (dataset-family root)."""
+        return os.path.dirname(self.save_path)
+
+    @property
+    def selections_dir(self):
+        return os.path.join(self.save_path, "selections")
+
+    @property
+    def stats_results_dir(self):
+        return os.path.join(self.save_path, "stats_results")
+
+    @property
+    def custom_dir(self):
+        return os.path.join(self.save_path, "custom_ccg")
+
+    @property
+    def custom_config_dir(self):
+        return os.path.join(self.custom_dir, "config")
+
+    @property
+    def custom_data_dir(self):
+        return os.path.join(self.custom_dir, "ccgdata")
+
+    def saved_sessions(self):
+        return self._list_dir(self.ccg_dir, CCGData.from_save_name)
+
+    def saved_customs(self):
+        """Custom segment keys from on-disk meta json."""
+        stems = [_Path(f).stem for f in glob.glob(os.path.join(self.custom_config_dir, '*.json'))]
+        return [CCGSourceConfig.stem_to_key(s) for s in stems]
+        
+    def by_session(self, session) -> dict:
+        """In-memory ``CCGData`` for one session, keyed by ``Key``."""
+        return {k: v for k, v in self._ccg.items() if str(k.session) == str(session)}
+
+    def by_resolution(self, resolution) -> dict:
+        """In-memory ``CCGData`` at one resolution."""
+        return {k: v for k, v in self._ccg.items() if k.resolution == resolution}
+
+    def by_segment(self, segment) -> dict:
+        """In-memory ``CCGData`` with matching segment label."""
+        return {k: v for k, v in self._ccg.items() if k.segment == segment}
+
+    def available_resolutions(self) -> list:
+        """Resolutions available in memory or on disk."""
+        return self.conf_meta['resolution']
+    
+    @property
+    def available_sessions(self) -> set:
+        """All sessions in memory or on disk."""
+        return self.live_sessions() | self.saved_sessions()
+
+    def check_all_sessions_have_all_resolutions(self, sessions=None) -> dict:
+        """``{session: [missing resolutions]}``."""
+        if sessions is None:
+            sessions = self.available_sessions
+        gaps = {}
+        for s in sessions:
+            missing = []
+            for res in self.available_resolutions():
+                key = Key(session=s, resolution=res)
+                probe = CCGData(key=key, conf=self.conf.at(res), ccg=None, ccg_null=None,
+                                pval=None, qval=None, root=self.save_path)
+                if key not in self._ccg and not probe.is_saved:
+                    missing.append(res)
+            if missing:
+                gaps[s] = missing
+        return gaps
+
+    @property
+    def applied_norm_methods(self) -> list[str] | None:
+        return self._applied_norm_methods
+
+    def apply_ccg_transform_for(self, key, active_norms):
+        data = self.ccg_for(key).copy()
+        if not active_norms:
+            return data.ccg, data.ccg_null
+        neurons = self.nd.neurons_for(key)
+        refs, tgts = data._ref_tgt_grid()
+        data.ccg = data.ccg.astype(float)          # norms yield fractions; int counts would truncate
+        data.ccg_null = data.ccg_null.astype(float)
+        for seg, label in enumerate(data.segment_names):
+            data.ccg[seg], data.ccg_null[seg] = CCGNorm.apply(
+                data.ccg[seg], data.ccg_null[seg], refs, tgts, active_norms, neurons,
+                custom_time_hours=self.time_hours_for(key, label))
+        return data.ccg, data.ccg_null
+
+    # PATCH: 'all' has no CCGSourceConfig, so it falls back to session extent — seg 0 should carry its own
+    def time_hours_for(self, key, label) -> float | None:
+        """Recording hours for a segment — TIME norm divisor."""
+        src = self.source_config(key, label)
+        if src is not None and src.total_time_hours is not None:
+            return float(src.total_time_hours)
+        neurons = self.nd.neurons_for(key)
+        return (float(neurons.t_stop) - float(neurons.t_start)) / 3600.0
+
+    def apply_ccg_transform(self, active_norms):
+        out = copy.deepcopy(self)
+        for key, data in out._ccg.items():
+            data.ccg, data.ccg_null = out.apply_ccg_transform_for(key, active_norms)
+        return out
+
+    def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig) -> np.ndarray:
+        """Connection-strength grid ``[seg, ref, tgt]`` after norms — batch call of the per-pair chain."""
+        data = self.ccg_for(key)
+        refs, tgts = data._ref_tgt_grid()
+        seg = self.segment_index(key, key.segment)
+        return ConnectionStrength.compute(
+            data.ccg[seg], data.ccg_null[seg], refs, tgts, data.conf,
+            metric=cfg.cs_metric, method=cfg.baseline_method, active_norms=active_norms,
+            neurons=self.nd.neurons_for(key),
+            custom_time_hours=self.time_hours_for(key, key.segment),
+            excitability=key.excitability)
+
+    def available_segments(self, key=None):
+        """Computed segment labels on disk (ccgdata); ``key=None`` → project-wide, else that session."""
+        keys = self._list_dir(self.custom_data_dir,
+                              lambda b: CCGSourceConfig.stem_to_key(b.rsplit('.', 1)[0]))
+        names = ['all']
+        for sk in keys:
+            nm = str(sk.segment)
+            if (key is None or str(sk.session) == str(key.session)) and nm not in names:
+                names.append(nm)
+        return names
+
+    def segment_names(self, key) -> list:
+        """In-memory segment labels (dim0 stack order) for *key*'s session."""
+        return self.ccg_for(key).segment_names
+
+    def n_segments(self, key) -> int:
+        return self.ccg_for(key).n_segment
+
+    def segment_index(self, key, label) -> int:
+        data = self.ccg_for(key)
+        if label and label != 'all' and label not in data.segment_names \
+                and label in self.available_segments(key):
+            self._load_segment(key.change(segment=label))
+        return data.segment_index(label)
+
+    def segment_name(self, key, idx) -> str:
+        return self.ccg_for(key).segment_name(idx)
+
+    def source_config(self, key, label) -> 'CCGSourceConfig | None':
+        return self.ccg_for(key).sources.get(label)
+
+    def check_segment_integrity(self, key, label) -> dict:
+        """TODO: per-resolution npy completeness for a segment."""
+        raise NotImplementedError
+
+    def ccg_config_relpath(self, key) -> str:
+        """TODO: project-relative ``CCGConfig`` path for segment meta."""
+        raise NotImplementedError
+
+    def save_batch_request(self, request: 'CCGBatchRequest', kind: str = 'suggest') -> None:
+        """TODO: persist batch request (`suggest` capped list or `history` log)."""
+        raise NotImplementedError
+
+    def list_batch_requests(self, kind: str = 'suggest') -> list:
+        """TODO: load batch requests (newest first)."""
+        raise NotImplementedError
+
+    def delete_batch_request(self, request: 'CCGBatchRequest') -> None:
+        """TODO: remove one saved batch request."""
+        raise NotImplementedError
+
+    def _request_sessions(self, spec: 'CCGBatchRequest') -> list:
+        """Sessions targeted by ``spec``: the explicit picker list, else ``scope``."""
+        # every session nd knows (not just those already on disk — missing ones lazy-compute)
+        all_sess = sorted(str(k.session) for k in self.nd.session_keys())
+        want = {str(s) for s in (spec.sessions or []) if str(s).lower() != 'all'}
+        if want:
+            return [s for s in all_sess if s in want]
+        return all_sess if str(spec.scope).lower() == 'all' else [str(spec.scope)]
+
+    def parse_ccg_batch_request(self, spec: 'CCGBatchRequest') -> tuple:
+        """Expand batch request → ``(work, skipped)`` segment configs."""
+        from neuropy.core.intervals import IntervalOp
+        work, skipped = [], []
+        for sess in self._request_sessions(spec):
+            key = Key(session=str(sess))
+            # resolve window against this session's bounds
+            t0, t1 = self.nd.resolve_time(key, spec.t0), self.nd.resolve_time(key, spec.t1)
+            t_start, t_end = self.nd.session_bounds(key)
+            if not (t_start <= t0 < t1 <= t_end):
+                skipped.append((sess, f"window {t0:.0f}–{t1:.0f}s outside session {t_end:.0f}s"))
+                continue
+            # per-session overlap ('%' needs window length)
+            overlap = CCGBatchRequest.resolve_overlap_sec(t0, t1, spec.overlap_raw, spec.overlap_unit)
+            before = len(work)
+            n, name, fs = max(1, spec.n_splits), str(spec.name), list(spec.filter_state)
+            if spec.split_mode == 'equal_effective':  # cut the active-time axis, not the real-time axis
+                active, _ = self.nd.resolve_intervals(key, t0, t1, fs)
+                chunks = IntervalOp.partition_effective(active, n, name) if active else []
+            else:
+                chunks = IntervalOp.partition(t0, t1, n, overlap, name)
+            for c0, c1, cname in chunks:  # keep chunks that have real active intervals
+                src = CCGSourceConfig(key=key.change(segment=cname), t0=c0, t1=c1,
+                                      overlap_sec=overlap, filter_state=fs)
+                intervals, active_dur = self.nd.resolve_intervals(src.key, src.t0, src.t1, src.filter_state)
+                if intervals or active_dur:
+                    src.active_duration = active_dur
+                    work.append(src)
+            if len(work) == before:
+                names = '∩'.join(t['name'] for t in fs)
+                skipped.append((sess, f"no '{names}' overlap"))
+        return work, skipped
+
+    def compute_segment(self, key, src: 'CCGSourceConfig', neurons_slice) -> 'CCGData':
+        """Compute one segment from pre-sliced neurons (no ``cd`` mutation)."""
+        return self._compute_ccg_data(key, neurons_slice, np.arange(neurons_slice.n_neurons),
+                                      self.conf.at(key.resolution))
+
+    def attach_segment(self, key, src: 'CCGSourceConfig', seg: 'CCGData'):
+        """Append computed segment to session dim0 (main thread)."""
+        data = self.ccg_for(key.cd())   # base array; key.segment is what we are attaching
+        data.attach_segment(src, seg)
+
+    def _drop_segment(self, key) -> None:
+        self.ccg_for(key.cd()).drop_segment(key.segment)   # base array; drop_segment no-ops if absent
+
+    def drop_segment(self, keys, resolutions=None) -> None:
+        for key in keys:
+            for res in resolutions or self.available_resolutions():
+                self._drop_segment(key.change(resolution=res))
+
+    def _load_segment(self, key) -> None:
+        """Load ``key.segment`` at ``key.resolution``; compute it when that resolution has no data."""
+        data = self.ccg_for(key.cd())   # cd() drops segment → no recursion into this method
+        try:
+            data.load_segment(key.segment)
+        except FileNotFoundError:
+            src = CCGSourceConfig(key=key)
+            src._root = self.save_path
+            src.load()
+            neurons_slice, _ = self.nd.sliced_neurons_for(src)
+            data.attach_segment(src, self.compute_segment(key, src, neurons_slice))
+
+    def load_segment(self, keys, resolutions=None) -> None:
+        for key in keys:
+            for res in resolutions or self.available_resolutions():
+                self._load_segment(key.change(resolution=res))
+
+    def _delete_segment(self, key) -> None:
+        self.ccg_for(key).delete_segment(key.segment)
+
+    def delete_segment(self, keys, resolutions=None) -> None:
+        """Remove segment on disk across resolutions (main thread)."""
+        for key in keys:
+            for res in resolutions or self.available_resolutions():
+                self._delete_segment(key.change(resolution=res))
+
+    def _try_load_cached(self, conv, key=None) -> bool:
+        """Load cached CCG + pointers; True if complete."""
+        if self.load(key) != 'loaded':
             return False
-        if CCGPointer.load(self.ptr, self.conf, root=self._save_path) == 'loaded':
-            for k in self.ccg:
+        if CCGPointer.load(self.ptr, self.conf, root=self.save_path) == 'loaded':
+            for k in self._ccg:
                 self.cache.touch(k)
             return True
         print("[CCGDataset] re-running significance detection.")
-        for k, cd in self.ccg.items():
+        for k, cd in self._ccg.items():
             self._rerun_significance(k, cd, conv)
         self._save_pointers()
         self.conf.save()
-        for k in self.ccg:
+        for k in self._ccg:
             self.cache.touch(k)
         return True
 
     def _missing_keys(self, keys: list, resolution: str) -> list:
-        """Load from disk for each key; return keys not found in cache."""
+        """Try disk load per key; return keys still missing."""
         missing = []
         for k in keys:
             rk = k.change(resolution=resolution)
-            if rk in self.ccg:
+            if rk in self._ccg:
                 self.cache.touch(rk)
-            elif self.load(resolution, nd_key=k) == 'loaded':
+            elif self.load(k.change(resolution=resolution)) == 'loaded':
                 self.cache.touch(rk)
             else:
                 missing.append(k)
@@ -524,7 +939,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
 
     def _compute_ccg_data(self, key, neurons, neuron_inds, conf,
                           start_end_times=None) -> 'CCGData':
-        """Compute CCG + convolution baseline. Returns CCGData (not yet stored)."""
+        """Compute CCG + baseline; result not stored on ``cd``."""
         print(f"[CCGDataset] {key.session} {key.resolution} "
               f"bin={conf.bin_size*1e3:.2f}ms …", flush=True)
         ccg = correlations.spike_correlations(
@@ -533,92 +948,66 @@ class CCGDataset(AnalysisDataset, Cacheable):
             use_acceleration=conf.use_acceleration, symmetrize=conf.symmetrize_ccg,
             start_end_times=start_end_times,
         )
+        if ccg.ndim == 3:  # 'all' mode (no segments) → add n_seg axis; CCGData is 4D [seg,ref,tgt,bin]
+            ccg = ccg[None]
         pvals, pred, qvals = EranConv._conv(
             ccg, W=conf.conv_window / conf.bin_size, wintype="gauss", hollow_frac=None)
         print(f"[CCGDataset]   → shape {ccg.shape}")
         return CCGData(key=key, conf=conf, ccg=ccg, ccg_null=pred,
-                       pval=pvals, qval=qvals, root=self._save_path)
+                       pval=pvals, qval=qvals, root=self.save_path)
 
-    def get_ccg(self, nd_key=None, use_segments=True, resolution='lowres'):
-        """Load or compute CCGs for one or all sessions."""
-        if resolution == 'highres':
-            self._get_ccg_highres(nd_key)
-            return
-
+    def get_ccg(self, key=None):
+        """Load or compute whole-session CCG (seg0 ``full``); auto-save."""
+        resolution = key.resolution if key is not None else 'lowres'
+        highres = resolution == 'highres'
+        conf = self.conf.at(resolution)
         conv = EranConv(self.conf)
-        et = self.src_conf.windows_to_edge_times() if self.src_conf else None
-        keys = [nd_key] if nd_key is not None else list(self.nd.data.keys())
+        et = None
+        keys = [key] if key is not None else self.nd.session_keys()
 
-        if self._try_load_cached(conv, nd_key=nd_key):
+        if not highres and self._try_load_cached(conv, key=key):
             return
-
-        missing = self._missing_keys(keys, 'lowres')
+        missing = self._missing_keys(keys, resolution)
         if not missing:
             return
-        for key in missing:
-            self._compute_and_store(key=key, conv=conv, edge_times=et, use_segments=use_segments)
-        self.save()
-        self._save_pointers()
-        self.conf.save()
-        for k in self.ccg:
+
+        computed = []
+        for k in missing:
+            if highres:
+                nd = self.nd.neurons_for(k)
+                hi_key = k.change(resolution='highres')
+                _set = et[['start', 'stop']].values.T if et is not None else None
+                self._ccg[hi_key] = self._compute_ccg_data(
+                    hi_key, nd, np.arange(nd.n_neurons), conf, start_end_times=_set)
+                self._rerun_significance(hi_key, self._ccg[hi_key], conv=None, skip_ptr=True)
+                self.cache.touch(hi_key)
+                computed.append(hi_key)
+            else:
+                self._compute_and_store(key=k, conv=conv, edge_times=et)
+                computed.append(k)
+
+        self.save(keys=computed)
+        if not highres:
+            for sess in {str(k.session) for k in missing}:
+                self._save_pointers(session=sess)
+        for k in self._ccg:
             self.cache.touch(k)
 
-    def _get_ccg_highres(self, nd_key=None) -> None:
-        conf = self.conf.copy(bin_size=_CCG_RESOLUTION['highres'], resolution='highres',
-                              conv_window=1e-4)
-        keys = [nd_key] if nd_key else list(self.nd.data.keys())
-        missing = self._missing_keys(keys, 'highres')
-        if not missing:
-            return
-        et = self.src_conf.windows_to_edge_times() if self.src_conf else None
-        _set = et[['start', 'stop']].values.T if et is not None else None
-        for k in missing:
-            hi_key = k.change(resolution='highres')
-            self.ccg[hi_key] = self._compute_ccg_data(
-                hi_key, self.nd.data[k], np.arange(self.nd.data[k].n_neurons),
-                conf, start_end_times=_set)
-            self._rerun_significance(hi_key, self.ccg[hi_key], conv=None, skip_ptr=True)
-            self.cache.touch(hi_key)
-        self.save('highres')
-        print(f"[get_ccg] highres done — {len(missing)} session(s), "
-              f"{conf.bin_size*1e3:.2f} ms bins.")
-
-    def get_ccg_custom(self, neurons_slice, *, has_highres: bool = False,
-                       excitability: str = 'E') -> None:
-        """Run CCG for self.src_conf time window; populate self.ccg with lo (and hi) CCGData."""
-        src = self.src_conf
-        n_neurons = neurons_slice.n_neurons
-        neuron_inds = np.arange(n_neurons)
-        conf = self.conf
-
-        active = src.active_duration or (src.t1_sec - src.t0_sec)
-        src.firing_rates = np.array(
-            [len(st) for st in neurons_slice.spiketrains], dtype=float
-        ) / max(active, 1e-9)
-        for resolution, bin_size in _CCG_RESOLUTION.items():
-            if resolution == 'highres' and not has_highres:
-                continue
-            k = Key(session=src.name, resolution=resolution)
-            cd = self._compute_ccg_data(k, neurons_slice, neuron_inds,
-                                        conf.copy(bin_size=bin_size, resolution=resolution))
-            if excitability != 'E':
-                cd.pval, cd.qval = cd.qval, None
-            self.ccg[k] = cd
-
-    def find(self, query: str):
-        """Return the key of the first CCGPointer whose session matches *query*.
-        Matching is case-insensitive and ignores underscores/spaces.
-        Pass the returned key directly to
-        launch_ccg_review(cd, cd.find("RatUDay2"))
-        """
-        q = query.replace('_', '').replace(' ', '').lower()
-        # Collect all full keys from cd.ptr whose session matches
-        matches = [
-            k for k in self.ptr.keys()
-            if k.session and q in k.session.replace('_', '').replace(' ', '').lower()
-        ]
-        if not matches:
-            raise KeyError(f"No CCG session matching {query!r}")
+    def find(self, query: str, *, type_label: str = '', strict: bool = True):
+        """First ``Key`` matching ``query`` session; ``type_label`` pins conn type; ``strict=False`` returns None instead of raising."""
+        if query is None:                             # only saved-restore passes None
+            return None
+        if not (matches := [                          # '' matches every session → first key
+                k for k in self.ptr.keys()
+                if k.session and query.replace('_', '').replace(' ', '').lower()
+                in k.session.replace('_', '').replace(' ', '').lower()]):
+            if strict:
+                raise KeyError(f"No CCG session matching {query!r}")
+            return None
+        if type_label:
+            hit = next((k for k in matches if k.type_label() == type_label), None)
+            if hit is not None:
+                return hit
         for ei, ct in self.conf.conn_types:
             hit = next((k for k in matches if k.excitability == ei and tuple(k.conn_type or ()) == tuple(ct)), None)
             if hit is not None:
@@ -626,8 +1015,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
         return matches[0]
 
     def _summary(self, key) -> str:
-        """Per-session pair-count table logged after compute or cache hit."""
-        neurons = self.nd.data[key.nd()]
+        """Log line: significant pair counts for a session."""
+        neurons = self.nd.neurons_for(key)
         nd_attrs = {f: getattr(key, f) for f in key.__dataclass_fields__
                     if getattr(key, f) is not None}
 
@@ -656,11 +1045,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         return s + printstr
 
     def _rerun_significance(self, nd_key, ccg_data, conv, skip_ptr=False):
-        """Run EranConv significance detection on already-loaded CCGData.
-
-        skip_ptr=True: skip pointer building (used for highres where bin_size is
-        inferred from array shape and ptr tracking is not needed).
-        """
+        """Re-run EranConv on loaded data; ``skip_ptr`` for highres."""
         conf = ccg_data.conf
         ccg = ccg_data.ccg
         n_bins = ccg.shape[-1]
@@ -674,125 +1059,108 @@ class CCGDataset(AnalysisDataset, Cacheable):
             ccg_data.ccg_null = pred
             ccg_data.pval = pvals
             ccg_data.qval = qvals
+            ccg_data.set_arrays()
             n_sig = int(sig.any(axis=-1).sum()) if sig is not None else 0
             print(f"[EranConv] {nd_key} shape={ccg.shape} W={W} → {n_sig} sig pair-segs")
             return
 
-        neurons = self.nd.data[nd_key]
-        edge_times = self.edge_times_for(nd_key)
+        neurons = self.nd.neurons_for(nd_key)
         pvals, pred, qvals, (inds_E, inds_I), printstr = conv.eranconv(
-            neurons_key=nd_key, ccg=ccg, edge_times=edge_times,
+            neurons_key=nd_key, ccg=ccg, edge_times=None,
             neuron_type=neurons.neuron_type, conf=self.conf)
         ccg_data.ccg_null = pred
         ccg_data.pval = pvals
         ccg_data.qval = qvals
-        ccg_data.significant = conv.significant
+        ccg_data.set_arrays()
         self._attr_append(nd_key, self._build_ptrs(nd_key, inds_E, inds_I), 'ptr')
         print(printstr)
 
     def _build_ptrs(self, key, inds_E: dict, inds_I: dict) -> dict:
-        """Build CCGPointer dict from raw inds returned by eranconv."""
+        """Build ``CCGPointer`` dict from eranconv index maps."""
         ptrs = {}
         for EI, inds_map in (('E', inds_E), ('I', inds_I)):
             for conn_type, inds in inds_map.items():
                 ccg_key = key.add(conn_type=conn_type, excitability=EI)
-                ptrs[ccg_key] = CCGPointer(key=ccg_key, conf=self.conf,
-                                           inds=inds, root=self._save_path)
+                ptrs[ccg_key.ptr()] = CCGPointer(key=ccg_key, conf=self.conf,
+                                                 inds=inds, root=self.save_path)
         return ptrs
 
-    def _compute_and_store(self, key, conv, edge_times, use_segments=True):
-        """
-        Run CCG and generate a convolution-based baseline for all neurons in my NeuronsDataset.
-        Run significance tests.
-        Store results in objects:
-            self.ccg
-            self.ptr
-
-        Params
-        -----
-        ccg_config: Parameters for CCG, contains all configurations
-        nd: Neurons dataset, contains all input data
-        """
+    def _compute_and_store(self, key, conv, edge_times):
+        """Compute CCG, significance, and store in ``self._ccg`` / ``self.ptr``."""
         print("EranConv significant pairs")
 
-        neurons = self.nd.data[key.nd()]
+        neurons = self.nd.neurons_for(key)
+        conf = self.conf.at(key.resolution)
 
-        _set = (edge_times[['start', 'stop']].values.T
-                if (use_segments and edge_times is not None) else None)
         ccg = correlations.spike_correlations(
             neurons=neurons,
             neuron_inds=np.arange(neurons.n_neurons),  # all
-            bin_size=self.conf.bin_size,
-            window_size=self.conf.duration,
-            use_acceleration=self.conf.use_acceleration,
-            symmetrize=self.conf.symmetrize_ccg,
-            start_end_times=_set,
+            bin_size=conf.bin_size,
+            window_size=conf.duration,
+            use_acceleration=conf.use_acceleration,
+            symmetrize=conf.symmetrize_ccg,
+            start_end_times=edge_times,
         )
+        if ccg.ndim == 3:  # 'all' mode (no segments) → add n_seg axis; CCGData is 4D [seg,ref,tgt,bin]
+            ccg = ccg[None]
 
         pvals, pred, qvals, (inds_E, inds_I), printstr = conv.eranconv(
             neurons_key=key, ccg=ccg, edge_times=edge_times,
-            neuron_type=neurons.neuron_type, conf=self.conf)
+            neuron_type=neurons.neuron_type, conf=conf)
 
         ccg_data = CCGData(
-            key=key, conf=self.conf,
+            key=key, conf=conf,
             ccg=ccg, ccg_null=pred,
             pval=pvals, qval=qvals,
-            root=self._save_path,
+            root=self.save_path,
         )
-        ccg_data.significant = conv.significant
 
-        self.ccg[key] = ccg_data
+        self._ccg[key] = ccg_data
         self._attr_append(key, self._build_ptrs(key, inds_E, inds_I), 'ptr')
 
         print(self._summary(key))
 
     def save_path(self, suffix='') -> str:
-        """Project folder; subcomponent paths anchored here."""
+        """Project data root for save/load paths."""
         return self.conf.save_path(suffix=suffix)
 
-    def _save_pointers(self) -> None:
+    def _save_pointers(self, session=None) -> None:
         if not self.ptr:
             print("[CCGDataset] no pointers to save.")
             return
         by_sess: dict = defaultdict(dict)
         for p in self.ptr.values():
-            by_sess[p.key.session][str(p.key)] = p
-        base = os.path.join(self._save_path, f"project_{self.conf.name}", "ccg", "pointers",
-                            f"{self.conf.name}_{self.conf.resolution}")
+            if session is None or str(p.key.session) == str(session):
+                by_sess[p.key.session][str(p.key)] = p
         for sess, bundle in by_sess.items():
-            path = f"{base}_{sess}.hkl"
+            path = next(iter(bundle.values())).save_path() + '.hkl'
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             hkl.dump(bundle, path)
         print(f"[CCGDataset] saved {len(self.ptr)} pointers in {len(by_sess)} session file(s)")
 
-    def save(self, resolution: str = 'lowres') -> None:
-        target = {k: v for k, v in self.ccg.items() if k.resolution == resolution}
-        if not target:
-            print(f"[CCGDataset] {resolution}: nothing to save.")
-            return
-        for cd in target.values():
-            cd.save()
-        if resolution == 'lowres':
-            self.conf.save()
-        print(f"[CCGDataset] {resolution} saved ({len(target)} session(s))")
+    def save(self, keys=None) -> None:
+        """Save in-memory ``CCGData`` (all or ``keys``)."""
+        for k in (list(self._ccg) if keys is None else list(keys)):
+            self._ccg[k].save()
+        self.conf.save()
 
-    def load(self, resolution: str = 'lowres', nd_key=None) -> str:
-        """Load CCGData from disk. Returns loaded|missing|stale."""
-        keys = [nd_key] if nd_key else (list(self.nd.data.keys()) if self.nd else [])
+    def load(self, key: Key = None) -> str:
+        """Load from disk; returns ``loaded`` | ``missing`` | ``stale``."""
+        resolution = key.resolution if key is not None else 'lowres'
+        keys = [key] if key is not None else (self.nd.session_keys() if self.nd else [])
         if not keys:
             return 'missing'
         loaded = 0
         for sk in keys:
             load_key = sk.change(resolution=resolution)
-            cd = CCGData(key=load_key, conf=self.conf,
+            cd = CCGData(key=load_key, conf=self.conf.at(resolution),
                          ccg=None, ccg_null=None, pval=None, qval=None,
-                         root=self._save_path)
-            path = cd.save_path() + '.npz'
-            if not os.path.isfile(path):
+                         root=self.save_path)
+            if not os.path.isdir(cd.save_path()):     # unit dir of memmapped .npy
                 continue
             try:
                 cd.load()
-                self.ccg[load_key] = cd
+                self._ccg[load_key] = cd
                 self.cache.touch(load_key)
                 loaded += 1
             except Exception as exc:
@@ -803,7 +1171,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
 
 
 def _multiple_correction(pvals: np.ndarray, alpha: float, method: str = 'bonferroni') -> tuple:
-    """Correct p-values over bins per (seg,ref,tgt) triple. Returns (sig_bool, p_correct)."""
+    """Multiple-test correction over lag bins; returns ``(sig, p_correct)``."""
     if method == 'bonferroni':
         corrected = np.minimum(pvals * pvals.shape[-1], 1.0)
         return corrected <= alpha, corrected
@@ -817,7 +1185,7 @@ def _multiple_correction(pvals: np.ndarray, alpha: float, method: str = 'bonferr
 
 
 class EranConv:
-    """Runs EranConv convolution-based significance detection."""
+    """Convolution baseline significance (Stark & Abeles 2009)."""
 
     def __init__(self, conf):
         self._pvals = []
@@ -827,35 +1195,7 @@ class EranConv:
 
     @staticmethod
     def _conv(ccg, W=5, wintype="gauss", hollow_frac=None):
-        """
-        Estimate chance-level correlations using convolution method from Stark and Abeles (2009, J. Neuro Methods).
-        Referencing MATLAB script EranConv.m written by the authors
-
-        Parameters
-        ----------
-        ccg: np.array. 
-            1D or 2D. (CCGs in columns)
-            If 2D, elements in the first dimension are individual ccgs and second dimension are bins.
-        W: 
-            defines the width (unit: ms) of the convolution window, should be same as size of jitter window if were to use one
-            `gauss`: W is standard deviation (sigma). Total window length will be 
-            `rect`: Half size of window = W, total length is always odd
-            `triang`: Window length is W rounded up to the nearest odd number
-
-        wintype: ["gauss", "rect", "triang"]
-            Type of convolution window.
-            `gauss`: Gaussian kernel
-            `rect`: rectangular kernel
-            `triang`: triangular kernel
-
-        hollow_frac: weight of the current bin
-        
-        Returns
-        -------
-        pvals: p-values (bin-wise)
-        pred: predictor (expected values) 
-        qvals: p-values (bin-wise) for inhibition
-        """
+        """Hollow convolution baseline; returns ``pvals``, ``pred``, ``qvals``."""
         if len(ccg.shape) == 1:
             ccg = ccg[np.newaxis, ...]
 
@@ -903,21 +1243,14 @@ class EranConv:
         min_bin = self.conf.min_spkcnt_bin
         max_bin = self.conf.max_spkcnt_bin
         threshold = self.conf.min_spkcount
-        # Use mean across the spkcount window so that a hollow center bin
-        # (zero spike count at lag=0) doesn't discard the whole pair.
-        # Previously used .all(axis=-1) which required EVERY bin >= threshold.
+        # Mean spike count in lag window (center bin may be zero).
         pair_inds = np.argwhere(
             ccg[..., min_bin:max_bin].mean(axis=-1) >= threshold)
         # NOTE right now it's the same criteria for excitation/inhibition
         return pair_inds
 
     def significance_mask(self, p, excitability):
-        """Return pair indices with significant CCG peaks.
-
-        Excitatory (E): a bin in [min_lag, max_lag) must survive MC correction.
-        Inhibitory (I): a surviving bin must have a surviving neighbour at the
-        looser ``alpha2`` threshold (ensures trough, not just noise).
-        """
+        """Pair indices with significant peaks (E: lag window; I: trough + neighbor)."""
         conf = self.conf
         method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
 
@@ -934,7 +1267,8 @@ class EranConv:
             pair_inds = np.argwhere(neighbor.any(-1))
         else:
             raise ValueError(f"Unknown excitability: {excitability!r}")
-        return pair_inds
+        # remove autocorrelations
+        return pair_inds[pair_inds[:, -2] != pair_inds[:, -1]]
 
     def _cell_type_mask(self, pair_inds, neuron_type, conn_types):
         if pair_inds.ndim == 1:
@@ -945,7 +1279,6 @@ class EranConv:
                 sig_pairs[ct] = None
             return sig_pairs
 
-        # Condition 3: Ref/Target are specific cell types
         for ct in conn_types:
             inds = np.where(
                 np.isin(pair_inds[:, -2], np.where(neuron_type == ct[0])) &
@@ -961,10 +1294,7 @@ class EranConv:
         neuron_type,
         conf: CCGConfig,
     ):
-        """
-        Main function for CCG computatinon
-        Call from CCGDataset
-        """
+        """Full EranConv pass for one neurons key."""
         print("running eranconv (1st pass)")
         key = neurons_key
         self.conf = conf
@@ -992,7 +1322,6 @@ class EranConv:
         rough_inds_E, inds_E = build_inds(pvals, 'E', conf.conn_types_E)
         rough_inds_I, inds_I = build_inds(qvals, 'I', conf.conn_types_I)
 
-        # Record a global map of significant pairs
         self.significant = np.zeros(ccg.shape[:3], dtype=bool)
         for inds in [inds_E, inds_I]:
             if inds is None:
@@ -1002,14 +1331,6 @@ class EranConv:
                     continue
                 self.significant[tuple(v.T)] = True
 
-        # Force CCG to be 4D
-        if ccg.ndim == 3:
-            ccg = ccg[None]
-            pred = pred[None]
-            for attr in ("_pvals", "_qvals"):
-                setattr(self, attr, getattr(self, attr)[None])
-
-        # Build printstr using raw inds (no CCGPointer created here)
         printstr = ''
         for i, (_, edge_time) in enumerate(edge_times.iterrows()):
             N_totalE = int((rough_inds_E[:, 0] == i).sum())
@@ -1022,6 +1343,5 @@ class EranConv:
             printstr += '\n'
 
         print("eranconv done")
-        # Return raw inds dicts; CCGDataset builds CCGPointers with its root
         return pvals, pred, qvals, (inds_E, inds_I), printstr
 

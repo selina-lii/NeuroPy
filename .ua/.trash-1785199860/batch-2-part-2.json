@@ -1,0 +1,692 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/analyses/spike_attribution.py",
+   "type": "file",
+   "name": "spike_attribution.py",
+   "filePath": "neuropy/analyses/spike_attribution.py",
+   "summary": "Spike attribution helpers：给定 CCG lag bin，找出实际贡献该 bin 的 ref/tgt spike 对。",
+   "tags": [
+    "utility",
+    "spike-analysis",
+    "attribution",
+    "ccg"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/spike_attribution.py:compute_spike_pairs",
+   "type": "function",
+   "name": "compute_spike_pairs",
+   "filePath": "neuropy/analyses/spike_attribution.py",
+   "lineRange": [
+    24,
+    50
+   ],
+   "summary": "在给定 lag 窗口内配对 ref/tgt spike，返回贡献该 CCG bin 的 spike 索引。",
+   "tags": [
+    "spike-analysis",
+    "attribution"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/spike_attribution.py:find_spike_pairs",
+   "type": "function",
+   "name": "find_spike_pairs",
+   "filePath": "neuropy/analyses/spike_attribution.py",
+   "lineRange": [
+    53,
+    85
+   ],
+   "summary": "对指定 pair 与 bin 查询实际 spike 对，供 UI raster 展示。",
+   "tags": [
+    "spike-analysis",
+    "query"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/analyses/utils.py",
+   "type": "file",
+   "name": "utils.py",
+   "filePath": "neuropy/analyses/utils.py",
+   "summary": "Analysis 层基础设施库：Savable/HklSavable/NpzSavable/JsonSavable 持久化 mixin、Config、GenericKey、AnalysisDataset、BiIndex、SetOp、Autosave、UndoRedo 等通用基类。",
+   "tags": [
+    "utility",
+    "persistence",
+    "base-class",
+    "serialization",
+    "caching"
+   ],
+   "complexity": "complex",
+   "languageNotes": "Mixin-heavy design: 各 dataset 通过多继承组合 save/load/cache 能力。"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:Savable",
+   "type": "class",
+   "name": "Savable",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    43,
+    77
+   ],
+   "summary": "持久化基类：状态提取、save_path 解析与覆盖确认。",
+   "tags": [
+    "base-class",
+    "persistence"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:HklSavable",
+   "type": "class",
+   "name": "HklSavable",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    80,
+    157
+   ],
+   "summary": "基于 hickle 的保存/加载与缓存查找 mixin。",
+   "tags": [
+    "persistence",
+    "caching",
+    "hickle"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:NpzSavable",
+   "type": "class",
+   "name": "NpzSavable",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    160,
+    186
+   ],
+   "summary": "基于 numpy npz 的保存/加载 mixin。",
+   "tags": [
+    "persistence",
+    "numpy"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:JsonSavable",
+   "type": "class",
+   "name": "JsonSavable",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    269,
+    365
+   ],
+   "summary": "JSON 持久化 mixin：公共状态序列化、save/load/is_saved。",
+   "tags": [
+    "persistence",
+    "json",
+    "serialization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:Cacheable",
+   "type": "class",
+   "name": "Cacheable",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    368,
+    415
+   ],
+   "summary": "缓存文件命名、版本清理与 JSON list 读写。",
+   "tags": [
+    "caching",
+    "utility"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:Config",
+   "type": "class",
+   "name": "Config",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    418,
+    480
+   ],
+   "summary": "配置基类：缓存校验、匹配、diff 与序列化。",
+   "tags": [
+    "config",
+    "base-class",
+    "serialization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:ConfigOption",
+   "type": "class",
+   "name": "ConfigOption",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    486,
+    492
+   ],
+   "summary": "配置选项值对象，支持相等比较。",
+   "tags": [
+    "config",
+    "value-object"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:GenericKey",
+   "type": "class",
+   "name": "GenericKey",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    499,
+    563
+   ],
+   "summary": "通用复合键基类，提供 matches/get/add/change/groupby 语义。",
+   "tags": [
+    "key",
+    "base-class",
+    "data-model"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:AnalysisDataset",
+   "type": "class",
+   "name": "AnalysisDataset",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    566,
+    671
+   ],
+   "summary": "分析数据集基类：按 key 过滤/分组、conf 管理与 save/load_data。",
+   "tags": [
+    "dataset",
+    "base-class",
+    "analysis"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:BiIndex",
+   "type": "class",
+   "name": "BiIndex",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    678,
+    739
+   ],
+   "summary": "双向索引结构，维护 key↔value 正反映射并支持重命名。",
+   "tags": [
+    "data-structure",
+    "index"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:SetOp",
+   "type": "class",
+   "name": "SetOp",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    742,
+    808
+   ],
+   "summary": "集合运算 helper：intersect/setdiff/union/unique。",
+   "tags": [
+    "utility",
+    "set-operations"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:SessionMemoryCache",
+   "type": "class",
+   "name": "SessionMemoryCache",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    812,
+    829
+   ],
+   "summary": "按 session 的内存缓存，带 touch 淘汰时序。",
+   "tags": [
+    "caching",
+    "memory"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:Autosave",
+   "type": "class",
+   "name": "Autosave",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    832,
+    899
+   ],
+   "summary": "自动保存 mixin：定时调度、目录管理与旧快照清理。",
+   "tags": [
+    "autosave",
+    "persistence"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/utils.py:UndoRedo",
+   "type": "class",
+   "name": "UndoRedo",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    902,
+    934
+   ],
+   "summary": "命令式撤销/重做栈。",
+   "tags": [
+    "undo-redo",
+    "state-management"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/utils.py:_to_json",
+   "type": "function",
+   "name": "_to_json",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    198,
+    227
+   ],
+   "summary": "递归将对象转为 JSON 安全结构。",
+   "tags": [
+    "serialization",
+    "helper"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/utils.py:_from_json",
+   "type": "function",
+   "name": "_from_json",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    230,
+    241
+   ],
+   "summary": "从 JSON 结构还原对象。",
+   "tags": [
+    "serialization",
+    "helper"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/utils.py:_compact_json_str",
+   "type": "function",
+   "name": "_compact_json_str",
+   "filePath": "neuropy/analyses/utils.py",
+   "lineRange": [
+    251,
+    266
+   ],
+   "summary": "生成紧凑可读的 JSON 字符串。",
+   "tags": [
+    "serialization",
+    "helper"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/core/intervals.py",
+   "type": "file",
+   "name": "intervals.py",
+   "filePath": "neuropy/core/intervals.py",
+   "summary": "IntervalOp / IntervalSet：纯函数式区间代数 (merge, clip, union, intersect, complement, mask_spikes, sliding_windows)，供 epoch 与 CCG 时间窗使用。",
+   "tags": [
+    "utility",
+    "interval",
+    "core",
+    "data-model"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/core/intervals.py:IntervalOp",
+   "type": "class",
+   "name": "IntervalOp",
+   "filePath": "neuropy/core/intervals.py",
+   "lineRange": [
+    8,
+    127
+   ],
+   "summary": "无状态区间代数运算集合 (merge/clip/union/intersect/complement/mask_spikes/sliding_windows)。",
+   "tags": [
+    "utility",
+    "interval",
+    "algorithm"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/core/intervals.py:IntervalSet",
+   "type": "class",
+   "name": "IntervalSet",
+   "filePath": "neuropy/core/intervals.py",
+   "lineRange": [
+    131,
+    168
+   ],
+   "summary": "不可变区间集合 dataclass，封装 IntervalOp 为方法式 API。",
+   "tags": [
+    "data-model",
+    "interval"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/ui/__init__.py",
+   "type": "file",
+   "name": "__init__.py",
+   "filePath": "neuropy/ui/__init__.py",
+   "summary": "UI package barrel — re-exports the CCG review main window.",
+   "tags": [
+    "entry-point",
+    "barrel",
+    "ui"
+   ],
+   "complexity": "simple"
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/analyses/spike_attribution.py",
+   "target": "function:neuropy/analyses/spike_attribution.py:compute_spike_pairs",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/spike_attribution.py",
+   "target": "function:neuropy/analyses/spike_attribution.py:compute_spike_pairs",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/spike_attribution.py",
+   "target": "function:neuropy/analyses/spike_attribution.py:find_spike_pairs",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/spike_attribution.py",
+   "target": "function:neuropy/analyses/spike_attribution.py:find_spike_pairs",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "file:neuropy/core/intervals.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Savable",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Savable",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:HklSavable",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:HklSavable",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:NpzSavable",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:NpzSavable",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:JsonSavable",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:JsonSavable",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Cacheable",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Cacheable",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Config",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Config",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:ConfigOption",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:ConfigOption",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:GenericKey",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:GenericKey",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:AnalysisDataset",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:AnalysisDataset",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:BiIndex",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:BiIndex",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:SetOp",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:SetOp",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:SessionMemoryCache",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:SessionMemoryCache",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Autosave",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:Autosave",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:UndoRedo",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "class:neuropy/analyses/utils.py:UndoRedo",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "function:neuropy/analyses/utils.py:_to_json",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "function:neuropy/analyses/utils.py:_from_json",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/utils.py",
+   "target": "function:neuropy/analyses/utils.py:_compact_json_str",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/core/intervals.py",
+   "target": "class:neuropy/core/intervals.py:IntervalOp",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/core/intervals.py",
+   "target": "class:neuropy/core/intervals.py:IntervalOp",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/intervals.py",
+   "target": "class:neuropy/core/intervals.py:IntervalSet",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/core/intervals.py",
+   "target": "class:neuropy/core/intervals.py:IntervalSet",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/__init__.py",
+   "target": "file:neuropy/ui/ccg_ui.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  }
+ ]
+}

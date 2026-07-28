@@ -127,7 +127,7 @@ class Test:
     def test_frate_stats(nd:NeuronsDataset):
         edge_times = nd.edge_times[key]
         frates = nd.segment_firing_rates[key]
-        neuron_types = nd.data[key].neuron_type
+        neuron_types = nd.neurons_for(key).neuron_type
         labels = edge_times['label'].values
         stats_name = "firing rate"
         from scipy.stats import ttest_ind

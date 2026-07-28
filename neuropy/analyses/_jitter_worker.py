@@ -3,7 +3,7 @@ import numpy as np
 
 
 def jitter_worker(queue, key, neurons, ccg_data, edge_times,
-                  ref, tgt, njitter, bin_size_eff,
+                  ref, tgt, njitter, bin_size_eff, ccg_conf,
                   segment=None, t0=None, t1=None):
     """Run jitter in a separate process (no GIL contention).
 
@@ -19,12 +19,14 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
         Time boundaries for the segment window (used when segment is not None).
     """
     try:
-        import copy
         import types
         from neuropy.analyses.jitter import Jitter, JitterConfig
 
-        conf_eff = copy.copy(ccg_data.conf)
-        conf_eff.bin_size = bin_size_eff
+        # ccg_conf passed explicitly: CCGData.IGNORED_KEYS drops `conf` during pickle
+        # (Savable.__getstate__), so ccg_data.conf is absent in this subprocess.
+        # Config.copy rebuilds via __init__ — copy.copy would round-trip through
+        # __getstate__ and lose _ignored_attrs.
+        conf_eff = ccg_conf.copy(bin_size=bin_size_eff)
         jconf = JitterConfig(ccg=conf_eff, njitter=njitter)
 
         if segment is not None and t0 is not None and t1 is not None:

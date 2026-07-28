@@ -1,35 +1,7 @@
-"""Qt CCG main view panel.
-
-Replaces the tkinter CCGPlotPanel + CorrelogramPanel + CSPanel + BaselinePanel
-+ NormPanel + JitterPanel + SpikeAttributionPanel + SegmentChipsPanel from
-ccg_mainview.py.
-
-Architecture
-------------
-CorrelogramPanel       — top-level QWidget, owns the plot + toolbox
-  ├─ SegmentBar            — chip bar (All | segs | custom) + lo|hi + CS chips
-  ├─ NormSection           — collapsible: norm chip buttons + same-scale + Apply
-  ├─ CorrelogramSection    — collapsible: CCG/baseline/ACG style + deconv + extend
-  ├─ BaselineCSSection     — collapsible: CS overlay + baseline method + p-val chips
-  ├─ JitterSection         — collapsible: n + run/clear/save + resolution
-  └─ SpikeAttributionSection — collapsible: enable + bin + ms/# selector + Set
-
-All state reads from AppState.  Display-only config (style, deconv flags,
-extend, jitter n, spike attribution bin) lives as plain Python attrs on each
-section — they are per-panel display prefs, not shared state.
-
-Rendering uses pyqtgraph native items:
-  BarGraphItem        → CCG bars
-  PlotDataItem        → baseline / ACG / jitter lines
-  LinearRegionItem    → test window shading
-  InfiniteLine        → alpha / p-value lines
-"""
+"""CCG main view panel."""
 from __future__ import annotations
-
 from typing import TYPE_CHECKING
-
 import numpy as np
-
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from pyqtgraph.Qt.QtCore import Qt, Signal, QObject, QTimer
@@ -42,22 +14,19 @@ from pyqtgraph.Qt.QtWidgets import (
     QToolButton, QSlider, QGroupBox, QFileDialog, QMessageBox,
 )
 from pyqtgraph.Qt.QtGui import QAction, QActionGroup
-from neuropy.analyses.ccg_transforms import NormalizeBy, CCGNorm, ConnectionStrength, _CSContext
+from neuropy.analyses.ccg_transforms import NormalizeBy, CCGNorm, ConnectionStrength
 from neuropy.analyses.jitter import compute_jbsi, JitterConfig
 from neuropy.analyses import correlations
-from neuropy.analyses.ms_connectivity import _CCG_RESOLUTION, Key, EranConv
+from neuropy.analyses.ms_connectivity import _CCG_RESOLUTION, Key
 from neuropy.plotting.ccg import (
     RenderContext, JitterOverlay, TitleConfig, PlotStyle,
     test_window_bin_mask, test_window_span_ms, render_ccg_png,
 )
 from neuropy.ui.ui_common import qt_dark_mode
-from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, SliderWithInput
+from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, SliderWithInput, has_primary_modifier
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
-
-_ALL_SEGS = "All"
-
 
 _CHIP_STYLE = (
     "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
@@ -74,7 +43,7 @@ class SegmentBar(QWidget):
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__(parent)
-        self._nav = nav
+        self.nav = nav
         self._chips: dict[int, QPushButton] = {}   # seg_idx → chip widget
         self._build()
         nav.segment_changed.connect(self._refresh)
@@ -95,7 +64,9 @@ class SegmentBar(QWidget):
         lbl.setStyleSheet("font-size: 9pt;")
         root.addWidget(lbl)
 
-        self._chip_bar = ArrowChipBar(self)
+        self._chip_bar = ArrowChipBar(
+            self, on_left=lambda: self.nav_step(-1),
+            on_right=lambda: self.nav_step(+1))
         root.addWidget(self._chip_bar, stretch=1)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine)
@@ -103,11 +74,11 @@ class SegmentBar(QWidget):
 
         self._lo_hi_btn = chip_button("lo|hi", checkable=True)
         self._lo_hi_btn.toggled.connect(
-            lambda on: self._nav.set_resolution("lo_hi" if on else "lo"))
+            lambda on: self.nav.set_resolution("lo_hi" if on else "lo"))
         root.addWidget(self._lo_hi_btn)
 
         self._cs_btn = chip_button("CS", checkable=True)
-        self._cs_btn.toggled.connect(self._nav.set_cs_overlay)
+        self._cs_btn.toggled.connect(self.nav.set_cs_overlay)
         root.addWidget(self._cs_btn)
 
         self.rebuild()
@@ -115,23 +86,12 @@ class SegmentBar(QWidget):
     def rebuild(self):
         self._chip_bar.clear()
         self._chips.clear()
-
-        nav = self._nav
-        n_segs = nav.n_segments
-        names = nav.all_segment_names()   # real names + _ALL_SEGS last
-
-        self._add_chip("All", n_segs, bold=True)
-        self._chip_bar.add_widget(self._vline())
-
-        for i, name in enumerate(nm for nm in names[:-1] if nm != 'session'):
-            self._add_chip(name, i, bold=False)
-
-        custom = nav.custom_seg_index
-        if custom:
-            self._chip_bar.add_widget(self._vline())
-            for ci, name in enumerate(custom.keys()):
-                self._add_chip(name, n_segs + 1 + ci, bold=False)
-
+        nav = self.nav
+        labels = nav.segment_names()
+        for i, name in enumerate(labels):
+            self._add_chip(name, i, bold=(i == 0))
+            if i == 0 and len(labels) > 1:
+                self._chip_bar.add_widget(self._vline())
         self._refresh()
         self._on_pair_sig_changed()
 
@@ -143,24 +103,49 @@ class SegmentBar(QWidget):
         btn.setStyleSheet(_CHIP_STYLE)
         btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         btn.clicked.connect(lambda _checked, i=seg_idx: self._on_chip_click(i))
+        btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn.customContextMenuRequested.connect(
+            lambda pos, i=seg_idx, b=btn: self._show_chip_menu(i, b.mapToGlobal(pos)))
         self._chip_bar.add_widget(btn)
         self._chips[seg_idx] = btn
 
     def _on_chip_click(self, seg_idx: int):
-        mods = QtWidgets.QApplication.keyboardModifiers()
-        if (mods & Qt.KeyboardModifier.ControlModifier and
-                mods & Qt.KeyboardModifier.ShiftModifier):
-            self._nav.toggle_stacked_segment(seg_idx)
+        # Primary modifier (Cmd on macOS, Ctrl elsewhere) toggles multi-stack; plain
+        # click sets the current segment.
+        if has_primary_modifier(QtWidgets.QApplication.keyboardModifiers()):
+            self.nav.toggle_stacked_segment(seg_idx)
         else:
-            self._nav.set_current_segment(self._nav.seg_name(seg_idx))
+            self.nav.set_current_segment(self.nav.segment_name(seg_idx))
+
+    def _show_chip_menu(self, seg_idx: int, global_pos):
+        nav = self.nav
+        menu = QMenu(self)
+        menu.addAction("Set as current",
+                       lambda: nav.set_current_segment(nav.segment_name(seg_idx)))
+        is_stacked = seg_idx in nav.stacked_segments
+        menu.addAction("Unstack segment" if is_stacked else "Stack segment",
+                       lambda: nav.toggle_stacked_segment(seg_idx))
+        if nav.stacked_segments:
+            menu.addSeparator()
+            menu.addAction(f"Clear stacked ({len(nav.stacked_segments)})",
+                           nav.clear_stacked_segments)
+        menu.exec(global_pos)
+
+    def _nav_step(self, step: int):
+        """◀/▶ navigate to the prev/next segment (cyclic over All + real + custom)."""
+        nav = self.nav
+        names = nav.segment_names()
+        if not names:
+            return
+        cur = nav.segment_index(nav.current_segment)
+        nav.set_current_segment(nav.segment_name((cur + step) % len(names)))
 
     def _refresh(self, *_):
-        nav = self._nav
-        active_idx = nav.seg_idx(nav.current_segment)
+        nav = self.nav
+        active_idx = nav.segment_index(nav.current_segment)
         stacked = nav.stacked_segments
         inds = nav.current_pair_inds
-        ref = int(inds[0]) if inds is not None else None
-        tgt = int(inds[1]) if inds is not None else None
+        ref, tgt = (int(inds[0]), int(inds[1])) if inds is not None else (None, None)
         for idx, btn in self._chips.items():
             is_stacked = idx in stacked
             sig = nav.is_significant(ref, tgt, idx) if ref is not None else False
@@ -210,7 +195,7 @@ class NormSection(CollapsibleSection):
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__("Normalization", parent=parent)
-        self._nav               = nav
+        self.nav               = nav
         self._norm_btns: dict[NormalizeBy, QPushButton] = {}
         self._pair_scale_btn    = None
         self._session_scale_btn = None
@@ -269,6 +254,8 @@ class CorrelogramSection(CollapsibleSection):
 
     def __init__(self, parent=None):
         super().__init__("Correlogram", parent=parent)
+        self._ref_scale_widget = None   # reserved for future per-ACG y-scale wiring
+        self._tgt_scale_widget = None
         self._build()
 
     def _build(self):
@@ -348,12 +335,12 @@ class CorrelogramSection(CollapsibleSection):
 
     @property
     def acg_yscale_ref(self) -> float:
-        w = getattr(self, '_ref_scale_widget', None)
+        w = self._ref_scale_widget
         return max(0.01, w.value) if w is not None else 1.0
 
     @property
     def acg_yscale_tgt(self) -> float:
-        w = getattr(self, '_tgt_scale_widget', None)
+        w = self._tgt_scale_widget
         return max(0.01, w.value) if w is not None else 1.0
 
     @property
@@ -382,20 +369,16 @@ class BaselineCSSection(CollapsibleSection):
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__("Baseline & Connection Strength", parent=parent)
-        self._nav        = nav
-        self._cs_backend = None   # set via set_cs_backend()
-        self._jitter_ctrl = None  # set via set_jitter_ctrl()
+        self.nav        = nav
+        self.jitter_mgr = None  # set via set_jitter_mgr()
         self._build()
         nav.cs_overlay_changed.connect(self._on_cs_overlay_changed)
         nav.cs_params_changed.connect(self._on_cs_params_changed)
         self.baseline_changed.connect(lambda m: nav.set_cs_params(m, nav.cs_metric))
         self.metric_changed.connect(lambda m: nav.set_cs_params(nav.baseline_method, m))
 
-    def set_cs_backend(self, backend):
-        self._cs_backend = backend
-
-    def set_jitter_ctrl(self, jctrl):
-        self._jitter_ctrl = jctrl
+    def set_jitter_mgr(self, jctrl):
+        self.jitter_mgr = jctrl
 
     def _build(self):
         layout = self.body_layout
@@ -403,7 +386,7 @@ class BaselineCSSection(CollapsibleSection):
         # Row 1: Show CS overlay checkbox | Measure: STG / JBSI
         row1 = QHBoxLayout()
         self.cs_show_check = QCheckBox("Show CS overlay")
-        self.cs_show_check.toggled.connect(self._nav.set_cs_overlay)
+        self.cs_show_check.toggled.connect(self.nav.set_cs_overlay)
         row1.addWidget(self.cs_show_check)
         row1.addWidget(QLabel("Measure:"))
         self._metric_group = QButtonGroup(self)
@@ -420,7 +403,7 @@ class BaselineCSSection(CollapsibleSection):
 
         # Row 2: CS: lo|hi label | non-negative chip
         row2 = QHBoxLayout()
-        self._cs_label = QLabel("CS: —")
+        self._cs_label = QLabel("CS: —|—")
         row2.addWidget(self._cs_label)
         self.nonneg_btn = chip_button("non-negative", checkable=True)
         self.nonneg_btn.toggled.connect(self.sig_changed)
@@ -500,13 +483,6 @@ class BaselineCSSection(CollapsibleSection):
         self.p_btn.setVisible(show)
         self.pc_btn.setVisible(show)
 
-    def update_cs_label(self, lo_val, hi_val):
-        def _fmt(v):
-            if v is None: return "—"
-            try: return f"{float(v):.3f}"
-            except Exception: return "—"
-        self._cs_label.setText(f"CS: {_fmt(lo_val)}|{_fmt(hi_val)}")
-
     def set_jitter_baseline_enabled(self, enabled: bool):
         rb = self._baseline_rbs.get('jitter')
         if rb is not None:
@@ -516,96 +492,50 @@ class BaselineCSSection(CollapsibleSection):
 
     # baseline_method and cs_metric live in nav.baseline_method / nav.cs_metric
 
+    def set_cs(self, lo_val, hi_val):
+        """Format lo|hi connection-strength values into the CS label."""
+        def _fmt(v):
+            if v is None: return "—"
+            try: return f"{float(v):.3f}"
+            except Exception: return "—"
+        self._cs_label.setText(f"CS: {_fmt(lo_val)}|{_fmt(hi_val)}")
+
     def update_display(self):
         """Recompute and display lo|hi CS values for the current pair."""
-        nav      = self._nav
+        nav      = self.nav
         inds     = nav.current_pair_inds
         if inds is None:
-            self.update_cs_label(None, None)
+            self.set_cs(None, None)
             return
         ref, tgt = int(inds[0]), int(inds[1])
-        seg_idx  = nav.seg_idx(nav.current_segment)
-        metric   = nav.cs_metric
-        method   = nav.baseline_method
-        nonneg   = self.nonneg_btn.isChecked()
-        cs_back  = self._cs_backend
+        seg_idx  = nav.segment_index(nav.current_segment)
 
-        def _cs_for(highres: bool) -> float | None:
-            data = nav.cd.ccg_for(nav.key.nd(), 'highres' if highres else 'lowres')
-            if data is None:
-                return None
-            arr = getattr(data, 'ccg', None)
-            if arr is None or ref >= arr.shape[1] or tgt >= arr.shape[2]:
-                return None
-            is_all = seg_idx == nav.n_segments
-            if is_all:
-                ns = min(nav.n_segments, arr.shape[0])
-                ccg_raw = arr[:ns, ref, tgt, :].sum(0) if ns > 0 else None
-            elif seg_idx < arr.shape[0]:
-                ccg_raw = arr[seg_idx, ref, tgt, :]
-            else:
-                return None
-            if ccg_raw is None or len(ccg_raw) == 0:
-                return None
+        def _cs_for(resolution: str) -> float | None:
+            return CCGContextBuilder._cs_value(
+                nav, self.jitter_mgr, seg_idx, ref, tgt, resolution,
+                nonneg=self.nonneg_btn.isChecked())
 
-            ctx = _CSContext(ref=ref, tgt=tgt, seg=seg_idx, highres=highres,
-                             nd_key=nav.key.nd(),
-                             eff_min_lag=data.conf.min_lag,
-                             eff_max_lag=data.conf.max_lag)
-            if metric == 'JBSI':
-                cs_val = cs_back._compute_jbsi(ctx) if cs_back else None
-            else:
-                null_arr = getattr(data, 'ccg_null', None)
-                null_raw = CCGContextBuilder._slice4d(
-                    null_arr, seg_idx, ref, tgt, is_all, nav.n_segments)
-                if method == 'jitter' and self._jitter_ctrl is not None and not highres:
-                    cached = self._jitter_ctrl.get_result(ref, tgt, 'lo')
-                    if cached is not None:
-                        null_raw = cached[0]
-                method_eff = 'conv' if method == 'jitter' else method
-                ccg, ccg_null = CCGNorm.apply(
-                    ccg_raw, null_raw, ref, tgt, seg_idx,
-                    nav.active_norms - {NormalizeBy.BASELINE},
-                    nav.neurons, n_segments=nav.n_segments,
-                    custom_time_hours=getattr(data.conf, 'total_time_hours', None))
-                try:
-                    cs_val, _ = ConnectionStrength.conn_strength(
-                        ccg, ccg_null, data.conf, method_eff,
-                        min_lag_override=data.conf.min_lag,
-                        max_lag_override=data.conf.max_lag)
-                except Exception:
-                    return None
-
-            if cs_val is not None and nonneg:
-                cs_val = max(0.0, float(cs_val))
-            return cs_val
-
-        lo = _cs_for(False)
-        hi = _cs_for(True) if nav.resolution != "lo" else None
-        if nav.resolution == "lo_hi":
-            self.update_cs_label(lo, hi)
-        elif nav.resolution == "hi":
-            self.update_cs_label(hi if hi is not None else lo, None)
-        else:
-            self.update_cs_label(lo, None)
+        # Highres is always loaded at startup, so always show both resolutions
+        # (hi renders "—" only when that session genuinely lacks highres data).
+        self.set_cs(_cs_for('lowres'), _cs_for('highres'))
 
 
 class JitterSection(CollapsibleSection):
     # Backend: JitterManager (neuropy/analyses/jitter.py)
-    # Injected via set_jitter_ctrl() after construction.
+    # Injected via set_jitter_mgr() after construction.
 
     jitter_done = Signal()   # emitted when poll completes → CorrelogramPanel rerenders
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__("Jitter", parent=parent)
-        self._nav   = nav
+        self.nav   = nav
         self._jctrl = None
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(200)
         self._poll_timer.timeout.connect(self._poll)
         self._build()
 
-    def set_jitter_ctrl(self, jctrl):
+    def set_jitter_mgr(self, jctrl):
         self._jctrl = jctrl
 
     def _build(self):
@@ -648,12 +578,12 @@ class JitterSection(CollapsibleSection):
 
     def _run(self):
         jctrl = self._jctrl
-        inds  = self._nav.current_pair_inds
-        data  = self._nav.ccg_data
+        inds  = self.nav.current_pair_inds
+        data  = self.nav.ccg_data
         if jctrl is None or inds is None or data is None:
             return
         ref, tgt  = int(inds[0]), int(inds[1])
-        nav       = self._nav
+        nav       = self.nav
         run_hi = self.hi_btn.isChecked()
         run_lo = self.lo_btn.isChecked() or not run_hi
         jctrl.run_jitter(ref, tgt, self.n_jitter, run_lo=run_lo, run_hi=run_hi)
@@ -672,7 +602,7 @@ class JitterSection(CollapsibleSection):
 
     def _clear(self):
         jctrl = self._jctrl
-        inds  = self._nav.current_pair_inds
+        inds  = self.nav.current_pair_inds
         if jctrl is None or inds is None:
             return
         ref, tgt = int(inds[0]), int(inds[1])
@@ -745,7 +675,7 @@ class SpikeAttributionSection(CollapsibleSection):
             self.set_requested.emit(val, unit)
         except ValueError:
             p = self.window()
-            lp = getattr(getattr(p, 'pairs_view', None), 'spike_pairs', None)
+            lp = p.pairs_view.spike_pairs if p else None
             if lp is not None:
                 lp._spike_pairs_count.set('Invalid bin')
 
@@ -772,7 +702,7 @@ class CCGContextBuilder:
 
     @staticmethod
     def _dark_mode(panel) -> bool:
-        fn = getattr(panel, '_theme_fn', None)
+        fn = panel._theme_fn
         if fn is not None:
             try:
                 theme = fn()
@@ -787,64 +717,94 @@ class CCGContextBuilder:
         """Return (ref, tgt, pair_key, sess_label), accounting for cross-session mode."""
         ref, tgt = int(nav.current_pair_inds[0]), int(nav.current_pair_inds[1])
         pair_key   = nav.key
-        sess_label = str(getattr(nav.key, 'session', '') or '')
+        sess_label = str(nav.key.session or '')
         if nav.session_any_mode:
             hl  = nav.cross_session_handles or []
             idx = nav.current_pair_idx
             if idx < len(hl):
                 pair_key   = hl[idx][0]
                 ref, tgt   = int(hl[idx][1]), int(hl[idx][2])
-                sess_label = str(getattr(pair_key, 'session', '') or '')
+                sess_label = str(pair_key.session or '')
         return ref, tgt, pair_key, sess_label
 
     @staticmethod
     def _resolve_data(nav, pair_key, hi_res_override):
         """Return the CCGData object to render from."""
         nd = pair_key.nd()
+        hi = nd.change(resolution='highres')
+        lo = nd.change(resolution='lowres')
         if hi_res_override is True:
-            return nav.cd.ccg_for(nd, 'highres') or nav.cd.ccg_for(nd, 'lowres')
+            return nav.cd.ccg_for(hi) or nav.cd.ccg_for(lo)
         if hi_res_override is False:
-            return nav.cd.ccg_for(nd, 'lowres')
-        # Follow nav resolution
-        data = (nav.cd.ccg_for(nd, 'highres')
-                if nav.resolution in ("hi", "lo_hi") else nav.cd.ccg_for(nd, 'lowres'))
-        return data or nav.ccg_data
+            return nav.cd.ccg_for(lo)
+        return (nav.cd.ccg_for(hi)
+                if nav.resolution in ("hi", "lo_hi") else nav.cd.ccg_for(lo))
 
     @staticmethod
-    def _slice4d(arr, seg_idx: int, r: int, t: int, is_all: bool, n_segs: int):
-        """Slice a (seg, ref, tgt, bin) array. Returns 1-D or None."""
-        if arr is None or not hasattr(arr, 'ndim') or arr.ndim < 4:
-            return None
-        if r >= arr.shape[1] or t >= arr.shape[2]:
-            return None
-        if is_all:
-            ns = min(n_segs, arr.shape[0]) if n_segs > 0 else arr.shape[0]
-            return arr[:ns, r, t, :].sum(0) if ns > 0 else None
-        return arr[seg_idx, r, t, :] if seg_idx < arr.shape[0] else None
+    def _firing_rates(nav, seg_idx, ref, tgt):
+        """(fr_ref, fr_tgt) for a pair. Prefer per-segment rates for an appended
+        window; fall back to the neurons object's whole-session firing_rate."""
+        key = nav.get_complete_key()
+        src = nav.cd.source_config(key, key.segment) if key.segment else None
+        seg_fr = src.firing_rates if src is not None else None
+        if seg_fr is None:
+            seg_fr = nav.neurons.firing_rate
+        return float(seg_fr[ref]), float(seg_fr[tgt])
 
     @staticmethod
-    def _neuron_meta(nav, ref: int, tgt: int):
-        """Return (nt_ref, nt_tgt, sh_ref, sh_tgt) from neurons object."""
-        neurons = nav.neurons
-        nt_ref = nt_tgt = sh_ref = sh_tgt = None
+    def _time_hours_for_seg(nav, seg_idx) -> float | None:
+        """Recording hours for dim0 *seg_idx* — TIME norm divisor (same resolver as batch)."""
+        key = nav.get_complete_key()
+        return nav.cd.time_hours_for(key, nav.cd.segment_name(key, seg_idx))
+
+    @staticmethod
+    def _cs_value(nav, jitter_mgr, seg_idx, ref, tgt, resolution, *, nonneg):
+        """Connection strength for one pair/segment at a given resolution.
+
+        Fetches the raw CCG (+ null / firing rates / segment extent), resolves the
+        cached lo-res jitter result, and hands the whole pipeline to
+        ConnectionStrength.compute. Returns None when that resolution isn't loaded.
+        """
+        key = nav.get_complete_key().change(resolution=resolution, ref=ref, tgt=tgt)
+        slices = nav.cd.pair_slices(key)
+        if slices is None:
+            return None
+        ccg_raw, null_raw, _pval, _pvc, _qval = slices
+        metric = nav.cs_metric
+        method = nav.baseline_method
+        cached = (jitter_mgr.get_result(ref, tgt, 'lo')
+                  if resolution == 'lowres' and jitter_mgr is not None else None)
+        j_avg = cached[0] if (metric == 'JBSI' and cached is not None) else None
+        if method == 'jitter' and cached is not None:
+            null_raw = cached[0]
+        fr_ref = fr_tgt = None
+        if metric == 'JBSI':
+            fr_ref, fr_tgt = CCGContextBuilder._firing_rates(nav, seg_idx, ref, tgt)
+        return ConnectionStrength.compute(
+            ccg_raw, null_raw, ref, tgt, nav.cd.ccg_for(key).conf,
+            metric=metric, method=method, active_norms=nav.active_norms,
+            neurons=nav.neurons,
+            custom_time_hours=CCGContextBuilder._time_hours_for_seg(nav, seg_idx),
+            fr_ref=fr_ref, fr_tgt=fr_tgt, j_avg=j_avg, nonneg=nonneg,
+            excitability=nav.key.excitability)
+
+    @staticmethod
+    def _neuron_meta(neurons, ref: int, tgt: int):
+        """Return (nt_ref, nt_tgt, sh_ref, sh_tgt) from the pair's neurons object.
+
+        Caller passes the pair's own session neurons (resolved via pair_key), so
+        ref/tgt always index this array in range.
+        """
         if neurons is None:
-            return nt_ref, nt_tgt, sh_ref, sh_tgt
-        types = getattr(neurons, 'neuron_type', None)
-        si    = getattr(neurons, 'shank_ids',   None)
-        try: nt_ref = str(types[ref])
-        except Exception: pass
-        try: nt_tgt = str(types[tgt])
-        except Exception: pass
-        try: sh_ref = int(si[ref])
-        except Exception: pass
-        try: sh_tgt = int(si[tgt])
-        except Exception: pass
-        return nt_ref, nt_tgt, sh_ref, sh_tgt
+            return None, None, None, None
+        types = neurons.neuron_type
+        si    = neurons.shank_ids
+        return str(types[ref]), str(types[tgt]), int(si[ref]), int(si[tgt])
 
     @staticmethod
     def _jitter_overlay(panel, nav, ref: int, tgt: int) -> JitterOverlay:
         """Look up cached jitter result for the current resolution."""
-        jctrl = panel._jitter_ctrl
+        jctrl = panel.jitter_mgr
         if jctrl is None:
             return JitterOverlay()
         res_key = 'hi' if nav.resolution in ("hi", "lo_hi") else 'lo'
@@ -856,49 +816,38 @@ class CCGContextBuilder:
 
     @staticmethod
     def _bin_size(conf, n_bins: int) -> float:
-        dur = getattr(conf, 'duration', 1.0) or 1.0
-        return dur / (n_bins - 1) if n_bins > 1 else getattr(conf, 'bin_size', 0.001)
-
-    @staticmethod
-    def _load_custom_npz(path: str, ref: int, tgt: int):
-        """Load CCG/null/pval slices from a custom-segment .npz file."""
-        npz    = np.load(path, allow_pickle=False)
-        c_arr  = npz.get('ccg')
-        if c_arr is None or c_arr.ndim < 4:
-            return None
-        if ref >= c_arr.shape[1] or tgt >= c_arr.shape[2]:
-            return None
-        ccg   = c_arr[0, ref, tgt, :]
-        null  = _safe_npz_slice(npz.get('ccg_null'), ref, tgt)
-        pval  = _safe_npz_slice(npz.get('pval'),     ref, tgt)
-        return ccg, null, pval
+        dur = conf.duration or 1.0
+        return dur / (n_bins - 1) if n_bins > 1 else conf.bin_size
 
     # ── public entry points ────────────────────────────────────────────
 
     @classmethod
     def build_context(cls, nav, panel,
-                      seg_override=None, hi_res_override=None) -> 'RenderContext | None':
+                      seg_override=None, hi_res_override=None,
+                      pair_override=None) -> 'RenderContext | None':
         """Build RenderContext for the current pair/segment.
 
         seg_override:    force a specific segment index
         hi_res_override: True=hi, False=lo, None=follow nav.resolution
+        pair_override:   (pair_key, ref, tgt) to render a specific pair instead of the
+                         current one — used to overlay "Show Together" pinned pairs.
         """
-        if nav.current_pair_inds is None:
-            return None
-
-        ref, tgt, pair_key, sess_label = cls._resolve_pair(nav)
+        if pair_override is not None:
+            pair_key, ref, tgt = pair_override[0], int(pair_override[1]), int(pair_override[2])
+            sess_label = str(pair_key.session or '')
+        else:
+            if nav.current_pair_inds is None:
+                return None
+            ref, tgt, pair_key, sess_label = cls._resolve_pair(nav)
         data = cls._resolve_data(nav, pair_key, hi_res_override)
         if data is None:
             return None
 
-        arr = getattr(data, 'ccg', None)
-        if arr is None or arr.ndim < 4 or ref >= arr.shape[1] or tgt >= arr.shape[2]:
+        arr = data.ccg
+        if arr is None:
             return None
 
-        n_segs  = nav.n_segments
-        seg_idx = seg_override if seg_override is not None else nav.seg_idx(nav.current_segment)
-        is_all    = seg_idx == n_segs
-        is_custom = seg_idx > n_segs
+        seg_idx = seg_override if seg_override is not None else nav.segment_index(nav.current_segment)
 
         cor  = panel.corr_section
         cs   = panel.cs_section
@@ -906,92 +855,43 @@ class CCGContextBuilder:
         conf = data.conf
         show_tw = cs.test_window_btn.isChecked()
 
-        # ── Custom segment: data read from in-memory CCGDataset ──
-        if is_custom:
-            custom_names = list(nav.custom_seg_index.keys())
-            ci = seg_idx - n_segs - 1
-            if ci < 0 or ci >= len(custom_names):
-                return None
-            seg_name = custom_names[ci]
-            cd_obj = nav.custom_seg_index[seg_name]
-            want_hi = hi_res_override is True or (hi_res_override is None and nav.resolution in ("hi", "lo_hi"))
-            res = 'highres' if want_hi else 'lowres'
-            k = Key(session=seg_name, resolution=res)
-            if k not in cd_obj.ccg:
-                k = Key(session=seg_name, resolution='lowres')
-            if k not in cd_obj.ccg:
-                return None
-            cd = cd_obj.ccg[k]
-            if cd.ccg is None or cd.ccg.ndim < 4 or ref >= cd.ccg.shape[1] or tgt >= cd.ccg.shape[2]:
-                return None
-            ccg_arr = cd.ccg[0, ref, tgt, :]
-            null_arr = cd.ccg_null[0, ref, tgt, :] if cd.ccg_null is not None else None
-            pval_val = cd.pval[0, ref, tgt] if cd.pval is not None else None
-            # Time-span/second norm must divide by the WINDOW duration (src_conf), not the
-            # CCGConfig — else a custom window normalizes as if it spanned the whole session.
-            ccg_arr, null_arr = CCGNorm.apply(ccg_arr, null_arr, ref, tgt, 0,
-                                              nav.active_norms, neurons=nav.neurons,
-                                              is_custom_seg=True,
-                                              custom_time_hours=getattr(cd_obj.src_conf, 'total_time_hours', None))
-            bsz = cls._bin_size(cd.conf, len(ccg_arr))
-            dur = getattr(cd.conf, 'duration', 1.0) or 1.0
-            return cls._make_context(
-                ccg=ccg_arr, bsz=bsz, dur=dur, conf=cd.conf, nav=nav,
-                ref=ref, tgt=tgt, seg_display=seg_name,
-                sess_label=str(getattr(nav.key, 'session', '') or ''),
-                jitter=JitterOverlay(), dark=dark,
-                null=null_arr if cor.baseline_btn.show else None,
-                pval=pval_val,
-                pval_corrected=None,
-                acg_ref=None, acg_tgt=None,
-                nt_ref=None, nt_tgt=None, sh_ref=None, sh_tgt=None,
-                show_tw=show_tw,
-                cor=cor, cs_overlay=nav.cs_overlay_active,
-                is_significant=False,
-            )
-
-        # ── Regular / All-segments ──
-        sl = lambda a, r=ref, t=tgt: cls._slice4d(a, seg_idx, r, t, is_all, n_segs)
-
-        ccg = sl(arr)
+        # Every segment (whole-session 'full' at 0, appended windows after) lives on dim0
+        # of this one array — the pair's traces come from data.pair(); the ACG diagonals
+        # (ref-ref, tgt-tgt) are different pairs, sliced directly.
+        ccg, null, pval, pvc, _qval = data.pair(seg_idx, ref, tgt)
         if ccg is None or len(ccg) == 0:
             return None
 
         bsz = cls._bin_size(conf, len(ccg))
-        dur = getattr(conf, 'duration', 1.0) or 1.0
+        dur = conf.duration or 1.0
 
-        _has_pval = nav.baseline_method in ('conv', 'jitter', 'tailed')
-        null  = sl(data.ccg_null)    if cor.baseline_btn.show else None
-        if is_all:
-            # p-values can't be summed across segments; recompute the conv test on the
-            # summed (= whole-session) CCG. Corrected p-values aren't defined here.
-            pval = (EranConv._conv(ccg, W=conf.conv_window / bsz)[0]
-                    if (_has_pval and cs.p_btn.isChecked()) else None)
-            pvc  = None
-        else:
-            pval  = sl(data.pval)        if (_has_pval and cs.p_btn.isChecked()) else None
-            pvc   = sl(data.qval or data.pval_corrected) if (_has_pval and cs.pc_btn.isChecked()) else None
-        acg_r = sl(arr, ref, ref)                          if cor.ref_btn.show else None
-        acg_t = sl(arr, tgt, tgt)                          if cor.tgt_btn.show else None
+        null  = null if cor.baseline_btn.show else None
+        pval  = pval if cs.p_btn.isChecked() else None
+        pvc   = pvc  if cs.pc_btn.isChecked() else None
+        acg_r = arr[seg_idx, ref, ref, :] if cor.ref_btn.show else None
+        acg_t = arr[seg_idx, tgt, tgt, :] if cor.tgt_btn.show else None
 
-        _time_hrs = getattr(conf, 'total_time_hours', None)
+        _time_hrs = cls._time_hours_for_seg(nav, seg_idx)
+        # Pair's own session neurons — correct in all-session mode where nav.neurons
+        # is the current (possibly different) session.
+        pair_neurons = nav.cd.nd.neurons_for(pair_key)
         ccg, null = CCGNorm.apply(
-            ccg, null, ref, tgt, seg_idx, nav.active_norms,
-            neurons=nav.neurons, n_segments=n_segs,
+            ccg, null, ref, tgt, nav.active_norms,
+            neurons=pair_neurons,
             custom_time_hours=_time_hrs)
         if acg_r is not None:
-            acg_r, _ = CCGNorm.apply(acg_r, None, ref, ref, seg_idx,
+            acg_r, _ = CCGNorm.apply(acg_r, None, ref, ref,
                                      nav.active_norms - {NormalizeBy.BASELINE},
-                                     neurons=nav.neurons,
+                                     neurons=pair_neurons,
                                      custom_time_hours=_time_hrs)
         if acg_t is not None:
-            acg_t, _ = CCGNorm.apply(acg_t, None, tgt, tgt, seg_idx,
+            acg_t, _ = CCGNorm.apply(acg_t, None, tgt, tgt,
                                      nav.active_norms - {NormalizeBy.BASELINE},
-                                     neurons=nav.neurons,
+                                     neurons=pair_neurons,
                                      custom_time_hours=_time_hrs)
 
-        nt_ref, nt_tgt, sh_ref, sh_tgt = cls._neuron_meta(nav, ref, tgt)
-        seg_display = nav.seg_name(seg_override) if seg_override is not None else nav.current_segment
+        nt_ref, nt_tgt, sh_ref, sh_tgt = cls._neuron_meta(pair_neurons, ref, tgt)
+        seg_display = nav.segment_name(seg_override) if seg_override is not None else nav.current_segment
 
         return cls._make_context(
             ccg=ccg, bsz=bsz, dur=dur, conf=conf, nav=nav,
@@ -1002,7 +902,8 @@ class CCGContextBuilder:
             nt_ref=nt_ref, nt_tgt=nt_tgt, sh_ref=sh_ref, sh_tgt=sh_tgt,
             show_tw=show_tw, cor=cor, cs_overlay=nav.cs_overlay_active,
             is_significant=nav.is_significant(ref, tgt, seg_idx),
-            cs_annotation_lines=cls._cs_annotation_lines(nav, cs, ref, tgt, seg_idx),
+            cs_annotation_lines=(cls._cs_annotation_lines(nav, cs, ref, tgt, seg_idx)
+                                 if nav.cs_overlay_active else []),
         )
 
     @classmethod
@@ -1016,7 +917,8 @@ class CCGContextBuilder:
             return None
         if nav.current_pair_inds is None:
             return None
-        ref, tgt = int(nav.current_pair_inds[0]), int(nav.current_pair_inds[1])
+        view = nav.get_complete_key()
+        ref, tgt = view.ref, view.tgt
         if ref == tgt:
             return None
 
@@ -1026,22 +928,21 @@ class CCGContextBuilder:
         dur, bs       = extend_ms / 1000.0, extend_bin_ms / 1000.0
 
         seg_label = nav.current_segment
-        cache_key = (str(nav.key), ref, tgt, seg_label, extend_ms, extend_bin_ms)
+        cache_key = (str(view), extend_ms, extend_bin_ms)
         if cache_key in panel._extend_cache:
             return panel._extend_cache[cache_key]
 
-        neurons = nav.neurons
-        if neurons is None:
+        if nav.neurons is None:
             return None
         conf = (nav.ccg_data.conf if nav.ccg_data is not None else nav.cd.conf)
         ccg_slice = cls._compute_extend_ccg(nav, ref, tgt, dur, bs, conf)
         if ccg_slice is None:
             return None
         ccg_slice, _ = CCGNorm.apply(ccg_slice, None, ref, tgt,
-                                     nav.seg_idx(nav.current_segment),
                                      nav.active_norms - {NormalizeBy.BASELINE},
                                      neurons=nav.neurons,
-                                     custom_time_hours=getattr(conf, 'total_time_hours', None))
+                                     custom_time_hours=cls._time_hours_for_seg(
+                                         nav, nav.segment_index(nav.current_segment)))
 
         bsz  = cls._bin_size(conf, len(ccg_slice))
         dark = cls._dark_mode(panel)
@@ -1049,7 +950,7 @@ class CCGContextBuilder:
             ccg=ccg_slice, bsz=bsz, dur=dur, conf=conf, nav=nav,
             ref=ref, tgt=tgt,
             seg_display=f'{seg_label} (extend {extend_ms}ms @ {extend_bin_ms}ms/bin)',
-            sess_label=str(getattr(nav.key, 'session', '') or ''),
+            sess_label=str(nav.key.session or ''),
             jitter=JitterOverlay(), dark=dark,
             null=None, pval=None, pval_corrected=None,
             acg_ref=None, acg_tgt=None,
@@ -1070,8 +971,8 @@ class CCGContextBuilder:
                        nt_ref, nt_tgt, sh_ref, sh_tgt,
                        show_tw, cor, cs_overlay, is_significant,
                        cs_annotation_lines=None) -> RenderContext:
-        min_lag = getattr(conf, 'min_lag', None) if show_tw else None
-        max_lag = getattr(conf, 'max_lag', None) if show_tw else None
+        min_lag = conf.min_lag if show_tw else None
+        max_lag = conf.max_lag if show_tw else None
         _ccg_top  = float(np.nanmax(ccg))  if len(ccg)  else 0.0
         _null_top = float(np.nanmax(null)) if null is not None and len(null) else 0.0
         _ylim_top = max(_ccg_top, _null_top) * 1.05
@@ -1123,58 +1024,10 @@ class CCGContextBuilder:
         method = nav.baseline_method
         nonneg = cs_section.nonneg_btn.isChecked()
 
-        def _cs_for(highres: bool) -> float | None:
-            data = nav.cd.ccg_for(nav.key.nd(), 'highres' if highres else 'lowres')
-            if data is None:
-                return None
-            arr = getattr(data, 'ccg', None)
-            if arr is None or ref >= arr.shape[1] or tgt >= arr.shape[2]:
-                return None
-            is_all = seg_idx == nav.n_segments
-            if is_all:
-                ns = min(nav.n_segments, arr.shape[0])
-                ccg_raw = arr[:ns, ref, tgt, :].sum(0) if ns > 0 else None
-            elif seg_idx < arr.shape[0]:
-                ccg_raw = arr[seg_idx, ref, tgt, :]
-            else:
-                return None
-            if ccg_raw is None or len(ccg_raw) == 0:
-                return None
-            ctx = _CSContext(ref=ref, tgt=tgt, seg=seg_idx, highres=highres,
-                             nd_key=nav.key.nd(),
-                             eff_min_lag=data.conf.min_lag,
-                             eff_max_lag=data.conf.max_lag)
-            cs_back = cs_section._cs_backend
-            if metric == 'JBSI':
-                cs_val = cs_back._compute_jbsi(ctx) if cs_back else None
-            else:
-                null_arr = getattr(data, 'ccg_null', None)
-                null_raw = CCGContextBuilder._slice4d(
-                    null_arr, seg_idx, ref, tgt, is_all, nav.n_segments)
-                jctrl = cs_section._jitter_ctrl
-                if method == 'jitter' and jctrl is not None and not highres:
-                    cached = jctrl.get_result(ref, tgt, 'lo')
-                    if cached is not None:
-                        null_raw = cached[0]
-                method_eff = 'conv' if method == 'jitter' else method
-                ccg, ccg_null = CCGNorm.apply(
-                    ccg_raw, null_raw, ref, tgt, seg_idx,
-                    nav.active_norms - {NormalizeBy.BASELINE},
-                    nav.neurons, n_segments=nav.n_segments,
-                    custom_time_hours=getattr(data.conf, 'total_time_hours', None))
-                try:
-                    cs_val, _ = ConnectionStrength.conn_strength(
-                        ccg, ccg_null, data.conf, method_eff,
-                        min_lag_override=data.conf.min_lag,
-                        max_lag_override=data.conf.max_lag)
-                except Exception:
-                    return None
-            if cs_val is not None and nonneg:
-                cs_val = max(0.0, float(cs_val))
-            return cs_val
-
-        lo = _cs_for(False)
-        hi = _cs_for(True) if nav.resolution != "lo" else None
+        lo = CCGContextBuilder._cs_value(nav, cs_section.jitter_mgr, seg_idx,
+                                         ref, tgt, 'lowres', nonneg=nonneg)
+        hi = CCGContextBuilder._cs_value(nav, cs_section.jitter_mgr, seg_idx,
+                                         ref, tgt, 'highres', nonneg=nonneg)
 
         lines = []
         if lo is not None:
@@ -1188,24 +1041,20 @@ class CCGContextBuilder:
         """Recompute CCG for ref/tgt at given window/bin. Returns 1-D array or None."""
         neurons = nav.neurons
         neurons_sub = neurons.neuron_slice(neuron_inds=np.array([ref, tgt]))
-        edge_times  = (nav.cd.edge_times_for(nav.key.nd())
-                       if nav.cd is not None else None)
-        seg_idx = nav.seg_idx(nav.current_segment)
-        is_all  = seg_idx >= nav.n_segments
+        # An appended window carries its own extent (source config); 'full' spans the session.
+        label = nav.segment_name(nav.segment_index(nav.current_segment))
+        src = nav.cd.source_config(nav.key, label) if label else None
         kwargs  = dict(
             bin_size=bs, window_size=dur,
-            symmetrize=getattr(conf, 'symmetrize_ccg', True),
-            use_acceleration=getattr(conf, 'use_acceleration', False),
+            symmetrize=conf.symmetrize_ccg,
+            use_acceleration=conf.use_acceleration,
         )
         try:
-            if edge_times is not None and len(edge_times) > 0:
-                et = (edge_times if is_all
-                      else edge_times.iloc[[seg_idx]] if 0 <= seg_idx < len(edge_times)
-                      else edge_times)
+            if src is not None and not isinstance(src.t0, str) and not isinstance(src.t1, str):
                 full = correlations.spike_correlations(
                     neurons_sub, neuron_inds=np.array([0, 1]),
-                    start_end_times=et[['start', 'stop']].values.T, **kwargs)
-                slc = full[:, 0, 1, :].sum(0) if is_all else full[0, 0, 1, :]
+                    start_end_times=np.array([[float(src.t0)], [float(src.t1)]]), **kwargs)
+                slc = full[0, 0, 1, :]
             else:
                 full = correlations.spike_correlations(
                     neurons_sub, ref_neuron_inds=np.array([0]),
@@ -1216,15 +1065,6 @@ class CCGContextBuilder:
         except Exception as exc:
             print(f"[CCGPanel] extend compute failed: {exc}", flush=True)
             return None
-
-
-def _safe_npz_slice(arr, ref: int, tgt: int):
-    """Slice arr[0, ref, tgt, :] if shape permits, else None."""
-    if arr is None or not hasattr(arr, 'ndim') or arr.ndim < 4:
-        return None
-    if ref >= arr.shape[1] or tgt >= arr.shape[2]:
-        return None
-    return arr[0, ref, tgt, :]
 
 
 class CCGPlotWidget(QWidget):
@@ -1312,6 +1152,8 @@ class CCGPlotWidget(QWidget):
             pw.scene().sigMouseClicked.connect(self._on_mouse_click)
             p = pw.getPlotItem()
             vb = pg.ViewBox()
+            vb.setMouseEnabled(x=False, y=False)   # no pinch/wheel/drag zoom on p-val overlay
+            vb.setMenuEnabled(False)
             pw.scene().addItem(vb)
             _guard = [False]
             def _sync_geom(vb=vb, p=p, g=_guard):
@@ -1553,13 +1395,13 @@ class WaveformPanelQt(QWidget):
         if neurons is None:
             self._canvas.draw()
             return
-        waveforms = getattr(neurons, 'waveforms', None)
-        shank_ids = getattr(neurons, 'shank_ids', None)
+        waveforms = neurons.waveforms
+        shank_ids = neurons.shank_ids
         if waveforms is None:
             self._canvas.draw()
             return
-        ref_wf    = waveforms[ref] if ref < len(waveforms) else None
-        tgt_wf    = waveforms[tgt] if tgt < len(waveforms) else None
+        ref_wf    = waveforms[ref]
+        tgt_wf    = waveforms[tgt]
         ref_shank = int(shank_ids[ref]) if shank_ids is not None else 0
         tgt_shank = int(shank_ids[tgt]) if shank_ids is not None else 0
         ax = self._fig.add_subplot(111)
@@ -1585,23 +1427,20 @@ class CorrelogramPanel(QWidget):
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__(parent)
-        self._nav = nav
+        self.nav = nav
         self._theme_fn = None
         self._extend_cache: dict = {}
         self._build()
         self._connect_nav()
         self._connect_sections()
 
-    def set_jitter_ctrl(self, jctrl):
-        self._jitter_ctrl = jctrl
-        self.jitter_section.set_jitter_ctrl(jctrl)
-        self.cs_section.set_jitter_ctrl(jctrl)
-
-    def set_cs_backend(self, backend):
-        self.cs_section.set_cs_backend(backend)
+    def set_jitter_mgr(self, jctrl):
+        self.jitter_mgr = jctrl
+        self.jitter_section.set_jitter_mgr(jctrl)
+        self.cs_section.set_jitter_mgr(jctrl)
 
     def _build(self):
-        self._jitter_ctrl = None   # set externally via set_jitter_ctrl()
+        self.jitter_mgr = None   # set externally via set_jitter_mgr()
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1627,11 +1466,11 @@ class CorrelogramPanel(QWidget):
         tb_layout.setContentsMargins(2, 2, 2, 2)
         tb_layout.setSpacing(3)
 
-        self.seg_bar      = SegmentBar(self._nav)
-        self.norm_section = NormSection(self._nav)
+        self.seg_bar      = SegmentBar(self.nav)
+        self.norm_section = NormSection(self.nav)
         self.corr_section = CorrelogramSection()
-        self.cs_section   = BaselineCSSection(self._nav)
-        self.jitter_section = JitterSection(self._nav)
+        self.cs_section   = BaselineCSSection(self.nav)
+        self.jitter_section = JitterSection(self.nav)
         self.sa_section   = SpikeAttributionSection()
 
         def _sep():
@@ -1661,7 +1500,7 @@ class CorrelogramPanel(QWidget):
     @staticmethod
     def _render_fail_reason(nav) -> str:
         """Why build_context returned None — for terminal diagnostics."""
-        n = len(nav.all_inds)
+        n = len(nav.all_pairs_np)
         idx = nav.current_pair_idx
         inds = nav.current_pair_inds
         if n == 0:
@@ -1673,20 +1512,27 @@ class CorrelogramPanel(QWidget):
         data = nav.ccg_data
         if data is None:
             return f"pair=({ref},{tgt}) but cd.ccg_for({nav.key.nd()}) is None"
-        arr = getattr(data, 'ccg', None)
-        if arr is None or getattr(arr, 'ndim', 0) < 4:
-            return f"pair=({ref},{tgt}) but ccg array missing/bad"
-        if ref >= arr.shape[1] or tgt >= arr.shape[2]:
-            return (f"pair=({ref},{tgt}) outside ccg shape {arr.shape} "
-                    "(tagged pair not in this session's neuron count)")
-        seg_idx = nav.seg_idx(nav.current_segment)
+        arr = data.ccg
+        if arr is None:
+            return f"pair=({ref},{tgt}) but ccg array is None"
+        seg_idx = nav.segment_index(nav.current_segment)
         if seg_idx < arr.shape[0] or seg_idx == nav.n_segments:
             pass  # All-segment sum path — build_context handles
         return (f"pair=({ref},{tgt}) ccg shape={arr.shape} seg={nav.current_segment!r} "
                 f"but slice failed — check segment index")
 
+    def _together_handle(self, entry):
+        """Normalize a together_pairs entry → (pair_key, ref, tgt).
+
+        Entries are (Key, ref, tgt) in all-session mode, else (ref, tgt) in the
+        current session.
+        """
+        if len(entry) == 3:
+            return entry[0], int(entry[1]), int(entry[2])
+        return self.nav.key, int(entry[0]), int(entry[1])
+
     def request_render(self):
-        nav = self._nav
+        nav = self.nav
         cor = self.corr_section
         if nav.resolution == "lo_hi":
             ctxs = [CCGContextBuilder.build_context(nav, self, hi_res_override=False),
@@ -1697,6 +1543,12 @@ class CorrelogramPanel(QWidget):
             ctxs.append(CCGContextBuilder.build_context(nav, self))
         else:
             ctxs = [CCGContextBuilder.build_context(nav, self)]
+        # "Show Together": overlay each pinned pair's CCG on top of the current view.
+        for entry in nav.together_pairs:
+            pk, r, t = self._together_handle(entry)
+            tctx = CCGContextBuilder.build_context(nav, self, pair_override=(pk, r, t))
+            if tctx is not None:
+                ctxs.append(tctx)
         if cor.extend_check.isChecked():
             ext = CCGContextBuilder.build_extend_context(nav, self)
             if ext is not None:
@@ -1707,12 +1559,13 @@ class CorrelogramPanel(QWidget):
         self.plot_widget.render(ctxs)
         self.cs_section.update_display()
         if hasattr(self, '_wf_panel') and self._wf_panel.isVisible():
-            inds = nav.current_pair_inds
-            if inds is not None:
-                self._wf_panel.render(nav.neurons, int(inds[0]), int(inds[1]))
+            if nav.current_pair_inds is not None:
+                # Pair's own session neurons (correct across sessions in all-session mode).
+                ref, tgt, pair_key, _ = CCGContextBuilder._resolve_pair(nav)
+                self._wf_panel.render(nav.cd.nd.neurons_for(pair_key), ref, tgt)
 
     def _connect_nav(self):
-        nav = self._nav
+        nav = self.nav
         for sig in (nav.key_changed, nav.pair_changed, nav.segment_changed,
                     nav.resolution_changed, nav.norms_changed,
                     nav.stacked_segments_changed, nav.cs_overlay_changed,
@@ -1724,7 +1577,7 @@ class CorrelogramPanel(QWidget):
         self.plot_update_requested.connect(self.request_render)
 
     def _connect_sections(self):
-        nav = self._nav
+        nav = self.nav
 
         self.norm_section.apply_requested.connect(self._on_apply_norms)
         self.cs_section.sig_changed.connect(lambda: self.plot_update_requested.emit())
@@ -1736,13 +1589,13 @@ class CorrelogramPanel(QWidget):
         self.sa_section.enable_toggled.connect(self._on_spike_attr_enable)
 
     def _update_jitter_baseline_state(self, *_):
-        inds = self._nav.current_pair_inds
-        has_jitter = (inds is not None and self._jitter_ctrl is not None and
-                      self._jitter_ctrl.get_result(int(inds[0]), int(inds[1]), 'lo') is not None)
+        inds = self.nav.current_pair_inds
+        has_jitter = (inds is not None and self.jitter_mgr is not None and
+                      self.jitter_mgr.has_result(int(inds[0]), int(inds[1])))
         self.cs_section.set_jitter_baseline_enabled(has_jitter)
 
     def _on_autoscale_snap(self):
-        ctx = CCGContextBuilder.build_context(self._nav, self)
+        ctx = CCGContextBuilder.build_context(self.nav, self)
         if ctx is None or ctx.ccg is None:
             return
         import numpy as _np
@@ -1763,17 +1616,17 @@ class CorrelogramPanel(QWidget):
 
     def _on_apply_norms(self):
         import copy
-        norms = self._nav.active_norms
+        norms = self.nav.active_norms
         if not norms:
             QMessageBox.information(self, "Apply to data", "No normalizations selected.")
             return
-        data = self._nav.ccg_data
+        data = self.nav.ccg_data
         if data is None:
             return
         name, ok = QInputDialog.getText(self, "Apply to data", "Name for normalized dataset:")
         if not ok or not name.strip():
             return
-        nav = self._nav
+        nav = self.nav
         arr, null = data.ccg, data.ccg_null
         n_seg, n_ref, n_tgt, _ = arr.shape
         new_ccg  = np.empty_like(arr,  dtype=float)
@@ -1783,39 +1636,39 @@ class CorrelogramPanel(QWidget):
                 for t in range(n_tgt):
                     c, cn = CCGNorm.apply(
                         arr[seg, r, t], null[seg, r, t] if null is not None else None,
-                        r, t, seg, norms,
+                        r, t, norms,
                         neurons=nav.neurons,
-                        custom_time_hours=getattr(data.conf, 'total_time_hours', None))
+                        custom_time_hours=CCGContextBuilder._time_hours_for_seg(nav, seg))
                     new_ccg[seg, r, t] = c
                     if new_null is not None and cn is not None:
                         new_null[seg, r, t] = cn
         new_data = copy.copy(data)
         new_data.ccg = new_ccg
         new_data.ccg_null = new_null
-        new_data.pval = new_data.qval = new_data.significant = None
+        new_data.pval = new_data.qval = None
         QMessageBox.information(self, "Done",
                                 f"Normalized CCG '{name.strip()}' applied in memory.")
 
     def _on_spike_attr_set(self, bin_val: float, unit: str):
         p = self.window()
-        fn = getattr(p, '_on_spike_attribution_set', None)
+        fn = p._on_spike_attribution_set
         if fn is not None:
             fn(bin_val, unit)
 
     def keyPressEvent(self, event):
         key = event.key()
         if key == Qt.Key.Key_Left:
-            self._nav.set_current_segment(
-                self._nav.seg_name(
-                    (self._nav.seg_idx(self._nav.current_segment) - 1)
-                    % len(self._nav.all_segment_names())))
+            self.nav.set_current_segment(
+                self.nav.segment_name(
+                    (self.nav.segment_index(self.nav.current_segment) - 1)
+                    % len(self.nav.available_segments())))
         elif key == Qt.Key.Key_Right:
-            self._nav.set_current_segment(
-                self._nav.seg_name(
-                    (self._nav.seg_idx(self._nav.current_segment) + 1)
-                    % len(self._nav.all_segment_names())))
+            self.nav.set_current_segment(
+                self.nav.segment_name(
+                    (self.nav.segment_index(self.nav.current_segment) + 1)
+                    % len(self.nav.available_segments())))
         elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_R:
-            self._nav.set_resolution("lo" if self._nav.resolution == "hi" else "hi")
+            self.nav.set_resolution("lo" if self.nav.resolution == "hi" else "hi")
         else:
             super().keyPressEvent(event)
 
@@ -1835,7 +1688,7 @@ class CorrelogramPanel(QWidget):
         menu.exec(pos)
 
     def _export_png(self):
-        ctx = CCGContextBuilder.build_context(self._nav, self)
+        ctx = CCGContextBuilder.build_context(self.nav, self)
         if ctx is None:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -1848,10 +1701,10 @@ class CorrelogramPanel(QWidget):
             QMessageBox.critical(self, "Export failed", str(e))
 
     def _view_values(self, item: str):
-        ctx = CCGContextBuilder.build_context(self._nav, self)
+        ctx = CCGContextBuilder.build_context(self.nav, self)
         if ctx is None:
             return
-        val = getattr(ctx, item, None)
+        val = ctx.ccg if item == 'ccg' else ctx.acg_ref if item == 'acg_ref' else ctx.acg_tgt if item == 'acg_tgt' else ctx.ccg_null_plot if item == 'baseline' else ctx.pval if item == 'pval' else None
         if val is None:
             print(f"[CCG] {item}: None")
         else:

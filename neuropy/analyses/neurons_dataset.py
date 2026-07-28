@@ -8,19 +8,18 @@ import pandas as pd
 from dataclasses import dataclass, replace
 from typing import Union, Optional
 
-from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable
+from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, JsonSavable
 from neuropy.core.neurons import Neurons
 from neuropy.core.probe import ProbeGroup
 from neuropy.core.epoch import Epoch
 
 
-@dataclass(frozen=True)
-class Key:
+@dataclass(eq=False)
+class Key(JsonSavable):
     """
     Indexing object for CCG analysis.
 
     key.session      # Top level
-    key.epoch        # Mid level
     key.segment      # Finest time division
     key.conn_type    # Connection type (ref -> target)
     key.resolution   # Resolution (lowres, highres)
@@ -30,7 +29,6 @@ class Key:
     """
 
     session: Optional[str] = None
-    epoch: Optional[str] = None
     segment: Optional[int] = None
     excitability: Optional[str] = None
     conn_type: Optional[tuple[str, str]] = None
@@ -45,6 +43,23 @@ class Key:
                 for f in self.__dataclass_fields__)
         except:
             return False  # NOTE no type check, allows comparison with other 'key' classes
+
+    def __hash__(self):
+        # Not frozen (mutable), but still used as dict/set keys — hash the field tuple,
+        # consistent with __eq__. Do not mutate a Key while it lives in a set/dict.
+        return hash(tuple(getattr(self, f) for f in self.__dataclass_fields__))
+
+    def serialize(self) -> dict:
+        # Compact JSON-boundary form; _to_json inlines this for any nested Key.
+        return {'__keystr__': self.json_str()}
+
+    def __getstate__(self):
+        return self.serialize()
+
+    def __setstate__(self, state: dict) -> None:
+        k = Key.from_str(state['__keystr__'])
+        for f in self.__dataclass_fields__:
+            setattr(self, f, getattr(k, f))
 
     def matches(self, **kwargs) -> bool:
         """Check if this key matches given criteria (for filtering)"""
@@ -96,12 +111,17 @@ class Key:
             parts.append(self.excitability)
         if self.conn_type:
             parts.append(Key.format_conn_type(self.conn_type))
-        if self.epoch:
-            parts.append(f'[{self.epoch}]')
         return ' '.join(parts) if parts else str(self)
 
     def nd(self) -> 'Key':
         return self.get('session')
+    
+    def cd(self) -> 'Key':
+        return self.get('session', 'resolution')
+
+    def ptr(self) -> 'Key':
+        """Pointer/significance key: resolution-invariant (pointers don't depend on resolution)."""
+        return self.get('session', 'conn_type', 'excitability')
 
     def json_str(self) -> str:
         """Canonical JSON key for this Key (stable serialization at JSON boundary)."""
@@ -119,10 +139,18 @@ class Key:
         """Pair identity for cross-group matching (session + ref + tgt)."""
         return cls(session=str(session), ref=int(ref), tgt=int(tgt))
 
+    def pair_sort_key(self) -> tuple:
+        """Stable tuple for sort order (session, ref, tgt)."""
+        return (str(self.session or ''), int(self.ref or 0), int(self.tgt or 0))
+
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, Key):
+            return NotImplemented
+        return self.pair_sort_key() < other.pair_sort_key()
+
     def __str__(self):
         parts = [
             f"sess_{self.session}" if self.session else "",
-            f"epoch_{self.epoch}" if self.epoch else "",
             f"seg_{self.segment}" if self.segment is not None else "",
             f"ex_{self.excitability}" if self.excitability else "",
             f"type_{self.conn_type[0]}-{self.conn_type[1]}" if self.conn_type else "",
@@ -142,9 +170,9 @@ class Key:
             if part.startswith('sess_'):
                 fields['session'] = part[5:]
             elif part.startswith('epoch_'):
-                fields['epoch'] = part[6:]
+                continue   # legacy custom-window keys: epoch dissolved into dim0 segments
             elif part.startswith('seg_'):
-                fields['segment'] = int(part[4:])
+                fields['segment'] = part[4:]
             elif part.startswith('ex_'):
                 fields['excitability'] = part[3:]
             elif part.startswith('type_'):
@@ -222,16 +250,109 @@ class NeuronsDataset(AnalysisDataset):
         conf: NeuronsDatasetConfig,
     ):
         super().__init__()
-        self.neurons = {}
+        self._neurons = {}
         self.probe_info = {}
         self.themes = {}
+        self._slice_cache = {}   # TRANSIENT memo, never persisted
         self._sessions = _san(sessions)
         self.conf = conf
         self._prep(self._sessions)
 
-    @property
-    def data(self):
-        return self.neurons
+    def neurons_for(self, key: Key) -> Neurons:
+        return self._neurons[key.nd()]
+
+    def get_themes(self, key: Key) -> dict:
+        """Sole provider of a session's non-empty theme Epochs (built once in _prep)."""
+        return {name: ep for name, ep in (self.themes.get(key.nd()) or {}).items()
+                if ep is not None and ep.n_epochs > 0}
+
+    def get_themes_any(self) -> dict:
+        """Union of theme Epochs across all sessions (all-session mode); concatenated per name."""
+        frames: dict[str, list] = {}
+        for k in self.session_keys():
+            for name, ep in self.get_themes(k).items():
+                frames.setdefault(name, []).append(ep.to_dataframe()[['start', 'stop', 'label']])
+        return {name: Epoch(pd.concat(dfs, ignore_index=True))
+                for name, dfs in frames.items() if dfs}
+
+    def session_bounds(self, key) -> tuple:
+        """Session recording (t_start, t_stop) in seconds."""
+        n = self.neurons_for(key)
+        return float(n.t_start), float(n.t_stop)
+
+    def resolve_time(self, key, raw) -> float:
+        """Sole start/end resolver: 'start'/'end' → session bounds; else numeric seconds."""
+        t_start, t_stop = self.session_bounds(key)
+        return {'start': t_start, 'end': t_stop}.get(raw, None) \
+            if isinstance(raw, str) else float(raw)
+
+    def _theme_intervals(self, key, theme, labels, t0, t1) -> tuple:
+        """Active intervals for one theme's label whitelist within [t0,t1]. Returns (intervals, dur)."""
+        from neuropy.analyses.epoch_filter import EpochFilter
+        active = {str(x) for x in (labels or [])}  # whitelist: keep only these
+        bounds = []
+        ep = self.get_themes(key).get(theme) if theme != 'segments' else None
+        raw_lbls = [str(lb).strip() for lb in (ep.labels if ep is not None else [])]
+        if ep is not None:
+            bounds = [(float(s), float(e), str(lb).strip())
+                      for s, e, lb in zip(ep.starts, ep.stops, ep.labels)]
+            if len({lb for _, _, lb in bounds if lb}) <= 1:  # single-label theme → theme name
+                bounds = [(s, e, theme) for s, e, _ in bounds]
+        print(f"[dbg:_theme_intervals] sess={key.session} theme={theme!r} "
+              f"whitelist={sorted(active)} raw_lbls={sorted(set(raw_lbls))} "
+              f"t0={t0:.1f} t1={t1:.1f} ep={'yes' if ep is not None else 'NO'}",
+              flush=True)
+        before = len(bounds)
+        if active:
+            bounds = [b for b in bounds if b[2] in active]
+        if not bounds:
+            print(f"[dbg:_theme_intervals] EMPTY label-filter "
+                  f"before={before} whitelist={sorted(active)}", flush=True)
+            return [], 0.0   # no label match → skip session
+        result = EpochFilter(bounds).filter(active or {lb for _, _, lb in bounds}, t0, t1)
+        print(f"[dbg:_theme_intervals] EpochFilter→ type={type(result).__name__} "
+              f"val={result!r}", flush=True)
+        if result is False or result[0] is None:
+            print(f"[dbg:_theme_intervals] DROP None/False as empty", flush=True)
+            return [], 0.0
+        return result
+
+    def resolve_intervals(self, key, t0, t1, filter_state) -> tuple:
+        """Active intervals = intersection over each theme's label whitelist. Returns (intervals, active_dur)."""
+        from neuropy.core.intervals import IntervalOp
+        t0 = self.resolve_time(key, t0)
+        t1 = self.resolve_time(key, t1)
+        if t1 <= t0:
+            return None, None
+        acc = None
+        for th in filter_state:
+            iv, _ = self._theme_intervals(key, th.get('name', 'segments'), th.get('labels'), t0, t1)
+            if not iv:
+                return [], 0.0 
+            acc = iv if acc is None else IntervalOp.intersect(acc, iv)
+            if not acc:
+                return [], 0.0
+        return acc, IntervalOp.duration(acc)
+
+    def sliced_neurons_for(self, src: 'CCGSourceConfig'):
+        """Neurons windowed to a segment's active intervals; cached per (session, intervals)
+        so lowres/highres tasks reuse one slice. Returns (neurons_slice, active_dur) or None."""
+        intervals, active_dur = self.resolve_intervals(src.key, src.t0, src.t1, src.filter_state)
+        if intervals is None or not intervals:
+            return None
+        ck = (src.key.nd(), tuple((float(a), float(b)) for a, b in intervals))
+        sl = self._slice_cache.get(ck)
+        if sl is None:
+            sl = self.neurons_for(src.key).time_multislices(*zip(*intervals))
+            self._slice_cache[ck] = sl
+        return sl, active_dur
+
+    def clear_slice_cache(self):
+        """Drop the transient windowed-Neurons memo (call when a compute batch finishes)."""
+        self._slice_cache.clear()
+
+    def session_keys(self) -> list:
+        return list(self._neurons.keys())
 
     def _prep(self, sessions):
         """
@@ -240,7 +361,7 @@ class NeuronsDataset(AnalysisDataset):
         for session in sessions:
             session_name = self._short_session_name(session)
             key = Key(session=session_name)
-            self.neurons[key] = self._load_neurons(session)  # TODO: use neuron ids?
+            self._neurons[key] = self._load_neurons(session)  # TODO: use neuron ids?
             self.probe_info[key] = self._load_probe_info(session)
             self.themes[key] = self._load_themes(session)
 
@@ -306,9 +427,9 @@ class NeuronsDataset(AnalysisDataset):
         return [self._short_session_name(session) for session in self._sessions]
 
     def __str__(self):
-        lines = [f"NeuronsDataset name={self.conf.name} sessions={len(self.neurons)}"]
+        lines = [f"NeuronsDataset name={self.conf.name} sessions={len(self._neurons)}"]
         theme_store = getattr(self, 'themes', None) or {}
-        for k, n in self.neurons.items():
+        for k, n in self._neurons.items():
             has_probe = self.probe_info.get(k) is not None
             per_sess = theme_store.get(k, {}) if isinstance(theme_store, dict) else {}
             theme_names = list(per_sess)
@@ -317,188 +438,3 @@ class NeuronsDataset(AnalysisDataset):
                 f"  {k}: neurons={n.n_neurons} probe={has_probe} "
                 f"themes={theme_names} intervals={n_iv}")
         return "\n".join(lines)
-
-    # def _get_edge_times(self, key: Key, neurons: Neurons, session, theme_name):
-    #     # TODO
-    #     """
-    #     Get the start and end of each segment. The edge timing are processed by epoch
-    #     A segment is the smallest time period in the
-    #     dataset where analysis will be performed (e.g. data used to calculate one CCG). There
-    #     can be many overlapping segments within a dataset depending on configuration.
-
-    #     Define segment edges of each neurons group
-    #     see neurons.py:
-    #         _edges_time_split   time_split
-    #         _edges_time_window  time_windows
-    #         _edges_spikecount   spikecount_split
-
-    #     passing in key because we need to generate finer keys for objects in edge_times
-    #     """
-
-    #     dfs = []
-    #     ivs = neurons.metadata['intervals']
-    #     for i, e in enumerate(_san(self.conf.epochs, wrap_none=True)):
-    #         try:
-    #             theme = self.themes[key][theme_name]
-    #         except:
-    #             try:
-    #                 theme = getattr(session, theme_name)
-    #             except:
-    #                 print(f"{key.session} doesn't have theme {theme_name}")
-    #                 return None
-                 
-    #         if not e in theme.labels: #TODO
-    #             print(f"{key.session} doesn't have epoch {e}")
-    #             continue
-
-    #         k = key.add(epoch=e)
-    #         t_start, t_stop = theme.timing_by_label(e) if e \
-    #                             else (neurons.t_start, neurons.t_stop)
-
-    #         if self.conf.seg_spikecount is not None:
-    #             # TODO spikecount segmentation code is not maintained
-    #             neus = neurons.time_slice(t_start, t_stop)
-    #             for i in range(neus.n_neurons):
-    #                 k = key.add(epoch=e, ref_ind=i)
-    #                 starts, stops = neus._edges_spikecount(
-    #                     i=i, n=self.conf.seg_spikecount, discard_tail=False)
-    #         elif self.conf.seg_stride is not None and self.conf.seg_len is not None:
-    #             starts, stops = neurons._edges_time_window(
-    #                 stride=self.conf.seg_stride,
-    #                 seg_len=self.conf.seg_len,
-    #                 t_start=t_start,
-    #                 t_stop=t_stop)
-    #         elif self.conf.n_segments is not None and self.conf.n_segments[
-    #                 i] > 1:
-    #             starts, stops = neurons._edges_time_split(
-    #                 n_segments=self.conf.n_segments,
-    #                 t_start=t_start,
-    #                 t_stop=t_stop)
-    #         else:
-    #             starts, stops = np.array([t_start]), np.array([t_stop])
-    #         """
-    #         Calculate total/actual time lengths of each segment
-    #         """
-    #         edges = pd.DataFrame({
-    #             "start": starts,
-    #             "stop": stops,
-    #             "key": [k.add(segment=i) for i in range(len(starts))],
-    #             "label": [e + str(i) for i in range(len(starts))],
-    #             "total_time_hours": (stops - starts) / 3600,
-    #         })
-
-    #         eths = []
-    #         for row in edges.itertuples(index=False):
-    #             start, stop, tth = row.start, row.stop, row.total_time_hours
-
-    #             # find intervals that overlap the edge
-    #             overlap_mask = (ivs[:, 1] > start) & (ivs[:, 0] < stop)
-    #             overlapping_ivs = ivs[overlap_mask]
-
-    #             # clip intervals to edge boundaries
-    #             clipped_start = np.clip(overlapping_ivs[:, 0], start, stop)
-    #             clipped_stop = np.clip(overlapping_ivs[:, 1], start, stop)
-
-    #             # compute effective time in hours
-    #             effective_hours = np.sum(clipped_stop - clipped_start) / 3600
-    #             eths.append(min(effective_hours, tth))
-    #         edges['effective_time_hours'] = np.array(eths)
-    #         dfs.append(edges)
-    #     return pd.concat(dfs, axis=0)
-
-
-    # def _time_filter(self, session):
-    ...
-    #     if self.conf.sleep is not None:
-    #         neurons = neurons.behav_slice(behav_times=session.brainstates,
-    #                                       labels=self.conf.sleep.labels OR labels=None,
-    #                                       discard=self.conf.sleep.discard,
-    #                                       min_dur=self.conf.sleep.min_dur)
-
-
-    # def _get_firing_rates_by_segment(self, edge_times: pd.DataFrame,
-    #                                  neurons: Neurons):
-    #     """
-    #         Calculate and store segment-specific firing rates
-    #     """
-    #     x = np.zeros((edge_times.shape[0], neurons.n_neurons))
-    #     for i, (t_start,
-    #             t_end) in enumerate(zip(edge_times['start'],
-    #                                     edge_times['stop'])):
-    #         x[i] = neurons.time_slice(t_start, t_end).firing_rate
-    #     return x
-
-    # def frate_stats(self, key, alpha=0.05):
-    #     """
-    #     Generate a stats description of firing rates
-    #     """
-    #     from scipy.stats import describe, ttest_ind
-
-    #     edge_times = self.edge_times[key]
-    #     frates = self.segment_firing_rates[key]
-    #     neuron_types = self.data[key].neuron_type
-    #     labels = edge_times['label'].values
-    #     stats_name = "firing rate"
-    #     neuron_type_conf = self.conf.neuron_types
-
-    #     for neuron_type in neuron_type_conf:
-    #         print(f"{stats_name} stats {neuron_type}")
-    #         print(
-    #             f"segment | num | mean | iqr | min | max | variance | skew | kurt"
-    #         )
-    #         for i, (vi) in enumerate(edge_times.itertuples()):
-    #             fr = frates[i][neuron_types == neuron_type]
-    #             mean = np.mean(fr)
-    #             iqr = np.percentile(fr, 75) - np.percentile(fr, 25)
-    #             desc = describe(fr)
-    #             print(
-    #                 f"{str(i)+':'+str(vi.label):7} | {desc.nobs} | {mean:.2f} | {iqr:.2f} | {desc.minmax[0]:.2f} | {desc.minmax[1]:.2f} | {desc.variance:.2f} | {desc.skewness:.2f} | {desc.kurtosis:.2f}"
-    #             )
-    #         print("\n")
-
-    #         print(f"Difference in mean {stats_name} P VALUES")
-    #         printstr = ""
-    #         decimal_places = int(-np.floor(np.log10(alpha)))
-
-    #         # print p-value matrix
-    #         printstr = f'{neuron_type:{decimal_places+3}}|'
-    #         for i in range(len(labels)):
-    #             printstr += f"{str(i):{decimal_places+3}}|"
-    #         printstr += "\n"
-    #         for i, (vi) in enumerate(frates):
-    #             printstr += f"{str(i):{decimal_places+3}}|"
-    #             for j, (vj) in enumerate(frates):
-    #                 fri = frates[i][neuron_types == neuron_type]
-    #                 frj = frates[j][neuron_types == neuron_type]
-    #                 if j >= i:
-    #                     continue
-    #                 if len(fri) < 5:
-    #                     printstr += f"{'-':{decimal_places}}|"
-    #                 else:
-    #                     p = ttest_ind(fri, frj, equal_var=True).pvalue
-    #                     printstr += f"{p:.{decimal_places}f}{'*' if p<=alpha else ' '}|"
-    #                     # Standard t-test,  check if mean firing rate changes per cell type
-    #             printstr += f"{labels[i]}"
-    #             printstr += "\n"
-    #         print(printstr)
-
-
-# class EpochSlicingConfig(Config):
-#     """
-#     Config to slice a behavioral epoch
-#     """
-#     def __init__(
-#         self,
-#         labels: Union[list[str], str, None] = None,
-#         min_dur=0,
-#         discard=False,
-#     ):
-#         super().__init__()
-#         self.labels = _san(labels)
-#         self.min_dur = min_dur
-#         self.discard = discard
-
-#     def __str__(self):
-#         return self.__class__.__name__ + ': ' + '\n'.join(
-#             [f"{key}={val}" for key, val in self.__dict__.items()])
-

@@ -1,0 +1,527 @@
+{
+  "scriptCompleted": true,
+  "contentDigest": "994fdd8269170215c7b67fa113d7928d479f223cbf967288d279b88f341baa69",
+  "files": [
+    {
+      "path": ".readthedocs.yaml",
+      "language": "yaml",
+      "sizeLines": 23,
+      "fileCategory": "config"
+    },
+    {
+      "path": "FUTURE_STEPS.md",
+      "language": "markdown",
+      "sizeLines": 40,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "README.md",
+      "language": "markdown",
+      "sizeLines": 59,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "design.md",
+      "language": "markdown",
+      "sizeLines": 14,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "neuropy/__init__.py",
+      "language": "python",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/__init__.py",
+      "language": "python",
+      "sizeLines": 9,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/_jitter_worker.py",
+      "language": "python",
+      "sizeLines": 64,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/artifact.py",
+      "language": "python",
+      "sizeLines": 122,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/brainstates.py",
+      "language": "python",
+      "sizeLines": 440,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/ccg_classifier.py",
+      "language": "python",
+      "sizeLines": 1388,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/ccg_transforms.py",
+      "language": "python",
+      "sizeLines": 192,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/correlations.py",
+      "language": "python",
+      "sizeLines": 1377,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/decoders.py",
+      "language": "python",
+      "sizeLines": 515,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/epoch_filter.py",
+      "language": "python",
+      "sizeLines": 68,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/jitter.py",
+      "language": "python",
+      "sizeLines": 832,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/ms_connectivity.py",
+      "language": "python",
+      "sizeLines": 1303,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/neurons_correlation.py",
+      "language": "python",
+      "sizeLines": 31,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/neurons_dataset.py",
+      "language": "python",
+      "sizeLines": 423,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/neurons_stability.py",
+      "language": "python",
+      "sizeLines": 102,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/oscillations.py",
+      "language": "python",
+      "sizeLines": 853,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/pair_selection_data.py",
+      "language": "python",
+      "sizeLines": 156,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/placefields.py",
+      "language": "python",
+      "sizeLines": 889,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/reactivation.py",
+      "language": "python",
+      "sizeLines": 445,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/spike_attribution.py",
+      "language": "python",
+      "sizeLines": 85,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/spkepochs.py",
+      "language": "python",
+      "sizeLines": 147,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/trace_fc.py",
+      "language": "python",
+      "sizeLines": 1092,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/analyses/utils.py",
+      "language": "python",
+      "sizeLines": 937,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/__init__.py",
+      "language": "python",
+      "sizeLines": 9,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/animal.py",
+      "language": "python",
+      "sizeLines": 40,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/ca_neurons.py",
+      "language": "python",
+      "sizeLines": 893,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/datawriter.py",
+      "language": "python",
+      "sizeLines": 93,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/epoch.py",
+      "language": "python",
+      "sizeLines": 911,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/event.py",
+      "language": "python",
+      "sizeLines": 17,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/intervals.py",
+      "language": "python",
+      "sizeLines": 168,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/neurons.py",
+      "language": "python",
+      "sizeLines": 1147,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/nwb_session.py",
+      "language": "python",
+      "sizeLines": 132,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/position.py",
+      "language": "python",
+      "sizeLines": 173,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/probe.py",
+      "language": "python",
+      "sizeLines": 397,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/ratemap.py",
+      "language": "python",
+      "sizeLines": 232,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/session.py",
+      "language": "python",
+      "sizeLines": 61,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/signal.py",
+      "language": "python",
+      "sizeLines": 106,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/core/sync.py",
+      "language": "python",
+      "sizeLines": 42,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/Calls2python.m",
+      "language": "m",
+      "sizeLines": 14,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/__init__.py",
+      "language": "python",
+      "sizeLines": 4,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/binarysignalio.py",
+      "language": "python",
+      "sizeLines": 154,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/dlcio.py",
+      "language": "python",
+      "sizeLines": 611,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/minianio.py",
+      "language": "python",
+      "sizeLines": 292,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/miniscopeio.py",
+      "language": "python",
+      "sizeLines": 380,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/movie.py",
+      "language": "python",
+      "sizeLines": 180,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/neuroscopeio.py",
+      "language": "python",
+      "sizeLines": 178,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/nwbio.py",
+      "language": "python",
+      "sizeLines": 182,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/openephysio.py",
+      "language": "python",
+      "sizeLines": 1004,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/optitrackio.py",
+      "language": "python",
+      "sizeLines": 608,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/phyio.py",
+      "language": "python",
+      "sizeLines": 287,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/spykingcircusio.py",
+      "language": "python",
+      "sizeLines": 164,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/io/usvio.py",
+      "language": "python",
+      "sizeLines": 154,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/__init__.py",
+      "language": "python",
+      "sizeLines": 6,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/ca_events.py",
+      "language": "python",
+      "sizeLines": 753,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/ccg.py",
+      "language": "python",
+      "sizeLines": 886,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/dataviz.py",
+      "language": "python",
+      "sizeLines": 300,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/epochs.py",
+      "language": "python",
+      "sizeLines": 266,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/figure.py",
+      "language": "python",
+      "sizeLines": 380,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/position.py",
+      "language": "python",
+      "sizeLines": 41,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/probe.py",
+      "language": "python",
+      "sizeLines": 293,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/ratemaps.py",
+      "language": "python",
+      "sizeLines": 155,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/signals.py",
+      "language": "python",
+      "sizeLines": 207,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/plotting/spikes.py",
+      "language": "python",
+      "sizeLines": 369,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/CCGUI Display.md",
+      "language": "markdown",
+      "sizeLines": 879,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "neuropy/ui/__init__.py",
+      "language": "python",
+      "sizeLines": 2,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/all_session_mode.py",
+      "language": "python",
+      "sizeLines": 100,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/app_state.py",
+      "language": "python",
+      "sizeLines": 600,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/ccg_panel.py",
+      "language": "python",
+      "sizeLines": 1723,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/ccg_ui.py",
+      "language": "python",
+      "sizeLines": 746,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/dialogs.py",
+      "language": "python",
+      "sizeLines": 1244,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/export_backend.py",
+      "language": "python",
+      "sizeLines": 564,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/jitter_ui.py",
+      "language": "python",
+      "sizeLines": 389,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/menubar.py",
+      "language": "python",
+      "sizeLines": 241,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/neuron_network.py",
+      "language": "python",
+      "sizeLines": 1881,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/pair_selection_panel.py",
+      "language": "python",
+      "sizeLines": 1829,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/stats_tests.py",
+      "language": "python",
+      "sizeLines": 1158,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/time_slider.py",
+      "language": "python",
+      "sizeLines": 1247,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/ui_common.py",
+      "language": "python",
+      "sizeLines": 380,
+      "fileCategory": "code"
+    },
+    {
+      "path": "neuropy/ui/utils.py",
+      "language": "python",
+      "sizeLines": 821,
+      "fileCategory": "code"
+    },
+    {
+      "path": "setup.py",
+      "language": "python",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    }
+  ],
+  "totalFiles": 84,
+  "filteredByIgnore": 132,
+  "estimatedComplexity": "moderate",
+  "stats": {
+    "filesScanned": 84,
+    "byCategory": {
+      "config": 1,
+      "docs": 4,
+      "code": 79
+    },
+    "byLanguage": {
+      "yaml": 1,
+      "markdown": 4,
+      "python": 78,
+      "m": 1
+    }
+  }
+}

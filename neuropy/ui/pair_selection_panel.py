@@ -81,12 +81,15 @@ import numpy as np
 from neuropy.ui.ui_common import (
     _SPECIAL_PREFIX, _SEPARATOR_ROW,
     is_special_group, is_separator_row,
-    CollapseState, group_header_label, SelectionCommand, BiIndex,
+    CollapseState, group_header_label, SelectionCommand,
 )
-from neuropy.analyses.utils import Savable, Autosave, UndoRedo
-from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.utils import Autosave, UndoRedo
+from neuropy.analyses.pair_selection_data import (
+    SelectionData, GroupDataset, SelectionDataset as _SelectionDataset,
+)
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
+    has_primary_modifier,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -94,105 +97,15 @@ from pyqtgraph.Qt.QtCore import QTimer as _QTimer
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI as CCGReviewUI
 
-@dataclass
-class Group(JsonSavable):
-    def __init__(self, name: str = '', hotkey: str = '', notes: str = ''):
-        JsonSavable.__init__(self)
-        self.name    = name
-        self.hotkey  = hotkey
-        self.notes   = notes
+class Groups(QObject, GroupDataset):
+    """UI wrapper over GroupDataset — adds the Qt ``changed`` signal and the
+    queries that need a live UI (pair validity, nd-keys, hotkey handling)."""
 
-
-class Groups(QObject, JsonSavable, BiIndex):
     changed = Signal()
-
-    _custom_types = {'registry': Group}
 
     def __init__(self):
         QObject.__init__(self)
-        JsonSavable.__init__(self, ignored_attrs=['ui'])
-        BiIndex.__init__(self)
-        self.registry: dict[str, Group] = {}
-        self.ui = None
-        self._save_dir: str = ''
-
-    def bind(self, ui: 'CCGReviewUI') -> None:
-        self.ui = ui
-
-    def __setstate__(self, state: dict) -> None:
-        # groups.json keys each Group by name but omits "name" from the value dict,
-        # so restore it from the registry key — the single source of truth.
-        JsonSavable.__setstate__(self, state)
-        for name, grp in self.registry.items():
-            grp.name = name
-
-    def __bool__(self) -> bool:
-        return bool(self._fwd) or bool(self.registry)
-
-    @property
-    def defined_groups(self) -> list[str]:
-        # add_to_group always registers metadata, so _fwd ⊆ registry
-        return sorted(self.registry.keys())
-
-    @property
-    def groups(self) -> list[str]:
-        return sorted(g for g in self.defined_groups if not is_special_group(g))
-
-    def special_groups(self) -> list[str]:
-        return sorted(g for g in self.defined_groups if is_special_group(g))
-
-    def get_group_metadata(self, name: str) -> Group:
-        if name not in self.registry:
-            self.registry[name] = Group(name=name)
-        return self.registry[name]
-
-    def save_path(self, **_) -> str | None:
-        d = self._save_dir or (self.ui.sd.save_dir if self.ui is not None else '')
-        return os.path.join(d, 'groups') if d else None
-
-    def add_to_group(self, gname: str, sess: str, pair: tuple) -> None:
-        self.add(gname, (sess, int(pair[0]), int(pair[1])))
-        self.get_group_metadata(gname)
-
-    def discard_from_group(self, gname: str, sess: str, pair: tuple) -> None:
-        self.discard(gname, (sess, int(pair[0]), int(pair[1])))
-
-    def pairs_in_group(self, gname: str, sess: str) -> set:
-        return {(r, t) for s, r, t in self.forward(gname) if s == sess}
-
-    def groups_for_pair(self, sess: str, ref: int, tgt: int) -> set:
-        return self.inverse((sess, int(ref), int(tgt)))
-
-    def sessions_for_group(self, gname: str) -> set:
-        return {s for s, *_ in self.forward(gname)}
-
-    def create_group(self, full_name: str) -> Group:
-        if full_name in self.registry or full_name in self._fwd:
-            raise ValueError(f"group '{full_name}' already exists")
-        return self.get_group_metadata(full_name)
-
-    def rename_group(self, old_name: str, new_name: str) -> None:
-        new_name = new_name.strip()
-        if not new_name or new_name == old_name:
-            return
-        if new_name in self._fwd:
-            raise ValueError(f"'{new_name}' already exists")
-        self.rename_key(old_name, new_name)
-        grp = self.registry.pop(old_name)
-        grp.name = new_name
-        if is_special_group(new_name):
-            grp.hotkey = ''
-        self.registry[new_name] = grp
-
-    def delete_group(self, name: str) -> None:
-        self.delete_key(name)
-        self.registry.pop(name)
-
-    def set_group_hotkey(self, name: str, key_str: str) -> None:
-        for grp in self.registry.values():
-            if grp.hotkey == key_str and grp.name != name:
-                grp.hotkey = ''
-        self.get_group_metadata(name).hotkey = key_str
+        GroupDataset.__init__(self)
 
     def pairs_in_group_by_session(self, gname: str) -> set[tuple]:
         ui = self.ui
@@ -202,7 +115,7 @@ class Groups(QObject, JsonSavable, BiIndex):
             if k.type_label() != lbl:
                 continue
             sess = str(k.session)
-            valid = ui._all_inds_set_for_ptr(ui.cd.ptr.get(k))
+            valid = ui.cd.ptr.get(k).pair_set
             for pair in self.pairs_in_group(gname, sess):
                 r, t = int(pair[0]), int(pair[1])
                 if (r, t) in valid:
@@ -219,7 +132,7 @@ class Groups(QObject, JsonSavable, BiIndex):
                 continue
             sess = str(ckey.session)
             ptr = ui.cd.ptr.get(ckey)
-            valid = ui._all_inds_set_for_ptr(ptr)
+            valid = ptr.pair_set
             if any((int(a), int(b)) in valid
                    for a, b in self.pairs_in_group(gname, sess)):
                 nid = id(nk)
@@ -240,7 +153,7 @@ class Groups(QObject, JsonSavable, BiIndex):
                 continue
             sess = str(ckey.session)
             ptr = ui.cd.ptr.get(ckey)
-            valid = ui._all_inds_set_for_ptr(ptr)
+            valid = ptr.pair_set
             pairs = self.pairs_in_group(gname, sess)
             if not pairs:
                 continue
@@ -248,14 +161,6 @@ class Groups(QObject, JsonSavable, BiIndex):
                 if r == t or (r, t) not in valid or (sess, r, t) in dead:
                     continue
                 yield ckey, r, t
-
-    def header_names(self) -> list[str]:
-        def _gname_sort_key(n):
-            try:
-                return (0, int(n), '')
-            except (ValueError, TypeError):
-                return (1, 0, n)
-        return sorted(self.registry, key=_gname_sort_key)
 
     def toggle_any_avail(self, gname: str) -> None:
         ui = self.ui
@@ -300,7 +205,7 @@ class Groups(QObject, JsonSavable, BiIndex):
         panel = nav.root.pairs_view.pair_selection
         current_pair = nav.current_pair
         if current_pair is None:
-            nav.root.show_transient_banner("Select a pair before using a group hotkey")
+            nav.root._show_transient_banner("Select a pair before using a group hotkey")
             return
 
         for grp in self.registry.values():
@@ -308,7 +213,6 @@ class Groups(QObject, JsonSavable, BiIndex):
             if not k or k != key_str:
                 continue
 
-            print(f"[hk] handler key={key_str!r} advance={advance} matched group={gname!r}")
             if not advance:
                 highlighted = [current_pair]
             else:
@@ -351,148 +255,23 @@ class Groups(QObject, JsonSavable, BiIndex):
             panel.push_undo(SelectionCommand(pair_changes, group_changes))
             nav.refresh_lists()
             if advance:
-                next_idx = min(nav.current_pair_idx + 1, len(nav.all_inds) - 1)
+                next_idx = min(nav.current_pair_idx + 1, len(nav.all_pairs_np) - 1)
                 nav.set_current_pair(next_idx)
                 panel._select_pair_in_list(panel._pair_at_all_inds_idx(next_idx))
             else:
                 panel._select_pair_in_list(current_pair)
-            nav.root.request_redraw()
+            nav.root.mainview.request_render()
             nav.root.neuron_network.draw()
             return
-        print(f"[hk] handler key={key_str!r} NO group matched")
-        nav.root.show_transient_banner(f"'{key_str}' is not assigned to any group hotkey")
+        nav.root._show_transient_banner(f"'{key_str}' is not assigned to any group hotkey")
 
 
-class _SelectionData(JsonSavable):
-    """Selections for one conn-type within a session."""
-
-    def __init__(self):
-        JsonSavable.__init__(self)
-        self.selected:   set = set()
-        self.unselected: set = set()
-        self.deleted:    set = set()
-        self.tags:       dict = {}   # {(ref,tgt): {groups,notes,tags}}
-
-    def __setstate__(self, state: dict):
-        def _to_set(v) -> set:
-            if isinstance(v, set):
-                return v
-            if isinstance(v, dict) and '__set__' in v:
-                v = v['__set__']
-            return {tuple(x) if isinstance(x, list) else x for x in (v or [])}
-
-        def _to_tuple_key_dict(v) -> dict:
-            if isinstance(v, dict):
-                if '__dict__' in v:
-                    return {(tuple(k) if isinstance(k, list) else k): val
-                            for k, val in v['__dict__']}
-                result = {}
-                for dk, dv in v.items():
-                    key = (tuple(int(i) for i in dk.split(','))
-                           if isinstance(dk, str) and ',' in dk else dk)
-                    result[key] = dv
-                return result
-            return {}
-
-        self.selected   = _to_set(state.get('selected', []))
-        self.unselected = _to_set(state.get('unselected', []))
-        self.deleted    = _to_set(state.get('deleted', []))
-        self.tags       = _to_tuple_key_dict(state.get('tags', {}))
-
-    def set_pair_state(self, pair: tuple, state: str):
-        pair = tuple(pair)
-        self.selected.discard(pair)
-        self.unselected.discard(pair)
-        self.deleted.discard(pair)
-        if state == 'sel':
-            self.selected.add(pair)
-        elif state == 'unsel':
-            self.unselected.add(pair)
-        elif state == 'del':
-            self.deleted.add(pair)
-
-    def reset(self, all_pairs, selected=(), deleted=()):
-        """Rebuild this bucket's state from scratch."""
-        all_set  = {tuple(p) for p in all_pairs}
-        sel_set  = {tuple(p) for p in selected}
-        del_set  = {tuple(p) for p in deleted}
-        self.selected   = sel_set & all_set
-        self.deleted    = del_set & all_set
-        self.unselected = all_set - self.selected - self.deleted
-
-
-class SelectionData(JsonSavable):
-    """Per-session, one _SelectionData per conn-type Key."""
-
-    _custom_types = {'selections': (Key, _SelectionData)}
-
-    def __init__(self, *, save_dir: str = '', nd_key: Key = None):
-        JsonSavable.__init__(self)
-        self.selections: dict[Key, _SelectionData] = _defaultdict(_SelectionData)
-        self._save_dir = save_dir
-        self._nd_key = nd_key
-
-    def save_path(self, **_) -> str | None:
-        if self._save_dir and self._nd_key is not None:
-            return os.path.join(self._save_dir, str(self._nd_key.session))
-        return None
-
-    @staticmethod
-    def as_pair_key(pair, session: str | None = None) -> Key:
-        """Normalize a pair to Key(session, ref, tgt) for dict/set matching."""
-        if isinstance(pair, Key) and pair.ref is not None and pair.tgt is not None:
-            return pair
-        p = tuple(pair)
-        if len(p) >= 3:
-            return Key.pair(p[0], p[1], p[2])
-        if session is None:
-            raise ValueError(f"session required for pair {p!r}")
-        return Key.pair(session, p[0], p[1])
-
-    @staticmethod
-    def pairs_vals_map(pairs, vals) -> dict[Key, float]:
-        return {SelectionData.as_pair_key(p): float(v) for p, v in zip(pairs or [], vals or [])}
-
-
-class SelectionDataset(JsonSavable, Autosave):
-    """Project-level owner of groups + per-session SelectionData."""
+class SelectionDataset(_SelectionDataset):
+    """UI SelectionDataset — analyses logic, but its groups are the Qt ``Groups``
+    subclass (adds the ``changed`` signal for panel refreshes)."""
 
     def __init__(self, save_dir: str = ''):
-        JsonSavable.__init__(self)
-        self.groups = Groups()
-        self.groups._save_dir = save_dir
-        self.sessions: dict[Key, SelectionData] = {}
-        self.save_dir = save_dir
-
-    def save_path(self, **_) -> str:
-        return os.path.join(self.save_dir, 'selection_dataset')
-
-    def __setstate__(self, state: dict):
-        self.save_dir = state.get('save_dir', self.save_dir)
-        self.groups._save_dir = self.save_dir
-        groups_v = state.get('groups', {})
-        if isinstance(groups_v, dict) and '__ref__' in groups_v:
-            path = groups_v['__ref__'][:-5]
-            self.groups.load(path)
-        else:
-            self.groups.__setstate__(groups_v)
-        self.sessions = {}
-        for key_str, sd_v in state.get('sessions', {}).items():
-            nd = Key.from_str(key_str)
-            sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
-            if isinstance(sd_v, dict) and '__ref__' in sd_v:
-                sd.load(sd_v['__ref__'][:-5])
-            else:
-                sd.__setstate__(sd_v)
-            self.sessions[nd] = sd
-
-    def get_selection_by_session(self, key: Key) -> SelectionData:
-        nd = key.nd()
-        sd = self.sessions.get(nd)
-        if sd is None:
-            sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
-            self.sessions[nd] = sd
-        return sd
+        super().__init__(save_dir=save_dir, groups_factory=Groups)
 
 
 class SearchBar(QWidget):
@@ -774,24 +553,28 @@ class PairSelectionPanel(QWidget, UndoRedo):
             sb = lb.verticalScrollBar()
             sb.setValue(int(frac * sb.maximum()))
 
+    def _make_pair_item(self, inds, should_gray, any_mode: bool) -> QListWidgetItem:
+        """Build a list item for a pair (label + gray + pair role), shared by both lists."""
+        ui     = self.ui
+        _, raw = ui.pair_sess_rt(inds)
+        pair_t = tuple(int(x) for x in raw)
+        label  = pair_label(inds,
+                            bookmarked=bm_key(inds, any_mode) in ui.bookmarked_pairs,
+                            group_names=group_names_for_pair(self.data, ui, inds),
+                            pair_tags=self.data.selections[ui.key].tags.get(pair_t, {}),
+                            any_mode=any_mode)
+        it = QListWidgetItem(label)
+        if should_gray(inds):
+            it.setForeground(QBrush(_C_GRAY_FG))
+        it.setData(_ROLE_PAIR, inds)
+        return it
+
     def _populate_avail_list(self, ui, data, should_gray):
         self.avail_list_pairs = []
         if ui.session_any_mode:
             return
-        bm = ui.bookmarked_pairs
         for inds in sorted(ui.active_selections.unselected):
-            _, raw  = ui.pair_sess_rt(inds)
-            pair_t  = tuple(int(x) for x in raw)
-            gnames  = group_names_for_pair(data, ui, inds)
-            label   = pair_label(inds,
-                                 bookmarked=bm_key(inds, False) in bm,
-                                 group_names=gnames,
-                                 pair_tags=data.selections[ui.key].tags.get(pair_t, {}))
-            it = QListWidgetItem(label)
-            if should_gray(inds):
-                it.setForeground(QBrush(_C_GRAY_FG))
-            it.setData(_ROLE_PAIR, inds)
-            self.unselected_list.addItem(it)
+            self.unselected_list.addItem(self._make_pair_item(inds, should_gray, False))
             self.avail_list_pairs.append((inds, None))
 
         deleted_inds = ui.active_selections.deleted
@@ -811,47 +594,26 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 self.avail_list_pairs.append((inds, 'deleted'))
 
     def _sel_insert_pair(self, inds, should_gray, any_mode):
-        ui     = self.ui
-        bm     = ui.bookmarked_pairs
-        _, raw = ui.pair_sess_rt(inds)
-        pair_t = tuple(int(x) for x in raw)
-        gnames = group_names_for_pair(self.data, ui, inds)
-        label  = pair_label(inds,
-                            bookmarked=bm_key(inds, any_mode) in bm,
-                            group_names=gnames,
-                            pair_tags=self.data.selections[ui.key].tags.get(pair_t, {}),
-                            any_mode=any_mode)
-        it = QListWidgetItem(label)
-        if should_gray(inds):
-            it.setForeground(QBrush(_C_GRAY_FG))
-        it.setData(_ROLE_PAIR, inds)
-        self.selected_list.addItem(it)
+        self.selected_list.addItem(self._make_pair_item(inds, should_gray, any_mode))
         self.sel_list_pairs.append(inds)
         self.sel_list_header_keys.append(None)
 
-    def _sel_insert_header(self, text: str, count: int) -> bool:
-        is_col  = self._collapsed_groups.is_collapsed(text)
-        display = group_header_label(text, count, is_col)
+    def _add_header_item(self, display: str, key: str) -> None:
+        """Add a styled, non-selectable header row to the selected list."""
         it = QListWidgetItem(display)
         it.setForeground(QBrush(_C_HDR_FG))
         it.setBackground(QBrush(_C_HDR_BG))
         it.setFlags(Qt.ItemIsEnabled)
         it.setData(_ROLE_TAG,  'header')
-        it.setData(_ROLE_HKEY, text)
+        it.setData(_ROLE_HKEY, key)
         self.selected_list.addItem(it)
         self.sel_list_pairs.append(None)
-        self.sel_list_header_keys.append(text)
-        return is_col
+        self.sel_list_header_keys.append(key)
 
-    def _pair_group_combo(self, inds):
-        ui = self.ui
-        sess, pair = ui.pair_sess_rt(inds)
-        pair = tuple(int(x) for x in pair)
-        return tuple(sorted(
-            g for g in ui.groups
-            if not is_special_group(g)
-            and pair in ui.groups.pairs_in_group(g, sess)
-        ))
+    def _sel_insert_header(self, text: str, count: int) -> bool:
+        is_col = self._collapsed_groups.is_collapsed(text)
+        self._add_header_item(group_header_label(text, count, is_col), text)
+        return is_col
 
     def _any_metric_values(self, kind: str) -> dict:
         """Metric per cross-session handle for Mean/Min-p sort. Eager-loads every
@@ -864,7 +626,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         ui.root._ensure_sessions_loaded(list(by_nd), res)
         out, worst = {}, (1.0 if kind == 'minp' else -1e18)
         for nd_key, hs in by_nd.items():
-            ccgd = ui.cd.ccg_for(nd_key, res)
+            ccgd = ui.cd.ccg_for(nd_key.change(resolution=res))
             has  = ccgd is not None and ccgd.ccg is not None
             seg  = ccgd.ccg.shape[0] if has else 0
             for h in hs:
@@ -911,15 +673,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             def _any_hdr(hdr_text, n, key=None):
                 exp = hdr_text in _expanded
                 hdr = f"── {hdr_text} ({n}) ──" + ("" if exp else " >>")
-                it  = QListWidgetItem(hdr)
-                it.setForeground(QBrush(_C_HDR_FG))
-                it.setBackground(QBrush(_C_HDR_BG))
-                it.setFlags(Qt.ItemIsEnabled)
-                it.setData(_ROLE_TAG,  'header')
-                it.setData(_ROLE_HKEY, key or hdr_text)
-                self.selected_list.addItem(it)
-                self.sel_list_pairs.append(None)
-                self.sel_list_header_keys.append(key or hdr_text)
+                self._add_header_item(hdr, key or hdr_text)
                 return exp
 
             sel_set = ui.active_selections.selected
@@ -968,63 +722,16 @@ class PairSelectionPanel(QWidget, UndoRedo):
                         for row in ui.groups.iter_pairs(gname):
                             _ins(row)
 
-        elif sort_mean:
-            seg_idx = self.ui.seg_idx(self.ui.current_segment)
-            _ccg_d = self.ui.ccg_data
-            if _ccg_d is not None:
-                for inds in sorted(ui.active_selections.selected,
-                                   key=lambda inds, _s=seg_idx: _ccg_d.mean_ccg(int(inds[0]), int(inds[1]), _s),
-                                   reverse=True):
-                    _ins(inds)
-            else:
-                for inds in sorted(ui.active_selections.selected):
-                    _ins(inds)
-        elif sort_minp:
-            seg_idx = self.ui.seg_idx(self.ui.current_segment)
-            _ccg_d = self.ui.ccg_data
-            if _ccg_d is not None:
-                for inds in sorted(ui.active_selections.selected,
-                                   key=lambda inds, _s=seg_idx: _ccg_d.min_pval(int(inds[0]), int(inds[1]), _s)):
-                    _ins(inds)
-            else:
-                for inds in sorted(ui.active_selections.selected):
-                    _ins(inds)
-        elif sort_group:
-            buckets = _defaultdict(list)
-            for inds in sorted(ui.active_selections.selected):
-                buckets[self._pair_group_combo(inds)].append(inds)
-            for combo in sorted(buckets.keys(), key=self._COMBO_SORT_KEY):
-                pairs_in = buckets[combo]
-                hdr_text = ', '.join(combo) if combo else '(untagged)'
-                if not _ins_hdr(hdr_text, len(pairs_in)):
-                    for inds in pairs_in:
-                        _ins(inds)
-        elif sort_tag:
-            tag_buckets: dict = _defaultdict(list)
-            untagged = []
-            non_internal = [g for g in ui.groups.defined_groups
-                            if not is_special_group(g)]
-            for inds in sorted(ui.active_selections.selected):
-                _s, _p = ui.pair_sess_rt(inds)
-                _p = tuple(int(x) for x in _p)
-                tags = [g for g in non_internal
-                        if _p in ui.groups.pairs_in_group(g, _s)]
-                if tags:
-                    for t in tags:
-                        tag_buckets[t].append(inds)
-                else:
-                    untagged.append(inds)
-            for tag in sorted(tag_buckets.keys()):
-                if not _ins_hdr(tag, len(tag_buckets[tag])):
-                    for inds in tag_buckets[tag]:
-                        _ins(inds)
-            if untagged:
-                if not _ins_hdr('(untagged)', len(untagged)):
-                    for inds in untagged:
-                        _ins(inds)
         else:
-            for inds in sorted(ui.active_selections.selected):
-                _ins(inds)
+            mode = ('mean'  if sort_mean  else
+                    'minp'  if sort_minp  else
+                    'group' if sort_group else
+                    'tag'   if sort_tag   else 'plain')
+            for header, pairs in ui.selected_sections(mode):
+                if header is not None and _ins_hdr(header, len(pairs)):
+                    continue
+                for inds in pairs:
+                    _ins(inds)
 
         return total_any_count
 
@@ -1038,7 +745,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             self._avail_label.set(f"Available ({n_avail}{del_suffix})")
             self._sel_label.set(f"Selected ({len(ui.active_selections.selected)})")
 
-        ui.root.jitter_controller.apply_list_colors()
+        ui.root.jitter_mgr.apply_list_colors()
         ui.root.status_bar.refresh()
 
     def refresh_lists(self):
@@ -1049,8 +756,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self.selected_list.clear()
 
         if ui.session_any_mode:
-            ui.root.any_session.rebuild_pair_handles()
-            ui.root.any_session.sync_selection_from_universe()
+            ui.root.all_sess_mgr.rebuild_pair_handles()
+            ui.root.all_sess_mgr.sync_selection_from_universe()
 
         net = ui.root.neuron_network
         should_gray = net.build_should_gray(ui.session_any_mode)
@@ -1135,9 +842,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         ui   = self.ui
         key  = event.key()
         mods = event.modifiers()   # per-event modifiers: reliable on macOS, unlike the global state
-        ctrl = bool(mods & (Qt.ControlModifier | Qt.MetaModifier))
+        ctrl = has_primary_modifier(mods)   # Cmd on macOS, Ctrl elsewhere
         shift= bool(mods & Qt.ShiftModifier)
-        print(f"[hk] list_key key={key} text={event.text()!r} ctrl={ctrl} shift={shift}")
 
         if ctrl and key == Qt.Key_B:
             self._bookmark_toggle_current()
@@ -1167,7 +873,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 c = None
             if c is not None:
                 advance = not shift
-                print(f"[hk] -> group hotkey c={c!r} advance={advance}")
                 ui.groups.hotkey_handler(
                     c, advance=advance,
                     collect_highlighted=self._collect_highlighted_pairs)
@@ -1176,11 +881,11 @@ class PairSelectionPanel(QWidget, UndoRedo):
     def _do_pair_select_update(self):
         ui = self.ui
         ui.root.pairs_view.spike_pairs.clear()
-        ui.root.jitter_controller.mark_viewed()
+        ui.root.jitter_mgr.mark_viewed()
         ui.root.neuron_network._focused_pair = None
         ui.root.neuron_network._focus_pair_entry.setText("")
         ui.root.neuron_network._focus_pair_info_label.setText("")
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
 
     def move_to_selected(self, item: QListWidgetItem = None):
         ui = self.ui
@@ -1209,10 +914,14 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if pred_group is not None:
             ui.groups.add_to_group(pred_group,
                                       ui.current_session_str, inds)
+        self._after_move(inds)
+
+    def _after_move(self, inds) -> None:
+        ui = self.ui
         self._mark_next_focus_pair(inds)
         self.refresh_lists()
         ui.set_current_pair(ui.get_pair_index(inds))
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
         ui.root.neuron_network.draw()
 
     def move_to_unselected(self, item: QListWidgetItem = None):
@@ -1241,11 +950,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
         self.push_undo(SelectionCommand({inds: ('sel', 'unsel')}, []))
         ui.active_selections.set_pair_state(inds, 'unsel')
-        self._mark_next_focus_pair(inds)
-        self.refresh_lists()
-        ui.set_current_pair(ui.get_pair_index(inds))
-        ui.root.request_redraw()
-        ui.root.neuron_network.draw()
+        self._after_move(inds)
 
     def _select_pair_in_list(self, inds):
         if inds is None:
@@ -1318,11 +1023,11 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 return None
             ck, r, t = hl[idx]
             return (str(ck.session), int(r), int(t))
-        row = ui.all_inds[idx]
+        row = ui.all_pairs_np[idx]
         return tuple(int(x) for x in row)
 
     def _next_inds_after(self, idx: int, pred) -> int | None:
-        inds = self.ui.all_inds
+        inds = self.ui.all_pairs_np
         n = len(inds)
         for i in range(idx + 1, n):
             if pred(tuple(inds[i])):
@@ -1358,7 +1063,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
                  if next_idx is not None else pair)
         self._select_pair_in_list(focus)
         ui.root.neuron_network.draw()
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
 
     def _transition_many(self, changes: dict) -> None:
         """Bulk state change: {pair: (old, new)}. No cursor jump."""
@@ -1450,7 +1155,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             if ui.together_pairs:
                 menu.addAction(
                     f"Clear 'Show Together' ({len(ui.together_pairs)} pairs)",
-                    ui._clear_together)
+                    ui.clear_together)
 
         if n == 1:
             menu.addSeparator()
@@ -1469,13 +1174,14 @@ class PairSelectionPanel(QWidget, UndoRedo):
                         sd.tags[pair] = entry
                     else:
                         sd.tags.pop(pair, None)
+                    self.refresh_lists()
+                    ui.notify_selection_changed()
             menu.addAction(f"{'✓ ' if has_tags else ''}Pair tags…", _open_pair_tags)
 
         menu.addSeparator()
-        menu.addAction("Export view as PNG…",
-                       lambda: ui._export_mgr._export_current_view('png'))
-        menu.addAction("Export view as PDF…",
-                       lambda: ui._export_mgr._export_current_view('pdf'))
+        for fmt in ('png', 'pdf'):
+            menu.addAction(f"Export view as {fmt.upper()}…",
+                           lambda f=fmt: ui._export_mgr._export_current_view(f))
 
         if ui.session_any_mode:
             all_names = ({g for g in ui.groups if not g.startswith('__')}
@@ -1501,11 +1207,11 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def _on_delete_pair(self, event=None):
         ui = self.ui
-        if ui.current_pair_idx >= len(ui.all_inds):
+        if ui.current_pair_idx >= len(ui.all_pairs_np):
             return
         if ui.session_any_mode:
             self._on_delete_pair_any()
-        elif tuple(int(x) for x in ui.all_inds[ui.current_pair_idx]) in ui.active_selections.selected:
+        elif tuple(int(x) for x in ui.all_pairs_np[ui.current_pair_idx]) in ui.active_selections.selected:
             self._on_delete_pair_single()
         else:
             self._on_toggle_deleted()
@@ -1525,18 +1231,18 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._transition(trip, 'del', scroll_save=(False, True))
         if next_trip is not None:
             ui.set_current_pair(ui.get_pair_index(next_trip))
-        elif ui.all_inds.size:
-            ui.set_current_pair(min(ui.current_pair_idx, len(ui.all_inds) - 1))
+        elif ui.all_pairs_np.size:
+            ui.set_current_pair(min(ui.current_pair_idx, len(ui.all_pairs_np) - 1))
 
     def _on_delete_pair_single(self):
-        inds = tuple(int(x) for x in self.ui.all_inds[self.ui.current_pair_idx])
+        inds = tuple(int(x) for x in self.ui.all_pairs_np[self.ui.current_pair_idx])
         self._transition(inds, 'del',
                          goto_next_pred=lambda p: p in self.ui.active_selections.selected,
                          scroll_save=(False, True))
 
     def _on_toggle_deleted(self):
         ui = self.ui
-        inds = tuple(int(x) for x in ui.all_inds[ui.current_pair_idx])
+        inds = tuple(int(x) for x in ui.all_pairs_np[ui.current_pair_idx])
         going_del = inds not in ui.active_selections.deleted
         self._transition(inds, 'del' if going_del else 'unsel',
                          goto_next_pred=(lambda p: p in ui.active_selections.unselected) if going_del else None,
@@ -1546,7 +1252,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         ui   = self.ui
         inds = self._selected_pair_from_lists()
         if inds is None:
-            if ui.current_pair_idx >= len(ui.all_inds):
+            if ui.current_pair_idx >= len(ui.all_pairs_np):
                 return
             inds = self._pair_at_all_inds_idx(ui.current_pair_idx)
             if inds is None:
@@ -1627,7 +1333,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         changed = set(cmd.pair_changes.keys())
         if changed:
             ui.refresh_lists()
-        ui.root.request_redraw()
+        ui.root.mainview.request_render()
         ui.root.neuron_network.draw()
         ui.root.status_bar.refresh()
 
@@ -1856,14 +1562,14 @@ class PairSelectionPanelContainer(QWidget, Autosave):
         selected = bucket.selected & universe
         deleted  = bucket.deleted  & universe
 
-        missing = selected - set(map(tuple, ui.all_inds))
+        missing = selected - ui.all_pairs_set
         if missing:
             if restore_groups and not _skip_redraw:
                 action = MissingPairsDialog.show(ui, missing)
                 if action == 'cancel':
                     return
                 if action == 'partial':
-                    selected &= set(map(tuple, ui.all_inds))
+                    selected &= ui.all_pairs_set
                 else:
                     selected |= missing
                     universe = ui._pairs_for_ptr_key(ui.key) | missing
@@ -1911,7 +1617,20 @@ class PairSelectionPanelContainer(QWidget, Autosave):
 
     def _do_save(self, name: str = ''):
         ui = self.ui
+        ui.apply_sel_for_key(ui.key)   # flush current conn-type bucket before write
+        for sd in ui.sd.sessions.values():
+            if sd._nd_key is None:   # placeholder session with no nd-key → nothing to tag
+                continue
+            sess = str(sd._nd_key.session)
+            for b in sd.selections.values():
+                for e in b.tags.values():
+                    e.pop('groups', None)
+                for p in b.all_pairs:
+                    g = sorted(ui.groups.groups_for_pair(sess, p[0], p[1]))
+                    if g:
+                        b.tags.setdefault(p, {})['groups'] = g
         ui.sd.save()   # persist latest (<session>.json + dataset + groups export)
+        latest_path = ui.sd.get_selection_by_session(ui.key).save_path()
         if name:
             vpath = os.path.join(ui.sd.save_dir, f"{ui.key.session}__{name}")
             ui.sd.get_selection_by_session(ui.key).save(path=vpath)
@@ -1921,13 +1640,15 @@ class PairSelectionPanelContainer(QWidget, Autosave):
             for tk_ in type_keys
         )
         groups_msg = f"\nGroups exported ({len(ui.groups.registry)} groups)." if ui.groups else ""
-        vmsg = f"\nVersion: {name}" if name else ""
+        vmsg = f"\nSnapshot: {name}" if name else ""
+        latest_msg = f"\nLatest: {latest_path}.json" if latest_path else ""
         QMessageBox.information(
             None, "Saved",
-            f"Saved {total} pairs across {len(type_keys)} types.{groups_msg}{vmsg}")
+            f"Saved {total} pairs across {len(type_keys)} types.{groups_msg}{latest_msg}{vmsg}")
 
     def _save_all_state(self, **_) -> None:
         ui = self.ui
+        ui.apply_sel_for_key(ui.key)
         ui.sd.save()
         ui._settings_mgr.save_ui_state()
 

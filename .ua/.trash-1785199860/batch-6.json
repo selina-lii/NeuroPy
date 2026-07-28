@@ -1,0 +1,54 @@
+{
+  "nodes": [
+    {
+      "id": "config:.readthedocs.yaml",
+      "type": "config",
+      "name": ".readthedocs.yaml",
+      "filePath": ".readthedocs.yaml",
+      "summary": "Read the Docs v2 构建配置：Ubuntu 24.04 + Python 3.11，用 Sphinx 从 docs_sphinx/conf.py 构建文档。Python requirements 安装段被注释掉。",
+      "tags": ["configuration", "documentation", "ci-cd", "build-system"],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "README.md",
+      "summary": "Project entry-point doc for NeuroPy: overview, minimum requirements (py3.9/numpy/scipy), mamba-based installation, pre-use data prep steps, a raster-plot quick example, CCGViewer GUI launch note, and the citation block.",
+      "tags": ["documentation", "entry-point", "overview", "installation"],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:FUTURE_STEPS.md",
+      "type": "document",
+      "name": "FUTURE_STEPS.md",
+      "filePath": "FUTURE_STEPS.md",
+      "summary": "CCG GUI 的未建功能 backlog（2026-07-27 创建）：JitterDataset 持久化、cd-owned batch-request store、拆解 CustomCCGState、ticket 归属 CustomCCGManager、segment 完整性检查、以及一串 UI todo（含 CS-grid 下沉到 backend）。",
+      "tags": ["documentation", "roadmap", "backlog", "refactoring"],
+      "complexity": "simple",
+      "languageNotes": "Stub-only features: 文中明确说明这些 API 目前 raise NotImplementedError 或无调用方。"
+    },
+    {
+      "id": "document:design.md",
+      "type": "document",
+      "name": "design.md",
+      "filePath": "design.md",
+      "summary": "A flat list of design principles governing UI code placement and growth: prefer simplification over addition, push code into ui component files rather than ccg_ui.py, manager classes over CCGReviewUI, computation into analyses/ms_connectivity.py, generic UI logic into ui utils.py, and name handlers after their widget.",
+      "tags": ["documentation", "design-principles", "conventions", "architecture"],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {"source": "document:README.md", "target": "file:neuropy/core/neurons.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:README.md", "target": "file:neuropy/plotting/__init__.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:README.md", "target": "file:neuropy/ui/ccg_ui.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:FUTURE_STEPS.md", "target": "file:neuropy/ui/jitter_ui.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:FUTURE_STEPS.md", "target": "file:neuropy/analyses/ms_connectivity.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:FUTURE_STEPS.md", "target": "file:neuropy/ui/stats_tests.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:FUTURE_STEPS.md", "target": "file:neuropy/ui/ccg_panel.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:design.md", "target": "file:neuropy/ui/ccg_ui.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:design.md", "target": "file:neuropy/ui/utils.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:design.md", "target": "file:neuropy/analyses/ms_connectivity.py", "type": "documents", "direction": "forward", "weight": 0.5},
+    {"source": "document:design.md", "target": "document:FUTURE_STEPS.md", "type": "related", "direction": "forward", "weight": 0.5}
+  ]
+}

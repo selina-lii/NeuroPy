@@ -3,43 +3,29 @@
 AppState owns all cross-panel shared state and is the single
 write path for any value that multiple panels read.  Panels subscribe
 to its signals; they never write each other's state directly.
-
-DisplayConfig is intentionally absent — per-panel display preferences
-live inside each Qt widget.
-
-Hierarchy
----------
-CCGDataset (cd)       <- raw arrays, pointers, neurons  [data owner]
-    |
-AppState       <- UI cursor + selection state    [state owner]
-    |
-Qt Widgets            <- subscribe to signals, own display prefs
 """
 
 from __future__ import annotations
-
 from typing import TYPE_CHECKING
-
 import os
 import re
 import collections
+from collections import defaultdict as _defaultdict
 import numpy as np
-import glob as _glob
-from pathlib import Path as _Path
-
 from pyqtgraph.Qt.QtCore import QObject, Signal, QTimer
-
 import json
-
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import _compact_json_str
-from neuropy.ui.pair_selection_panel import SelectionData, SelectionDataset
+from neuropy.ui.ui_common import is_special_group
+from neuropy.ui.pair_selection_panel import SelectionDataset
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
     from neuropy.analyses.ms_connectivity import CCGDataset
 
-_ALL_SEGS = "All"
+# Whole-session view == the permanent dim0[0]='all' segment (no virtual sum view any more).
+_ALL_SEGS = "all"
+ALL_PAIRS = '(all pairs)'   # stats-panel "every valid pair" group choice
 
 # Sentinel for the virtual "All sessions" entry in the session list
 _ALL_SESSION_MARKER = object()
@@ -77,10 +63,6 @@ class NavField:
 
 class AppState(QObject):
     """Cross-panel shared state.  Single write path via set_* methods.
-
-    All fields that used to be scattered across CCGReviewUI, MiscManager,
-    and MultiSessionManager now live here.
-
     Signals fire only when the value actually changes.
     """
 
@@ -114,7 +96,6 @@ class AppState(QObject):
     baseline_method      = NavField("baseline_method")
     cs_metric            = NavField("cs_metric")
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
-    custom_seg_index     = NavField("custom_seg_index")
 
     def __init__(self, cd: 'CCGDataset', key: Key):
         super().__init__()
@@ -133,33 +114,33 @@ class AppState(QObject):
         self._baseline_method = 'conv'
         self._cs_metric = 'STG'
         self._cs_overlay_active = False
-        self._custom_seg_index = {}
         self.root = None  # set by CCGReviewUI after construction
         self.together_pairs: list = []
         self.max_together_pairs: int = 5
+        self.max_ccg_queue: int = 50       # custom-CCG background queue cap (Settings ▸ Cache)
+        self.max_jitter_queue: int = 50    # jitter background queue cap (Settings ▸ Cache)
         self.bookmarked_pairs: set = set()
         self.any_expanded_group_tags: set = set()
 
     @property
     def ccg_ptr(self):
-        return self.cd.ptr.get(self.key)
+        return self.cd.ptr.get(self.key.ptr())
 
     @property
     def ccg_data(self):
-        nd_key = self.key.nd()
-        res = 'highres' if self.resolution in ("hi", "lo_hi") else 'lowres'
-        return self.cd.ccg_for(nd_key, res)
+        return self.cd.ccg_for(self.get_key_with_resolution())
 
     @property
     def neurons(self):
-        return self.cd.nd.data[self.key.nd()]
+        """Neurons of the selected pair's session — the pair's own in all-session mode."""
+        return self.cd.nd.neurons_for(self.get_complete_key())
 
     @property
     def n_segments(self) -> int:
-        return self.cd.n_segments_for(self.key)
+        return self.cd.n_segments(self.get_key_with_resolution())
 
     @property
-    def all_inds(self) -> np.ndarray:
+    def all_pairs_np(self) -> np.ndarray:
         """All (ref, tgt) pairs currently visible, as Nx2 int array."""
         if self.session_any_mode:
             hl = self.cross_session_handles
@@ -173,8 +154,13 @@ class AppState(QObject):
         return np.array(base, dtype=int) if base else np.empty((0, 2), dtype=int)
 
     @property
+    def all_pairs_set(self) -> set:
+        """All visible (ref, tgt) pairs as a set of int tuples (membership tests)."""
+        return {(int(r), int(t)) for r, t in self.all_pairs_np}
+
+    @property
     def current_pair_inds(self) -> np.ndarray | None:
-        inds = self.all_inds
+        inds = self.all_pairs_np
         if self.current_pair_idx < len(inds):
             return inds[self.current_pair_idx]
         return None
@@ -187,7 +173,7 @@ class AppState(QObject):
         if self.session_any_mode:
             hl = self.cross_session_handles
             return hl[idx] if 0 <= idx < len(hl) else None
-        inds = self.all_inds
+        inds = self.all_pairs_np
         return tuple(int(x) for x in inds[idx]) if 0 <= idx < len(inds) else None
 
     @property
@@ -213,36 +199,29 @@ class AppState(QObject):
         """Replace the CCGDataset (on project switch). No signal."""
         self.cd = cd
 
-    def _build_themes(self, key: Key) -> dict:
-        nd = getattr(self.cd, 'nd', None)
-        if nd is None:
-            print("[themes] nd is None")
-            return {}
-        sessions = getattr(nd, '_sessions', None) or []
-        if not isinstance(sessions, (list, tuple)):
-            sessions = [sessions]
-        sess_name = str(getattr(key, 'session', ''))
-        session = next(
-            (s for s in sessions
-             if (nd._short_session_name(s) if hasattr(nd, '_short_session_name') else str(s)) == sess_name),
-            None)
-        if session is None:
-            known = [nd._short_session_name(s) for s in sessions]
-            print(f"[themes] session {sess_name!r} not found; known={known}")
-            return {}
-        from neuropy.core.epoch import Epoch as _Epoch
-        all_epoch_attrs = {attr: obj for attr in vars(session)
-                           if isinstance((obj := getattr(session, attr, None)), _Epoch)}
-        print(f"[themes] session={sess_name!r}  all Epoch attrs: "
-              + ", ".join(f"{a}(n={o.n_epochs}, labels={list(o.labels)[:5]})"
-                          for a, o in all_epoch_attrs.items()))
-        result = {a: o for a, o in all_epoch_attrs.items() if o.n_epochs > 0}
-        print(f"[themes] → emitting {list(result)}")
-        return result
-
     def set_key(self, key: Key):
         type(self).key.set(self, key, self.key_changed)
-        self.themes_changed.emit(self._build_themes(key))
+        self.themes_changed.emit(self.cd.nd.get_themes(key))
+
+    def switch_key(self, new_key: Key, load_selection=None):
+        """Single-session transition to *new_key*: set key, reconcile the bucket, keep the
+        segment if still valid, reset pair/norms on a real switch.
+
+        load_selection: optional callable run right after the key is set (before reconciling)
+        so a session-change can populate the new bucket from disk first. Ordering matters —
+        set_key must precede the load, apply_sel_for_key must follow it.
+        """
+        prev_key, prev_seg = self.key, self.current_segment
+        self.set_key(new_key)
+        if load_selection is not None:
+            load_selection()
+        self.apply_sel_for_key(new_key)
+        if prev_seg in self.available_segments():
+            self.set_current_segment(prev_seg)
+        self.clamp_segment()
+        if new_key != prev_key:                 # fast path preserves current pair + norms
+            self.set_current_pair(0)
+            self.set_active_norms(set())
 
     def set_current_pair(self, idx: int, *, source=None):
         type(self).current_pair_idx.set(self, idx, self.pair_changed)
@@ -288,19 +267,6 @@ class AppState(QObject):
         self._cs_metric = cs_metric
         self.cs_params_changed.emit(baseline_method, cs_metric)
 
-    def refresh_custom_seg_index(self):
-        """Scan cd's save path for .npz custom CCG files; update registry in-place."""
-        base = self.cd.conf.save_path(suffix='customseg')
-        new = {}
-        for p in sorted(_glob.glob(base + '_*.npz')):
-            stem = _Path(p).stem
-            prefix = _Path(base).stem + '_'
-            if stem.startswith(prefix):
-                new[stem[len(prefix):]] = p
-        if new != self.custom_seg_index:
-            self._custom_seg_index = new
-            self.custom_segs_changed.emit()
-
     def toggle_stacked_segment(self, seg_idx: int):
         segs = list(self.stacked_segments)
         if seg_idx in segs:
@@ -317,24 +283,7 @@ class AppState(QObject):
         self.stacked_segments_changed.emit([])
 
     def is_significant(self, ref: int, tgt: int, seg: int) -> bool:
-        n = self.n_segments
-        if seg > n:
-            return False
-        if seg == n:
-            return any(self.is_significant(ref, tgt, s) for s in range(n))
-
-        j = self.cd._jitter.get(self.key) if self.cd._jitter else None
-        if j is not None:
-            inds = j.ccg_ptr.inds
-            if j.ccg_ptr.stored_by_segment:
-                mask = (inds[:, 0] == seg) & (inds[:, -2] == ref) & (inds[:, -1] == tgt)
-            else:
-                mask = (inds[:, -2] == ref) & (inds[:, -1] == tgt)
-            if mask.any():
-                return bool(j.j_sig[mask].any())
-            return False
-
-        data = self.cd.ccg.get(self.key.nd())
+        data = self.ccg_data
         if data is None:
             return False
         lb = data.conf.min_lag_bin
@@ -342,77 +291,87 @@ class AppState(QObject):
         pc = data.pval_corrected
         if pc is not None and seg < pc.shape[0] and ref < pc.shape[1] and tgt < pc.shape[2]:
             return bool(pc[seg, ref, tgt, lb:ub].min() <= self.active_sig_threshold)
-        sig = data.significant
-        if sig is not None:
-            if sig.ndim == 4 and seg < sig.shape[0] and ref < sig.shape[1] and tgt < sig.shape[2]:
-                return bool(sig[seg, ref, tgt].any())
-            if sig.ndim == 3 and ref < sig.shape[0] and tgt < sig.shape[1]:
-                return bool(sig[ref, tgt].any())
         return False
 
-    def _custom_names(self) -> list:
-        return list(self.custom_seg_index.keys())
+    @property
+    def data_resolution(self) -> str:
+        """CCGData resolution the view mode reads ('lo_hi' renders both, data is highres)."""
+        return 'highres' if self.resolution in ("hi", "lo_hi") else 'lowres'
 
-    def seg_idx(self, name: str) -> int:
-        if name is None or name == _ALL_SEGS:
-            return self.n_segments
-        names = self.cd.segment_names_for(self.key)
-        if name in names:
-            return names.index(name)
-        custom = self._custom_names()
-        if name in custom:
-            return self.n_segments + 1 + custom.index(name)
-        return self.n_segments
+    def get_key_with_resolution(self) -> Key:
+        """CCG store key: session + the resolution the view mode requests."""
+        return Key(session=self.key.session, resolution=self.data_resolution)
 
-    def seg_name(self, idx: int) -> str:
-        if idx is None or idx == self.n_segments:
-            return _ALL_SEGS
-        n = self.n_segments
-        if 0 <= idx < n:
-            names = self.cd.segment_names_for(self.key)
-            if idx < len(names):
-                return names[idx]
-            return _ALL_SEGS
-        custom = self._custom_names()
-        ci = idx - n - 1
-        return custom[ci] if 0 <= ci < len(custom) else _ALL_SEGS
+    def get_complete_key(self) -> Key:
+        """Complete Key for the current view: the selected pair's session + resolution,
+        plus the current segment label and (ref, tgt) as coordinates on that array."""
+        pair = self.current_pair
+        inds = self.current_pair_inds
+        ref, tgt = (int(inds[0]), int(inds[1])) if inds is not None else (None, None)
+        sess = pair[0] if self.session_any_mode and pair is not None else self.key
+        return Key(session=sess.session, resolution=self.data_resolution,
+                   segment=self.current_segment, ref=ref, tgt=tgt)
 
-    def all_segment_names(self) -> list[str]:
-        names = list(self.cd.segment_names_for(self.key))
-        names.append(_ALL_SEGS)
-        names.extend(self._custom_names())
-        return names
+    def segment_index(self, label: str) -> int:
+        return self.cd.segment_index(self.get_key_with_resolution(), label)
+
+    def segment_name(self, idx: int) -> str:
+        return self.cd.segment_name(self.get_key_with_resolution(), idx)
+
+    def segment_names(self) -> list[str]:
+        return self.cd.segment_names(self.get_key_with_resolution())
+
+    def available_segments(self) -> list[str]:
+        """Disk segment labels for the current session."""
+        return self.cd.available_segments(self.key)
+
+    def all_available_segments(self) -> list[str]:
+        """Project-wide disk segment labels (union across sessions) — cross-session pickers."""
+        return self.cd.available_segments()
+
+    def attach_segment(self, src, seg_data) -> None:
+        """Stack a pre-computed window (single-segment CCGData) onto the current session's
+        array as a new dim0 segment, then notify listeners. Main-thread only."""
+        self.cd.attach_segment(self.key.nd(), src, seg_data)
+        self.custom_segs_changed.emit()
+
+    def drop_segment(self, label: str) -> None:
+        """Remove an appended window segment from the current session (never 'full')."""
+        if label == _ALL_SEGS:
+            return
+        self.cd.drop_segment([self.key.nd().change(segment=label)])
+        if self.current_segment == label:
+            self.set_current_segment(_ALL_SEGS)
+        self.custom_segs_changed.emit()
+
+    def available_sessions(self) -> list[str]:
+        """Session id strings for every real nd-key (ALL-session marker excluded)."""
+        return [str(k.session) for k in self.real_nd_keys()]
+
+    def available_resolutions(self) -> list[str]:
+        """Resolutions available (live or saved) — robust to lazy loading."""
+        return self.cd.available_resolutions()
+
+    def available_conn_types(self) -> list[str]:
+        return self.cd.conf.conn_type_labels
+
+    def available_groups(self) -> list[str]:
+        gr = self.groups
+        return [ALL_PAIRS] + gr.groups + gr.special_groups()
+
+    def pairs_for_group(self, group_name: str, ptr_key) -> set:
+        """Valid (significant) pairs of a group for a ptr key; ALL_PAIRS = every valid pair."""
+        valid = self.cd.ptr[ptr_key].pair_set
+        if group_name == ALL_PAIRS:
+            return valid
+        return self.groups.pairs_in_group(group_name, ptr_key.session) & valid
 
     def clamp_segment(self):
-        if self.current_segment not in self.all_segment_names():
+        if self.current_segment not in self.available_segments():
             self.set_current_segment(_ALL_SEGS)
 
     def ensure_groups_loaded_for(self, sessions: list[str]) -> None:
-        """Load SelectionData from disk for unvisited sessions; sync group tags into groups.
-
-        Source of truth for group membership is SelectionData.tags, not groups._fwd.
-        sd.sessions tracks which sessions have been loaded.
-        """
-        save_dir = self.sd.save_dir
-        if not save_dir:
-            return
-        loaded = {str(k.session) for k in self.sd.sessions}
-        for sess in sessions:
-            if sess in loaded:
-                continue
-            path = os.path.join(save_dir, sess)
-            if not os.path.exists(path + '.json'):
-                continue
-            sel = SelectionData()
-            sel.load(path)
-            if sel.selections:
-                nd_key = next(iter(sel.selections)).nd()
-                self.sd.sessions[nd_key] = sel
-            for bucket in sel.selections.values():
-                for (ref, tgt), entry in bucket.tags.items():
-                    for gname in (entry.get('groups') or []):
-                        if isinstance(gname, str) and gname:
-                            self.groups.add_to_group(gname, sess, (ref, tgt))
+        self.sd.ensure_groups_loaded_for(sessions)
 
     def available_type_keys(self, nd_key) -> list:
         if nd_key is _ALL_SESSION_MARKER:
@@ -445,12 +404,17 @@ class AppState(QObject):
 
         ct = key.conn_type
         ct_key = (_rank(ct[0]), _rank(ct[1])) if ct else ((99, ''), (99, ''))
-        return (ep, ct_key, str(key.epoch or ''))
+        return (ep, ct_key)
 
     def real_nd_keys(self) -> list:
-        """Unique session nd-keys from cd, excluding _ALL_SESSION_MARKER."""
+        """Unique session nd-keys for the dataset, excluding _ALL_SESSION_MARKER.
+
+        Sourced from cd.nd (the loaded dataset) first so every session appears even before its
+        CCG is lazily generated; cd.ccg/cd.ptr add any extra keys.
+        """
+        nd_keys = self.cd.nd.session_keys() if self.cd.nd is not None else []
         seen, keys = set(), []
-        for k in list(self.cd.ccg.keys()) + list(self.cd.ptr.keys()):
+        for k in nd_keys + list(self.cd.ptr.keys()):
             nd = k.nd()
             sess = str(nd.session)
             if sess not in seen:
@@ -474,7 +438,7 @@ class AppState(QObject):
     def all_nd_keys(self) -> list:
         """Unique nd-keys including _ALL_SESSION_MARKER if present."""
         seen, keys = set(), []
-        for k in list(self.cd.ccg.keys()) + list(self.cd.ptr.keys()):
+        for k in list(self.cd.ptr.keys()):
             nd = k.nd()
             sess = str(nd.session)
             if sess not in seen:
@@ -500,7 +464,7 @@ class AppState(QObject):
                 continue
             ct_label = Key.format_conn_type(key.conn_type)
             pt = self.cd.ptr[key]
-            for ref, tgt in map(tuple, pt.inds2):
+            for ref, tgt in pt.pair_set:
                 pair_ct[(ref, tgt)] = ct_label
         result = collections.OrderedDict()
         for pair in sorted(pairs):
@@ -532,10 +496,72 @@ class AppState(QObject):
                 if r2 == r and t2 == t:
                     return i
             return 0
-        for i, pair in enumerate(self.all_inds):
+        for i, pair in enumerate(self.all_pairs_np):
             if tuple(pair) == tuple(inds):
                 return i
         return 0
+
+    _COMBO_SORT_KEY = staticmethod(
+        lambda combo: (1, []) if not combo else (0, list(combo)))
+
+    def _pair_group_combo(self, inds) -> tuple:
+        """Sorted tuple of non-special group names this pair belongs to."""
+        sess, pair = self.pair_sess_rt(inds)
+        pair = tuple(int(x) for x in pair)
+        return tuple(sorted(
+            g for g in self.groups
+            if not is_special_group(g) and pair in self.groups.pairs_in_group(g, sess)))
+
+    def selected_sections(self, sort_mode: str) -> list:
+        """Ordered (header|None, [inds]) sections of the selected pairs for a sort mode.
+
+        sort_mode in {'mean','minp','group','tag','plain'}. Pure data ordering; the
+        panel only renders the returned sections.
+        """
+        selected = self.active_selections.selected
+        if sort_mode in ('mean', 'minp'):
+            ccg_d = self.ccg_data
+            if ccg_d is not None:
+                seg = self.segment_index(self.current_segment)
+                metric = ccg_d.mean_ccg if sort_mode == 'mean' else ccg_d.min_pval
+                order = sorted(selected,
+                               key=lambda p: metric(int(p[0]), int(p[1]), seg),
+                               reverse=(sort_mode == 'mean'))
+            else:
+                order = sorted(selected)
+            return [(None, order)]
+
+        if sort_mode == 'group':
+            buckets = _defaultdict(list)
+            for inds in sorted(selected):
+                buckets[self._pair_group_combo(inds)].append(inds)
+            sections = []
+            for combo in sorted(buckets, key=self._COMBO_SORT_KEY):
+                hdr = ', '.join(combo) if combo else '(untagged)'
+                sections.append((hdr, buckets[combo]))
+            return sections
+
+        if sort_mode == 'tag':
+            non_internal = [g for g in self.groups.defined_groups
+                            if not is_special_group(g)]
+            tag_buckets = _defaultdict(list)
+            untagged = []
+            for inds in sorted(selected):
+                sess, pair = self.pair_sess_rt(inds)
+                pair = tuple(int(x) for x in pair)
+                tags = [g for g in non_internal
+                        if pair in self.groups.pairs_in_group(g, sess)]
+                if tags:
+                    for t in tags:
+                        tag_buckets[t].append(inds)
+                else:
+                    untagged.append(inds)
+            sections = [(t, tag_buckets[t]) for t in sorted(tag_buckets)]
+            if untagged:
+                sections.append(('(untagged)', untagged))
+            return sections
+
+        return [(None, sorted(selected))]
 
     def pair_sess_rt(self, inds) -> tuple:
         """(session_str, (ref, tgt)) for group/tag lookups."""
@@ -550,56 +576,16 @@ class AppState(QObject):
                 self.together_pairs = [x for x in self.together_pairs if tuple(x) != pt]
             else:
                 self.together_pairs.append(pt)
-        self.root.request_redraw()
+        self.root.mainview.request_render()
 
     def clear_together(self):
         self.together_pairs.clear()
-        self.root.request_redraw()
-
-    @staticmethod
-    def _all_inds_set_for_ptr(ptr) -> set:
-        base = ptr.inds2
-        return set(map(tuple, base[base[:, 0] != base[:, 1]]))
+        self.root.mainview.request_render()
 
     def _pairs_for_ptr_key(self, key) -> set:
-        ptr = self.cd.ptr.get(key)
-        if ptr is None:
-            return set()
-        raw = ptr.inds2
-        return set(map(tuple, raw[raw[:, 0] != raw[:, 1]]))
-
-    def _pairs_from_tags_for_key(self, key) -> set:
-        sess = str(key.session)
-        pairs: set = {tuple(p) for p in self.sel_data.selections[key].tags if p[0] != p[1]}
-        for gname in self.groups.defined_groups:
-            pairs |= self.groups.pairs_in_group(gname, sess)
-        if not pairs:
-            return pairs
-        ct_lbl = Key.format_conn_type(key.conn_type)
-        return set(map(tuple, self._pairs_by_conn_type(sess, pairs).get(ct_lbl, [])))
+        ptr = self.cd.ptr.get(key.ptr())
+        return ptr.pair_set if ptr is not None else set()
 
     def apply_sel_for_key(self, key=None):
-        """Initialize or reconcile SelectionData bucket for one conn-type Key."""
         key = key or self.key
-        all_pairs = self._pairs_for_ptr_key(key)
-        full_universe = all_pairs
-        b = self.sd.get_selection_by_session(key).selections[key]
-        is_new = not (b.selected or b.unselected or b.deleted)
-        if not is_new and full_universe:
-            sel = b.selected & full_universe
-            deleted = b.deleted & full_universe
-            new_pairs = full_universe - sel - deleted - b.unselected
-            if new_pairs and key.is_excitatory():
-                sel |= new_pairs
-            b.reset(full_universe, selected=sel, deleted=deleted)
-            return
-        if all_pairs:
-            sel = set(all_pairs) if key.is_excitatory() else set()
-            b.reset(all_pairs, selected=sel, deleted=b.deleted & all_pairs)
-            return
-        tagged = self._pairs_from_tags_for_key(key)
-        if tagged:
-            b.reset(tagged, selected=tagged if key.is_excitatory() else set(),
-                   deleted=b.deleted & tagged)
-            return
-        b.reset(set())
+        self.sd.reconcile(key, self._pairs_for_ptr_key(key))

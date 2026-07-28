@@ -394,11 +394,14 @@ def compute_jbsi(*, real_ccg, j_ccg_avg, fr_ref, fr_tgt, bin_size: float, jscale
     """
     real_ccg = np.asarray(real_ccg, dtype=float)
     j_ccg_avg = np.asarray(j_ccg_avg, dtype=float)
-    n1 = np.minimum(float(fr_ref), float(fr_tgt))
+    n1 = np.minimum(np.asarray(fr_ref, dtype=float), np.asarray(fr_tgt, dtype=float))
     ts = float(bin_size)
     tj = float(jscale)
     b = tj / (tj - ts) if tj / ts > 2 else 2.0
-    return b / (n1 + 1e-12) * (real_ccg - j_ccg_avg)
+    factor = b / (n1 + 1e-12)
+    if np.ndim(factor) > 0:
+        factor = factor[..., None]  # per-pair factor broadcasts over the bin axis
+    return factor * (real_ccg - j_ccg_avg)
 
 
 def plot_jitter_verification(jitter_obj,
@@ -546,11 +549,10 @@ class JitterDataset(AnalysisDataset):
         self.cd = cd
         self.data = {}   # Key → Jitter
 
-    def run_jitter(self, save_progress=False):
+    def run_jitter(self):
         for key, ccg_ptr in self.cd.ptr.items():
-            nd_key = key.nd()
-            neurons = self.nd.data[nd_key]
-            ccg_data = self.cd.ccg[nd_key]
+            neurons = self.nd.get_neurons(key)
+            ccg_data = self.cd.ccg_for(key)
 
             if ccg_ptr.n_pairs == 0:
                 self.data[key] = None

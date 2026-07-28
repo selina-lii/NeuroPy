@@ -1,0 +1,1418 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/analyses/trace_fc.py",
+   "type": "file",
+   "name": "trace_fc.py",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "summary": "Trace fear-conditioning \u884c\u4e3a\u5206\u6790\u5c42\uff1asession/animal/group \u4e09\u7ea7 class \u63d0\u53d6 freezing epochs\u3001\u4e8b\u4ef6\u65f6\u523b\u4e0e\u8fd0\u52a8\u901f\u5ea6\uff0c\u5e76\u63d0\u4f9b\u6210\u7ec4\u7ed8\u56fe\u3002",
+   "tags": [
+    "behavior-analysis",
+    "data-model",
+    "plotting",
+    "freezing",
+    "aggregation"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/analyses/trace_fc.py:trace_behavior",
+   "type": "class",
+   "name": "trace_behavior",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    41,
+    446
+   ],
+   "summary": "Single-session trace FC behavior container: loads DLC tracking + event tables, computes freezing epochs, event/stimulus times, and mean/baseline speed.",
+   "tags": [
+    "data-model",
+    "session",
+    "freezing",
+    "speed"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/analyses/trace_fc.py:trace_animal",
+   "type": "class",
+   "name": "trace_animal",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    449,
+    567
+   ],
+   "summary": "Per-animal wrapper aggregating multiple trace_behavior sessions with cross-session plotting helpers.",
+   "tags": [
+    "aggregation",
+    "animal",
+    "plotting"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/trace_fc.py:trace_group",
+   "type": "class",
+   "name": "trace_group",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    570,
+    926
+   ],
+   "summary": "Group-level aggregator over animals: mean speed, trial speed traces, and summary plots across an experimental cohort.",
+   "tags": [
+    "aggregation",
+    "group",
+    "plotting",
+    "statistics"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/analyses/trace_fc.py:get_stimuli_times",
+   "type": "function",
+   "name": "get_stimuli_times",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    929,
+    988
+   ],
+   "summary": "Extracts CS/US stimulus onset times from an events table for a given session type and paradigm.",
+   "tags": [
+    "events",
+    "extraction",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/analyses/trace_fc.py:generate_session_names",
+   "type": "function",
+   "name": "generate_session_names",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    1012,
+    1065
+   ],
+   "summary": "Generates canonical session-name lists for a given trace-FC paradigm.",
+   "tags": [
+    "naming",
+    "paradigm",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/analyses/trace_fc.py:fix_date",
+   "type": "function",
+   "name": "fix_date",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    1000,
+    1009
+   ],
+   "summary": "Normalizes heterogeneous date strings into a consistent parseable format.",
+   "tags": [
+    "utility",
+    "parsing",
+    "date"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/trace_fc.py:load_events_from_csv",
+   "type": "function",
+   "name": "load_events_from_csv",
+   "filePath": "neuropy/analyses/trace_fc.py",
+   "lineRange": [
+    1068,
+    1083
+   ],
+   "summary": "Loads a behavioral events CSV into a DataFrame with cleaned timestamps.",
+   "tags": [
+    "io",
+    "csv",
+    "events"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/core/ca_neurons.py",
+   "type": "file",
+   "name": "ca_neurons.py",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "summary": "Calcium-imaging neuron core\uff1aCaNeurons \u4fdd\u5b58 traces/spikes/ROI \u5e76\u7ed8\u56fe\uff1bCaNeuronReg + PairwiseMap/MultiSessionMap \u8d1f\u8d23\u8de8 session \u7684 cell registration \u6620\u5c04\u3002",
+   "tags": [
+    "data-model",
+    "calcium-imaging",
+    "registration",
+    "plotting",
+    "core"
+   ],
+   "complexity": "complex",
+   "languageNotes": "Subclasses DataWriter, following NeuroPy's core-object save/load convention."
+  },
+  {
+   "id": "class:neuropy/core/ca_neurons.py:CaNeurons",
+   "type": "class",
+   "name": "CaNeurons",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    13,
+    299
+   ],
+   "summary": "Core calcium-imaging container (traces, spikes/events, ROIs, projections) with event detection, rise-height computation, and ROI/trace plotting.",
+   "tags": [
+    "data-model",
+    "calcium-imaging",
+    "core",
+    "plotting"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/core/ca_neurons.py:CaNeuronReg",
+   "type": "class",
+   "name": "CaNeuronReg",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    302,
+    568
+   ],
+   "summary": "Cross-session cell registration object: aligns ROIs across sessions, overlays registered neurons, and loads pairwise mapping files.",
+   "tags": [
+    "registration",
+    "calcium-imaging",
+    "alignment"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/core/ca_neurons.py:PairwiseMap",
+   "type": "class",
+   "name": "PairwiseMap",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    571,
+    604
+   ],
+   "summary": "Lightweight holder for a pairwise session-to-session neuron index map with numpy/load conversion.",
+   "tags": [
+    "data-model",
+    "registration",
+    "mapping"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/core/ca_neurons.py:MultiSessionMap",
+   "type": "class",
+   "name": "MultiSessionMap",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    607,
+    784
+   ],
+   "summary": "Chains pairwise maps into multi-session neuron identity tracks; supports stepwise registration and transitive consistency testing.",
+   "tags": [
+    "registration",
+    "mapping",
+    "multi-session",
+    "validation"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/core/ca_neurons.py:id_and_plot_reference_cells",
+   "type": "function",
+   "name": "id_and_plot_reference_cells",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    792,
+    850
+   ],
+   "summary": "Identifies matching reference cells between two CaNeurons sessions and plots the overlaid ROIs.",
+   "tags": [
+    "registration",
+    "plotting",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/core/ca_neurons.py:detect_roi_edges",
+   "type": "function",
+   "name": "detect_roi_edges",
+   "filePath": "neuropy/core/ca_neurons.py",
+   "lineRange": [
+    853,
+    864
+   ],
+   "summary": "Extracts contour edges from a binary ROI mask.",
+   "tags": [
+    "image-processing",
+    "roi",
+    "utility"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "file:neuropy/io/dlcio.py",
+   "type": "file",
+   "name": "dlcio.py",
+   "filePath": "neuropy/io/dlcio.py",
+   "summary": "DeepLabCut \u4f4d\u7f6e\u8ffd\u8e2a\u7684 IO \u4e0e\u9884\u5904\u7406\u5c42\uff1aDLC class \u8bfb\u53d6 h5 tracking\u3001\u5bf9\u9f50 miniscope/optitrack \u65f6\u95f4\u6233\u3001\u505a\u5e73\u6ed1\u4e0e speed \u8ba1\u7b97\uff0c\u5e76\u63d0\u4f9b 1d/2d \u7ed8\u56fe\u3002",
+   "tags": [
+    "io",
+    "tracking",
+    "deeplabcut",
+    "preprocessing",
+    "plotting"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/io/dlcio.py:DLC",
+   "type": "class",
+   "name": "DLC",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    20,
+    397
+   ],
+   "summary": "Main DeepLabCut tracking wrapper: loads h5 pose data, derives sample rate/timestamps, converts to cm, masks on-maze frames, smooths positions and computes speed.",
+   "tags": [
+    "io",
+    "tracking",
+    "preprocessing",
+    "speed"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/dlcio.py:get_matching_files",
+   "type": "function",
+   "name": "get_matching_files",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    406,
+    445
+   ],
+   "summary": "Finds files in a directory matching an include pattern while excluding others.",
+   "tags": [
+    "utility",
+    "filesystem",
+    "search"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/dlcio.py:smooth_pos",
+   "type": "function",
+   "name": "smooth_pos",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    470,
+    508
+   ],
+   "summary": "Low-pass filters and interpolates DLC position traces, gating on likelihood and interpolation limits.",
+   "tags": [
+    "preprocessing",
+    "smoothing",
+    "tracking"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/dlcio.py:calculate_speed",
+   "type": "function",
+   "name": "calculate_speed",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    511,
+    530
+   ],
+   "summary": "Computes per-bodypart speed from smoothed positions with pixel-to-cm scaling.",
+   "tags": [
+    "speed",
+    "tracking",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/dlcio.py:plot_1d",
+   "type": "function",
+   "name": "plot_1d",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    533,
+    565
+   ],
+   "summary": "Plots a single DLC feature over time with likelihood-based masking.",
+   "tags": [
+    "plotting",
+    "tracking",
+    "visualization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/dlcio.py:plot_2d",
+   "type": "function",
+   "name": "plot_2d",
+   "filePath": "neuropy/io/dlcio.py",
+   "lineRange": [
+    568,
+    593
+   ],
+   "summary": "Plots the 2d trajectory of a bodypart with likelihood cutoff and cm scaling.",
+   "tags": [
+    "plotting",
+    "tracking",
+    "visualization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/io/minianio.py",
+   "type": "file",
+   "name": "minianio.py",
+   "filePath": "neuropy/io/minianio.py",
+   "summary": "Minian CNMF \u8f93\u51fa (zarr) \u7684\u52a0\u8f7d\u5668\uff1aMinianIO \u8bfb\u53d6 traces/spikes/ROI\uff0c\u505a curation \u4e0e trimming\uff0c\u5e76\u8f6c\u6210 CaNeurons \u5bf9\u8c61\u3002",
+   "tags": [
+    "io",
+    "calcium-imaging",
+    "minian",
+    "zarr",
+    "adapter"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/io/minianio.py:MinianIO",
+   "type": "class",
+   "name": "MinianIO",
+   "filePath": "neuropy/io/minianio.py",
+   "lineRange": [
+    12,
+    216
+   ],
+   "summary": "Loads Minian zarr outputs (C/S/A footprints, unit ids), supports saving curated neuron subsets, trimming, and conversion to a CaNeurons object.",
+   "tags": [
+    "io",
+    "adapter",
+    "calcium-imaging",
+    "zarr"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/minianio.py:fix_dim_mismatch",
+   "type": "function",
+   "name": "fix_dim_mismatch",
+   "filePath": "neuropy/io/minianio.py",
+   "lineRange": [
+    219,
+    240
+   ],
+   "summary": "Repairs a corrupted zarr variable whose dimension coords mismatch a known-good zarr.",
+   "tags": [
+    "repair",
+    "zarr",
+    "io"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/minianio.py:save_zarr_to_numpy",
+   "type": "function",
+   "name": "save_zarr_to_numpy",
+   "filePath": "neuropy/io/minianio.py",
+   "lineRange": [
+    243,
+    267
+   ],
+   "summary": "Serializes zarr variables to .npy files for faster downstream loading.",
+   "tags": [
+    "io",
+    "conversion",
+    "cache"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/io/miniscopeio.py",
+   "type": "file",
+   "name": "miniscopeio.py",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "summary": "Miniscope \u91c7\u96c6\u6587\u4ef6\u5939\u7684 IO\uff1a\u89e3\u6790 recording metadata\u3001\u62fc\u63a5\u8de8 recording \u7684 timestamps \u4e0e head-orientation (quaternion\u2192euler)\uff0c\u5e76\u6574\u7406\u6587\u4ef6\u5230 combined folder\u3002",
+   "tags": [
+    "io",
+    "miniscope",
+    "timestamps",
+    "metadata",
+    "utility"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/io/miniscopeio.py:MiniscopeIO",
+   "type": "class",
+   "name": "MiniscopeIO",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    14,
+    124
+   ],
+   "summary": "Session-level miniscope IO object that concatenates timestamps and head-orientation data across all recordings in a folder.",
+   "tags": [
+    "io",
+    "miniscope",
+    "timestamps"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/miniscopeio.py:load_timestamps",
+   "type": "function",
+   "name": "load_timestamps",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    153,
+    237
+   ],
+   "summary": "Loads and concatenates miniscope/webcam timestamp CSVs for a recording folder, handling corrupted videos.",
+   "tags": [
+    "io",
+    "timestamps",
+    "robustness"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/miniscopeio.py:load_orientation",
+   "type": "function",
+   "name": "load_orientation",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    240,
+    281
+   ],
+   "summary": "Loads head-orientation (IMU quaternion) data for a recording folder and converts to usable angles.",
+   "tags": [
+    "io",
+    "imu",
+    "orientation"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/miniscopeio.py:move_files_to_combined_folder",
+   "type": "function",
+   "name": "move_files_to_combined_folder",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    284,
+    342
+   ],
+   "summary": "Moves/copies recording files into a combined folder, optionally prepending recording date/time to filenames.",
+   "tags": [
+    "filesystem",
+    "organization",
+    "utility"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/miniscopeio.py:get_recording_metadata",
+   "type": "function",
+   "name": "get_recording_metadata",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    127,
+    150
+   ],
+   "summary": "Parses metaData.json for a miniscope recording folder into a metadata dict.",
+   "tags": [
+    "io",
+    "metadata",
+    "parsing"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/io/miniscopeio.py:euler_from_quaternion",
+   "type": "function",
+   "name": "euler_from_quaternion",
+   "filePath": "neuropy/io/miniscopeio.py",
+   "lineRange": [
+    345,
+    372
+   ],
+   "summary": "Converts a quaternion to roll/pitch/yaw Euler angles.",
+   "tags": [
+    "math",
+    "orientation",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/io/movie.py",
+   "type": "file",
+   "name": "movie.py",
+   "filePath": "neuropy/io/movie.py",
+   "summary": "Behavior tracking video \u7684\u8f7b\u91cf OpenCV \u5c01\u88c5\uff1a\u5e27\u6570/\u5e27\u7387\u67e5\u8be2\u3001\u6293\u5e27\u7ed8\u56fe\uff0c\u4ee5\u53ca\u4ece\u6587\u4ef6\u540d\u63a8\u65ad\u5f55\u50cf\u8d77\u59cb\u65f6\u95f4\u3002",
+   "tags": [
+    "io",
+    "video",
+    "opencv",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/io/movie.py:tracking_movie",
+   "type": "class",
+   "name": "tracking_movie",
+   "filePath": "neuropy/io/movie.py",
+   "lineRange": [
+    11,
+    118
+   ],
+   "summary": "OpenCV-backed tracking video wrapper exposing frame count, frame rate, frame grabbing and frame plotting.",
+   "tags": [
+    "io",
+    "video",
+    "opencv"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/movie.py:get_nframes_manual",
+   "type": "function",
+   "name": "get_nframes_manual",
+   "filePath": "neuropy/io/movie.py",
+   "lineRange": [
+    121,
+    141
+   ],
+   "summary": "Counts video frames by iterating when the container metadata is unreliable.",
+   "tags": [
+    "video",
+    "utility",
+    "fallback"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/movie.py:deduce_starttime_from_file",
+   "type": "function",
+   "name": "deduce_starttime_from_file",
+   "filePath": "neuropy/io/movie.py",
+   "lineRange": [
+    144,
+    175
+   ],
+   "summary": "Infers a recording start datetime from the video filename or file metadata.",
+   "tags": [
+    "video",
+    "parsing",
+    "datetime"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/io/optitrackio.py",
+   "type": "file",
+   "name": "optitrackio.py",
+   "filePath": "neuropy/io/optitrackio.py",
+   "summary": "Optitrack motion-capture IO\uff1a\u4ece CSV/FBX \u89e3\u6790\u4f4d\u7f6e\u8f68\u8ff9\u3001\u91c7\u6837\u7387\u4e0e\u8d77\u59cb\u65f6\u95f4\uff0c\u63d2\u503c\u7f3a\u5931\u70b9\uff0c\u5e76\u6309 datetime \u5bf9\u9f50\u8f93\u51fa Position \u5bf9\u8c61\u3002",
+   "tags": [
+    "io",
+    "motion-capture",
+    "optitrack",
+    "position",
+    "parsing"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/io/optitrackio.py:OptitrackIO",
+   "type": "class",
+   "name": "OptitrackIO",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    337,
+    608
+   ],
+   "summary": "Folder-level Optitrack loader that parses all take files, concatenates tracks by datetime, and exports a core Position object.",
+   "tags": [
+    "io",
+    "motion-capture",
+    "position",
+    "aggregation"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:posfromCSV",
+   "type": "function",
+   "name": "posfromCSV",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    76,
+    133
+   ],
+   "summary": "Parses an Optitrack CSV export into x/y/z position arrays with unit handling.",
+   "tags": [
+    "parsing",
+    "csv",
+    "motion-capture"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:posfromFBX",
+   "type": "function",
+   "name": "posfromFBX",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    154,
+    257
+   ],
+   "summary": "Parses an Optitrack FBX export, extracting per-frame rigid-body position tracks.",
+   "tags": [
+    "parsing",
+    "fbx",
+    "motion-capture"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:interp_missing_pos",
+   "type": "function",
+   "name": "interp_missing_pos",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    136,
+    151
+   ],
+   "summary": "Linearly interpolates dropped-frame gaps in x/y/z position traces.",
+   "tags": [
+    "preprocessing",
+    "interpolation",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:timestamps_from_oe",
+   "type": "function",
+   "name": "timestamps_from_oe",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    275,
+    315
+   ],
+   "summary": "Derives Optitrack sync timestamps from OpenEphys recording files.",
+   "tags": [
+    "io",
+    "sync",
+    "timestamps"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:getStartTime",
+   "type": "function",
+   "name": "getStartTime",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    260,
+    272
+   ],
+   "summary": "Reads the take start time from an Optitrack file header.",
+   "tags": [
+    "parsing",
+    "datetime",
+    "utility"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:getnframes_fbx",
+   "type": "function",
+   "name": "getnframes_fbx",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    50,
+    65
+   ],
+   "summary": "Reads frame count from an FBX file header.",
+   "tags": [
+    "parsing",
+    "fbx",
+    "utility"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/io/optitrackio.py:getSampleRate",
+   "type": "function",
+   "name": "getSampleRate",
+   "filePath": "neuropy/io/optitrackio.py",
+   "lineRange": [
+    16,
+    29
+   ],
+   "summary": "Reads the capture frame rate from an Optitrack file header.",
+   "tags": [
+    "parsing",
+    "metadata",
+    "utility"
+   ],
+   "complexity": "simple"
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_behavior",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_behavior",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_animal",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_animal",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_group",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "class:neuropy/analyses/trace_fc.py:trace_group",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:get_stimuli_times",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:get_stimuli_times",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:generate_session_names",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:generate_session_names",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:fix_date",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:fix_date",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:load_events_from_csv",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "function:neuropy/analyses/trace_fc.py:load_events_from_csv",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:CaNeurons",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:CaNeurons",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:CaNeuronReg",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:CaNeuronReg",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:PairwiseMap",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:PairwiseMap",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:MultiSessionMap",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "class:neuropy/core/ca_neurons.py:MultiSessionMap",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "function:neuropy/core/ca_neurons.py:id_and_plot_reference_cells",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "function:neuropy/core/ca_neurons.py:id_and_plot_reference_cells",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "function:neuropy/core/ca_neurons.py:detect_roi_edges",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "function:neuropy/core/ca_neurons.py:detect_roi_edges",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "class:neuropy/io/dlcio.py:DLC",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "class:neuropy/io/dlcio.py:DLC",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:get_matching_files",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:get_matching_files",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:smooth_pos",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:smooth_pos",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:calculate_speed",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:calculate_speed",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:plot_1d",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:plot_1d",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:plot_2d",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "function:neuropy/io/dlcio.py:plot_2d",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "class:neuropy/io/minianio.py:MinianIO",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "class:neuropy/io/minianio.py:MinianIO",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "function:neuropy/io/minianio.py:fix_dim_mismatch",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "function:neuropy/io/minianio.py:fix_dim_mismatch",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "function:neuropy/io/minianio.py:save_zarr_to_numpy",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "function:neuropy/io/minianio.py:save_zarr_to_numpy",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "class:neuropy/io/miniscopeio.py:MiniscopeIO",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "class:neuropy/io/miniscopeio.py:MiniscopeIO",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:load_timestamps",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:load_timestamps",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:load_orientation",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:load_orientation",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:move_files_to_combined_folder",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:move_files_to_combined_folder",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:get_recording_metadata",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:get_recording_metadata",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:euler_from_quaternion",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/miniscopeio.py",
+   "target": "function:neuropy/io/miniscopeio.py:euler_from_quaternion",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "class:neuropy/io/movie.py:tracking_movie",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "class:neuropy/io/movie.py:tracking_movie",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "function:neuropy/io/movie.py:get_nframes_manual",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "function:neuropy/io/movie.py:get_nframes_manual",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "function:neuropy/io/movie.py:deduce_starttime_from_file",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/movie.py",
+   "target": "function:neuropy/io/movie.py:deduce_starttime_from_file",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "class:neuropy/io/optitrackio.py:OptitrackIO",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "class:neuropy/io/optitrackio.py:OptitrackIO",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:posfromCSV",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:posfromCSV",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:posfromFBX",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:posfromFBX",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:interp_missing_pos",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:interp_missing_pos",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:timestamps_from_oe",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:timestamps_from_oe",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getStartTime",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getStartTime",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getnframes_fbx",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getnframes_fbx",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getSampleRate",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1.0
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "function:neuropy/io/optitrackio.py:getSampleRate",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/trace_fc.py",
+   "target": "file:neuropy/io/dlcio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/core/ca_neurons.py",
+   "target": "file:neuropy/core/datawriter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "file:neuropy/io/miniscopeio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "file:neuropy/io/movie.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/dlcio.py",
+   "target": "file:neuropy/io/optitrackio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "file:neuropy/core/ca_neurons.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/minianio.py",
+   "target": "file:neuropy/io/miniscopeio.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/io/optitrackio.py",
+   "target": "file:neuropy/core/__init__.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "class:neuropy/core/ca_neurons.py:CaNeurons",
+   "target": "class:neuropy/core/datawriter.py:DataWriter",
+   "type": "inherits",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "class:neuropy/io/minianio.py:MinianIO",
+   "target": "class:neuropy/core/ca_neurons.py:CaNeurons",
+   "type": "calls",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "class:neuropy/io/dlcio.py:DLC",
+   "target": "class:neuropy/io/miniscopeio.py:MiniscopeIO",
+   "type": "calls",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "class:neuropy/io/dlcio.py:DLC",
+   "target": "class:neuropy/io/movie.py:tracking_movie",
+   "type": "calls",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "class:neuropy/analyses/trace_fc.py:trace_behavior",
+   "target": "class:neuropy/io/dlcio.py:DLC",
+   "type": "calls",
+   "direction": "forward",
+   "weight": 0.8
+  }
+ ]
+}

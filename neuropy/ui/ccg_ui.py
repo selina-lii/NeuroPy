@@ -3,70 +3,64 @@ from __future__ import annotations
 import os
 import json
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, field
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 from pyqtgraph.Qt import QtCore, QtWidgets
-from pyqtgraph.Qt.QtCore import Qt, QTimer
+from pyqtgraph.Qt.QtCore import Qt, QTimer, QThread, QObject, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QApplication,
     QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton, QScrollArea,
 )
-from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut, QPalette, QColor
+from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
 from neuropy.analyses.neurons_dataset import Key
-from neuropy.ui.app_state import AppState, _ALL_SESSION_MARKER, _ALL_SEGS
-from neuropy.ui.pair_selection_panel import (
-    PairSelectionPanelContainer, SelectionData,
-)
-from neuropy.ui.ui_common import (
-    UITheme, atomic_write_json, qt_dark_mode,
-)
+from neuropy.ui.app_state import AppState, _ALL_SEGS
+from neuropy.ui.pair_selection_panel import PairSelectionPanelContainer
+from neuropy.ui.ui_common import UITheme, qt_dark_mode
 from neuropy.ui.utils import GroupHotkeysBar
 from neuropy.ui.dialogs import (
-    QuickSaveDialog, LoadSelectionDialog, ManageGroupsDialog,
-    CreateGroupDialog,
-    VersionSaveDialog, VersionLoadDialog, CustomCCGManageDialog,
+    QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog,
 )
-from neuropy.ui.stats_tests import StatsTestPanelQt
-from neuropy.ui.jitter_ui import JitterControllerQt, JitterQueueDialog
-from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanelQt
+from neuropy.ui.stats_tests import StatsTestPanel
+from neuropy.ui.jitter_ui import JitterManager
+from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanel
 from neuropy.ui.menubar import ReviewMenuBar, IndexBar
 from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
-from neuropy.analyses.ms_connectivity import CCGDataset, CCGSourceConfig
+from neuropy.analyses.ms_connectivity import CCGDataset
 from neuropy.ui.all_session_mode import AllSessionMode
 from neuropy.analyses.spike_attribution import compute_spike_pairs
-from neuropy.analyses.ccg_transforms import CCGNorm
-from neuropy.analyses.epoch_filter import EpochFilter
 
 if TYPE_CHECKING:
     pass
 
-@dataclass
-class SavePaths:
-    data_root: _Path
-    project_dir: str
 
-    @classmethod
-    def from_config(cls, config_name: str) -> 'SavePaths':
-        root = _Path(__file__).resolve().parents[2] / 'data'
-        return cls(data_root=root, project_dir=f'project_{config_name}')
+class _CCGLoadWorker(QObject):
+    """Runs one blocking cd.get_ccg off the Qt main thread (numpy/file IO releases the GIL,
+    so the event loop stays responsive). Emits done/error back to the main thread."""
+    done  = Signal()
+    error = Signal(str)
 
-    @property
-    def selections_dir(self) -> str:
-        return str(self.data_root / self.project_dir / 'selections')
+    def __init__(self, cd, nd_key, resolution):
+        super().__init__()
+        self._cd = cd
+        self._nd_key = nd_key
+        self._res = resolution
 
-    @property
-    def custom_ccg_dir(self) -> str:
-        return str(self.data_root / self.project_dir / 'custom_ccg')
+    def run(self):
+        try:
+            self._cd.get_ccg(self._nd_key.change(resolution=self._res))
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        self.done.emit()
 
-    @property
-    def ui_state_file(self) -> str:
-        return str(self.data_root / 'ui_state_qt.json')
 
-    def for_project(self, project_dir: str) -> 'SavePaths':
-        return SavePaths(data_root=self.data_root, project_dir=project_dir)
+# Global UI-state snapshot — not per-project, so it lives beside the data root
+# rather than on any CCGDataset. All project-scoped paths come from cd (its
+# save_path / selections_dir / custom_dir), the single source of truth.
+_UI_STATE_FILE = str(_Path(__file__).resolve().parents[2] / 'data' / 'ui_state_qt.json')
 
 
 @dataclass
@@ -83,11 +77,42 @@ class UISettings:
     ccg_memory_limit_gb: float = 4.0
 
 
+@dataclass
+class UIStates:
+    """The single persisted UI snapshot for CCGReviewUI — settings + view + panel layout."""
+    settings: UISettings = field(default_factory=UISettings)
+    session: str = ''
+    type_label: str = ''
+    session_any_mode: bool = False
+    resolution: str = 'lo'
+    current_segment: str = _ALL_SEGS
+    splitter_sizes: list = field(default_factory=list)
+    panel_sizes: dict = field(default_factory=dict)        # panel attr -> pre-collapse width
+    collapsed_panels: list = field(default_factory=list)   # panel attrs currently hidden
+    panel_state: dict = field(default_factory=dict)        # PairSelectionPanelContainer state
+
+    @classmethod
+    def load(cls, path: str) -> 'UIStates':
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return cls()
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}  # stale-schema safe
+        d['settings'] = UISettings(**d.get('settings', {}))
+        return cls(**d)
+
+    def save(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(asdict(self), f, indent=2)
+
+
 class BottomStatusBar:
     """Owns the stats QLabel in the window status bar. Refreshes on nav signals."""
 
     def __init__(self, nav: 'AppState', status_bar):
-        self._nav = nav
+        self.nav = nav
         self.label = QLabel("")
         status_bar.addWidget(self.label)
         self._pair_info_label = QLabel("")
@@ -97,76 +122,52 @@ class BottomStatusBar:
         nav.selection_changed.connect(self.refresh)
 
     def refresh(self, *_):
-        self.label.setText(self._stats_str())
-
-    @staticmethod
-    def _counts_for(neurons, ref_t, tgt_t):
-        """(n_ref, n_tgt, n_poss) for one session's neurons; None if type absent."""
-        try:
-            n_ref = neurons.get_neuron_type(ref_t).n_neurons
-            n_tgt = neurons.get_neuron_type(tgt_t).n_neurons
-        except Exception:
-            return None
-        n_poss = n_ref * (n_ref - 1) if ref_t == tgt_t else n_ref * n_tgt
-        return n_ref, n_tgt, n_poss
+        self.label.setText(self._str())
 
     @staticmethod
     def _counts_str(ref_t, tgt_t, n_ref, n_tgt) -> str:
         return (f"  {ref_t}: {n_ref}" if ref_t == tgt_t
                 else f"  ref({ref_t}): {n_ref}  tgt({tgt_t}): {n_tgt}")
+    
+    def _sig_str(self, n_poss: int, n_sig: int, n_sel: int) -> str:
+        if n_poss:
+            return f"Significant: {n_sig}/{n_poss} Selected: {n_sel}/{n_poss}"
+        return f"Significant: {n_sig}"
 
-    def _stats_str(self) -> str:
-        nav = self._nav
-        n_sig = len(nav.all_inds)
-        n_sel = len(nav.active_selections.selected)
+    def _frate_str(self, frates, ref, tgt) -> str:
+        return f"  |  FR: ref={frates[ref]:.1f}Hz  tgt={frates[tgt]:.1f}Hz"
+
+    def _str(self) -> str:
+        nav = self.nav
         key = nav.key
-        if key is None:
-            return f"Significant: {n_sig}  Selected: {n_sel}"
+        ref_t, tgt_t = key.conn_type
+        
+        n_sig = len(nav.all_pairs_np)
+        n_sel = len(nav.active_selections.selected)
+
         if nav.session_any_mode:
-            return self._stats_str_any(nav, key, n_sig, n_sel)
-
-        ct_prefix = f"{key.type_label()} | "
-        s = f"Significant: {n_sig}  Selected: {n_sel}"
-        if key.conn_type:
-            neurons = nav.neurons
-            if neurons is not None:
-                ref_t, tgt_t = key.conn_type
-                counts = self._counts_for(neurons, ref_t, tgt_t)
-                if counts is not None:
-                    n_ref, n_tgt, n_poss = counts
-                    s = f"Significant: {n_sig}/{n_poss}  Selected: {n_sel}/{n_poss}"
-                    s += self._counts_str(ref_t, tgt_t, n_ref, n_tgt)
-                inds = nav.current_pair_inds
-                if inds is not None:
-                    ref, tgt = int(inds[0]), int(inds[1])
-                    try:
-                        s += f"  |  FR: ref={neurons.firing_rate[ref]:.1f}Hz  tgt={neurons.firing_rate[tgt]:.1f}Hz"
-                    except Exception:
-                        pass
-        return ct_prefix + s
-
-    def _stats_str_any(self, nav, key, n_sig, n_sel) -> str:
-        """Pooled cross-session stats for all-session mode."""
-        s = f"Significant: {n_sig}  Selected: {n_sel}"
-        if key.conn_type:
-            ref_t, tgt_t = key.conn_type
             n_ref = n_tgt = n_poss = 0
             for nk in nav.real_nd_keys():
-                neurons = nav.cd.nd.data.get(nk)
-                if neurons is None:
-                    continue
-                counts = self._counts_for(neurons, ref_t, tgt_t)
-                if counts is None:
-                    continue
-                a, b, p = counts
+                a, b, p = nav.cd.nd.neurons_for(nk).pair_count(ref_t, tgt_t)
                 n_ref += a
                 n_tgt += b
                 n_poss += p
-            if n_poss:
-                s = f"Significant: {n_sig}/{n_poss}  Selected: {n_sel}/{n_poss}"
-                s += self._counts_str(ref_t, tgt_t, n_ref, n_tgt)
-        return f"All sessions · {key.type_label()} | " + s
+        else:
+            n_ref, n_tgt, n_poss = nav.neurons.pair_count(ref_t, tgt_t)
 
+        ct_prefix = f"{key.type_label()} | "
+        s = ct_prefix
+        s += self._sig_str(n_poss, n_sig, n_sel)
+        s += self._counts_str(ref_t, tgt_t, n_ref, n_tgt)
+
+        inds = nav.current_pair_inds
+        if inds is not None:
+            ref, tgt = int(inds[0]), int(inds[1])
+            try:
+                s += self._frate_str(nav.neurons.firing_rate, ref, tgt)
+            except Exception:
+                pass
+        return s
 
 class CCGReviewUI(QMainWindow):
     """Qt root window for CCG Manual Review.
@@ -174,40 +175,56 @@ class CCGReviewUI(QMainWindow):
     Owns AppState. Panels are created in _build_layout() and receive
     nav as their primary interface.
     """
+    nav: AppState
 
-    def __init__(self, cd: 'CCGDataset', key: Key):
+    def __init__(self, cd: 'CCGDataset', key=None):
         super().__init__()
+        self._loading_thread = self._loading_worker = None   # in-flight lazy-load (see _ensure_loaded)
+        self.ui_states = UIStates.load(_UI_STATE_FILE)   # one snapshot for everything
+        
+        if key is None:                               # restore last-used, else default
+            s = self.ui_states
+            key = cd.find(s.session, type_label=s.type_label, strict=False) or cd.find('')
+        else:
+            key = cd.find(key if isinstance(key, str) else key.session)
 
-        self._cd  = cd
-        self._key = key
+        # Bootstrap: nav (hence self.cd) doesn't exist yet, so probe the local cd directly.
+        check = cd.ccg_for(key)
+        if check is None or check.ccg is None or check.ccg.ndim < 4:
+            cd.get_ccg(key)
+
         self.theme = UITheme.from_dark(qt_dark_mode())
 
-        self._nav = AppState(cd, key)
-        self._nav.root = self
+        self.nav = AppState(cd, key)
+        self.nav.root = self
+        self.nav.sd.save_dir = cd.selections_dir # SelectionDataset save path
 
-        self.jitter_controller = JitterControllerQt(self._nav, cd)
-        self.jitter_controller.jitter_completed.connect(self._on_jitter_completed)
-        self.jitter_controller.jitter_failed.connect(self._on_jitter_failed)
+        self.jitter_mgr = JitterManager(self.nav, cd)
+        self.jitter_mgr.completed.connect(self._on_jitter_completed)
+        self.jitter_mgr.failed.connect(self._on_jitter_failed)
 
-        self.paths = SavePaths.from_config(cd.conf.name)
-        self._nav.sd.save_dir = self.paths.selections_dir
-
-        self._saved_panel_sizes: dict[str, int] = {}
+        self.custom_mgr = CustomCCGManager(self)
+        self.all_sess_mgr = AllSessionMode(self.nav, self.cd)
+        self.nav.pair_changed.connect(self._on_pair_changed)
+        self.nav.segment_changed.connect(self._on_segment_changed)
+        self.nav.key_changed.connect(self._on_key_changed)
+        self.nav.session_mode_changed.connect(self._on_session_mode_changed)
+        self.nav.cross_session_handles_changed.connect(
+            lambda: self.mainview.request_render() if self.nav.session_any_mode else None)
+        self.nav.groups.changed.connect(self._on_groups_changed)
 
         self._build_layout()
-        self._custom_mgr = CustomCCGManager(self)
-        self.any_session = AllSessionMode(self._nav, self._cd, self.paths)
         self._bind_shortcuts()
 
-        self._nav.pair_changed.connect(self._on_pair_changed)
-        self._nav.segment_changed.connect(self._on_segment_changed)
-        self._nav.key_changed.connect(self._on_key_changed)
-        self._nav.session_mode_changed.connect(self._on_session_mode_changed)
-        self._nav.cross_session_handles_changed.connect(
-            lambda: self.request_redraw() if self._nav.session_any_mode else None)
-        self._nav.groups.changed.connect(self._on_groups_changed)
-
         QTimer.singleShot(100, self._initial_draw)
+
+    @property
+    def settings(self) -> UISettings:
+        return self.ui_states.settings
+    
+    @property
+    def cd(self) -> CCGDataset:
+        return self.nav.cd
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -215,33 +232,13 @@ class CCGReviewUI(QMainWindow):
 
     def _refresh_theme(self, *, redraw: bool = False):
         self.theme = UITheme.from_dark(qt_dark_mode())
+        self.hotkeys_bar.refresh()
+        self.stats_panel.apply_theme()
         if redraw:
-            self.request_redraw()
+            self.mainview.request_render()
             self.neuron_network.draw()
 
-    def toggle_dark_mode(self):
-        app = QApplication.instance()
-        if qt_dark_mode():
-            app.setPalette(app.style().standardPalette())
-        else:
-            p = QPalette()
-            dark = QColor(30, 30, 30)
-            p.setColor(QPalette.ColorRole.Window,          dark)
-            p.setColor(QPalette.ColorRole.WindowText,      QColor(220, 220, 220))
-            p.setColor(QPalette.ColorRole.Base,            QColor(42, 42, 42))
-            p.setColor(QPalette.ColorRole.AlternateBase,   dark)
-            p.setColor(QPalette.ColorRole.Text,            QColor(220, 220, 220))
-            p.setColor(QPalette.ColorRole.Button,          QColor(53, 53, 53))
-            p.setColor(QPalette.ColorRole.ButtonText,      QColor(220, 220, 220))
-            p.setColor(QPalette.ColorRole.Highlight,       QColor(42, 130, 218))
-            p.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
-            app.setPalette(p)
-        self._refresh_theme(redraw=True)
-        self.hotkeys_bar._update_dark_btn()
-        self.hotkeys_bar.refresh()
-
     def _build_layout(self):
-        self.settings = UISettings()
         self._apply_min_font_size(self.settings.min_font_size)
         self.setWindowTitle("CCG Manual Review")
         self.resize(1800, 950)
@@ -263,10 +260,10 @@ class CCGReviewUI(QMainWindow):
         root_layout.addWidget(v_splitter, stretch=1)
 
         # Time slider (above main panel per spec)
-        self.time_slider = TimeSliderPanelQt(self._nav, self._cd)
-        self.time_slider.save_requested.connect(lambda: CustomCCGManageDialog.show(self._custom_mgr, self.time_slider, parent=self))
-        self.time_slider.load_requested.connect(lambda: CustomCCGManageDialog.show(self._custom_mgr, self.time_slider, select_mode=True, parent=self))
-        self.time_slider.ccg_enqueue_requested.connect(self._on_ccg_enqueue)
+        self.time_slider = TimeSliderPanel(self.nav, self.cd)
+        self.time_slider.save_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, parent=self))
+        self.time_slider.load_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, select_mode=True, parent=self))
+        self.time_slider.queue_ccg_requested.connect(self._on_queue_ccg)
         v_splitter.addWidget(self.time_slider)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -278,8 +275,8 @@ class CCGReviewUI(QMainWindow):
         self.left_frame = QWidget()
         left_frame = self.left_frame
         self.pairs_view = PairSelectionPanelContainer(
-            left_frame, self._nav.sel_data, self._nav,
-            self._load_ui_state().get('panel_state', {}))
+            left_frame, self.nav.sel_data, self.nav,
+            self.ui_states.panel_state)
         lft_layout = QVBoxLayout(left_frame)
         lft_layout.setContentsMargins(0, 0, 0, 0)
         _lft_title = QLabel("Pair Selection"); _lft_title.setStyleSheet("font-weight:bold;padding:2px 4px;")
@@ -288,10 +285,10 @@ class CCGReviewUI(QMainWindow):
         splitter.addWidget(left_frame)
 
         # Center: CCG panel
-        self.mainview = CorrelogramPanel(self._nav)
-        self.mainview.set_jitter_ctrl(self.jitter_controller)
+        self.mainview = CorrelogramPanel(self.nav)
+        self.mainview.set_jitter_mgr(self.jitter_mgr)
         self.mainview._theme_fn = lambda: self.theme
-        self.jitter_controller.status_changed.connect(
+        self.jitter_mgr.status_changed.connect(
             lambda text: self.mainview.jitter_section.set_running(bool(text)))
         splitter.addWidget(self.mainview)
 
@@ -309,7 +306,7 @@ class CCGReviewUI(QMainWindow):
         net_container = QWidget()
         net_scroll.setWidget(net_container)
         right_outer.addWidget(net_scroll)
-        self.neuron_network = NetworkPanel(net_container, self._nav)
+        self.neuron_network = NetworkPanel(net_container, self.nav)
         splitter.addWidget(right_frame)
 
         splitter.setSizes([340, 1040, 320])
@@ -325,63 +322,70 @@ class CCGReviewUI(QMainWindow):
         }
 
         ReviewMenuBar(self).build()
-        self.status_bar = BottomStatusBar(self._nav, self.statusBar())
-        self.stats_panel = StatsTestPanelQt(self._nav, self._cd)
+        self.status_bar = BottomStatusBar(self.nav, self.statusBar())
+        self.stats_panel = StatsTestPanel(self.nav)
         self.stats_panel.setWindowTitle("Stats Tests")
         self.stats_panel.resize(1100, 750)
 
     def _switch_project(self, project_dir: str):
         config_name = project_dir[len('project_'):]
-        new_conf = self._cd.conf.copy(name=config_name)
-        new_cd = CCGDataset(new_conf, self._cd.nd)
+        new_conf = self.cd.conf.copy(name=config_name)
+        new_cd = CCGDataset(new_conf, self.cd.nd)
 
-        self.cd = new_cd
-        self._nav.set_cd(new_cd)
-        self.jitter_controller._cd = new_cd
-        self.time_slider._cd = new_cd
+        self.nav.set_cd(new_cd)   # self.cd is a read-only property → nav.cd
+        self.jitter_mgr.cd = new_cd
+        self.time_slider.cd = new_cd
 
-        self.paths = self.paths.for_project(project_dir)
-        self._nav.reset_selection_for_project(new_cd, self.paths.selections_dir)
-        os.makedirs(self.paths.custom_ccg_dir, exist_ok=True)
+        self.nav.reset_selection_for_project(new_cd, new_cd.selections_dir)
+        os.makedirs(new_cd.custom_dir, exist_ok=True)
 
-        sess = str(self._nav.key.session)
+        sess = str(self.nav.key.session)
         tk = new_cd.find(sess)
         if tk is not None:
             self._ensure_loaded(tk.nd(), 'lowres', lambda: self._switch_session(tk))
         self.index_bar.sync()
 
         self.pairs_view._autoload_session_latest(restore_groups=True)
-        self._nav.apply_sel_for_key(self._nav.key)
+        self.nav.apply_sel_for_key(self.nav.key)
 
         self.pairs_view.pair_selection.refresh_lists()
         self._post_load_refresh()
         print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
               flush=True)
 
+    def _panel_target(self, attr: str):
+        """Widget whose visibility represents panel *attr* (splitter frame, else the panel)."""
+        entry = self._panel_splitter_map.get(attr)
+        return (entry[2] if entry else None) or getattr(self, attr, None)
+
     def _toggle_panel(self, attr: str):
         if attr == '_waveforms_panel':
             self._toggle_waveforms()   # waveforms live in mainview, not a standalone panel
             return
-        panel = getattr(self, attr, None)
-        if panel is None:
+        target = self._panel_target(attr)
+        if target is not None:
+            self._set_panel_visible(attr, not target.isVisible())
+
+    def _set_panel_visible(self, attr: str, visible: bool):
+        """Show/hide a splitter panel, remembering its pre-collapse width on ui_states."""
+        target = self._panel_target(attr)
+        if target is None:
             return
-        visible = not panel.isVisible()
         entry = self._panel_splitter_map.get(attr)
-        if entry is not None:
-            spl, idx, frame = entry
-            if spl is not None and idx is not None:
-                sizes = list(spl.sizes())
-                if not visible:
-                    if sizes[idx] > 0:
-                        self._saved_panel_sizes[attr] = sizes[idx]
-                    sizes[idx] = 0
-                    spl.setSizes(sizes)
-                else:
-                    sizes[idx] = self._saved_panel_sizes.get(attr, 300)
-                    spl.setSizes(sizes)
-                    if frame is not None:
-                        frame.setVisible(True)
-        panel.setVisible(visible)
+        if entry and entry[0] is not None:            # lives in a splitter
+            spl, idx, _ = entry
+            sizes = list(spl.sizes())
+            if visible:
+                sizes[idx] = self.ui_states.panel_sizes.get(attr, 300)
+            else:
+                if sizes[idx] > 0:
+                    self.ui_states.panel_sizes[attr] = sizes[idx]
+                sizes[idx] = 0
+            spl.setSizes(sizes)
+        target.setVisible(visible)
+        panel = getattr(self, attr, None)
+        if panel is not None and panel is not target:
+            panel.setVisible(visible)
         act = self._panel_actions.get(attr)
         if act:
             act.setChecked(visible)
@@ -400,28 +404,17 @@ class CCGReviewUI(QMainWindow):
             f.setPointSize(size)
             app.setFont(f)
 
-    def show_transient_banner(self, message: str, duration_ms: int = 3500) -> None:
+    def _show_transient_banner(self, message: str, duration_ms: int = 3500) -> None:
         """Brief status-bar message (e.g. unassigned group hotkey)."""
         self.statusBar().showMessage(message, duration_ms)
 
-    # fmt: off
-    # Complete shortcut reference — update here when adding/removing shortcuts.
     # pairs_view / Right       Navigate segments
-    # Ctrl+R             Toggle hi/lo resolution
-    # Ctrl+E             Toggle waveform panel
-    # Ctrl+F             Toggle search bar
-    # Ctrl+S             Save selection
-    # Ctrl+B             Toggle bookmark on current pair
-    # Ctrl+Z             Undo
-    # Ctrl+Y / Ctrl+Shift+Z   Redo
     # Del / Backspace    Move current pair to Deleted (in list focus)
     # 1-9, 0             Group hotkeys (assigned via Manage Groups)
     # Ctrl+1-0           Same (when list does not have keyboard focus)
-    # fmt: on
     def _bind_shortcuts(self):
         def _sc(seq, fn):
             QShortcut(QKeySequence(seq), self).activated.connect(fn)
-
         _sc("pairs_view",           lambda: self._change_segment(-1))
         _sc("Right",          lambda: self._change_segment(1))
         _sc("Ctrl+R",         self._toggle_resolution)
@@ -434,10 +427,10 @@ class CCGReviewUI(QMainWindow):
         _sc("Ctrl+Shift+Z",   self._redo)
 
     def _on_jitter_completed(self, ref, tgt, _res_key, _seg_key):
-        inds = self._nav.current_pair_inds
+        inds = self.nav.current_pair_inds
         if inds is not None and int(inds[0]) == ref and int(inds[1]) == tgt:
-            self.jitter_controller.mark_viewed(ref, tgt)
-            self.request_redraw()
+            self.jitter_mgr.mark_viewed(ref, tgt)
+            self.mainview.request_render()
         self.mainview.jitter_section.set_running(False)
         self.status_bar.refresh()
 
@@ -446,86 +439,99 @@ class CCGReviewUI(QMainWindow):
         QMessageBox.critical(self, "Jitter error", msg)
 
     def _on_spike_attribution_set(self, bin_val: float, unit: str):
-        nav = self._nav
+        nav = self.nav
         if not self.mainview.sa_section.is_enabled:
             return
         inds = nav.current_pair_inds
         if inds is None:
             return
         ref, tgt = int(inds[0]), int(inds[1])
+        # Bound to the appended window's extent (source config); 'full' = whole session (None).
+        label = nav.current_segment
+        src = self.cd.source_config(nav.key, label) if label and label != _ALL_SEGS else None
+        t0 = float(src.t0) if src is not None and not isinstance(src.t0, str) else None
+        t1 = float(src.t1) if src is not None and not isinstance(src.t1, str) else None
         pairs = compute_spike_pairs(
-            nav.neurons, ref, tgt, bin_val, unit,
-            nav.ccg_data, nav.seg_idx(nav.current_segment),
-            nav.n_segments, self._cd.edge_times_for(nav.key))
+            nav.neurons, ref, tgt, bin_val, unit, nav.ccg_data, t0, t1)
         self.pairs_view.spike_pairs.populate(pairs)
         if pairs:
             self.pairs_view.spike_pairs.activate()
 
-    def _on_pair_changed(self, _idx: int):
+    def _on_pair_changed(self):
         self.status_bar.refresh()
-        self.request_redraw()
-        self.neuron_network.draw()   # current-pair edge must track the selected pair
+        self.mainview.request_render()
+        self.neuron_network.follow_current_pair()
 
-    def _on_segment_changed(self, _name: str):
+    def _on_segment_changed(self):
         self.mainview.refresh_spike_attr_if_enabled()
-        self.request_redraw()
+        self.mainview.request_render()
 
-    def _on_groups_changed(self) -> None:
+    def _on_groups_changed(self):
         self.hotkeys_bar.refresh()
         self.neuron_network.refresh_group_buttons()
 
-    def _on_key_changed(self, _key):
+    def _on_key_changed(self):
         self.index_bar.sync()
-        inds = self._nav.all_inds
+        inds = self.nav.all_pairs_np
         if len(inds) > 0:
-            self._nav.set_current_pair(min(self._nav.current_pair_idx, len(inds) - 1))
+            self.nav.set_current_pair(min(self.nav.current_pair_idx, len(inds) - 1))
         self.pairs_view.pair_selection.refresh_lists()
-        self.jitter_controller.load_from_cd()
-        self._nav.groups.changed.emit()
+        self.jitter_mgr.load_from_cd()
+        self.nav.groups.changed.emit()
         self.neuron_network.refresh_ct_buttons()
         self.neuron_network.draw()
         self.status_bar.refresh()
-        self.request_redraw()
-
-    def request_redraw(self):
-        """Ask CorrelogramPanel to re-render the current pair."""
         self.mainview.request_render()
 
     def _post_load_refresh(self):
-        self._nav.groups.changed.emit()
+        self.nav.groups.changed.emit()
         self.pairs_view.pair_selection.refresh_lists()
         self.neuron_network.draw()
-        inds = self._nav.all_inds
+        inds = self.nav.all_pairs_np
         if len(inds) > 0:
-            idx = min(self._nav.current_pair_idx, len(inds) - 1)
-            if idx != self._nav.current_pair_idx:
-                self._nav.set_current_pair(idx)
+            idx = min(self.nav.current_pair_idx, len(inds) - 1)
+            if idx != self.nav.current_pair_idx:
+                self.nav.set_current_pair(idx)
             else:
-                self._on_pair_changed(idx)
-        self.request_redraw()
+                self._on_pair_changed()
+        self.mainview.request_render()
         self.status_bar.refresh()
 
     def _initial_draw(self):
         print(f"[CCGReviewUI] ccg_ui={__file__}", flush=True)
         try:
             self.pairs_view._autoload_session_latest(restore_groups=True)
-            self._nav.apply_sel_for_key(self._nav.key)
+            self.nav.apply_sel_for_key(self.nav.key)
             self.pairs_view.pair_selection.refresh_lists()
             if self.time_slider is not None:
                 self.time_slider.reload_themes()
             self._post_load_refresh()
             self.neuron_network.refresh_shank_buttons()
             self.status_bar.refresh()
-            self.request_redraw()
+            # Restore saved view (segment / resolution / splitter / collapse) before first draw.
+            s = self.ui_states
+            self.nav.set_current_segment(_ALL_SEGS)   # segment is per-session view state, never restored
+            if s.resolution == 'hi':
+                self._ensure_loaded(self.nav.key.nd(), 'highres',
+                                    lambda: self.nav.set_resolution('hi'))
+            if s.splitter_sizes:
+                self._splitter.setSizes(s.splitter_sizes)
+            for attr in list(s.collapsed_panels):
+                self._set_panel_visible(attr, False)
+            self.mainview.request_render()
+            # Restore all-session mode after the single-session baseline is set up
+            # (_enter_all_session_mode preserves the current key's type_label).
+            if s.session_any_mode:
+                self._enter_all_session_mode()
         except Exception:
             raise
 
     def _toggle_resolution(self):
-        nd_key = self._nav.key.nd()
-        if self._nav.resolution == "lo":
-            self._ensure_loaded(nd_key, 'highres', lambda: self._nav.set_resolution("hi"))
+        nd_key = self.nav.key.nd()
+        if self.nav.resolution == "lo":
+            self._ensure_loaded(nd_key, 'highres', lambda: self.nav.set_resolution("hi"))
         else:
-            self._nav.set_resolution("lo")
+            self.nav.set_resolution("lo")
 
     def _toggle_waveforms(self):
         btn = self.mainview.corr_section.ref_wf_btn
@@ -534,35 +540,24 @@ class CCGReviewUI(QMainWindow):
         if act:
             act.setChecked(btn.isChecked())
         if btn.isChecked():
-            self.request_redraw()
+            self.mainview.request_render()
 
-    def _on_ccg_enqueue(self, spec):
-        if isinstance(spec, dict):
-            spec = CCGSourceConfig.deserialize(spec, default_session=str(self._nav.key.session))
-        all_sessions = {str(k.session) for k in self._nav.real_nd_keys()}
-        picked = [str(s) for s in (spec.sessions or []) if str(s).lower() != 'all']
-        scope_all = str(spec.scope or '').lower() == 'all'
-        if not picked and not scope_all:
-            picked = [str(spec.scope or self._nav.key.session)]
-        for_all = scope_all or (bool(all_sessions) and bool(picked)
-                                and set(picked) >= all_sessions)
-        target = None if for_all else picked
-        print(f"[enqueue] spec={spec.name!r} picked={picked} for_all={for_all}")
-        n = self._custom_mgr._queue_custom_ccgs(
-            spec, for_all=for_all, auto_save=True, target_sessions=target)
-        print(f"[enqueue] queued={n}")
+    def _on_queue_ccg(self, spec: 'CCGBatchRequest'):
+        # scope lives in spec; backend expands over sessions/splits
+        n = self.custom_mgr._queue_custom_ccgs(spec)
         if n:
-            self._custom_mgr.worker._custom_ccg_start_next()
-            if self.time_slider is not None:
+            if self.time_slider is not None:   # show status before the (possibly blocking) launch
                 self.time_slider._status_lbl.setText(f"Queued {n} custom CCG task(s)")
+                QApplication.processEvents()
+            self.custom_mgr.worker._custom_ccg_start_next()
         else:
             if self.time_slider is not None:
                 self.time_slider._status_lbl.setText("Nothing queued (check scope/session)")
 
     def _manage_groups(self):
         ManageGroupsDialog.show(
-            self._nav.sel_data, self.pairs_view.pair_selection,
-            pairs_by_conn_type_fn=self._nav._pairs_by_conn_type, parent=self)
+            self.nav.sel_data, self.pairs_view.pair_selection,
+            pairs_by_conn_type_fn=self.nav._pairs_by_conn_type, parent=self)
 
     def _undo(self):
         self.pairs_view.pair_selection.undo()
@@ -570,61 +565,56 @@ class CCGReviewUI(QMainWindow):
     def _redo(self):
         self.pairs_view.pair_selection.redo()
 
-    def _load_ui_state(self) -> dict:
-        try:
-            with open(self.paths.ui_state_file, 'r') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
     def _save_ui_state(self):
-        state = {
-            'splitter_sizes': self._splitter.sizes(),
-            'resolution': self._nav.resolution,
-            'current_segment': self._nav.current_segment,
-        }
-        os.makedirs(os.path.dirname(self.paths.ui_state_file), exist_ok=True)
-        with open(self.paths.ui_state_file, 'w') as f:
-            json.dump(state, f, indent=2)
+        # Refresh the nav-derived fields on ui_states from live state, then persist the whole thing.
+        s = self.ui_states
+        s.splitter_sizes = self._splitter.sizes()
+        s.resolution = self.nav.resolution
+        s.current_segment = self.nav.current_segment
+        s.session = str(self.nav.key.session)
+        s.type_label = self.nav.key.type_label()
+        s.session_any_mode = bool(self.nav.session_any_mode)
+        s.collapsed_panels = [a for a in self._panel_splitter_map
+                              if not self._panel_target(a).isVisible()]
+        s.save(_UI_STATE_FILE)   # settings / panel_sizes already live on s
 
     def closeEvent(self, event: 'QCloseEvent'):
-        self._nav.closing.emit()
-        self._save_ui_state()
+        self.nav.closing.emit()
+        if self.settings.save_ui_on_close:
+            self._save_ui_state()
         super().closeEvent(event)
 
     def _enter_all_session_mode(self):
-        type_keys = self._nav.available_type_keys_any()
+        type_keys = self.nav.available_type_keys_any()
         if not type_keys:
             QMessageBox.warning(self, "All sessions", "No connection types in dataset.")
             return
-        prev_lbl = self._nav.key.type_label()
+        prev_lbl = self.nav.key.type_label()
         type_labels = [k.type_label() for k in type_keys]
         new_key = type_keys[type_labels.index(prev_lbl)] if prev_lbl in type_labels else type_keys[0]
-        self.any_session.load_groups()
+        self.all_sess_mgr.load_groups()
         self._ensure_loaded(new_key.nd(), 'lowres', lambda: self._switch_session(new_key))
-        self._nav.set_session_any_mode(True)
+        self.nav.set_session_any_mode(True)
         self.index_bar.sync()
 
     def _exit_all_session_mode(self):
-        self.any_session.flush_deleted_to_stores()
-        self._nav.set_session_any_mode(False)
+        self.all_sess_mgr.flush_deleted_to_stores()
+        self.nav.set_session_any_mode(False)
         self.index_bar.sync()
 
     def _on_session_mode_changed(self, any_mode: bool):
         if any_mode:
-            self._nav.any_expanded_group_tags = (
-                set(self._nav.groups.header_names())
-                | {str(k.session) for k in self._nav.real_nd_keys()})
+            self.nav.any_expanded_group_tags = (
+                set(self.nav.groups.header_names())
+                | {str(k.session) for k in self.nav.real_nd_keys()})
             self.pairs_view.pair_selection._sort_btns.select('tag')
-            self.any_session.load_deleted_aggregate()
-            self.any_session.rebuild_pair_handles()
-            self.any_session.sync_selection_from_universe()
-            self._nav.set_current_pair(0)
-            self._nav.set_current_segment(_ALL_SEGS)
+            self.all_sess_mgr.rebuild_universe()
+            self.nav.set_current_pair(0)
+            self.nav.set_current_segment(_ALL_SEGS)
         else:
-            self._nav.any_expanded_group_tags.clear()
-            self._nav.set_cross_session_handles([])
-            self._nav.apply_sel_for_key(self._nav.key)
+            self.nav.any_expanded_group_tags.clear()
+            self.nav.set_cross_session_handles([])
+            self.nav.apply_sel_for_key(self.nav.key)
         np = self.neuron_network
         if any_mode:
             np._net_any_sessions_cache = np._net_any_sessions()
@@ -635,23 +625,52 @@ class CCGReviewUI(QMainWindow):
         self._post_load_refresh()
 
     def _ccg_ready(self, nd_key, resolution: str = 'lowres') -> bool:
-        data = self._cd.ccg_for(nd_key, resolution)
+        data = self.cd.ccg_for(nd_key.change(resolution=resolution))
         return data is not None and data.ccg is not None and data.ccg.ndim >= 4
 
     def _ensure_loaded(self, nd_key, resolution: str, on_loaded):
         if self._ccg_ready(nd_key, resolution):
             on_loaded()
             return
+        # Reentrancy guard: a load already in flight → ignore (avoids overlapping cd mutation
+        # from rapid session switches).
+        if self._loading_thread is not None:
+            return
+        # Busy dialog kept hidden; a 2s single-shot reveals it only if the load outlasts 2s.
         dlg = QProgressDialog("Loading…", None, 0, 0, self)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setCancelButton(None)
-        dlg.setMinimumDuration(0)
-        dlg.show()
-        QApplication.processEvents()
-        self._cd.get_ccg(resolution=resolution, nd_key=nd_key)
-        self._cd._check_memory_and_evict(self.settings.ccg_memory_limit_gb)
-        dlg.close()
-        on_loaded()
+        show_timer = QTimer(self)
+        show_timer.setSingleShot(True)
+        show_timer.timeout.connect(dlg.show)
+        show_timer.start(2000)
+
+        thread = QThread(self)
+        worker = _CCGLoadWorker(self.cd, nd_key, resolution)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        self._loading_thread, self._loading_worker = thread, worker
+
+        def _teardown():
+            show_timer.stop()
+            dlg.close()
+            thread.quit()
+            thread.wait()
+            worker.deleteLater()
+            thread.deleteLater()
+            self._loading_thread = self._loading_worker = None
+
+        def _on_done():
+            _teardown()
+            on_loaded()
+
+        def _on_error(msg: str):
+            _teardown()
+            QMessageBox.critical(self, "Load failed", f"Could not load CCG data:\n{msg}")
+
+        worker.done.connect(_on_done)
+        worker.error.connect(_on_error)
+        thread.start()
 
     def _ensure_sessions_loaded(self, nd_keys, resolution: str):
         """Batch-load CCG for many sessions (one progress dialog). No eviction, so
@@ -667,105 +686,60 @@ class CCGReviewUI(QMainWindow):
         for i, k in enumerate(pending):
             dlg.setValue(i)
             QApplication.processEvents()
-            self._cd.get_ccg(resolution=resolution, nd_key=k)
+            self.cd.get_ccg(k.change(resolution=resolution))
         dlg.close()
 
-    def _seg_name(self, idx: int) -> str:
-        if idx == self._nav.n_segments:
-            return _ALL_SEGS
-        cs_list = self._custom_segments
-        if idx > self._nav.n_segments:
-            ci = idx - self._nav.n_segments - 1
-            if 0 <= ci < len(cs_list):
-                return cs_list[ci].src_conf.name
-            return _ALL_SEGS
-        names = self._cd.segment_names_for(self._nav.key)
-        return names[idx] if 0 <= idx < len(names) else _ALL_SEGS
-
     def _change_segment(self, delta: int):
-        all_names = self._nav.all_segment_names()
+        all_names = self.nav.available_segments()
         if not all_names:
             return
-        cur = self._nav.current_segment
+        cur = self.nav.current_segment
         idx = all_names.index(cur) if cur in all_names else 0
-        self._nav.set_current_segment(all_names[(idx + delta) % len(all_names)])
-        self.request_redraw()
+        self.nav.set_current_segment(all_names[(idx + delta) % len(all_names)])
+        self.mainview.request_render()
 
     def _switch_session(self, new_key) -> bool:
         """Switch to a new Key. Returns False if data unavailable."""
-        if self._nav.session_any_mode:
+        if self.nav.session_any_mode:
             return self._switch_type_any(new_key)
 
-        prev_key = self._nav.key
-        prev_session = prev_key.session
-
-        if new_key == prev_key:
-            self._nav.apply_sel_for_key(new_key)
-            self._post_load_refresh()
-            return True
-
-        # prev_key's bucket already holds its selected/deleted state (buckets persist).
-        _prev_seg = self._nav.current_segment
         new_session = str(new_key.session)
-        session_changed = str(prev_session or '') != new_session
-        sess_sel_path = os.path.join(self.paths.selections_dir, f"{new_session}.json")
+        session_changed = str(self.nav.key.session or '') != new_session
 
-        if not session_changed:
-            self._nav.apply_sel_for_key(new_key)
-        self._nav.set_key(new_key)
-        self.index_bar.sync()
-
-        if session_changed and os.path.isfile(sess_sel_path):
-            self.pairs_view._load_selection_from_file(
-                sess_sel_path, restore_groups=True, _skip_redraw=True)
-        elif session_changed:
-            self._nav.apply_sel_for_key(new_key)
-
-        if _prev_seg in self._nav.all_segment_names():
-            self._nav.set_current_segment(_prev_seg)
-        self._nav.clamp_segment()
-
-        self._nav.set_current_pair(0)
-        self._nav.set_active_norms(set())
-
+        # On a session change, load that session's saved selection from disk (window owns the
+        # IO decision; nav runs it at the right point in the transition).
+        load = None
         if session_changed:
-            self._custom_segments = self._custom_mgr._by_session.setdefault(new_session, [])
-            self._nav._custom_seg_index = {
-                cd.src_conf.name: cd
-                for cd in self._custom_segments
-                if cd.src_conf is not None
-            }
-            self._nav.custom_segs_changed.emit()
+            path = os.path.join(self.cd.selections_dir, f"{new_session}.json")
+            if os.path.isfile(path):
+                load = lambda: self.pairs_view._load_selection_from_file(
+                    path, restore_groups=True, _skip_redraw=True)
+
+        self.nav.switch_key(new_key, load_selection=load)
+
+        self.index_bar.sync()
         self._post_load_refresh()
         return True
 
     def _switch_type_any(self, new_key) -> bool:
         """All-session mode: rebuild the cross-session universe for a new conn type."""
-        self._nav.set_key(new_key)
+        self.nav.set_key(new_key)
         self.index_bar.sync()
-        self.any_session.load_deleted_aggregate()
-        self.any_session.rebuild_pair_handles()
-        self.any_session.sync_selection_from_universe()
-        self._nav.set_current_pair(0)
+        self.all_sess_mgr.rebuild_universe()
+        self.nav.set_current_pair(0)
         self.neuron_network.refresh_ct_buttons()
         self.neuron_network.draw()
         self._post_load_refresh()
         return True
 
-    def default_launch_key(cd: 'CCGDataset', session_query: str) -> Key:
-        return cd.find(session_query)
-
     @classmethod
-    def launch(cls, cd: 'CCGDataset', key: Key) -> 'CCGReviewUI':
+    def launch(cls, cd: 'CCGDataset', key=None) -> 'CCGReviewUI':
         """Create and show the Qt review UI.
+
+        key may be a full Key, a session-string query, or None.
+        When omitted the last-used session is restored from ui_state_qt.json.
         """
-        app = QApplication.instance() or QApplication([])
-        sess = str(key.session)
-        key = cls.default_launch_key(cd, sess)
-        nd_key = key.nd()
-        data = cd.ccg_for(nd_key, 'lowres')
-        if data is None or data.ccg is None or data.ccg.ndim < 4:
-            cd.get_ccg(nd_key=nd_key)
-        win = cls(cd, key)
+        QApplication.instance() or QApplication([])
+        win = cls(cd, key) # __init__
         win.show()
         return win

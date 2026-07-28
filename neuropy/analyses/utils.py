@@ -158,24 +158,31 @@ class HklSavable(Savable):
 
 
 class NpzSavable(Savable):
-    """Savable backed by numpy .npz."""
+    """Savable backed by a directory of memmapped .npy arrays.
+
+    One unit = one directory named by save_path(); each ndarray attr is a loose <attr>.npy,
+    loaded with mmap_mode='r' so only accessed pages fault in.
+    """
 
     def save(self, path: str = None, **_):
-        p = (path or self.save_path()) + '.npz'
-        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+        d = path or self.save_path()
+        os.makedirs(d, exist_ok=True)
         state = {k: v for k, v in self.serialize().items() if isinstance(v, np.ndarray)}
-        np.savez_compressed(p, **state)
+        for k, v in state.items():
+            np.save(os.path.join(d, k + '.npy'), v)
 
     def load(self, path: str = None):
-        p = (path or self.save_path()) + '.npz'
-        if not os.path.exists(p):
-            print(f"File not found: {p}")
-            return
-        self.__setstate__(dict(np.load(p, allow_pickle=False)))
+        d = path or self.save_path()
+        if not os.path.isdir(d):
+            raise FileNotFoundError(d)
+        state = {f[:-4]: np.load(os.path.join(d, f), mmap_mode='r')
+                 for f in os.listdir(d) if f.endswith('.npy')}
+        self.__setstate__(state)
+        return self   # enables `CCGData(...).load(path=d)` chaining
 
     @property
     def is_saved(self) -> bool:
-        return os.path.isfile(self.save_path() + '.npz')
+        return os.path.isdir(self.save_path())
 
 
 def _json_key(k):
@@ -222,6 +229,9 @@ def _to_json(v):
 def _from_json(v):
     """Reverse _to_json. Handles legacy __set__/__dict__ tags for backward compat."""
     if isinstance(v, dict):
+        if '__keystr__' in v:
+            from neuropy.analyses.neurons_dataset import Key
+            return Key.from_str(v['__keystr__'])
         if '__set__' in v:
             return {tuple(x) if isinstance(x, list) else x for x in v['__set__']}
         if '__dict__' in v:
@@ -340,8 +350,7 @@ class JsonSavable(Savable):
     def load(self, path: str = None):
         p = (path or self.save_path()) + '.json'
         if not os.path.exists(p):
-            print(f"File not found: {p}")
-            return
+            raise FileNotFoundError(p)
         with open(p, encoding='utf-8') as f:
             raw = json.load(f)
         if isinstance(raw, dict) and 'selections' in raw:
@@ -619,10 +628,12 @@ class AnalysisDataset(Savable):
 
     @conf.setter
     def conf(self, conf):
+        prev = getattr(self, '_conf', None)
         self._conf = conf
-        print(
-            f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary."
-        )
+        if prev is not None and conf is not prev:   # only real reassignments, not construction
+            print(
+                f"{self.__class__.__name__}Config changed, which might create inconsistencies between existing data and config. Rerun if necessary."
+            )
 
     def _attr_append(self,
                      base_key: K,
@@ -659,6 +670,74 @@ class AnalysisDataset(Savable):
         """Copy only conf"""
         new = self.__class__(conf=self._conf)
         return new
+
+
+_SPECIAL_PREFIX = "__special_"
+is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
+
+
+class BiIndex:
+    """Generic bidirectional multimap: A ↔ set(B) and B ↔ set(A), both O(1).
+
+    For groups: a = gname, b = (sess, ref, tgt)
+    """
+
+    def __init__(self):
+        self._fwd: dict = {}
+        self._inv: dict = {}
+
+    def add(self, a, b) -> None:
+        self._fwd.setdefault(a, set()).add(b)
+        self._inv.setdefault(b, set()).add(a)
+
+    def discard(self, a, b) -> None:
+        fa = self._fwd.get(a)
+        if fa is not None:
+            fa.discard(b)
+            if not fa:
+                del self._fwd[a]
+        ib = self._inv.get(b)
+        if ib is not None:
+            ib.discard(a)
+            if not ib:
+                del self._inv[b]
+
+    def delete_key(self, a) -> None:
+        for b in self._fwd.pop(a, ()):
+            ib = self._inv.get(b)
+            if ib is not None:
+                ib.discard(a)
+                if not ib:
+                    del self._inv[b]
+
+    def rename_key(self, old_a, new_a) -> None:
+        bs = self._fwd.pop(old_a, None)
+        if bs is None:
+            return
+        self._fwd[new_a] = bs
+        for b in bs:
+            ib = self._inv.get(b)
+            if ib is not None:
+                ib.discard(old_a)
+                ib.add(new_a)
+
+    def clear(self) -> None:
+        self._fwd.clear()
+        self._inv.clear()
+
+    def forward(self, a) -> set:
+        return self._fwd.get(a, set())
+
+    def inverse(self, b) -> set:
+        return self._inv.get(b, set())
+
+    def __contains__(self, a) -> bool: return a in self._fwd
+    def __len__(self)         -> int:  return len(self._fwd)
+    def __iter__(self):                return iter(self._fwd)
+    def get(self, a, default=None):    return self._fwd.get(a, default)
+    def keys(self):                    return self._fwd.keys()
+    def values(self):                  return self._fwd.values()
+    def items(self):                   return self._fwd.items()
 
 
 class SetOp():
@@ -732,7 +811,11 @@ class SetOp():
 
 
 class SessionMemoryCache:
-    """LRU eviction for the CCGDataset.ccg dict (keyed by Key with resolution)."""
+    """Access-order tracker for the CCGDataset.ccg dict (keyed by Key with resolution).
+
+    No eviction: CCGData arrays are memmapped, so a 'live' session costs ~no committed RAM (the
+    OS pages/reclaims). touch() keeps insertion/access order should a policy ever be reintroduced.
+    """
 
     def __init__(self, ccg: dict):
         import collections as _col
@@ -745,31 +828,6 @@ class SessionMemoryCache:
         except (ValueError, AttributeError):
             pass
         self._order.append(key)
-
-    def evict(self, key) -> None:
-        self._ccg.pop(key, None)
-        try:
-            self._order.remove(key)
-        except (ValueError, AttributeError):
-            pass
-
-    def estimated_mb(self) -> float:
-        total = 0
-        for cd_obj in self._ccg.values():
-            for arr in (cd_obj.ccg, getattr(cd_obj, 'ccg_null', None)):
-                if arr is not None:
-                    total += arr.nbytes
-        return total / 1024 ** 2
-
-    def enforce_limit(self, limit_gb: float = 8.0) -> None:
-        while self.estimated_mb() > limit_gb * 1024 and self._order:
-            lru_key = self._order[0]
-            if lru_key not in self._ccg:
-                self._order.popleft()
-                continue
-            print(f"[CCGDataset] evicting {lru_key} "
-                  f"(memory limit {limit_gb:.1f} GB)")
-            self.evict(lru_key)
 
 
 class Autosave:

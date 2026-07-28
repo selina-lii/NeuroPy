@@ -1,0 +1,19 @@
+{
+  "projectRoot": "/Users/selinl/Documents/ms_synchrony/NeuroPy",
+  "batchFiles": [
+    {"path": "neuropy/analyses/ccg_classifier.py", "language": "python", "sizeLines": 1388, "fileCategory": "code"},
+    {"path": "neuropy/io/Calls2python.m", "language": "m", "sizeLines": 14, "fileCategory": "code"},
+    {"path": "neuropy/plotting/ca_events.py", "language": "python", "sizeLines": 753, "fileCategory": "code"},
+    {"path": "neuropy/plotting/dataviz.py", "language": "python", "sizeLines": 300, "fileCategory": "code"},
+    {"path": "neuropy/ui/CCGUI Display.md", "language": "markdown", "sizeLines": 879, "fileCategory": "docs"},
+    {"path": "setup.py", "language": "python", "sizeLines": 35, "fileCategory": "code"}
+  ],
+  "batchImportData": {
+    "neuropy/analyses/ccg_classifier.py": [],
+    "neuropy/io/Calls2python.m": [],
+    "neuropy/plotting/ca_events.py": [],
+    "neuropy/plotting/dataviz.py": [],
+    "neuropy/ui/CCGUI Display.md": [],
+    "setup.py": []
+  }
+}

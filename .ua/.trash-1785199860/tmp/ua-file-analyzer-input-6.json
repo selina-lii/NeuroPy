@@ -1,0 +1,10 @@
+{
+  "projectRoot": "/Users/selinl/Documents/ms_synchrony/NeuroPy",
+  "batchFiles": [
+    {"path": ".readthedocs.yaml", "language": "yaml", "sizeLines": 23, "fileCategory": "config"},
+    {"path": "FUTURE_STEPS.md", "language": "markdown", "sizeLines": 40, "fileCategory": "docs"},
+    {"path": "README.md", "language": "markdown", "sizeLines": 59, "fileCategory": "docs"},
+    {"path": "design.md", "language": "markdown", "sizeLines": 14, "fileCategory": "docs"}
+  ],
+  "batchImportData": {".readthedocs.yaml": [], "FUTURE_STEPS.md": [], "README.md": [], "design.md": []}
+}

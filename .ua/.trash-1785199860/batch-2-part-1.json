@@ -1,0 +1,414 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/analyses/_jitter_worker.py",
+   "type": "file",
+   "name": "_jitter_worker.py",
+   "filePath": "neuropy/analyses/_jitter_worker.py",
+   "summary": "Standalone multiprocessing worker that runs jitter surrogate CCG computation for a single pair — 独立进程入口，避免 GUI 阻塞。",
+   "tags": [
+    "worker",
+    "multiprocessing",
+    "jitter",
+    "analysis"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/analyses/_jitter_worker.py:jitter_worker",
+   "type": "function",
+   "name": "jitter_worker",
+   "filePath": "neuropy/analyses/_jitter_worker.py",
+   "lineRange": [
+    5,
+    64
+   ],
+   "summary": "进程入口：对一对神经元执行 jitter 重采样并返回 surrogate CCG 结果。",
+   "tags": [
+    "worker",
+    "jitter",
+    "entry-point"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/analyses/epoch_filter.py",
+   "type": "file",
+   "name": "epoch_filter.py",
+   "filePath": "neuropy/analyses/epoch_filter.py",
+   "summary": "EpochFilter：按 epoch 标签筛选/组合时间区间，基于 IntervalOp 做区间代数。",
+   "tags": [
+    "utility",
+    "epoch",
+    "filtering",
+    "interval"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/epoch_filter.py:EpochFilter",
+   "type": "class",
+   "name": "EpochFilter",
+   "filePath": "neuropy/analyses/epoch_filter.py",
+   "lineRange": [
+    11,
+    68
+   ],
+   "summary": "按标签过滤 epoch 并返回合并后的时间区间集合。",
+   "tags": [
+    "filtering",
+    "epoch",
+    "utility"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "file",
+   "name": "neurons_dataset.py",
+   "filePath": "neuropy/analyses/neurons_dataset.py",
+   "summary": "Defines Key (session/conn_type/excitability identity) 与 NeuronsDataset — the project's neuron/session data hub: 懒加载 Neurons、probe 信息、epoch themes 与时间切片缓存。",
+   "tags": [
+    "data-model",
+    "dataset",
+    "session",
+    "neurons",
+    "caching"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/analyses/neurons_dataset.py:Key",
+   "type": "class",
+   "name": "Key",
+   "filePath": "neuropy/analyses/neurons_dataset.py",
+   "lineRange": [
+    18,
+    187
+   ],
+   "summary": "不可冻结的复合标识 (session, conn_type, excitability)，支持 matches/get/add/change 等派生操作，是全局索引键。",
+   "tags": [
+    "data-model",
+    "key",
+    "identity"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/neurons_dataset.py:NeuronsDatasetConfig",
+   "type": "class",
+   "name": "NeuronsDatasetConfig",
+   "filePath": "neuropy/analyses/neurons_dataset.py",
+   "lineRange": [
+    190,
+    217
+   ],
+   "summary": "NeuronsDataset 的配置容器（路径、session 列表等）。",
+   "tags": [
+    "config",
+    "data-model"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/neurons_dataset.py:NeuronsDataset",
+   "type": "class",
+   "name": "NeuronsDataset",
+   "filePath": "neuropy/analyses/neurons_dataset.py",
+   "lineRange": [
+    220,
+    423
+   ],
+   "summary": "Session 级神经元数据集：懒加载 Neurons/probe、解析 epoch themes 与时间区间、提供切片缓存。",
+   "tags": [
+    "dataset",
+    "data-model",
+    "caching",
+    "session"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "file:neuropy/analyses/pair_selection_data.py",
+   "type": "file",
+   "name": "pair_selection_data.py",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "summary": "Selection/Group 数据层：SelectionData、GroupDataset、SelectionDataset 负责 per-session pair 选择状态与分组的持久化 (JSON serialize/save)。",
+   "tags": [
+    "data-model",
+    "persistence",
+    "selection",
+    "groups",
+    "serialization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/pair_selection_data.py:_SelectionData",
+   "type": "class",
+   "name": "_SelectionData",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "lineRange": [
+    24,
+    83
+   ],
+   "summary": "单 session 的 pair 选择状态容器 (accept/reject/pending)。",
+   "tags": [
+    "data-model",
+    "selection"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/pair_selection_data.py:SelectionData",
+   "type": "class",
+   "name": "SelectionData",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "lineRange": [
+    86,
+    156
+   ],
+   "summary": "带持久化的选择数据：serialize/save 到 JSON，并提供 pair→group 名映射。",
+   "tags": [
+    "persistence",
+    "selection",
+    "serialization"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/pair_selection_data.py:Group",
+   "type": "class",
+   "name": "Group",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "lineRange": [
+    159,
+    166
+   ],
+   "summary": "轻量分组记录 (name, hotkey, notes)。",
+   "tags": [
+    "data-model",
+    "groups"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/analyses/pair_selection_data.py:GroupDataset",
+   "type": "class",
+   "name": "GroupDataset",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "lineRange": [
+    169,
+    279
+   ],
+   "summary": "项目级分组仓库：定义组、特殊组、pair 增删与 JSON 持久化。",
+   "tags": [
+    "data-model",
+    "groups",
+    "persistence"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/analyses/pair_selection_data.py:SelectionDataset",
+   "type": "class",
+   "name": "SelectionDataset",
+   "filePath": "neuropy/analyses/pair_selection_data.py",
+   "lineRange": [
+    282,
+    350
+   ],
+   "summary": "跨 session 的选择集合，按需加载各 session 的 selection 与 groups。",
+   "tags": [
+    "dataset",
+    "selection",
+    "lazy-loading"
+   ],
+   "complexity": "moderate"
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/analyses/_jitter_worker.py",
+   "target": "function:neuropy/analyses/_jitter_worker.py:jitter_worker",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/_jitter_worker.py",
+   "target": "function:neuropy/analyses/_jitter_worker.py:jitter_worker",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/epoch_filter.py",
+   "target": "file:neuropy/core/intervals.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/epoch_filter.py",
+   "target": "class:neuropy/analyses/epoch_filter.py:EpochFilter",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/epoch_filter.py",
+   "target": "class:neuropy/analyses/epoch_filter.py:EpochFilter",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "file:neuropy/analyses/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "file:neuropy/core/epoch.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "file:neuropy/core/neurons.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "file:neuropy/core/probe.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:Key",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:Key",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:NeuronsDatasetConfig",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:NeuronsDatasetConfig",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:NeuronsDataset",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/neurons_dataset.py",
+   "target": "class:neuropy/analyses/neurons_dataset.py:NeuronsDataset",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "file:neuropy/analyses/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:_SelectionData",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:SelectionData",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:SelectionData",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:Group",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:Group",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:GroupDataset",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:GroupDataset",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:SelectionDataset",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/analyses/pair_selection_data.py",
+   "target": "class:neuropy/analyses/pair_selection_data.py:SelectionDataset",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  }
+ ]
+}

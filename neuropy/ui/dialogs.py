@@ -16,10 +16,11 @@ from pyqtgraph.Qt.QtWidgets import (
     QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QListWidget, QListWidgetItem,
     QPushButton, QTabWidget, QWidget, QMessageBox, QMenu, QApplication,
     QScrollArea, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
-    QAbstractItemView, QFrame, QComboBox,
+    QAbstractItemView, QFrame, QComboBox, QInputDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
 from neuropy.ui.ui_common import _SPECIAL_PREFIX
+from neuropy.analyses.neurons_dataset import Key
 
 from neuropy.ui.utils import SideNavPanel
 
@@ -379,73 +380,133 @@ class VersionLoadDialog(QDialog):
         if not versions:
             QMessageBox.information(parent, title, empty_msg)
             return
+        versions = list(versions)
         dlg = QDialog(parent)
         dlg.setWindowTitle(title)
         dlg.resize(640, 360)
         lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel("Select a version to load:"))
+        lay.addWidget(QLabel("Select a version to load (double-click to rename):"))
         lst = QListWidget()
-        for name, path, saved_at, is_valid, is_history in versions:
-            pfx = '' if is_valid else '⚠  '
-            item = QListWidgetItem(f"{pfx}{name:30s}  {saved_at[:19]}")
-            if not is_valid:
-                item.setForeground(Qt.GlobalColor.red)
-            elif is_history:
-                item.setForeground(Qt.GlobalColor.gray)
-            lst.addItem(item)
+
+        def _fill():
+            lst.clear()
+            for name, path, saved_at, is_valid, is_history in versions:
+                pfx = '' if is_valid else '⚠  '
+                item = QListWidgetItem(f"{pfx}{name:30s}  {saved_at[:19]}")
+                if not is_valid:
+                    item.setForeground(Qt.GlobalColor.red)
+                elif is_history:
+                    item.setForeground(Qt.GlobalColor.gray)
+                lst.addItem(item)
+        _fill()
         lay.addWidget(lst)
 
-        def _do_load():
+        def _selected():
             row = lst.currentRow()
-            if row < 0:
+            return (row, versions[row]) if 0 <= row < len(versions) else (-1, None)
+
+        def _do_load():
+            row, ver = _selected()
+            if ver is None:
                 return
-            name, path, saved_at, is_valid, is_history = versions[row]
+            name, path, saved_at, is_valid, is_history = ver
             if not is_valid:
                 QMessageBox.warning(dlg, title, f"'{name}' appears corrupted.")
                 return
             dlg.accept()
             on_load(path)
 
-        lst.doubleClicked.connect(_do_load)
+        def _do_rename():
+            row, ver = _selected()
+            if ver is None:
+                return
+            name, path, saved_at, is_valid, is_history = ver
+            new, ok = QInputDialog.getText(dlg, "Rename", "New name:", text=name)
+            new = (new or '').strip()
+            if not ok or not new or new == name:
+                return
+            dst = os.path.join(os.path.dirname(path), new + os.path.splitext(path)[1])
+            if os.path.exists(dst):
+                QMessageBox.warning(dlg, "Rename", f"'{new}' already exists.")
+                return
+            try:
+                os.rename(path, dst)
+            except OSError as exc:
+                QMessageBox.warning(dlg, "Rename", f"Rename failed:\n{exc}")
+                return
+            versions[row] = (new, dst, saved_at, is_valid, is_history)
+            _fill()
+            lst.setCurrentRow(row)
+
+        def _do_delete():
+            row, ver = _selected()
+            if ver is None:
+                return
+            name, path, *_ = ver
+            if QMessageBox.question(dlg, "Delete", f"Delete '{name}'?") != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                os.remove(path)
+            except OSError as exc:
+                QMessageBox.warning(dlg, "Delete", f"Delete failed:\n{exc}")
+                return
+            versions.pop(row)
+            _fill()
+            if not versions:
+                dlg.reject()
+
+        lst.doubleClicked.connect(_do_rename)
         btn_row = QHBoxLayout()
         load_btn = QPushButton("Load")
         load_btn.clicked.connect(_do_load)
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(_do_rename)
+        del_btn = QPushButton("Delete")
+        del_btn.clicked.connect(_do_delete)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dlg.reject)
         btn_row.addWidget(load_btn)
+        btn_row.addWidget(rename_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
         lay.addLayout(btn_row)
         dlg.exec()
 
 
 class QuickSaveDialog(QDialog):
-    """Ctrl+S save dialog — names a selection version."""
+    """Ctrl+S save dialog — update latest and optionally name a snapshot."""
 
     def __init__(self, group_mgr: 'PairSelectionPanel', parent=None):
         super().__init__(parent)
         self._group_mgr = group_mgr
         self.setWindowTitle("Save Selection")
-        self.setFixedSize(320, 110)
+        self.setFixedSize(360, 130)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Version name:"))
+        lay.addWidget(QLabel("Snapshot name (optional):"))
         self._name_edit = QLineEdit(datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
         self._name_edit.selectAll()
         self._name_edit.returnPressed.connect(self._save)
         lay.addWidget(self._name_edit)
         btn_row = QHBoxLayout()
-        save_btn = QPushButton("Save")
+        latest_btn = QPushButton("Save to Latest")
+        latest_btn.clicked.connect(self._save_latest)
+        save_btn = QPushButton("Save Snapshot")
         save_btn.clicked.connect(self._save)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(latest_btn)
         btn_row.addWidget(save_btn)
         btn_row.addWidget(cancel_btn)
         lay.addLayout(btn_row)
         self._name_edit.setFocus()
 
+    def _save_latest(self):
+        self.accept()
+        self._group_mgr._do_save('')
+
     def _save(self):
         name = self._name_edit.text().strip()
-        if not name:
-            return
         self.accept()
         self._group_mgr._do_save(name)
 
@@ -596,7 +657,7 @@ class MissingPairsDialog(QDialog):
 
 
 class CustomCCGManageDialog(QDialog):
-    """List saved custom CCG .npz entries (by session or name). Load or delete."""
+    """List saved custom CCG entries (by session or name). Load or delete."""
 
     def __init__(self, custom_mgr, time_slider=None, *, select_mode: bool = False,
                  parent=None):
@@ -607,28 +668,18 @@ class CustomCCGManageDialog(QDialog):
         self.setWindowTitle("Load custom CCG" if select_mode else "Custom CCG files")
         self.resize(560, 420)
         self._build()
-        self._mgr.load_saved_from_disk()
         self._refresh_list()
 
     def _scan_entries(self) -> list[dict]:
+        """Appended-window segments on disk."""
         entries = []
-        by_session = getattr(self._mgr, '_by_session', {})
-        for sess, cd_list in sorted(by_session.items()):
-            for cd in cd_list:
-                src = getattr(cd, 'src_conf', None)
-                if src is None:
-                    continue
-                name = str(getattr(src, 'name', ''))
-                t0 = getattr(src, 't0', 0.0)
-                t1 = getattr(src, 't1', 0.0)
-                entries.append({
-                    'cd': cd,
-                    'name': name,
-                    'session': str(sess),
-                    't0': t0,
-                    't1': t1,
-                    'display': f"{sess} · {t0:g}:{t1:g} · {name}",
-                })
+        cd = self._mgr._ui.nav.cd
+        for key in cd.saved_customs():
+            entries.append({
+                'name': str(key.segment),
+                'session': str(key.session),
+                'display': f"{key.session} · {key.segment}",
+            })
         return entries
 
     def _build(self):
@@ -687,22 +738,10 @@ class CustomCCGManageDialog(QDialog):
         if not entries:
             QMessageBox.information(self, "Load", "Select one or more entries.")
             return
-        for e in entries:
-            cd = e['cd']
-            name = e['name']
-            sess = e['session']
-            by_session = getattr(self._mgr, '_by_session', {})
-            lst = by_session.setdefault(sess, [])
-            if not any(getattr(x, 'src_conf', None) and x.src_conf.name == name for x in lst):
-                lst.append(cd)
-        ui = getattr(self._mgr, '_ui', None)
-        if ui is not None:
-            # Register each loaded custom in the chip index (the source segment chips
-            # rebuild from); emitting alone would rebuild from an unchanged index → no chip.
-            for e in entries:
-                ui._nav._custom_seg_index[e['name']] = e['cd']
-            ui._nav.custom_segs_changed.emit()
-            ui.request_redraw()
+        cd = self._mgr._ui.nav.cd
+        keys = [Key(session=e['session'], segment=e['name']) for e in entries]
+        cd.load_segment(keys)
+        self._mgr._ui.nav.custom_segs_changed.emit()
         QMessageBox.information(self, "Load", f"Loaded {len(entries)} custom CCG(s).")
         self.accept()
 
@@ -710,17 +749,22 @@ class CustomCCGManageDialog(QDialog):
         entries = self._selected_entries()
         if not entries:
             return
-        if QMessageBox.question(
-                self, "Delete",
-                f"Remove {len(entries)} custom CCG(s)?") != QMessageBox.StandardButton.Yes:
+        # Each entry is a distinct (session, name); delete exactly those, not the whole name.
+        targets = sorted({(e['session'], e['name']) for e in entries})
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Delete custom CCG")
+        box.setText(f"Are you sure you want to delete {len(targets)} custom CCG(s)?")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
             return
-        by_session = getattr(self._mgr, '_by_session', {})
-        for e in entries:
-            lst = by_session.get(e['session'], [])
-            by_session[e['session']] = [
-                x for x in lst
-                if not (getattr(x, 'src_conf', None) and x.src_conf.name == e['name'])]
+        cd = self._mgr._ui.nav.cd
+        cd.delete_segment([Key(session=s, segment=n) for s, n in targets])
         self._refresh_list()
+        nav = self._mgr._ui.nav
+        nav.clamp_segment()
+        nav.custom_segs_changed.emit()
 
     @classmethod
     def show(cls, custom_mgr, time_slider=None, *, select_mode: bool = False,
@@ -804,8 +848,8 @@ class ExportOptionsDialog(QDialog):
                  fmt: str = 'png', preview_pair=None, selected_pairs=None,
                  segment_names: list = None, parent=None):
         super().__init__(parent)
-        self._nav            = nav
-        self._cd             = cd
+        self.nav            = nav
+        self.cd             = cd
         self.sel_data       = sel_data
         self._group_mgr      = group_mgr
         self._groups         = group_mgr.ui.groups
@@ -868,7 +912,7 @@ class ExportOptionsDialog(QDialog):
             scope_lay.addWidget(QPushButton(
                 f"Export all selected ({len(self._selected_pairs)})…",
                 clicked=lambda: self._done('all')))
-        n_bm = len(self._nav.bookmarked_pairs)
+        n_bm = len(self.nav.bookmarked_pairs)
         if n_bm > 0:
             scope_lay.addWidget(QPushButton(
                 f"Export bookmarked ({n_bm})…",
@@ -991,18 +1035,15 @@ class ExportOptionsDialog(QDialog):
             return
         try:
             ref, tgt = int(self._preview_pair[0]), int(self._preview_pair[1])
-            nav = self._nav
-            cd_data = nav.ccg_data
-            if cd_data is None or not hasattr(cd_data, 'ccg'):
+            nav = self.nav
+            key = nav.get_complete_key().change(segment=0, ref=ref, tgt=tgt)  # seg 0 = whole session
+            slices = nav.cd.pair_slices(key)
+            if slices is None:
                 return
-            seg = nav.n_segments  # "All" = summed
-            if nav.n_segments > 0:
-                ccg_raw  = np.sum(cd_data.ccg[:, ref, tgt, :], axis=0).astype(float)
-                null_raw = (np.sum(cd_data.ccg_null[:, ref, tgt, :], axis=0).astype(float)
-                            if cd_data.ccg_null is not None else None)
-            else:
-                return
+            ccg_raw, null_raw = slices[0].astype(float), slices[1]
+            null_raw = null_raw.astype(float) if null_raw is not None else None
 
+            cd_data = nav.cd.ccg_for(key)
             n  = len(ccg_raw)
             bs = cd_data.conf.bin_size * 1000.0
             ws = cd_data.conf.duration * 1000.0
@@ -1090,7 +1131,7 @@ class ExportOptionsDialog(QDialog):
         sel_data  = nav.sel_data
         group_mgr = nav.root.pairs_view.left_panel
         ui_state  = nav.root._load_ui_state()
-        seg_names = nav.all_segment_names()
+        seg_names = nav.available_segments()
 
         parent = nav.root
         dlg = cls(nav, cd, sel_data, group_mgr, ui_state, fmt,
@@ -1105,9 +1146,10 @@ class SettingsTabs:
 
     def __init__(self, ui, nav: 'SideNavPanel'):
         self._ui = ui
-        self._nav = nav
+        self.nav = nav
         self._max_pairs_spin = None
         self._font_spin = None
+        self._ccg_queue_spin = self._jitter_queue_spin = None
         self._autosave_sel_cb = self._autosave_sel_spin = self._autosave_sel_unit = None
         self._autosave_grp_cb = self._autosave_grp_spin = self._autosave_grp_unit = None
         self._save_ui_cb = None
@@ -1115,7 +1157,7 @@ class SettingsTabs:
 
     def _build(self):
         ui = self._ui
-        nav = self._nav
+        nav = self.nav
 
         disp = QWidget()
         dl = QVBoxLayout(disp)
@@ -1124,7 +1166,7 @@ class SettingsTabs:
         row1.addWidget(QLabel("Max pairs in 'Show Together':"))
         self._max_pairs_spin = QSpinBox()
         self._max_pairs_spin.setRange(2, 20)
-        self._max_pairs_spin.setValue(ui.max_together_pairs)
+        self._max_pairs_spin.setValue(ui.nav.max_together_pairs)
         row1.addWidget(self._max_pairs_spin)
         dl.addLayout(row1)
         row2 = QHBoxLayout()
@@ -1140,7 +1182,21 @@ class SettingsTabs:
 
         cache = QWidget()
         cl = QVBoxLayout(cache)
-        cl.addWidget(QLabel("Cache migration: use current code paths."))
+        cl.setSpacing(8)
+        crow1 = QHBoxLayout()
+        crow1.addWidget(QLabel("Max CCG queue size:"))
+        self._ccg_queue_spin = QSpinBox()
+        self._ccg_queue_spin.setRange(1, 500)
+        self._ccg_queue_spin.setValue(ui.nav.max_ccg_queue)
+        crow1.addWidget(self._ccg_queue_spin)
+        cl.addLayout(crow1)
+        crow2 = QHBoxLayout()
+        crow2.addWidget(QLabel("Max jitter queue size:"))
+        self._jitter_queue_spin = QSpinBox()
+        self._jitter_queue_spin.setRange(1, 500)
+        self._jitter_queue_spin.setValue(ui.nav.max_jitter_queue)
+        crow2.addWidget(self._jitter_queue_spin)
+        cl.addLayout(crow2)
         cl.addStretch()
         nav.add_page("Cache", cache)
 
@@ -1184,7 +1240,7 @@ class SettingsTabs:
 
     def apply(self):
         ui = self._ui
-        ui.max_together_pairs = self._max_pairs_spin.value()
+        ui.nav.max_together_pairs = self._max_pairs_spin.value()
         ui.settings.min_font_size = self._font_spin.value()
         ui._apply_min_font_size(ui.settings.min_font_size)
         ui.settings.autosave_sel_on = self._autosave_sel_cb.isChecked()
@@ -1194,6 +1250,11 @@ class SettingsTabs:
         ui.settings.autosave_grp_interval = self._autosave_grp_spin.value()
         ui.settings.autosave_grp_unit = self._autosave_grp_unit.currentText()
         ui.settings.save_ui_on_close = self._save_ui_cb.isChecked()
+        # Queue caps → nav + push onto the live background runners.
+        ui.nav.max_ccg_queue = self._ccg_queue_spin.value()
+        ui.nav.max_jitter_queue = self._jitter_queue_spin.value()
+        ui.custom_mgr.worker._runner._max_queue = ui.nav.max_ccg_queue
+        ui.jitter_mgr.jitter_worker._runner._max_queue = ui.nav.max_jitter_queue
 
     def _on_clear_autosave(self):
         ui = self._ui
@@ -1205,7 +1266,7 @@ class SettingsTabs:
                 removed += 1
             except OSError:
                 pass
-        QMessageBox.information(self._nav, "Clear autosaved data",
+        QMessageBox.information(self.nav, "Clear autosaved data",
                                 f"Removed {removed} autosaved file(s).")
 
 

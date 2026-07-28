@@ -87,7 +87,7 @@ class CCGClassifier:
     _FLANK_START_MS  = 25e-3  # 25 ms
 
     def __init__(self, ccg_data, conf):
-        self._cd   = ccg_data
+        self.cd   = ccg_data
         self._conf = conf
         self._clfs: Dict[str, object]  = {}   # group_name → fitted LogisticRegression
         self._trash_clf                = None
@@ -120,7 +120,7 @@ class CCGClassifier:
 
     def extract_features(self, ref: int, tgt: int) -> np.ndarray:
         """Return 12-element feature vector for pair (ref, tgt)."""
-        cd = self._cd
+        cd = self.cd
         # All-segments average
         ccg_avg  = cd.ccg[:, ref, tgt, :].mean(axis=0).astype(float)
         null_avg = (cd.ccg_null[:, ref, tgt, :].mean(axis=0).astype(float)
@@ -491,7 +491,7 @@ class CCGClusterClassifier:
     """
 
     def __init__(self, ccg_data, conf, smooth_sigma: float = 1.0):
-        self._cd          = ccg_data
+        self.cd          = ccg_data
         self._conf        = conf
         self._smooth      = float(smooth_sigma)
         self._pca         = None
@@ -509,7 +509,7 @@ class CCGClusterClassifier:
         Steps: average across segments → subtract null baseline →
         optional Gaussian smooth → unit L2 normalise.
         """
-        cd = self._cd
+        cd = self.cd
         ccg_avg  = cd.ccg[:, ref, tgt, :].mean(axis=0).astype(float)
         null_avg = (cd.ccg_null[:, ref, tgt, :].mean(axis=0).astype(float)
                     if cd.ccg_null is not None else np.zeros_like(ccg_avg))
@@ -537,7 +537,7 @@ class CCGClusterClassifier:
         ----------
         labeled_pairs : group_name → set of (ref, tgt) in current session
         deleted_pairs : set of (ref, tgt) treated as trash
-        all_pairs     : full pair list to fit PCA on; pass list(ptr.inds2) for
+        all_pairs     : full pair list to fit PCA on; pass list(ptr.pairs) for
                         broadest coverage.  Falls back to labeled + deleted.
 
         Returns
@@ -888,7 +888,7 @@ class CCGTemplateClassifier:
 
     def __init__(self, ccg_data, conf, smooth_ms: float = 2.0,
                  resolution: str = 'both', conn_type_str: str = '(all)'):
-        self._cd        = ccg_data
+        self.cd        = ccg_data
         self._conf      = conf
         self._templates: Dict[str, GroupTemplate] = {}
         self._resolution    = resolution      # 'hi', 'lo', or 'both'
@@ -1042,7 +1042,7 @@ class CCGTemplateClassifier:
         of length n_bins.  ccg_raw is the all-segments average; ccg_smooth has
         Gaussian smoothing applied (sigma = smooth_ms / bs_ms bins).
         """
-        cd = self._cd
+        cd = self.cd
         ccg_raw = cd.ccg[:, ref, tgt, :].mean(axis=0).astype(float)
         if self._sigma_bins > 0:
             ccg_smooth = gaussian_filter1d(ccg_raw, sigma=self._sigma_bins)

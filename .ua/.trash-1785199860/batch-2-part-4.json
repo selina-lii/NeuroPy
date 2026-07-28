@@ -1,0 +1,732 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/ui/jitter_ui.py",
+   "type": "file",
+   "name": "jitter_ui.py",
+   "filePath": "neuropy/ui/jitter_ui.py",
+   "summary": "Jitter UI 层：JitterWorker 队列化后台 jitter 计算，JitterManager 管理缓存/状态，JitterQueueDialog 展示队列。",
+   "tags": [
+    "ui",
+    "background-task",
+    "jitter",
+    "queue"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/jitter_ui.py:JitterWorker",
+   "type": "class",
+   "name": "JitterWorker",
+   "filePath": "neuropy/ui/jitter_ui.py",
+   "lineRange": [
+    25,
+    77
+   ],
+   "summary": "jitter 计算的进程队列 worker，串行执行并缓存结果。",
+   "tags": [
+    "background-task",
+    "worker",
+    "jitter"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/jitter_ui.py:JitterManager",
+   "type": "class",
+   "name": "JitterManager",
+   "filePath": "neuropy/ui/jitter_ui.py",
+   "lineRange": [
+    89,
+    326
+   ],
+   "summary": "jitter 结果管理：排队、轮询、缓存载入/保存与 UI 状态标记。",
+   "tags": [
+    "state-management",
+    "jitter",
+    "ui"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/jitter_ui.py:JitterQueueDialog",
+   "type": "class",
+   "name": "JitterQueueDialog",
+   "filePath": "neuropy/ui/jitter_ui.py",
+   "lineRange": [
+    333,
+    389
+   ],
+   "summary": "展示与删除 jitter 队列条目的对话框。",
+   "tags": [
+    "ui",
+    "dialog",
+    "queue"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/ui/menubar.py",
+   "type": "file",
+   "name": "menubar.py",
+   "filePath": "neuropy/ui/menubar.py",
+   "summary": "ReviewMenuBar 与 IndexBar：菜单栏构建 + session/conn-type/project 下拉导航条。",
+   "tags": [
+    "ui",
+    "menubar",
+    "navigation",
+    "qt"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/menubar.py:IndexBar",
+   "type": "class",
+   "name": "IndexBar",
+   "filePath": "neuropy/ui/menubar.py",
+   "lineRange": [
+    20,
+    182
+   ],
+   "summary": "导航条：session / conn-type / project 下拉与联动刷新。",
+   "tags": [
+    "ui",
+    "navigation",
+    "widget"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/menubar.py:ReviewMenuBar",
+   "type": "class",
+   "name": "ReviewMenuBar",
+   "filePath": "neuropy/ui/menubar.py",
+   "lineRange": [
+    185,
+    241
+   ],
+   "summary": "构建主窗口菜单栏与动作绑定。",
+   "tags": [
+    "ui",
+    "menubar"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/ui/neuron_network.py",
+   "type": "file",
+   "name": "neuron_network.py",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "summary": "NetworkPanel — probe 空间神经元连接网络图 (pyqtgraph)：自定义连线/弧线 item、flow layout 控件、焦点与过滤模式、渲染缓存。",
+   "tags": [
+    "ui",
+    "visualization",
+    "graph",
+    "pyqtgraph",
+    "panel"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:ProbeConnectionItem",
+   "type": "class",
+   "name": "ProbeConnectionItem",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    72,
+    137
+   ],
+   "summary": "pyqtgraph 自定义连接箭头 item，可点击选中 pair。",
+   "tags": [
+    "visualization",
+    "graphics-item",
+    "pyqtgraph"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:SameChannelArcItem",
+   "type": "class",
+   "name": "SameChannelArcItem",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    140,
+    175
+   ],
+   "summary": "同通道连接的弧形绘制 item。",
+   "tags": [
+    "visualization",
+    "graphics-item"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:_FlowLayout",
+   "type": "class",
+   "name": "_FlowLayout",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    178,
+    262
+   ],
+   "summary": "自动换行的 Qt 流式布局（网络面板内部使用）。",
+   "tags": [
+    "ui",
+    "layout",
+    "qt"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:ProbeNetworkData",
+   "type": "class",
+   "name": "ProbeNetworkData",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    267,
+    285
+   ],
+   "summary": "网络渲染所需的数据快照 dataclass。",
+   "tags": [
+    "data-model",
+    "visualization"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:_NavPlotWidget",
+   "type": "class",
+   "name": "_NavPlotWidget",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    288,
+    302
+   ],
+   "summary": "带键盘导航的 pyqtgraph plot widget。",
+   "tags": [
+    "ui",
+    "widget",
+    "pyqtgraph"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/neuron_network.py:NetworkPanel",
+   "type": "class",
+   "name": "NetworkPanel",
+   "filePath": "neuropy/ui/neuron_network.py",
+   "lineRange": [
+    305,
+    1881
+   ],
+   "summary": "probe 网络主面板：控件、过滤开关、焦点模式、数据组装与缓存化渲染。",
+   "tags": [
+    "ui",
+    "panel",
+    "visualization",
+    "controller"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "file:neuropy/ui/pair_selection_panel.py",
+   "type": "file",
+   "name": "pair_selection_panel.py",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "summary": "左侧 pair 选择面板：可用/已选列表、搜索栏、group 标注与热键、自动保存与版本化 selection 载入。",
+   "tags": [
+    "ui",
+    "panel",
+    "selection",
+    "groups",
+    "autosave"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:Group",
+   "type": "class",
+   "name": "Group",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    102,
+    107
+   ],
+   "summary": "轻量分组记录 (name, hotkey, notes)。",
+   "tags": [
+    "data-model",
+    "groups"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:Groups",
+   "type": "class",
+   "name": "Groups",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    110,
+    377
+   ],
+   "summary": "面板内的分组仓库实现（与 GroupDataset 平行，迁移过渡中）。",
+   "tags": [
+    "data-model",
+    "groups",
+    "persistence"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:SelectionDataset",
+   "type": "class",
+   "name": "SelectionDataset",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    380,
+    444
+   ],
+   "summary": "跨 session 的选择集合，按需加载各 session 的 selection 与 groups。",
+   "tags": [
+    "dataset",
+    "selection",
+    "lazy-loading"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:SearchBar",
+   "type": "class",
+   "name": "SearchBar",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    447,
+    567
+   ],
+   "summary": "pair 列表搜索栏，支持高亮与逐项跳转。",
+   "tags": [
+    "ui",
+    "widget",
+    "search"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanel",
+   "type": "class",
+   "name": "PairSelectionPanel",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    570,
+    1528
+   ],
+   "summary": "可用/已选 pair 双列表面板：填充、光标跟随、高亮、滚动位置保持与分组操作。",
+   "tags": [
+    "ui",
+    "panel",
+    "selection"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:SpikePairsPanel",
+   "type": "class",
+   "name": "SpikePairsPanel",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    1531,
+    1635
+   ],
+   "summary": "spike attribution 结果面板，点击 spike pair 绘制 raster。",
+   "tags": [
+    "ui",
+    "panel",
+    "raster"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanelContainer",
+   "type": "class",
+   "name": "PairSelectionPanelContainer",
+   "filePath": "neuropy/ui/pair_selection_panel.py",
+   "lineRange": [
+    1638,
+    1831
+   ],
+   "summary": "选择面板容器：自动保存、版本列出/载入、整体状态存取。",
+   "tags": [
+    "ui",
+    "container",
+    "autosave",
+    "persistence"
+   ],
+   "complexity": "moderate"
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "file:neuropy/analyses/_jitter_worker.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "file:neuropy/analyses/jitter.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "file:neuropy/ui/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterWorker",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterWorker",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterManager",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterManager",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterQueueDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/jitter_ui.py",
+   "target": "class:neuropy/ui/jitter_ui.py:JitterQueueDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "file:neuropy/ui/app_state.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "file:neuropy/ui/dialogs.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "file:neuropy/ui/jitter_ui.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "class:neuropy/ui/menubar.py:IndexBar",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "class:neuropy/ui/menubar.py:IndexBar",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "class:neuropy/ui/menubar.py:ReviewMenuBar",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/menubar.py",
+   "target": "class:neuropy/ui/menubar.py:ReviewMenuBar",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "file:neuropy/ui/app_state.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "file:neuropy/ui/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:ProbeConnectionItem",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:ProbeConnectionItem",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:SameChannelArcItem",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:SameChannelArcItem",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:_FlowLayout",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:ProbeNetworkData",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:ProbeNetworkData",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:_NavPlotWidget",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:NetworkPanel",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/neuron_network.py",
+   "target": "class:neuropy/ui/neuron_network.py:NetworkPanel",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/analyses/pair_selection_data.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/analyses/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/ui/dialogs.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "file:neuropy/ui/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:Group",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:Group",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:Groups",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:Groups",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SelectionDataset",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SelectionDataset",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SearchBar",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SearchBar",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanel",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanel",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SpikePairsPanel",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:SpikePairsPanel",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanelContainer",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/pair_selection_panel.py",
+   "target": "class:neuropy/ui/pair_selection_panel.py:PairSelectionPanelContainer",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  }
+ ]
+}

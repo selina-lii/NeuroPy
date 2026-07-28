@@ -1,0 +1,849 @@
+{
+ "nodes": [
+  {
+   "id": "file:neuropy/ui/all_session_mode.py",
+   "type": "file",
+   "name": "all_session_mode.py",
+   "filePath": "neuropy/ui/all_session_mode.py",
+   "summary": "AllSessionMode：跨 session 聚合视图的状态管理，统一 pair universe、groups 与 deleted-pair 的读写。",
+   "tags": [
+    "ui",
+    "state-management",
+    "aggregation",
+    "session"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/all_session_mode.py:AllSessionMode",
+   "type": "class",
+   "name": "AllSessionMode",
+   "filePath": "neuropy/ui/all_session_mode.py",
+   "lineRange": [
+    11,
+    100
+   ],
+   "summary": "跨 session 聚合模式：重建 pair universe/handles，同步 groups 与 deleted pairs。",
+   "tags": [
+    "state-management",
+    "aggregation",
+    "ui"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "file:neuropy/ui/app_state.py",
+   "type": "file",
+   "name": "app_state.py",
+   "filePath": "neuropy/ui/app_state.py",
+   "summary": "AppState — central UI state/navigation object；NavField descriptor 提供带信号的导航字段，代理 CCGDataset/NeuronsDataset 的 pair、segment、selection 访问。",
+   "tags": [
+    "state-management",
+    "ui",
+    "navigation",
+    "facade"
+   ],
+   "complexity": "complex",
+   "languageNotes": "NavField 是自定义 descriptor，实现声明式 UI 状态字段与变更广播。"
+  },
+  {
+   "id": "class:neuropy/ui/app_state.py:NavField",
+   "type": "class",
+   "name": "NavField",
+   "filePath": "neuropy/ui/app_state.py",
+   "lineRange": [
+    34,
+    60
+   ],
+   "summary": "Descriptor，为 AppState 提供带变更通知的导航字段。",
+   "tags": [
+    "descriptor",
+    "state-management"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/app_state.py:AppState",
+   "type": "class",
+   "name": "AppState",
+   "filePath": "neuropy/ui/app_state.py",
+   "lineRange": [
+    64,
+    600
+   ],
+   "summary": "UI 中央状态：当前 session/pair/segment、CCG 指针与数据、selection 与 groups 的统一入口。",
+   "tags": [
+    "state-management",
+    "facade",
+    "ui"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "file:neuropy/ui/ccg_ui.py",
+   "type": "file",
+   "name": "ccg_ui.py",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "summary": "CCGReviewUI 主窗口：组装三栏布局、panel 显隐、主题、状态栏与后台 CCG 载入 worker。",
+   "tags": [
+    "entry-point",
+    "ui",
+    "main-window",
+    "layout"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/ccg_ui.py:_CCGLoadWorker",
+   "type": "class",
+   "name": "_CCGLoadWorker",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "lineRange": [
+    39,
+    57
+   ],
+   "summary": "后台线程 worker，加载 CCGDataset 避免阻塞 UI。",
+   "tags": [
+    "background-task",
+    "worker"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/ccg_ui.py:UISettings",
+   "type": "class",
+   "name": "UISettings",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "lineRange": [
+    67,
+    77
+   ],
+   "summary": "UI 设置数据类（字体、主题等）。",
+   "tags": [
+    "config",
+    "ui"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/ccg_ui.py:UIStates",
+   "type": "class",
+   "name": "UIStates",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "lineRange": [
+    81,
+    108
+   ],
+   "summary": "UI 面板显隐等状态的 load/save。",
+   "tags": [
+    "persistence",
+    "ui"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/ccg_ui.py:BottomStatusBar",
+   "type": "class",
+   "name": "BottomStatusBar",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "lineRange": [
+    111,
+    170
+   ],
+   "summary": "底部状态栏：显示 pair 计数、显著性与发放率摘要。",
+   "tags": [
+    "ui",
+    "status-bar"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/ccg_ui.py:CCGReviewUI",
+   "type": "class",
+   "name": "CCGReviewUI",
+   "filePath": "neuropy/ui/ccg_ui.py",
+   "lineRange": [
+    172,
+    746
+   ],
+   "summary": "主窗口：布局组装、面板切换、主题应用、项目切换与分类器触发。",
+   "tags": [
+    "ui",
+    "main-window",
+    "controller"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "file:neuropy/ui/dialogs.py",
+   "type": "file",
+   "name": "dialogs.py",
+   "filePath": "neuropy/ui/dialogs.py",
+   "summary": "所有 Qt 对话框集合：group 创建/管理、selection 版本保存/加载、custom CCG 管理、导出选项与 settings。",
+   "tags": [
+    "ui",
+    "dialog",
+    "qt",
+    "settings",
+    "export"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:PairTagsDialog",
+   "type": "class",
+   "name": "PairTagsDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    32,
+    66
+   ],
+   "summary": "为 pair 打 group 标签的对话框。",
+   "tags": [
+    "ui",
+    "dialog",
+    "groups"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:CreateGroupDialog",
+   "type": "class",
+   "name": "CreateGroupDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    69,
+    117
+   ],
+   "summary": "创建分组对话框（名称、热键、备注）。",
+   "tags": [
+    "ui",
+    "dialog",
+    "groups"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:ManageGroupsDialog",
+   "type": "class",
+   "name": "ManageGroupsDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    120,
+    331
+   ],
+   "summary": "分组管理对话框：分页编辑、备注自动保存与重建。",
+   "tags": [
+    "ui",
+    "dialog",
+    "groups"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:VersionSaveDialog",
+   "type": "class",
+   "name": "VersionSaveDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    334,
+    371
+   ],
+   "summary": "版本化 selection 保存对话框。",
+   "tags": [
+    "ui",
+    "dialog",
+    "persistence"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:VersionLoadDialog",
+   "type": "class",
+   "name": "VersionLoadDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    374,
+    419
+   ],
+   "summary": "版本化 selection 载入对话框。",
+   "tags": [
+    "ui",
+    "dialog",
+    "persistence"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:QuickSaveDialog",
+   "type": "class",
+   "name": "QuickSaveDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    422,
+    460
+   ],
+   "summary": "快速保存对话框，支持保存到最新版本。",
+   "tags": [
+    "ui",
+    "dialog",
+    "persistence"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:LoadSelectionDialog",
+   "type": "class",
+   "name": "LoadSelectionDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    463,
+    559
+   ],
+   "summary": "selection 文件列表载入对话框，含右键菜单与损坏文件提示。",
+   "tags": [
+    "ui",
+    "dialog",
+    "persistence"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:MissingPairsDialog",
+   "type": "class",
+   "name": "MissingPairsDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    562,
+    601
+   ],
+   "summary": "提示载入的 selection 中缺失 pair 的对话框。",
+   "tags": [
+    "ui",
+    "dialog",
+    "validation"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:CustomCCGManageDialog",
+   "type": "class",
+   "name": "CustomCCGManageDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    604,
+    719
+   ],
+   "summary": "自定义 CCG 片段的扫描、载入与删除管理。",
+   "tags": [
+    "ui",
+    "dialog",
+    "ccg"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:ExportOptionsDialog",
+   "type": "class",
+   "name": "ExportOptionsDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    789,
+    1087
+   ],
+   "summary": "导出选项对话框：字段选择、预览与默认值保存。",
+   "tags": [
+    "ui",
+    "dialog",
+    "export"
+   ],
+   "complexity": "complex"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:SettingsTabs",
+   "type": "class",
+   "name": "SettingsTabs",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    1090,
+    1216
+   ],
+   "summary": "设置对话框的分页内容与应用逻辑。",
+   "tags": [
+    "ui",
+    "settings"
+   ],
+   "complexity": "moderate"
+  },
+  {
+   "id": "class:neuropy/ui/dialogs.py:SettingsDialog",
+   "type": "class",
+   "name": "SettingsDialog",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    1219,
+    1244
+   ],
+   "summary": "顶层设置对话框壳。",
+   "tags": [
+    "ui",
+    "dialog",
+    "settings"
+   ],
+   "complexity": "simple"
+  },
+  {
+   "id": "function:neuropy/ui/dialogs.py:_dual_list",
+   "type": "function",
+   "name": "_dual_list",
+   "filePath": "neuropy/ui/dialogs.py",
+   "lineRange": [
+    722,
+    786
+   ],
+   "summary": "双列表选择控件构造 helper（可选/已选互换）。",
+   "tags": [
+    "ui",
+    "widget",
+    "helper"
+   ],
+   "complexity": "moderate"
+  }
+ ],
+ "edges": [
+  {
+   "source": "file:neuropy/ui/all_session_mode.py",
+   "target": "class:neuropy/ui/all_session_mode.py:AllSessionMode",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/all_session_mode.py",
+   "target": "class:neuropy/ui/all_session_mode.py:AllSessionMode",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "file:neuropy/analyses/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "file:neuropy/ui/pair_selection_panel.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "class:neuropy/ui/app_state.py:NavField",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "class:neuropy/ui/app_state.py:NavField",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "class:neuropy/ui/app_state.py:AppState",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/app_state.py",
+   "target": "class:neuropy/ui/app_state.py:AppState",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/analyses/ms_connectivity.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/analyses/spike_attribution.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/all_session_mode.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/app_state.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/ccg_panel.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/dialogs.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/jitter_ui.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/menubar.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/neuron_network.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/pair_selection_panel.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/stats_tests.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/time_slider.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "file:neuropy/ui/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:_CCGLoadWorker",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:UISettings",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:UISettings",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:UIStates",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:UIStates",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:BottomStatusBar",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:BottomStatusBar",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:CCGReviewUI",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/ccg_ui.py",
+   "target": "class:neuropy/ui/ccg_ui.py:CCGReviewUI",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "file:neuropy/analyses/neurons_dataset.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "file:neuropy/ui/ui_common.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "file:neuropy/ui/utils.py",
+   "type": "imports",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:PairTagsDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:PairTagsDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:CreateGroupDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:CreateGroupDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:ManageGroupsDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:ManageGroupsDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:VersionSaveDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:VersionSaveDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:VersionLoadDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:VersionLoadDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:QuickSaveDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:QuickSaveDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:LoadSelectionDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:LoadSelectionDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:MissingPairsDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:MissingPairsDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:CustomCCGManageDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:CustomCCGManageDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:ExportOptionsDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:ExportOptionsDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:SettingsTabs",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:SettingsTabs",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:SettingsDialog",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "class:neuropy/ui/dialogs.py:SettingsDialog",
+   "type": "exports",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "file:neuropy/ui/dialogs.py",
+   "target": "function:neuropy/ui/dialogs.py:_dual_list",
+   "type": "contains",
+   "direction": "forward",
+   "weight": 1
+  }
+ ]
+}
