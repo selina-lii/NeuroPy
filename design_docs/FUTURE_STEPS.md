@@ -33,6 +33,13 @@ Created 2026-07-27.
 - `cfg.conn_types` is a list (picker allows multi-select) but collection loops sessions/segments/groups, not conn_types.
 - Fix: add `for conn_type in (cfg.conn_types or [''])` loop alongside the seg/grp loops so each selected conn_type gets its own ptr key + collection.
 
+## 8. Port Simulation to Qt (dropped in tkinter→Qt cutover)
+- Never migrated: `219370e1` dropped it wholesale; no Qt equivalent exists. Last intact at `ee34d49f`.
+- Recover `SimulationDialog` (`ee34d49f:neuropy/ui/dialogs.py:195`) + `SimulationManager` (`ee34d49f:neuropy/ui/ccg_ui.py:2626`, `_sim_mgr` at :3989).
+- Generation math lived inside the UI file — move it to `analyses/` on port, leave the dialog thin.
+- Re-wire under `Modules > Simulation > New simulation…` (was top-level `Simulation` in the spec).
+- Spec: `neuropy/ui/CCGUI Display.md:258` — simulated-CCG area, Run / Export / Import simulation settings.
+
 ## UI todos (next)
 - ~~Stats test segment not refreshing~~ DONE — picker now reads cd.available_segments (disk ccgdata).
 - ~~Time slider "select none" button~~ DONE.

@@ -6,12 +6,15 @@ This package is primarily developed for hippocampal recordings, but can also be 
 
 ### CCGViewer GUI
 Launch CCGViewer with `python ./run_ccg_gui.py` or from `notebooks/CCG_gui.ipynb`.
-View CCGs:
+**View CCGs**
+
 ![Example Image](images/ccg_gui_v2.png)
 * Assign neuronal pairs to different groups
 * Adjust CCG normalization, baseline, and connection strength methods
 * Create custom CCGs by conditions
-Statistical tests:
+
+
+**Statistical tests**
 ![Example Image](images/ccg_gui_v2_stats_tests.png)
 Selina Li 2026
 
