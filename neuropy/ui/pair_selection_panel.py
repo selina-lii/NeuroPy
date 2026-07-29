@@ -208,6 +208,8 @@ class Groups(QObject, GroupDataset):
             nav.root._show_transient_banner("Select a pair before using a group hotkey")
             return
 
+        print(f"[tag] handler key={key_str!r} advance={advance} "
+              f"registry={[(g.name, g.hotkey) for g in self.registry.values()]}")
         for grp in self.registry.values():
             gname, k = grp.name, grp.hotkey
             if not k or k != key_str:
@@ -229,11 +231,15 @@ class Groups(QObject, GroupDataset):
                        else 'unsel')
                 sess, p2 = nav.pair_sess_rt(pair)
                 was_in = p2 in self.pairs_in_group(gname, sess)
+                print(f"[tag] key={key_str!r} grp={gname!r} sess={sess!r} p2={p2!r} "
+                      f"was_in={was_in} in_grp={sorted(self.pairs_in_group(gname, sess))[:5]}")
                 group_changes.append((gname, sess, p2, 'remove' if was_in else 'add'))
                 if was_in:
                     self.discard_from_group(gname, sess, p2)
                 else:
                     self.add_to_group(gname, sess, p2)
+                print(f"[tag] -> after {'discard' if was_in else 'add'}: "
+                      f"in_grp={sorted(self.pairs_in_group(gname, sess))[:5]}")
                 if any_mode:
                     changed.add(pair)
                     continue
@@ -1130,7 +1136,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
         grp_menu = QMenu("Group tag", menu)
         grp_menu.addAction("Create new group…",
-                           lambda: CreateGroupDialog.show(ui.sel_data, ui.left_container.pair_selection))
+                           lambda: CreateGroupDialog.show(ui.sel_data, self, widget))
         regular = [g for g in sorted(self.ui.groups) if not is_special_group(g)]
         special = [g for g in sorted(self.ui.groups) if is_special_group(g)]
         all_groups = [(g, g) for g in regular] + [(g, g[len(_SPECIAL_PREFIX):]) for g in special]

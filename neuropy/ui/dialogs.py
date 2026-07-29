@@ -180,7 +180,7 @@ class ManageGroupsDialog(QDialog):
         name_row.addWidget(name_edit, stretch=1)
         rename_btn = QPushButton("Rename")
 
-        def _rename(old=gname, sp=is_special, ne=name_edit):
+        def _rename(_checked=False, old=gname, sp=is_special, ne=name_edit):
             new = ne.text().strip()
             if sp:
                 new = _SPECIAL_PREFIX + new
@@ -205,7 +205,7 @@ class ManageGroupsDialog(QDialog):
             hk_row.addWidget(hk_edit)
             set_hk = QPushButton("Set")
 
-            def _set_hk(g=gname, he=hk_edit):
+            def _set_hk(_checked=False, g=gname, he=hk_edit):
                 try:
                     gr.set_hotkey_ui(g, he.text())
                 except Exception as e:
@@ -258,7 +258,7 @@ class ManageGroupsDialog(QDialog):
         btn_row = QHBoxLayout()
         if is_special:
             conv_btn = QPushButton("Convert to group")
-            def _conv(g=gname, d=display):
+            def _conv(_checked=False, g=gname, d=display):
                 try:
                     self._autosave_notes()
                     gr.rename_group(g, d)
@@ -269,7 +269,7 @@ class ManageGroupsDialog(QDialog):
                     QMessageBox.warning(self, "Convert", str(e))
         else:
             conv_btn = QPushButton("Convert to special group")
-            def _conv(g=gname, d=display):
+            def _conv(_checked=False, g=gname, d=display):
                 try:
                     self._autosave_notes()
                     gr.rename_group(g, _SPECIAL_PREFIX + d)
@@ -282,7 +282,7 @@ class ManageGroupsDialog(QDialog):
         btn_row.addWidget(conv_btn)
 
         del_btn = QPushButton(f"Delete group '{display}'")
-        def _del(g=gname):
+        def _del(_checked=False, g=gname):
             if QMessageBox.question(self, "Delete group",
                                     f"Delete group '{g}'?") != QMessageBox.StandardButton.Yes:
                 return

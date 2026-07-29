@@ -140,14 +140,9 @@ class SelectionData(JsonSavable):
         return Key.pair(session, p[0], p[1])
 
     def group_names_for_pair(self, sess: str, pair: tuple, groups) -> list[str]:
-        """Sorted group names containing this pair (groups registry + local tags)."""
+        """Sorted group names containing this pair; live from Groups (tags['groups'] is a stale save-time snapshot)."""
         pair = (int(pair[0]), int(pair[1]))
-        names = groups.groups_for_pair(sess, pair[0], pair[1])
-        for bucket in self.selections.values():
-            for g in (bucket.tags.get(pair) or {}).get('groups', []):
-                if isinstance(g, str) and g:
-                    names.add(g)
-        return sorted(names)
+        return sorted(groups.groups_for_pair(sess, pair[0], pair[1]))
 
     @staticmethod
     def pairs_vals_map(pairs, vals) -> dict[Key, float]:

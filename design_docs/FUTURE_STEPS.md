@@ -40,6 +40,11 @@ Created 2026-07-27.
 - Re-wire under `Modules > Simulation > New simulation…` (was top-level `Simulation` in the spec).
 - Spec: `neuropy/ui/CCGUI Display.md:258` — simulated-CCG area, Run / Export / Import simulation settings.
 
+## 9. Hotkey tag toggle: 1s lag
+- `refresh_lists` (pair_selection_panel.py:757) full-rebuilds both lists on every tag hotkey press.
+- Fix: in-place row relabel when no sel/unsel state transition and sort mode isn't group/tag-ordered; fall back to refresh_lists otherwise.
+- Started, reverted mid-edit — needs 1-line-comment, ≤10-line version, reuse `_make_pair_item`.
+
 ## UI todos (next)
 - ~~Stats test segment not refreshing~~ DONE — picker now reads cd.available_segments (disk ccgdata).
 - ~~Time slider "select none" button~~ DONE.

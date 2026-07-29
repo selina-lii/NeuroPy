@@ -321,30 +321,42 @@ class StatsPanelBackend:
         m = METRICS[dtype]
         print(m.source)
         merged: dict[Key, float] = {}
+        used_sessions: set[str] = set()
         for grp_name in grp_names:
             for seg_name in seg_names:
                 ei, ct = self.nav.cd.conf.parse_conn_type_label(conn_type)
                 for sess in sessions:
                     ptr_key = Key(session=sess, excitability=ei, conn_type=ct)
                     if ptr_key not in self.nav.cd.ptr:
-                        print(sess, seg_name)
                         continue
                     if not m.enabled:
                         vals_map = {}
                     elif m.source == "conn_strength":
-                        vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name, grp_name)
+                        try:
+                            vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name, grp_name)
+                        except FileNotFoundError:
+                            continue
                     elif m.source in ("ref_firing_rate", "tgt_firing_rate"):
-                        vals_map = self.get_fr_for_sess(ptr_key, grp_name,
-                                                        0 if m.source == "ref_firing_rate" else 1)
+                        try:
+                            vals_map = self.get_fr_for_sess(ptr_key, grp_name,
+                                                            0 if m.source == "ref_firing_rate" else 1)
+                        except FileNotFoundError:
+                            continue
                     elif m.source == "baseline":
-                        vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, grp_name)
+                        try:
+                            vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, grp_name)
+                        except FileNotFoundError:
+                            continue
+                    if vals_map:
+                        used_sessions.add(sess)
                     for k, v in vals_map.items():
                         merged.setdefault(k, v)
 
         sess_str = sessions[0] if len(sessions) == 1 else ','.join(sessions)
         return dict(name=cfg.name, session=sess_str, conn_type=conn_type,
                     segment=seg_names[0], group=grp_names[0], data_type=dtype,
-                    pairs=list(merged), vals=list(merged.values()), color=cfg.color)
+                    pairs=list(merged), vals=list(merged.values()), color=cfg.color,
+                    sessions_used=sorted(used_sessions))
 
     def _pair_value_dict(self, ptr_key, group_name, value_fn) -> dict[Key, float]:
         """{Key.pair(session,ref,tgt): value_fn(ref,tgt)} over a group's valid pairs."""
@@ -576,9 +588,16 @@ class StatsPanelBackend:
         def _fmt_res(r, groups_) -> list[str]:
             if not r: return ["(no result)"]
             if 'error' in r: return [f"Error: {r['error']}"]
-            lines = [f"  Test: {r.get('test','?')}",
-                     f"  N: {[len(g.get('vals') or []) for g in groups_]}",
-                     f"  Means: {[round(float(np.mean(g['vals'])),4) if g.get('vals') else 'n/a' for g in groups_]}"]
+            if r.get('paired') and 'n_a' in r:   # matched N differs from raw group N pre-intersection
+                n_line = f"  N (matched pairs): {[r['n_a'], r['n_b']]}"
+                m_line = f"  Means (matched): {[round(r['mean_a'],4), round(r['mean_b'],4)]}"
+            elif 'n_subjects' in r:
+                n_line = f"  N (matched pairs): {r['n_subjects']}"
+                m_line = f"  Means: {[round(float(np.mean(g['vals'])),4) if g.get('vals') else 'n/a' for g in groups_]}"
+            else:
+                n_line = f"  N: {[len(g.get('vals') or []) for g in groups_]}"
+                m_line = f"  Means: {[round(float(np.mean(g['vals'])),4) if g.get('vals') else 'n/a' for g in groups_]}"
+            lines = [f"  Test: {r.get('test','?')}", n_line, m_line]
             if 'f_stat' in r:
                 lines.append(f"  F = {r['f_stat']:.4f}")
             elif 'stat' in r:
@@ -604,6 +623,7 @@ class StatsPanelBackend:
             for g in sr.groups:
                 vals = g.get('vals') or []
                 tag = f"   {_res_lbl.get(sr.resolution, sr.resolution)} {g.get('name','?')}"
+                out.append(f"{tag} sessions: {g.get('sessions_used') or []}")
                 out.append(f"{tag} pairs: {[str(p) for p in (g.get('pairs') or [])]}")
                 out.append(f"{tag} (n={len(vals)}): {[round(float(v), 6) for v in vals]}")
         return out

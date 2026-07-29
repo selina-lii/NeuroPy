@@ -846,10 +846,12 @@ class CCGDataset(AnalysisDataset, Cacheable):
             overlap = CCGBatchRequest.resolve_overlap_sec(t0, t1, spec.overlap_raw, spec.overlap_unit)
             before = len(work)
             n, name, fs = max(1, spec.n_splits), str(spec.name), list(spec.filter_state)
+            active, _ = self.nd.resolve_intervals(key, t0, t1, fs) if fs else (None, None)
             if spec.split_mode == 'equal_effective':  # cut the active-time axis, not the real-time axis
-                active, _ = self.nd.resolve_intervals(key, t0, t1, fs)
                 chunks = IntervalOp.partition_effective(active, n, name) if active else []
             else:
+                if active:   # raw_span with a filter: split the filtered span, not the full window
+                    t0, t1 = active[0][0], active[-1][1]
                 chunks = IntervalOp.partition(t0, t1, n, overlap, name)
             for c0, c1, cname in chunks:  # keep chunks that have real active intervals
                 src = CCGSourceConfig(key=key.change(segment=cname), t0=c0, t1=c1,

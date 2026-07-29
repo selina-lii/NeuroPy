@@ -161,10 +161,7 @@ def pair_label(inds, *, bookmarked=False, group_names=None, pair_tags=None,
     if bookmarked:
         label = "★ " + label
     pt = pair_tags or {}
-    names = set(group_names or [])
-    for g in pt.get('groups', []) or []:
-        if isinstance(g, str) and g:
-            names.add(g)
+    names = set(group_names or [])   # live from Groups; pt['groups'] is a stale save-time snapshot
     tags = [f"[{g}]" for g in sorted(names)]
     for k, v in sorted(pt.items()):
         if k in ('groups', 'admitted', 'notes') or not v:
