@@ -640,6 +640,15 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """Sessions with in-memory ``CCGData``."""
         return {str(k.session) for k in self._ccg}
 
+    def missing_sessions(self) -> list:
+        """``nd`` sessions with no CCG pointers on disk; warns if any."""
+        on_disk = {str(k.session) for k in self.ptr}
+        missing = [name for s in self.nd._sessions
+                   if (name := self.nd._short_session_name(s)) not in on_disk]
+        if missing:
+            print(f"[CCGDataset] missing on disk: {missing}")
+        return missing
+
     @property
     def ccg_dir(self):
         return os.path.join(self.save_path, "ccg", "ccgdata")
@@ -867,6 +876,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
 
     def compute_segment(self, key, src: 'CCGSourceConfig', neurons_slice) -> 'CCGData':
         """Compute one segment from pre-sliced neurons (no ``cd`` mutation)."""
+        src.firing_rates = neurons_slice.firing_rate
         return self._compute_ccg_data(key, neurons_slice, np.arange(neurons_slice.n_neurons),
                                       self.conf.at(key.resolution))
 

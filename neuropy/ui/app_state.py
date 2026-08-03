@@ -93,6 +93,7 @@ class AppState(QObject):
     active_norms         = NavField("active_norms")
     same_scale_mode      = NavField("same_scale_mode")
     stacked_segments     = NavField("stacked_segments")
+    stacked_transposed   = NavField("stacked_transposed", coerce=bool)
     baseline_method      = NavField("baseline_method")
     cs_metric            = NavField("cs_metric")
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
@@ -106,11 +107,12 @@ class AppState(QObject):
         self._resolution = "lo"
         self._session_any_mode = False
         self._cross_session_handles = []
-        self.sd = SelectionDataset()
+        self.sd = SelectionDataset(cd)
         self._active_sig_threshold = cd.conf.alpha
         self._active_norms = set()
         self._same_scale_mode = None
         self._stacked_segments = []
+        self._stacked_transposed = False
         self._baseline_method = 'conv'
         self._cs_metric = 'STG'
         self._cs_overlay_active = False
@@ -242,9 +244,9 @@ class AppState(QObject):
     def notify_selection_changed(self):
         self.selection_changed.emit()
 
-    def reset_selection_for_project(self, cd, save_dir: str = '') -> None:
+    def reset_selection_for_project(self, cd) -> None:
         """Replace selection state with a fresh dataset when switching projects."""
-        self.sd = SelectionDataset(save_dir=save_dir)
+        self.sd = SelectionDataset(cd)
         self.notify_selection_changed()
 
     def set_active_sig_threshold(self, alpha: float):
@@ -267,12 +269,17 @@ class AppState(QObject):
         self._cs_metric = cs_metric
         self.cs_params_changed.emit(baseline_method, cs_metric)
 
-    def toggle_stacked_segment(self, seg_idx: int):
+    def toggle_stacked_transposed(self) -> None:
+        self._stacked_transposed = not self._stacked_transposed
+        self.stacked_segments_changed.emit(self.stacked_segments)
+
+    def toggle_stacked_segments(self, labels) -> None:
+        """Add *labels* to the stack, or remove them when all are already stacked."""
         segs = list(self.stacked_segments)
-        if seg_idx in segs:
-            segs.remove(seg_idx)
+        if all(l in segs for l in labels):
+            segs = [s for s in segs if s not in labels]
         else:
-            segs.append(seg_idx)
+            segs += [l for l in labels if l not in segs]
         self._stacked_segments = segs
         self.stacked_segments_changed.emit(segs)
 
@@ -506,11 +513,11 @@ class AppState(QObject):
 
     def _pair_group_combo(self, inds) -> tuple:
         """Sorted tuple of non-special group names this pair belongs to."""
-        sess, pair = self.pair_sess_rt(inds)
-        pair = tuple(int(x) for x in pair)
+        k = self.key_for_pair(inds)
         return tuple(sorted(
             g for g in self.groups
-            if not is_special_group(g) and pair in self.groups.pairs_in_group(g, sess)))
+            if not is_special_group(g)
+            and (k.ref, k.tgt) in self.groups.pairs_in_group(g, k.session)))
 
     def selected_sections(self, sort_mode: str) -> list:
         """Ordered (header|None, [inds]) sections of the selected pairs for a sort mode.
@@ -547,10 +554,9 @@ class AppState(QObject):
             tag_buckets = _defaultdict(list)
             untagged = []
             for inds in sorted(selected):
-                sess, pair = self.pair_sess_rt(inds)
-                pair = tuple(int(x) for x in pair)
+                k = self.key_for_pair(inds)
                 tags = [g for g in non_internal
-                        if pair in self.groups.pairs_in_group(g, sess)]
+                        if (k.ref, k.tgt) in self.groups.pairs_in_group(g, k.session)]
                 if tags:
                     for t in tags:
                         tag_buckets[t].append(inds)
@@ -563,11 +569,12 @@ class AppState(QObject):
 
         return [(None, sorted(selected))]
 
-    def pair_sess_rt(self, inds) -> tuple:
-        """(session_str, (ref, tgt)) for group/tag lookups."""
+    def key_for_pair(self, inds) -> 'Key':
+        # TODO band-aid: inds[0] is either a keyed session object or an already-resolved str; unify shapes later.
         if self.session_any_mode:
-            return str(inds[0].session), (int(inds[1]), int(inds[2]))
-        return str(self.key.session), (int(inds[0]), int(inds[1]))
+            sess = inds[0] if isinstance(inds[0], str) else str(inds[0].session)
+            return Key.pair(sess, inds[1], inds[2])
+        return Key.pair(str(self.key.session), inds[0], inds[1])
 
     def toggle_together(self, pairs):
         for p in pairs:

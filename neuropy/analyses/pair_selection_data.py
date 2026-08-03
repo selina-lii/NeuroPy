@@ -281,8 +281,10 @@ class SelectionDataset(JsonSavable, Autosave):
     ``groups_factory``; scripts/notebooks default to the pure ``GroupDataset``.
     """
 
-    def __init__(self, save_dir: str = '', groups_factory=GroupDataset):
-        JsonSavable.__init__(self)
+    def __init__(self, cd, groups_factory=GroupDataset):
+        JsonSavable.__init__(self, ignored_attrs=['cd'])
+        self.cd = cd
+        save_dir = cd.selections_dir
         self.groups = groups_factory()
         self.groups._save_dir = save_dir
         self.sessions: dict[Key, SelectionData] = {}

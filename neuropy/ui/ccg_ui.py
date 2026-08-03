@@ -197,7 +197,6 @@ class CCGReviewUI(QMainWindow):
 
         self.nav = AppState(cd, key)
         self.nav.root = self
-        self.nav.sd.save_dir = cd.selections_dir # SelectionDataset save path
 
         self.jitter_mgr = JitterManager(self.nav, cd)
         self.jitter_mgr.completed.connect(self._on_jitter_completed)
@@ -264,12 +263,18 @@ class CCGReviewUI(QMainWindow):
         self.time_slider.save_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, parent=self))
         self.time_slider.load_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, select_mode=True, parent=self))
         self.time_slider.queue_ccg_requested.connect(self._on_queue_ccg)
-        v_splitter.addWidget(self.time_slider)
+        time_slider_scroll = QScrollArea()
+        time_slider_scroll.setWidgetResizable(True)
+        time_slider_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        time_slider_scroll.setWidget(self.time_slider)
+        v_splitter.addWidget(time_slider_scroll)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         v_splitter.addWidget(splitter)
         v_splitter.setSizes([180, 720])
         v_splitter.setHandleWidth(6)
+        for i in range(v_splitter.count()):
+            v_splitter.setCollapsible(i, True)
 
         # pairs_view: pair selection
         self.left_frame = QWidget()
@@ -282,7 +287,11 @@ class CCGReviewUI(QMainWindow):
         _lft_title = QLabel("Pair Selection"); _lft_title.setStyleSheet("font-weight:bold;padding:2px 4px;")
         lft_layout.addWidget(_lft_title)
         lft_layout.addWidget(self.pairs_view)
-        splitter.addWidget(left_frame)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setWidget(left_frame)
+        splitter.addWidget(left_scroll)
 
         # Center: CCG panel
         self.mainview = CorrelogramPanel(self.nav)
@@ -290,7 +299,11 @@ class CCGReviewUI(QMainWindow):
         self.mainview._theme_fn = lambda: self.theme
         self.jitter_mgr.status_changed.connect(
             lambda text: self.mainview.jitter_section.set_running(bool(text)))
-        splitter.addWidget(self.mainview)
+        center_scroll = QScrollArea()
+        center_scroll.setWidgetResizable(True)
+        center_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        center_scroll.setWidget(self.mainview)
+        splitter.addWidget(center_scroll)
 
         # Right: probe network
         self.right_frame = QWidget()
@@ -336,7 +349,7 @@ class CCGReviewUI(QMainWindow):
         self.jitter_mgr.cd = new_cd
         self.time_slider.cd = new_cd
 
-        self.nav.reset_selection_for_project(new_cd, new_cd.selections_dir)
+        self.nav.reset_selection_for_project(new_cd)
         os.makedirs(new_cd.custom_dir, exist_ok=True)
 
         sess = str(self.nav.key.session)
@@ -400,9 +413,18 @@ class CCGReviewUI(QMainWindow):
     def _apply_min_font_size(self, size: int) -> None:
         app = QApplication.instance()
         f = app.font()
-        if f.pointSize() < size:
-            f.setPointSize(size)
-            app.setFont(f)
+        f.setPointSize(size)
+        app.setFont(f)
+        if hasattr(self, 'pairs_view'):
+            self.pairs_view.pair_selection.refresh_font()
+        if hasattr(self, 'hotkeys_bar'):
+            self.hotkeys_bar.refresh()
+        if hasattr(self, 'time_slider'):
+            self.time_slider._update_legend()
+        if hasattr(self, 'neuron_network'):
+            self.neuron_network.refresh_font()
+        if hasattr(self, 'mainview'):
+            self.mainview.refresh_font()
 
     def _show_transient_banner(self, message: str, duration_ms: int = 3500) -> None:
         """Brief status-bar message (e.g. unassigned group hotkey)."""
@@ -690,7 +712,7 @@ class CCGReviewUI(QMainWindow):
         dlg.close()
 
     def _change_segment(self, delta: int):
-        all_names = self.nav.available_segments()
+        all_names = self.nav.segment_names()
         if not all_names:
             return
         cur = self.nav.current_segment

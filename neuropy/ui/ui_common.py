@@ -137,17 +137,10 @@ def group_header_label(name: str, count: int, collapsed: bool) -> str:
 from neuropy.utils.data_storage_util import atomic_write_json  # noqa: F401
 
 
-def bm_key(inds, any_mode: bool) -> tuple:
-    """Bookmark / highlight key for pair *inds* (session-any vs normal)."""
-    if any_mode and len(inds) >= 3:
-        return (int(inds[-2]), int(inds[-1]))
-    return (int(inds[0]), int(inds[1]))
-
-
 def group_names_for_pair(data, ui, inds) -> list:
     """Sorted group names containing this pair in the current session."""
-    sess, pair = ui.pair_sess_rt(inds)
-    return data.group_names_for_pair(sess, pair, ui.groups)
+    k = ui.key_for_pair(inds)
+    return data.group_names_for_pair(k.session, (k.ref, k.tgt), ui.groups)
 
 
 def pair_label(inds, *, bookmarked=False, group_names=None, pair_tags=None,

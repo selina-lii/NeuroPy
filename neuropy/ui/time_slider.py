@@ -32,7 +32,8 @@ _FULL_SEG = 'all'   # reserved label for the permanent whole-session segment (di
 from neuropy.analyses.utils import JsonSavable, Savable
 from neuropy.core.intervals import IntervalOp as _SetOp
 from neuropy.ui.ui_common import BackgroundTaskRunner
-from neuropy.ui.utils import chip_button, ListPickerButton, ResultsDialog
+from neuropy.ui.utils import (
+    chip_button, CollapsibleSection, ListPickerButton, ResultsDialog, small_font_pt, regular_font_pt)
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
@@ -55,19 +56,22 @@ class EpochPlotWidget(pg.PlotWidget):
 
     _CURSOR_COLOR = '#1565C0'
     _DRAG_COLOR   = '#C62828'
-    _BAR_Y0       = 0.2    # epoch bars occupy y=0.2..1.0 (2x height); axis zone=0..0.2
-    _DOT_Y        = 0.1    # cursor dots in axis zone
+    _BAR_Y0       = 0.0    # epoch bars occupy y=0..1.0; no axis zone
+    _DOT_Y        = 0.0    # cursor dots at bar bottom
 
     def __init__(self, parent=None):
         from neuropy.ui.ui_common import qt_dark_mode
         _axis = pg.AxisItem(orientation='bottom')
-        _axis.setStyle(tickLength=10)
+        _axis.setStyle(tickLength=10, tickTextOffset=1)
         _axis.tickStrings = lambda values, *_: [
             f"{int(max(0.0,float(v))//3600):02d}:"
             f"{int((max(0.0,float(v))%3600)//60):02d}:"
             f"{int(max(0.0,float(v))%60):02d}"
             for v in values]
+        _app = QtWidgets.QApplication.instance()
+        _axis.setStyle(tickFont=_app.font() if _app is not None else QFont())
         super().__init__(parent, axisItems={'bottom': _axis})
+        self.getPlotItem().layout.setContentsMargins(0, 1, 0, 1)
         bg = '#2b2b2b' if qt_dark_mode() else None
         self.setBackground(bg)
         if bg is None:
@@ -77,7 +81,7 @@ class EpochPlotWidget(pg.PlotWidget):
         self.setMouseEnabled(x=True, y=False)
         self.setMenuEnabled(False)
         self.setYRange(0, 1, padding=0)
-        self.setFixedHeight(60)
+        self.setFixedHeight(42)
 
         self._t_min:    float = 0.0
         self._t_max:    float = 1.0
@@ -380,13 +384,15 @@ class TimeSliderPanel(QWidget):
         self._init_times()
         self._update_legend()
 
+    @staticmethod
+    def _fixed_line_edit(text: str, width: int) -> QLineEdit:
+        le = QLineEdit(text); le.setFixedWidth(width)
+        return le
+
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 1, 4, 1)
-        root.setSpacing(1)
-
         title_lbl = QLabel("Time Slider - Behavioral Epochs")
-        title_lbl.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        title_lbl.setStyleSheet(f"font-weight: bold; font-size: {regular_font_pt()}pt;")
         root.addWidget(title_lbl)
 
         row1 = QHBoxLayout()
@@ -396,131 +402,92 @@ class TimeSliderPanel(QWidget):
         self._theme_combo.setFixedWidth(140)
         self._theme_combo.currentTextChanged.connect(self._on_theme_change)
         row1.addWidget(self._theme_combo)
-
         self._theme_info_lbl = QLabel("")
-        self._theme_info_lbl.setStyleSheet("color:#888; font-size:8pt;")
+        self._theme_info_lbl.setStyleSheet(f"color:#888; font-size:{small_font_pt()}pt;")
         row1.addWidget(self._theme_info_lbl)
 
-        # per-theme "include in filter" flag (marks a theme for cross-theme intersection; see FUTURE_STEPS)
-        self._filter_checks: dict[str, bool] = {}
+        self._filter_checks: dict[str, bool] = {}   # per-theme "include in filter" (cross-theme AND; see FUTURE_STEPS)
         self._filter_check = chip_button("Include in filter", checked=False)
         self._filter_check.toggled.connect(lambda on: self._filter_check.setText(
             "✓ Include in filter" if on else "Include in filter"))
         self._filter_check.toggled.connect(self._on_filter_toggle)
         row1.addWidget(self._filter_check)
-
         row1.addSpacing(12)
-        for text, width, slot in (
-            ("All", 40, self._on_label_reset),
-            ("None", 40, self._on_label_none),
-        ):
-            btn = QPushButton(text)
-            btn.setFixedWidth(width)
-            btn.clicked.connect(slot)
+        for text, width, slot in (("All", 40, self._on_label_reset), ("None", 40, self._on_label_none)):
+            btn = QPushButton(text); btn.setFixedWidth(width); btn.clicked.connect(slot)
             row1.addWidget(btn)
-
         row1.addStretch()
 
-        save_btn = QToolButton(); save_btn.setText("💾")
-        save_btn.clicked.connect(self.save_requested)
-        row1.addWidget(save_btn)
-        load_btn = QToolButton(); load_btn.setText("📂")
-        load_btn.clicked.connect(self.load_requested)
-        row1.addWidget(load_btn)
-
-        sep_tb = QFrame()
-        sep_tb.setFrameShape(QFrame.VLine)
-        sep_tb.setStyleSheet('color: #ccc;')
+        for icon, signal in (("💾", self.save_requested), ("📂", self.load_requested)):
+            tb = QToolButton(); tb.setText(icon); tb.clicked.connect(signal)
+            row1.addWidget(tb)
+        sep_tb = QFrame(); sep_tb.setFrameShape(QFrame.VLine); sep_tb.setStyleSheet('color: #ccc;')
         row1.addWidget(sep_tb)
-
         self._snap_check = QCheckBox("Snap")
-        self._snap_check.setChecked(True)
-        self._snap_check.toggled.connect(self._on_snap_toggle)
+        self._snap_check.setChecked(True); self._snap_check.toggled.connect(self._on_snap_toggle)
         row1.addWidget(self._snap_check)
         self._reset_zoom_btn = QPushButton("Reset")
-        self._reset_zoom_btn.setFixedWidth(50)
-        self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
+        self._reset_zoom_btn.setFixedWidth(50); self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
         row1.addWidget(self._reset_zoom_btn)
-        root.addLayout(row1)
+        row1_widget = QWidget(); row1_widget.setLayout(row1)
+        root.addWidget(row1_widget)
 
         self._legend_widget = QWidget()
         self._legend_layout = QHBoxLayout(self._legend_widget)
-        self._legend_layout.setContentsMargins(0, 0, 0, 0)
-        self._legend_layout.setSpacing(4)
         self._legend_layout.addStretch()
-        root.addSpacing(12)
         root.addWidget(self._legend_widget)
-        root.addSpacing(12)
 
         self._any_mode_lbl = QLabel(
             "All-sessions view: no single behavioral timeline — "
             "type Start/End below to run custom CCG across the selected sessions.")
         self._any_mode_lbl.setWordWrap(True)
-        self._any_mode_lbl.setStyleSheet('color:#666; font-size:9pt; padding:4px;')
+        self._any_mode_lbl.setStyleSheet(f'color:#666; font-size:{small_font_pt()}pt; padding:4px;')
         self._any_mode_lbl.setVisible(False)
         root.addWidget(self._any_mode_lbl)
 
         self._main_plot = EpochPlotWidget()
         self._main_plot.handle_moved.connect(self._on_main_handle_moved)
         root.addWidget(self._main_plot)
-
         self._on_snap_toggle(self._snap_check.isChecked())
 
-        self._timing_row_widget = QWidget()
-        timing_row = QHBoxLayout(self._timing_row_widget)
-        timing_row.setContentsMargins(0, 0, 0, 0)
-        self._timing_lbl = QLabel("CCG time range")
-        timing_row.addWidget(self._timing_lbl)
-        timing_row.addWidget(QLabel("Start:"))
-        self._start_entry = QLineEdit("00:00:00")
-        self._start_entry.setFixedWidth(72)
-        self._start_entry.editingFinished.connect(
-            lambda: self._validate_timing_entry('start'))
-        timing_row.addWidget(self._start_entry)
-        timing_row.addWidget(QLabel("End:"))
-        self._end_entry = QLineEdit("end")
-        self._end_entry.setFixedWidth(72)
-        self._end_entry.editingFinished.connect(
-            lambda: self._validate_timing_entry('end'))
-        timing_row.addWidget(self._end_entry)
-
-        set_btn = QPushButton("Set")
-        set_btn.clicked.connect(self._on_set)
+        self._timing_section = CollapsibleSection("CCG time range", expanded=True)
+        root.addWidget(self._timing_section)
+        timing_row = QHBoxLayout()
+        self._timing_section.body_layout.addLayout(timing_row)
+        for lbl, which, default in (("Start:", 'start', "00:00:00"), ("End:", 'end', "end")):
+            timing_row.addWidget(QLabel(lbl))
+            entry = self._fixed_line_edit(default, 72)
+            entry.editingFinished.connect(lambda w=which: self._validate_timing_entry(w))
+            timing_row.addWidget(entry)
+            setattr(self, f'_{which}_entry', entry)
+        set_btn = QPushButton("Set"); set_btn.clicked.connect(self._on_set)
         timing_row.addWidget(set_btn)
 
         self._ccg_extra_widget = QWidget()
         extra_lay = QHBoxLayout(self._ccg_extra_widget)
-        extra_lay.setContentsMargins(0, 0, 0, 0)
-        extra_lay.setSpacing(4)
-        clr_btn = QPushButton("Clear")
-        clr_btn.clicked.connect(self._on_clear)
+        clr_btn = QPushButton("Clear"); clr_btn.clicked.connect(self._on_clear)
         extra_lay.addWidget(clr_btn)
         _sessions = [str(k.session) for k in self.nav.real_nd_keys()]
-        self._sessions_picker = ListPickerButton("Sessions", items=_sessions,
-                                                 plural="sessions")
+        self._sessions_picker = ListPickerButton("Sessions", items=_sessions, plural="sessions")
         self._sessions_picker.set_selected([str(self.nav.key.session)])
         self._sessions_picker.setFixedWidth(120)
         extra_lay.addWidget(self._sessions_picker)
         extra_lay.addWidget(QLabel("Name:"))
-        self._name_entry = QLineEdit("")
-        self._name_entry.setFixedWidth(100)
+        self._name_entry = self._fixed_line_edit("", 100)
         self._name_is_auto = True   # False once the user types their own name
         self._name_entry.textEdited.connect(lambda _t: setattr(self, '_name_is_auto', False))
         extra_lay.addWidget(self._name_entry)
         extra_lay.addWidget(QLabel("Splits:"))
         self._splits_spin = QSpinBox()
-        self._splits_spin.setRange(1, 99)
-        self._splits_spin.setValue(1)
-        self._splits_spin.setFixedWidth(45)
+        self._splits_spin.setRange(1, 99); self._splits_spin.setValue(1); self._splits_spin.setFixedWidth(45)
         extra_lay.addWidget(self._splits_spin)
         extra_lay.addWidget(QLabel("Overlap:"))
-        self._overlap_entry = QLineEdit("0")
-        self._overlap_entry.setFixedWidth(45)
+        self._overlap_entry = self._fixed_line_edit("0", 45)
         extra_lay.addWidget(self._overlap_entry)
         self._overlap_unit = QComboBox()
         for u in ('%', 'hr', 'min', 's'):
             self._overlap_unit.addItem(u)
-        self._overlap_unit.setFixedWidth(45)
+        self._overlap_unit.setFixedWidth(60)
         extra_lay.addWidget(self._overlap_unit)
         self._equal_effective_check = QCheckBox("Equal duration")
         self._equal_effective_check.setToolTip(
@@ -529,10 +496,19 @@ class TimeSliderPanel(QWidget):
         timing_row.addWidget(self._ccg_extra_widget)
 
         self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet("color:#555; font-size:8pt;")
+        self._status_lbl.setStyleSheet(f"color:#555; font-size:{small_font_pt()}pt;")
         timing_row.addWidget(self._status_lbl)
         timing_row.addStretch()
-        root.addWidget(self._timing_row_widget)
+
+        for lyt in (row1, self._legend_layout, timing_row, extra_lay):
+            lyt.setContentsMargins(0, 0, 0, 0)
+            lyt.setSpacing(4)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(2)
+        for w in (title_lbl, row1_widget, self._legend_widget, self._any_mode_lbl,
+                  self._timing_section):
+            w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        root.addStretch()
 
     def _connect_nav(self):
         nav = self.nav
@@ -546,7 +522,7 @@ class TimeSliderPanel(QWidget):
         self._any_mode_lbl.setVisible(any_mode)
         self._main_plot.setVisible(not any_mode)
         self._legend_widget.setVisible(True)
-        self._timing_row_widget.setEnabled(True)
+        self._timing_section.setEnabled(True)
         if any_mode:
             self._sessions_picker.set_selected(
                 [str(k.session) for k in self.nav.real_nd_keys()])
@@ -639,15 +615,16 @@ class TimeSliderPanel(QWidget):
     def _add_legend_chip(self, label: str, color: str, active: bool, *,
                          none_style: bool = False):
         chip = chip_button(label, checked=active)
+        fs = small_font_pt()
         if none_style:
             ss = (f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
-                  f"padding: 1px 6px; font-size: 8pt; background: {color}; "
+                  f"padding: 1px 6px; font-size: {fs}pt; background: {color}; "
                   f"color: #444; }}"
                   f"QPushButton:checked {{ font-weight: bold; }}"
                   f"QPushButton:!checked {{ color: #aaa; background: #f0f0f0; }}")
         else:
             ss = (f"QPushButton {{ border: 1px solid #888; border-radius: 2px; "
-                  f"padding: 1px 6px; font-size: 8pt; background: {color}; }}"
+                  f"padding: 1px 6px; font-size: {fs}pt; background: {color}; }}"
                   f"QPushButton:checked {{ font-weight: bold; }}"
                   f"QPushButton:!checked {{ color: #888; background: #f0f0f0; }}")
         chip.setStyleSheet(ss)

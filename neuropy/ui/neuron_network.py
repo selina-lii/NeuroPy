@@ -19,24 +19,29 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtCore import Qt, QTimer
 from neuropy.ui.ui_common import LRUCache, _SPECIAL_PREFIX
 from neuropy.ui.app_state import _ALL_SEGS
-from neuropy.ui.utils import chip_button, FlowLayout, SliderWithInput
+from neuropy.ui.utils import chip_button, FlowLayout, SliderWithInput, small_font_pt
 from neuropy.analyses.neurons_dataset import Key
 
-_UI_FS = 'font-size: 9pt;'
-_INPUT_SS = (
-    'QLineEdit { background: #fff; color: #222; border: 1px solid #aaa; '
-    'font-size: 9pt; padding: 2px 4px; }'
-)
-_OUTLINE_BTN_SS = (
-    'QPushButton { border: 1px solid #aaa; border-radius: 3px; '
-    'padding: 1px 8px; font-size: 9pt; background: #fafafa; color: #222; }'
-    'QPushButton:hover { background: #eef; }'
-)
+def _UI_FS() -> str:
+    return f'font-size: {small_font_pt()}pt;'
+
+def _INPUT_SS() -> str:
+    return (
+        f'QLineEdit {{ background: #fff; color: #222; border: 1px solid #aaa; '
+        f'font-size: {small_font_pt()}pt; padding: 2px 4px; }}'
+    )
+
+def _OUTLINE_BTN_SS() -> str:
+    return (
+        f'QPushButton {{ border: 1px solid #aaa; border-radius: 3px; '
+        f'padding: 1px 8px; font-size: {small_font_pt()}pt; background: #fafafa; color: #222; }}'
+        f'QPushButton:hover {{ background: #eef; }}'
+    )
 
 
 def _outline_button(label: str, width: int | None = None) -> QPushButton:
     btn = QPushButton(label)
-    btn.setStyleSheet(_OUTLINE_BTN_SS)
+    btn.setStyleSheet(_OUTLINE_BTN_SS())
     if width is not None:
         btn.setFixedWidth(width)
     return btn
@@ -320,6 +325,7 @@ class NetworkPanel:
         self.ui = ui
         self._focused_neuron: int | None = None
         self._focused_pair:   tuple | None = None
+        self._font_scaled_widgets: list = []   # [(widget, lambda: stylesheet_str), ...]
 
         self._net_arrows:           bool  = True
         self._net_cur_pair:         bool  = False
@@ -371,7 +377,7 @@ class NetworkPanel:
         # Session caption (any-session mode only) — sits above the flanked plot.
         self._net_nav_label = QLabel('')
         self._net_nav_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._net_nav_label.setStyleSheet('font-size: 9pt; color: #444; padding: 2px;')
+        self._scale_font(self._net_nav_label, lambda: f'font-size: {small_font_pt()}pt; color: #444; padding: 2px;')
         self._net_nav_label.setVisible(False)
         container_lay.addWidget(self._net_nav_label)
 
@@ -406,9 +412,9 @@ class NetworkPanel:
         # Legend floats over the plot itself (parented to pw, not the container) so the
         # top caption and flanking arrows never overlap it.
         self._legend_overlay = QLabel(pw)
-        self._legend_overlay.setStyleSheet(
+        self._scale_font(self._legend_overlay, lambda: (
             'background: rgba(255,255,255,0.9); padding: 3px 6px; '
-            'border: 1px solid #ccc; font-size: 8pt;')
+            f'border: 1px solid #ccc; font-size: {small_font_pt()}pt;'))
         self._legend_overlay.move(6, 6)
         self._legend_overlay.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -426,6 +432,17 @@ class NetworkPanel:
             pw.setMinimumHeight(200)
             pw.getViewBox().setMouseEnabled(x=True, y=True)
 
+    def _scale_font(self, widget, stylesheet_fn):
+        """Apply stylesheet_fn() now and remember it so refresh_font() can reapply it live."""
+        widget.setStyleSheet(stylesheet_fn())
+        self._font_scaled_widgets.append((widget, stylesheet_fn))
+
+    def refresh_font(self):
+        for widget, stylesheet_fn in self._font_scaled_widgets:
+            widget.setStyleSheet(stylesheet_fn())
+        self.refresh_group_buttons()
+        self.refresh_shank_buttons()
+
     def _make_section(self, parent_layout, title: str) -> tuple:
         """Return (section_widget, header_btn, body_widget, body_layout)."""
         sec = QWidget()
@@ -441,7 +458,7 @@ class NetworkPanel:
         hdr_lay.setSpacing(2)
         arrow_btn = QPushButton('▾ ' + title)
         arrow_btn.setFlat(True)
-        arrow_btn.setStyleSheet(f'font-weight: bold; {_UI_FS} text-align: left;')
+        self._scale_font(arrow_btn, lambda: f'font-weight: bold; {_UI_FS()} text-align: left;')
         hdr_lay.addWidget(arrow_btn)
         hdr_lay.addStretch()
         sec_lay.addWidget(hdr)
@@ -499,7 +516,7 @@ class NetworkPanel:
         n_lay.addWidget(n_chip)
         self._focus_entry = QLineEdit()
         self._focus_entry.setFixedWidth(64)
-        self._focus_entry.setStyleSheet(_INPUT_SS)
+        self._scale_font(self._focus_entry, _INPUT_SS)
         n_lay.addWidget(self._focus_entry)
         n_clr = chip_button('✕', checkable=False)
         n_clr.setFixedWidth(28)
@@ -508,7 +525,7 @@ class NetworkPanel:
         body_lay.addWidget(n_row)
 
         self._focus_info_label = QLabel('')
-        self._focus_info_label.setStyleSheet(f'color: #555; {_UI_FS} border: none;')
+        self._scale_font(self._focus_info_label, lambda: f'color: #555; {_UI_FS()} border: none;')
         body_lay.addWidget(self._focus_info_label)
 
         p_row = QWidget()
@@ -516,13 +533,13 @@ class NetworkPanel:
         p_lay.setContentsMargins(0, 0, 0, 0)
         p_lay.setSpacing(4)
         sep = QLabel('|')
-        sep.setStyleSheet('color: #bbb; font-size: 9pt;')
+        self._scale_font(sep, lambda: f'color: #bbb; font-size: {small_font_pt()}pt;')
         p_lay.addWidget(sep)
         p_chip = chip_button('Pair', checkable=False)
         p_lay.addWidget(p_chip)
         self._focus_pair_entry = QLineEdit()
         self._focus_pair_entry.setFixedWidth(80)
-        self._focus_pair_entry.setStyleSheet(_INPUT_SS)
+        self._scale_font(self._focus_pair_entry, _INPUT_SS)
         p_lay.addWidget(self._focus_pair_entry)
         p_clr = chip_button('✕', checkable=False)
         p_clr.setFixedWidth(28)
@@ -537,7 +554,7 @@ class NetworkPanel:
         body_lay.addWidget(p_row)
 
         self._focus_pair_info_label = QLabel('')
-        self._focus_pair_info_label.setStyleSheet(f'color: #555; {_UI_FS} border: none;')
+        self._scale_font(self._focus_pair_info_label, lambda: f'color: #555; {_UI_FS()} border: none;')
         body_lay.addWidget(self._focus_pair_info_label)
 
         self._focus_entry.returnPressed.connect(self._on_neuron_focus)
@@ -565,7 +582,7 @@ class NetworkPanel:
         sep2 = QLabel('|'); sep2.setStyleSheet('color: #bbb;')
         r1_lay.addWidget(sep2)
         ct_lbl = QLabel('Conn type:')
-        ct_lbl.setStyleSheet(_UI_FS)
+        self._scale_font(ct_lbl, _UI_FS)
         r1_lay.addWidget(ct_lbl)
         self._net_ct_frame = QWidget()
         self._net_ct_frame_lay = QHBoxLayout(self._net_ct_frame)
@@ -617,7 +634,7 @@ class NetworkPanel:
         prb_r_lay.setContentsMargins(0, 0, 0, 0)
         prb_r_lay.setSpacing(2)
         prb_lbl = QLabel('Probe shanks')
-        prb_lbl.setStyleSheet(f'font-weight: bold; {_UI_FS}')
+        self._scale_font(prb_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
         prb_r_lay.addWidget(prb_lbl)
         prb_r_lay.addStretch()
         btn_none = _outline_button('None', 48)
@@ -640,7 +657,7 @@ class NetworkPanel:
 
         # Zoom + appearance sliders — compact 2-per-row grid instead of 4 stacked rows.
         zoom_lbl = QLabel('Zoom / Appearance')
-        zoom_lbl.setStyleSheet(f'font-weight: bold; {_UI_FS}')
+        self._scale_font(zoom_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
         ann_lay.addWidget(zoom_lbl)
         zoom_grid_w = QWidget()
         zoom_grid = QGridLayout(zoom_grid_w)
@@ -654,7 +671,7 @@ class NetworkPanel:
             ('spread:', '_net_spread',      0,  1500, 100, 0.01),
         ]):
             row, col = divmod(i, 2)
-            lbl = QLabel(lbl_text); lbl.setStyleSheet(_UI_FS)
+            lbl = QLabel(lbl_text); self._scale_font(lbl, _UI_FS)
             sw = SliderWithInput(lo, hi, init, scale=scale)
             sw.value_changed.connect(lambda v, a=attr: (setattr(self, a, v), self._on_zoom()))
             zoom_grid.addWidget(lbl, row, col * 2)
@@ -663,7 +680,7 @@ class NetworkPanel:
 
         # Annotation checkboxes
         ann_chip_lbl = QLabel('Annotations')
-        ann_chip_lbl.setStyleSheet(f'font-weight: bold; {_UI_FS}')
+        self._scale_font(ann_chip_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
         ann_lay.addWidget(ann_chip_lbl)
         ann_chip_row = QWidget()
         ac_lay = QHBoxLayout(ann_chip_row)
@@ -1572,7 +1589,7 @@ class NetworkPanel:
 
         if not regular and not special:
             lbl = QLabel('(no groups)')
-            lbl.setStyleSheet('color: #888; font-size: 8pt;')
+            lbl.setStyleSheet(f'color: #888; font-size: {small_font_pt()}pt;')
             self._net_grp_body_lay.addWidget(lbl)
             return
 
@@ -1602,7 +1619,7 @@ class NetworkPanel:
             arrow_lbl = '▸' if self._net_special_collapsed else '▾'
             toggle_btn = QPushButton(f'{arrow_lbl} Special:')
             toggle_btn.setFlat(True)
-            toggle_btn.setStyleSheet('color: #666; font-size: 8pt; text-align: left;')
+            toggle_btn.setStyleSheet(f'color: #666; font-size: {small_font_pt()}pt; text-align: left;')
             def _toggle_special(_btn=toggle_btn):
                 self._net_special_collapsed = not self._net_special_collapsed
                 _btn.setText(('▸' if self._net_special_collapsed else '▾') + ' Special:')
@@ -1664,7 +1681,7 @@ class NetworkPanel:
 
         if not shanks:
             lbl = QLabel('No shank data')
-            lbl.setStyleSheet(f'color: gray; {_UI_FS}')
+            lbl.setStyleSheet(f'color: gray; {_UI_FS()}')
             flow_lay.addWidget(lbl)
             self._net_shank_vars = {}
             return

@@ -30,7 +30,7 @@ from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction
 from neuropy.ui.ui_common import (
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
-    pair_label, group_names_for_pair, bm_key,
+    pair_label, group_names_for_pair,
 )
 from neuropy.ui.dialogs import (
     PairTagsDialog as PairTagsDialog,
@@ -89,7 +89,7 @@ from neuropy.analyses.pair_selection_data import (
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    has_primary_modifier,
+    has_primary_modifier, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -229,7 +229,8 @@ class Groups(QObject, GroupDataset):
                 old = ('sel' if pair in nav.active_selections.selected
                        else 'del' if pair in nav.active_selections.deleted
                        else 'unsel')
-                sess, p2 = nav.pair_sess_rt(pair)
+                k = nav.key_for_pair(pair)
+                sess, p2 = k.session, (k.ref, k.tgt)
                 was_in = p2 in self.pairs_in_group(gname, sess)
                 print(f"[tag] key={key_str!r} grp={gname!r} sess={sess!r} p2={p2!r} "
                       f"was_in={was_in} in_grp={sorted(self.pairs_in_group(gname, sess))[:5]}")
@@ -276,8 +277,8 @@ class SelectionDataset(_SelectionDataset):
     """UI SelectionDataset — analyses logic, but its groups are the Qt ``Groups``
     subclass (adds the ``changed`` signal for panel refreshes)."""
 
-    def __init__(self, save_dir: str = ''):
-        super().__init__(save_dir=save_dir, groups_factory=Groups)
+    def __init__(self, cd):
+        super().__init__(cd, groups_factory=Groups)
 
 
 class SearchBar(QWidget):
@@ -454,6 +455,9 @@ class PairSelectionPanel(QWidget, UndoRedo):
             setattr(self, f'_{side}_label', LabelVar(lbl_w))
             layout.addWidget(lbl_w)
             lst = PairListWidget(self)
+            _f = QApplication.instance().font()
+            _f.setPointSize(small_font_pt())
+            lst.setFont(_f)
             setattr(self, list_attr, lst)
             layout.addWidget(lst)
             splitter.addWidget(col)
@@ -561,13 +565,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def _make_pair_item(self, inds, should_gray, any_mode: bool) -> QListWidgetItem:
         """Build a list item for a pair (label + gray + pair role), shared by both lists."""
-        ui     = self.ui
-        _, raw = ui.pair_sess_rt(inds)
-        pair_t = tuple(int(x) for x in raw)
-        label  = pair_label(inds,
-                            bookmarked=bm_key(inds, any_mode) in ui.bookmarked_pairs,
+        ui = self.ui
+        k  = ui.key_for_pair(inds)
+        label = pair_label(inds,
+                            bookmarked=ui.key_for_pair(inds) in ui.bookmarked_pairs,
                             group_names=group_names_for_pair(self.data, ui, inds),
-                            pair_tags=self.data.selections[ui.key].tags.get(pair_t, {}),
+                            pair_tags=self.data.selections[ui.key].tags.get((k.ref, k.tgt), {}),
                             any_mode=any_mode)
         it = QListWidgetItem(label)
         if should_gray(inds):
@@ -753,6 +756,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
         ui.root.jitter_mgr.apply_list_colors()
         ui.root.status_bar.refresh()
+
+    def refresh_font(self):
+        f = QApplication.instance().font()
+        f.setPointSize(small_font_pt())
+        self.unselected_list.setFont(f)
+        self.selected_list.setFont(f)
 
     def refresh_lists(self):
         ui, data = self.ui, self.data
@@ -1137,19 +1146,16 @@ class PairSelectionPanel(QWidget, UndoRedo):
         grp_menu = QMenu("Group tag", menu)
         grp_menu.addAction("Create new group…",
                            lambda: CreateGroupDialog.show(ui.sel_data, self, widget))
-        regular = [g for g in sorted(self.ui.groups) if not is_special_group(g)]
-        special = [g for g in sorted(self.ui.groups) if is_special_group(g)]
-        all_groups = [(g, g) for g in regular] + [(g, g[len(_SPECIAL_PREFIX):]) for g in special]
-        if all_groups:
-            grp_menu.addSeparator()
-        for i, (gname, display) in enumerate(all_groups):
-            if i == len(regular) and special and regular:
-                grp_menu.addSeparator()
-            if pairs:
-                all_in = all(p2 in ui.groups.pairs_in_group(gname, s2)
-                             for p in pairs for s2, p2 in (ui.pair_sess_rt(p),))
-                grp_menu.addAction(f"{'✓ ' if all_in else '  '}{display}",
-                                   lambda g=gname, pp=pairs: self._toggle_pairs_group(pp, g))
+        if pairs:
+            def _checkmark(gname):
+                return all((k.ref, k.tgt) in ui.groups.pairs_in_group(gname, k.session)
+                           for p in pairs for k in (ui.key_for_pair(p),))
+            self.all_groups_dropdown(grp_menu, _checkmark,
+                                      lambda g, pp=pairs: self._toggle_pairs_group(pp, g))
+        grp_menu.addSeparator()
+        bm_menu = QMenu("Add bookmarked pairs to group", grp_menu)
+        self.all_groups_dropdown(bm_menu, lambda g: False, self._add_bookmarked_pairs_to_group)
+        grp_menu.addMenu(bm_menu)
         menu.addMenu(grp_menu)
 
         if pairs:
@@ -1166,8 +1172,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if n == 1:
             menu.addSeparator()
             p = pairs[0]
-            _, _rt = ui.pair_sess_rt(p)
-            has_tags = _rt in self.data.selections[ui.key].tags
+            _k = ui.key_for_pair(p)
+            has_tags = (_k.ref, _k.tgt) in self.data.selections[ui.key].tags
             def _open_pair_tags():
                 inds = ui.current_pair_inds
                 ref, tgt = int(inds[0]), int(inds[1])
@@ -1255,17 +1261,19 @@ class PairSelectionPanel(QWidget, UndoRedo):
                          scroll_save=(True, False))
 
     def _bookmark_toggle_current(self, event=None):
-        ui   = self.ui
-        inds = self._selected_pair_from_lists()
-        if inds is None:
+        ui = self.ui
+        pairs = self._selected_pairs_from_lists()
+        if not pairs:
             if ui.current_pair_idx >= len(ui.all_pairs_np):
                 return
             inds = self._pair_at_all_inds_idx(ui.current_pair_idx)
             if inds is None:
                 return
-        inds = bm_key(inds, ui.session_any_mode)
+            pairs = [inds]
         bm = ui.bookmarked_pairs
-        bm.discard(inds) if inds in bm else bm.add(inds)
+        for inds in pairs:
+            k = ui.key_for_pair(inds)
+            bm.discard(k) if k in bm else bm.add(k)
         self.refresh_lists()
 
     def _clear_bookmarks(self):
@@ -1277,14 +1285,14 @@ class PairSelectionPanel(QWidget, UndoRedo):
         bm = self.ui.bookmarked_pairs
         if not bm:
             return
-        any_mode = self.ui.session_any_mode
+        ui = self.ui
         for i, (raw, _) in enumerate(self.avail_list_pairs):
-            if not is_separator_row(raw) and bm_key(raw, any_mode) in bm:
+            if not is_separator_row(raw) and ui.key_for_pair(raw) in bm:
                 it = self.unselected_list.item(i)
                 it.setForeground(QBrush(_C_BM_FG))
                 it.setBackground(QBrush(_C_BM_BG))
         for i, entry in enumerate(self.sel_list_pairs):
-            if entry is not None and bm_key(entry, any_mode) in bm:
+            if entry is not None and ui.key_for_pair(entry) in bm:
                 it = self.selected_list.item(i)
                 it.setForeground(QBrush(_C_BM_FG))
                 it.setBackground(QBrush(_C_BM_BG))
@@ -1300,7 +1308,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
             inds = self.sel_list_pairs[self.selected_list.row(it)]
             if inds is not None:
                 result.append(inds)
-        return result or [current_pair]
+        out = result or [current_pair]
+        print(f"[tag-collect] any_mode={self.ui.session_any_mode} "
+              f"n_unsel_selected={len(self.unselected_list.selectedItems())} "
+              f"n_sel_selected={len(self.selected_list.selectedItems())} "
+              f"fell_back={not result} out={out}")
+        return out
 
     def _show_hotkeys_dialog(self):
         """Show a dialog listing all keyboard shortcuts."""
@@ -1351,14 +1364,37 @@ class PairSelectionPanel(QWidget, UndoRedo):
                     it.setBackground(QBrush())
                     it.setForeground(QBrush())
 
+    def all_groups_dropdown(self, parent_menu, checkmark, on_pick):
+        """Populate parent_menu with all groups; special groups nest under a 'Special' submenu."""
+        def _add_group_action(menu, gname, display):
+            all_in = checkmark(gname)
+            menu.addAction(f"{'✓ ' if all_in else '  '}{display}",
+                           lambda g=gname: on_pick(g))
+
+        regular = [g for g in sorted(self.ui.groups) if not is_special_group(g)]
+        special = [g for g in sorted(self.ui.groups) if is_special_group(g)]
+        for gname in regular:
+            _add_group_action(parent_menu, gname, gname)
+        if special:
+            special_menu = QMenu("Special", parent_menu)
+            for gname in special:
+                _add_group_action(special_menu, gname, gname[len(_SPECIAL_PREFIX):])
+            parent_menu.addMenu(special_menu)
+
+    def _add_bookmarked_pairs_to_group(self, group_name):
+        ui = self.ui
+        for k in ui.bookmarked_pairs:
+            ui.groups.add_to_group(group_name, k.session, (k.ref, k.tgt))
+        self.refresh_lists()
+
     def _toggle_pairs_group(self, pairs, group_name):
         ui = self.ui
-        all_in = all(p2 in ui.groups.pairs_in_group(group_name, s2)
-                     for p in pairs for s2, p2 in (ui.pair_sess_rt(p),))
+        all_in = all((k.ref, k.tgt) in ui.groups.pairs_in_group(group_name, k.session)
+                     for p in pairs for k in (ui.key_for_pair(p),))
         for p in pairs:
-            s2, p2 = ui.pair_sess_rt(p)
+            k = ui.key_for_pair(p)
             (ui.groups.discard_from_group if all_in else ui.groups.add_to_group)(
-                group_name, s2, p2)
+                group_name, k.session, (k.ref, k.tgt))
         unsel_frac, sel_frac = self._save_scroll_positions()
         self.refresh_lists()
         self._restore_scroll_positions(unsel_frac, sel_frac)

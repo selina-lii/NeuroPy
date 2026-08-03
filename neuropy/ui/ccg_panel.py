@@ -21,12 +21,27 @@ from neuropy.analyses.ms_connectivity import _CCG_RESOLUTION, Key
 from neuropy.plotting.ccg import (
     RenderContext, JitterOverlay, TitleConfig, PlotStyle,
     test_window_bin_mask, test_window_span_ms, render_ccg_png,
+    ACG_REF_COLOR, ACG_TGT_COLOR,
 )
-from neuropy.ui.ui_common import qt_dark_mode
-from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, SliderWithInput, has_primary_modifier
+from neuropy.ui.ui_common import qt_dark_mode, LRUCache
+from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, SliderWithInput, has_primary_modifier, small_font_pt
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
+
+pg.setConfigOptions(antialias=True)
+
+_LINE_W = 2   # pen width for every line-mode overlay (CCG, baseline, ACG, jitter, p-values)
+
+
+def _pen(color, style=None):
+    """Overlay pen at _LINE_W. Round cap/join keeps dashes even on horizontal runs."""
+    p = pg.mkPen(color, width=_LINE_W)
+    p.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    if style is not None:
+        p.setStyle(style)
+    return p
 
 _CHIP_STYLE = (
     "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
@@ -35,6 +50,7 @@ _CHIP_STYLE = (
     "QPushButton[active=true] { background: #4a7fd4; color: white; }"
     "QPushButton[active=true][sig=true] { background: #4CAF50; color: white; }"
     "QPushButton[stacked=true] { background: #7fb87f; color: white; }"
+    "QPushButton[selected=true] { border: 2px solid #4a7fd4; }"
 )
 
 
@@ -45,6 +61,7 @@ class SegmentBar(QWidget):
         super().__init__(parent)
         self.nav = nav
         self._chips: dict[int, QPushButton] = {}   # seg_idx → chip widget
+        self._selected: set[int] = set()            # multi-select, display-only
         self._build()
         nav.segment_changed.connect(self._refresh)
         nav.stacked_segments_changed.connect(self._refresh)
@@ -55,18 +72,21 @@ class SegmentBar(QWidget):
         nav.sig_threshold_changed.connect(self._on_pair_sig_changed)
         nav.cs_overlay_changed.connect(self._on_cs_overlay_changed)
 
+    def refresh_font(self):
+        self._seg_lbl.setStyleSheet(f"font-size: {small_font_pt()}pt;")
+
     def _build(self):
         root = QHBoxLayout(self)
         root.setContentsMargins(2, 2, 2, 2)
         root.setSpacing(3)
 
-        lbl = QLabel("Segments:")
-        lbl.setStyleSheet("font-size: 9pt;")
-        root.addWidget(lbl)
+        self._seg_lbl = QLabel("Segments:")
+        self._seg_lbl.setStyleSheet(f"font-size: {small_font_pt()}pt;")
+        root.addWidget(self._seg_lbl)
 
         self._chip_bar = ArrowChipBar(
-            self, on_left=lambda: self.nav_step(-1),
-            on_right=lambda: self.nav_step(+1))
+            self, on_left=lambda: self._nav_step(-1),
+            on_right=lambda: self._nav_step(+1))
         root.addWidget(self._chip_bar, stretch=1)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine)
@@ -86,6 +106,7 @@ class SegmentBar(QWidget):
     def rebuild(self):
         self._chip_bar.clear()
         self._chips.clear()
+        self._selected.clear()
         nav = self.nav
         labels = nav.segment_names()
         for i, name in enumerate(labels):
@@ -110,26 +131,35 @@ class SegmentBar(QWidget):
         self._chips[seg_idx] = btn
 
     def _on_chip_click(self, seg_idx: int):
-        # Primary modifier (Cmd on macOS, Ctrl elsewhere) toggles multi-stack; plain
-        # click sets the current segment.
         if has_primary_modifier(QtWidgets.QApplication.keyboardModifiers()):
-            self.nav.toggle_stacked_segment(seg_idx)
+            if seg_idx in self._selected:
+                self._selected.remove(seg_idx)
+            else:
+                self._selected.add(seg_idx)
+            self._refresh()
         else:
+            self.nav.clear_stacked_segments()   # a plain click is a single-segment view
             self.nav.set_current_segment(self.nav.segment_name(seg_idx))
 
     def _show_chip_menu(self, seg_idx: int, global_pos):
         nav = self.nav
         menu = QMenu(self)
-        menu.addAction("Set as current",
-                       lambda: nav.set_current_segment(nav.segment_name(seg_idx)))
-        is_stacked = seg_idx in nav.stacked_segments
-        menu.addAction("Unstack segment" if is_stacked else "Stack segment",
-                       lambda: nav.toggle_stacked_segment(seg_idx))
+        labels = ([nav.segment_name(i) for i in sorted(self._selected)]
+                  if self._selected else [nav.segment_name(seg_idx)])
+        is_stacked = all(l in nav.stacked_segments for l in labels)
+        verb = "Unstack" if is_stacked else "Stack"
+        menu.addAction(f"{verb} segment" + (f"s ({len(labels)})" if len(labels) > 1 else ""),
+                       lambda: self._stack_labels(labels))
         if nav.stacked_segments:
             menu.addSeparator()
+            menu.addAction("Transpose stacked", nav.toggle_stacked_transposed)
             menu.addAction(f"Clear stacked ({len(nav.stacked_segments)})",
                            nav.clear_stacked_segments)
         menu.exec(global_pos)
+
+    def _stack_labels(self, labels: list):
+        self._selected.clear()   # multi-select is transient: consumed by the stack action
+        self.nav.toggle_stacked_segments(labels)
 
     def _nav_step(self, step: int):
         """◀/▶ navigate to the prev/next segment (cyclic over All + real + custom)."""
@@ -142,15 +172,19 @@ class SegmentBar(QWidget):
 
     def _refresh(self, *_):
         nav = self.nav
+        if len(self._chips) != len(nav.segment_names()):  # lazy-load attached a segment
+            self.rebuild()
+            return
         active_idx = nav.segment_index(nav.current_segment)
         stacked = nav.stacked_segments
         inds = nav.current_pair_inds
         ref, tgt = (int(inds[0]), int(inds[1])) if inds is not None else (None, None)
         for idx, btn in self._chips.items():
-            is_stacked = idx in stacked
+            is_stacked = nav.segment_name(idx) in stacked
             sig = nav.is_significant(ref, tgt, idx) if ref is not None else False
             btn.setProperty("active",  idx == active_idx and not is_stacked)
             btn.setProperty("stacked", is_stacked)
+            btn.setProperty("selected", idx in self._selected)
             btn.setProperty("sig",     sig)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
@@ -296,7 +330,7 @@ class CorrelogramSection(CollapsibleSection):
 
     def _row2(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        self.autoscale_btn = chip_button("Autoscale", checkable=False)
+        self.autoscale_btn = chip_button("Autoscale", checkable=True)
         row.addWidget(self.autoscale_btn)
         for name in ("ref", "tgt"):
             w = self._scale_entry(name)
@@ -316,8 +350,8 @@ class CorrelogramSection(CollapsibleSection):
         self.extend_check = QCheckBox("Extend:")
         self._extend_ms_spin = self.make_spin((5, 10, 20, 50, 100, 200, 500, 1000), "50")
         self._extend_ms_spin.currentTextChanged.connect(lambda _: self.style_changed.emit())
-        _min_bin_ms = round(_CCG_RESOLUTION['highres'] * 1000, 4)
-        _bin_opts = sorted({_min_bin_ms, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0})
+        _min_bin_ms = _CCG_RESOLUTION['highres'] * 1000
+        _bin_opts = sorted({round(_min_bin_ms, 4), 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0})
         self._extend_bin_spin = self.make_spin(_bin_opts, "1.0")
         self._extend_bin_spin.currentTextChanged.connect(lambda _: self.style_changed.emit())
         for w in (self.extend_check, self._extend_ms_spin,
@@ -376,6 +410,9 @@ class BaselineCSSection(CollapsibleSection):
         nav.cs_params_changed.connect(self._on_cs_params_changed)
         self.baseline_changed.connect(lambda m: nav.set_cs_params(m, nav.cs_metric))
         self.metric_changed.connect(lambda m: nav.set_cs_params(nav.baseline_method, m))
+
+    def refresh_font(self):
+        self._explanation.setStyleSheet(f"color: #666; font-size: {small_font_pt()}pt;")
 
     def set_jitter_mgr(self, jctrl):
         self.jitter_mgr = jctrl
@@ -449,7 +486,7 @@ class BaselineCSSection(CollapsibleSection):
 
         # Explanation label (updates on baseline change)
         self._explanation = QLabel(_BASELINE_EXPLANATIONS['conv'])
-        self._explanation.setStyleSheet("color: #666; font-size: 8pt;")
+        self._explanation.setStyleSheet(f"color: #666; font-size: {small_font_pt()}pt;")
         self._explanation.setWordWrap(True)
         layout.addWidget(self._explanation)
 
@@ -489,6 +526,7 @@ class BaselineCSSection(CollapsibleSection):
             rb.setEnabled(enabled)
             if not enabled and rb.isChecked():
                 self._baseline_rbs['conv'].setChecked(True)
+                self._on_baseline_clicked(self._baseline_rbs['conv'])
 
     # baseline_method and cs_metric live in nav.baseline_method / nav.cs_metric
 
@@ -729,16 +767,17 @@ class CCGContextBuilder:
 
     @staticmethod
     def _resolve_data(nav, pair_key, hi_res_override):
-        """Return the CCGData object to render from."""
+        """Return (nd-key, CCGData) to render from; the key resolves segment labels."""
         nd = pair_key.nd()
         hi = nd.change(resolution='highres')
         lo = nd.change(resolution='lowres')
         if hi_res_override is True:
-            return nav.cd.ccg_for(hi) or nav.cd.ccg_for(lo)
+            return (hi, nav.cd.ccg_for(hi)) if nav.cd.ccg_for(hi) else (lo, nav.cd.ccg_for(lo))
         if hi_res_override is False:
-            return nav.cd.ccg_for(lo)
-        return (nav.cd.ccg_for(hi)
-                if nav.resolution in ("hi", "lo_hi") else nav.cd.ccg_for(lo))
+            return lo, nav.cd.ccg_for(lo)
+        if nav.resolution in ("hi", "lo_hi"):
+            return hi, nav.cd.ccg_for(hi)
+        return lo, nav.cd.ccg_for(lo)
 
     @staticmethod
     def _firing_rates(nav, seg_idx, ref, tgt):
@@ -772,8 +811,7 @@ class CCGContextBuilder:
         ccg_raw, null_raw, _pval, _pvc, _qval = slices
         metric = nav.cs_metric
         method = nav.baseline_method
-        cached = (jitter_mgr.get_result(ref, tgt, 'lo')
-                  if resolution == 'lowres' and jitter_mgr is not None else None)
+        cached = jitter_mgr.get_result(ref, tgt, 'lo' if resolution == 'lowres' else 'hi')
         j_avg = cached[0] if (metric == 'JBSI' and cached is not None) else None
         if method == 'jitter' and cached is not None:
             null_raw = cached[0]
@@ -819,15 +857,36 @@ class CCGContextBuilder:
         dur = conf.duration or 1.0
         return dur / (n_bins - 1) if n_bins > 1 else conf.bin_size
 
+    @classmethod
+    def _same_scale_ylim(cls, nav, panel, data, ref: int, tgt: int, neurons):
+        """(0, ymax) shared across a pair's segments, or across every pair in the session."""
+        mode = nav.same_scale_mode
+        if mode is None or data.ccg is None:
+            return None
+        ck = (mode, frozenset(nav.active_norms), nav.resolution, str(nav.key),
+              (ref, tgt) if mode == 'pair' else None)
+        hit = panel._same_scale_cache.get(ck)
+        if hit is None:
+            pairs = ([(ref, tgt)] if mode == 'pair'
+                     else [(int(r), int(t)) for r, t in nav.all_pairs_np])
+            top = max((float(np.nanmax(CCGNorm.apply(
+                          data.ccg[seg, r, t, :], None, r, t, nav.active_norms,
+                          neurons=neurons,
+                          custom_time_hours=cls._time_hours_for_seg(nav, seg))[0]))
+                       for r, t in pairs for seg in range(data.ccg.shape[0])), default=0.0)
+            hit = (0.0, top * 1.1) if top > 0 else (0.0, 1.0)
+            panel._same_scale_cache.put(ck, hit)
+        return hit
+
     # ── public entry points ────────────────────────────────────────────
 
     @classmethod
     def build_context(cls, nav, panel,
-                      seg_override=None, hi_res_override=None,
+                      seg_label=None, hi_res_override=None,
                       pair_override=None) -> 'RenderContext | None':
         """Build RenderContext for the current pair/segment.
 
-        seg_override:    force a specific segment index
+        seg_label:       segment to render; None = nav.current_segment
         hi_res_override: True=hi, False=lo, None=follow nav.resolution
         pair_override:   (pair_key, ref, tgt) to render a specific pair instead of the
                          current one — used to overlay "Show Together" pinned pairs.
@@ -839,15 +898,15 @@ class CCGContextBuilder:
             if nav.current_pair_inds is None:
                 return None
             ref, tgt, pair_key, sess_label = cls._resolve_pair(nav)
-        data = cls._resolve_data(nav, pair_key, hi_res_override)
+        data_key, data = cls._resolve_data(nav, pair_key, hi_res_override)
         if data is None:
             return None
 
-        arr = data.ccg
+        seg_label = seg_label or nav.current_segment
+        seg_idx = nav.cd.segment_index(data_key, seg_label)   # lazy-loads the label into this resolution
+        arr = data.ccg                                        # after load: dim0 may have grown
         if arr is None:
             return None
-
-        seg_idx = seg_override if seg_override is not None else nav.segment_index(nav.current_segment)
 
         cor  = panel.corr_section
         cs   = panel.cs_section
@@ -891,7 +950,7 @@ class CCGContextBuilder:
                                      custom_time_hours=_time_hrs)
 
         nt_ref, nt_tgt, sh_ref, sh_tgt = cls._neuron_meta(pair_neurons, ref, tgt)
-        seg_display = nav.segment_name(seg_override) if seg_override is not None else nav.current_segment
+        seg_display = seg_label
 
         return cls._make_context(
             ccg=ccg, bsz=bsz, dur=dur, conf=conf, nav=nav,
@@ -902,14 +961,16 @@ class CCGContextBuilder:
             nt_ref=nt_ref, nt_tgt=nt_tgt, sh_ref=sh_ref, sh_tgt=sh_tgt,
             show_tw=show_tw, cor=cor, cs_overlay=nav.cs_overlay_active,
             is_significant=nav.is_significant(ref, tgt, seg_idx),
+            ylim_override=cls._same_scale_ylim(nav, panel, data, ref, tgt, pair_neurons),
             cs_annotation_lines=(cls._cs_annotation_lines(nav, cs, ref, tgt, seg_idx)
                                  if nav.cs_overlay_active else []),
         )
 
     @classmethod
-    def build_extend_context(cls, nav, panel) -> 'RenderContext | None':
+    def build_extend_context(cls, nav, panel, seg_label=None) -> 'RenderContext | None':
         """Recompute CCG at user-specified window + bin size (extend mode).
 
+        seg_label: segment to extend; None = nav.current_segment.
         Result is cached by (key, ref, tgt, seg, extend_ms, bin_ms).
         """
         cor = panel.corr_section
@@ -923,33 +984,35 @@ class CCGContextBuilder:
             return None
 
         extend_ms     = max(5, cor.extend_ms)
-        min_bin_ms    = round(_CCG_RESOLUTION['highres'] * 1000, 4)
+        min_bin_ms    = _CCG_RESOLUTION['highres'] * 1000
         extend_bin_ms = max(cor.extend_bin_ms, min_bin_ms)
         dur, bs       = extend_ms / 1000.0, extend_bin_ms / 1000.0
 
-        seg_label = nav.current_segment
-        cache_key = (str(view), extend_ms, extend_bin_ms)
-        if cache_key in panel._extend_cache:
-            return panel._extend_cache[cache_key]
+        seg_label = seg_label or nav.current_segment
+        cache_key = (str(view), seg_label, extend_ms, extend_bin_ms,
+                     frozenset(nav.active_norms))
+        hit = panel._extend_cache.get(cache_key)
+        if hit is not None:
+            return hit
 
         if nav.neurons is None:
             return None
         conf = (nav.ccg_data.conf if nav.ccg_data is not None else nav.cd.conf)
-        ccg_slice = cls._compute_extend_ccg(nav, ref, tgt, dur, bs, conf)
+        ccg_slice = cls._compute_extend_ccg(nav, ref, tgt, dur, bs, conf, seg_label)
         if ccg_slice is None:
             return None
         ccg_slice, _ = CCGNorm.apply(ccg_slice, None, ref, tgt,
                                      nav.active_norms - {NormalizeBy.BASELINE},
                                      neurons=nav.neurons,
                                      custom_time_hours=cls._time_hours_for_seg(
-                                         nav, nav.segment_index(nav.current_segment)))
+                                         nav, nav.segment_index(seg_label)))
 
-        bsz  = cls._bin_size(conf, len(ccg_slice))
+        bsz  = dur / (len(ccg_slice) - 1) if len(ccg_slice) > 1 else bs
         dark = cls._dark_mode(panel)
         ctx = cls._make_context(
             ccg=ccg_slice, bsz=bsz, dur=dur, conf=conf, nav=nav,
             ref=ref, tgt=tgt,
-            seg_display=f'{seg_label} (extend {extend_ms}ms @ {extend_bin_ms}ms/bin)',
+            seg_display=f'{seg_label} (extend {extend_ms}ms @ {extend_bin_ms:.4f}ms/bin)',
             sess_label=str(nav.key.session or ''),
             jitter=JitterOverlay(), dark=dark,
             null=None, pval=None, pval_corrected=None,
@@ -958,7 +1021,7 @@ class CCGContextBuilder:
             show_tw=False, cor=cor, cs_overlay=False,
             is_significant=False,
         )
-        panel._extend_cache[cache_key] = ctx
+        panel._extend_cache.put(cache_key, ctx)
         return ctx
 
     # ── private builders ───────────────────────────────────────────────
@@ -970,13 +1033,15 @@ class CCGContextBuilder:
                        acg_ref, acg_tgt,
                        nt_ref, nt_tgt, sh_ref, sh_tgt,
                        show_tw, cor, cs_overlay, is_significant,
-                       cs_annotation_lines=None) -> RenderContext:
+                       cs_annotation_lines=None, ylim_override=None) -> RenderContext:
         min_lag = conf.min_lag if show_tw else None
         max_lag = conf.max_lag if show_tw else None
+        if null is not None:
+            null = ConnectionStrength.baseline(ccg, null, conf, nav.baseline_method)
         _ccg_top  = float(np.nanmax(ccg))  if len(ccg)  else 0.0
         _null_top = float(np.nanmax(null)) if null is not None and len(null) else 0.0
         _ylim_top = max(_ccg_top, _null_top) * 1.05
-        _ylim = (0.0, _ylim_top) if _ylim_top > 0 else None
+        _ylim = ylim_override or ((0.0, _ylim_top) if _ylim_top > 0 else None)
         return RenderContext(
             ccg=ccg, bin_size_eff=bsz, window_size_eff=dur,
             alpha=nav.active_sig_threshold, seg_id_display=seg_display,
@@ -996,7 +1061,6 @@ class CCGContextBuilder:
             acg_ref=acg_ref, acg_tgt=acg_tgt,
             # Waveforms: not yet wired — data not available in CCGData
             wf_peak_ms=None, wf_peak_amp=None,
-            # CS overlay: pass null as baseline when CS overlay is active
             cs_baseline_arg=null if (null is not None and cs_overlay) else None,
             norm_info=None,
             extend_on=cor.extend_check.isChecked(),
@@ -1037,13 +1101,12 @@ class CCGContextBuilder:
         return lines
 
     @staticmethod
-    def _compute_extend_ccg(nav, ref: int, tgt: int, dur: float, bs: float, conf):
+    def _compute_extend_ccg(nav, ref: int, tgt: int, dur: float, bs: float, conf, seg_label: str):
         """Recompute CCG for ref/tgt at given window/bin. Returns 1-D array or None."""
         neurons = nav.neurons
         neurons_sub = neurons.neuron_slice(neuron_inds=np.array([ref, tgt]))
         # An appended window carries its own extent (source config); 'full' spans the session.
-        label = nav.segment_name(nav.segment_index(nav.current_segment))
-        src = nav.cd.source_config(nav.key, label) if label else None
+        src = nav.cd.source_config(nav.key, seg_label) if seg_label else None
         kwargs  = dict(
             bin_size=bs, window_size=dur,
             symmetrize=conf.symmetrize_ccg,
@@ -1079,7 +1142,6 @@ class CCGPlotWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._last_ctxs: list | None = None
         self._resize_render_pending = False
         self._build()
 
@@ -1087,28 +1149,32 @@ class CCGPlotWidget(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # Container for N side-by-side PlotWidgets (horizontal scroll when stacked)
+        # Container of per-row HBoxes (rows stack vertically; each row scrolls
+        # horizontally if it holds multiple resolution/extend variants)
         self._plot_container = QWidget()
         self._plot_container.setMinimumHeight(self._MIN_PLOT_H)
-        self._plot_row = QHBoxLayout(self._plot_container)
-        self._plot_row.setContentsMargins(0, 0, 0, 0)
-        self._plot_row.setSpacing(2)
+        self._plot_grid = QVBoxLayout(self._plot_container)
+        self._plot_grid.setContentsMargins(0, 0, 0, 0)
+        self._plot_grid.setSpacing(2)
         self._plot_scroll = QScrollArea()
         self._plot_scroll.setWidgetResizable(True)
         self._plot_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._plot_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._plot_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._plot_scroll.setWidget(self._plot_container)
         outer.addWidget(self._plot_scroll, stretch=1)
 
-        self._plot_widgets: list = []   # list[pg.PlotWidget]
-        self._plots:        list = []   # list[pg.PlotItem]
-        self._pval_vbs:     list = []   # list[pg.ViewBox]
-        self._pval_items_per: list = [] # list[list]
+        self._row_layouts:  list = []   # list[QHBoxLayout], one per stacked row
+        self._plot_widgets: list = []   # list[pg.PlotWidget], flat
+        self._plots:        list = []   # list[pg.PlotItem], flat
+        self._pval_vbs:     list = []   # list[pg.ViewBox], flat
+        self._pval_items_per: list = [] # list[list], flat
+        self._acgs:         list = []   # list[[(vb, axis) ref, (vb, axis) tgt]], flat
 
-        self._rebuild_subplots(1)
+        self._last_rows: list | None = None
+        self._rebuild_subplots([1])
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1119,7 +1185,7 @@ class CCGPlotWidget(QWidget):
         self._schedule_resize_render()
 
     def _schedule_resize_render(self):
-        if self._last_ctxs is None:
+        if self._last_rows is None:
             return
         if self._resize_render_pending:
             return
@@ -1128,71 +1194,104 @@ class CCGPlotWidget(QWidget):
 
     def _render_after_resize(self):
         self._resize_render_pending = False
-        if self._last_ctxs is not None and self._plot_scroll.viewport().height() > 20:
-            self.render(self._last_ctxs)
+        if self._last_rows is not None and self._plot_scroll.viewport().height() > 20:
+            self.render(self._last_rows)
 
-    def _rebuild_subplots(self, n: int):
-        # Remove old widgets
+    def _rebuild_subplots(self, row_lengths: list):
+        # Remove old rows/widgets
         for pw in self._plot_widgets:
-            self._plot_row.removeWidget(pw)
             pw.setParent(None)
             pw.deleteLater()
+        for row_layout in self._row_layouts:
+            self._plot_grid.removeItem(row_layout)
+        self._row_layouts.clear()
         self._plot_widgets.clear()
         self._plots.clear()
         self._pval_vbs.clear()
         self._pval_items_per.clear()
+        self._acgs.clear()
 
-        for _ in range(n):
-            pw = pg.PlotWidget()
-            pw.setMinimumSize(280, self._MIN_PLOT_H)
-            pw.setBackground('w')
-            pw.showGrid(x=False, y=True, alpha=0.3)
-            pw.setMouseEnabled(x=False, y=False)
-            pw.getViewBox().setMouseEnabled(x=False, y=False)
-            pw.scene().sigMouseClicked.connect(self._on_mouse_click)
-            p = pw.getPlotItem()
-            vb = pg.ViewBox()
-            vb.setMouseEnabled(x=False, y=False)   # no pinch/wheel/drag zoom on p-val overlay
-            vb.setMenuEnabled(False)
-            pw.scene().addItem(vb)
-            _guard = [False]
-            def _sync_geom(vb=vb, p=p, g=_guard):
-                if g[0]: return
-                g[0] = True
-                try:    vb.setGeometry(p.vb.sceneBoundingRect())
-                finally: g[0] = False
-            p.vb.sigResized.connect(_sync_geom)
-            self._plot_row.addWidget(pw)
-            self._plot_widgets.append(pw)
-            self._plots.append(p)
-            self._pval_vbs.append(vb)
-            self._pval_items_per.append([])
+        for row_len in row_lengths:
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(2)
+            for _ in range(row_len):
+                pw = pg.PlotWidget()
+                pw.setMinimumSize(280, self._MIN_PLOT_H)
+                pw.setBackground('w')
+                pw.showGrid(x=False, y=True, alpha=0.3)
+                pw.setMouseEnabled(x=False, y=False)
+                pw.getViewBox().setMouseEnabled(x=False, y=False)
+                pw.scene().sigMouseClicked.connect(self._on_mouse_click)
+                p = pw.getPlotItem()
+                vb = pg.ViewBox()
+                vb.setMouseEnabled(x=False, y=False)   # no pinch/wheel/drag zoom on p-val overlay
+                vb.setMenuEnabled(False)
+                pw.scene().addItem(vb)
+                # ACG ref/tgt each get their own right-hand y-axis, stepped outward
+                acg = []
+                p.layout.setColumnMinimumWidth(3, 14)   # gap: keeps the outer axis clear of the inner label
+                for col, color, name in ((2, ACG_REF_COLOR, 'ACG ref'),
+                                         (4, ACG_TGT_COLOR, 'ACG tgt')):
+                    avb, ax = pg.ViewBox(), pg.AxisItem('right')
+                    avb.setMouseEnabled(x=False, y=False)
+                    avb.setMenuEnabled(False)
+                    avb.setXLink(p.vb)
+                    pw.scene().addItem(avb)
+                    ax.linkToView(avb)
+                    ax.setPen(pg.mkPen(color)); ax.setTextPen(pg.mkPen(color))
+                    ax.setLabel(name, color=color)
+                    p.layout.addItem(ax, 2, col); ax.hide()
+                    acg.append((avb, ax))
+                _guard = [False]
+                def _sync_geom(vb=vb, p=p, g=_guard, acg=acg):
+                    if g[0]: return
+                    g[0] = True
+                    try:
+                        rect = p.vb.sceneBoundingRect()
+                        for v in (vb, acg[0][0], acg[1][0]):
+                            v.setGeometry(rect)
+                    finally: g[0] = False
+                p.vb.sigResized.connect(_sync_geom)
+                row_layout.addWidget(pw)
+                self._plot_widgets.append(pw)
+                self._plots.append(p)
+                self._pval_vbs.append(vb)
+                self._pval_items_per.append([])
+                self._acgs.append(acg)
+            self._plot_grid.addLayout(row_layout)
+            self._row_layouts.append(row_layout)
 
     def _on_mouse_click(self, event):
         if event.button() == Qt.MouseButton.RightButton:
             self.context_menu_requested.emit(event.screenPos().toPoint())
 
-    def render(self, ctxs) -> None:
-        """Draw from a list of RenderContexts (one per subplot)."""
-        if not isinstance(ctxs, list):
-            ctxs = [ctxs]
-        self._last_ctxs = ctxs
-        valid = [c for c in ctxs if c is not None]
-        n = max(1, len(valid))
-        if len(self._plots) != n:
-            self._rebuild_subplots(n)
+    def render(self, rows) -> None:
+        """Draw from rows of RenderContexts: each row is a list of contexts laid
+        out side by side; rows themselves stack vertically."""
+        if rows and not isinstance(rows[0], list):
+            rows = [rows]
+        rows = [[c for c in row if c is not None] for row in rows]
+        rows = [row for row in rows if row]
+        self._last_rows = rows
+        row_lengths = [len(row) for row in rows] or [1]
+        if [rl.count() for rl in self._row_layouts] != row_lengths:
+            self._rebuild_subplots(row_lengths)
+        valid = [c for row in rows for c in row]
         dark = valid[0].dark_mode if valid else qt_dark_mode()
         plot_bg = '#1e1e1e' if dark else 'w'
         for pw in self._plot_widgets:
             pw.setBackground(plot_bg)
         for i, ctx in enumerate(valid):
             self._render_one(self._plots[i], self._pval_vbs[i],
-                             self._pval_items_per[i], ctx)
+                             self._pval_items_per[i], ctx, self._acgs[i])
         for i in range(len(valid), len(self._plots)):
-            self._plots[i].clear()
+            self._render_one(self._plots[i], self._pval_vbs[i],
+                             self._pval_items_per[i], None, self._acgs[i])
         vp = self._plot_scroll.viewport()
-        plot_w = max(320 * len(self._plot_widgets), vp.width())
-        plot_h = max(self._MIN_PLOT_H, vp.height())
+        max_row_len = max(row_lengths)
+        plot_w = max(320 * max_row_len, vp.width())
+        plot_h = max(self._MIN_PLOT_H * len(row_lengths), vp.height())
         self._plot_container.setMinimumSize(plot_w, plot_h)
 
     @staticmethod
@@ -1210,8 +1309,11 @@ class CCGPlotWidget(QWidget):
         except Exception:
             pass
 
-    def _render_one(self, p, pval_vb, pval_items, ctx) -> None:
+    def _render_one(self, p, pval_vb, pval_items, ctx, acg_axes) -> None:
         p.clear()
+        for avb, ax in acg_axes:
+            avb.clear()
+            ax.hide()
         if ctx is None:
             return
         self._apply_plot_chrome(p, ctx.dark_mode)
@@ -1230,7 +1332,7 @@ class CCGPlotWidget(QWidget):
             color = '#4a7fd4' if not ctx.dark_mode else '#7aafff'
             if ctx.line_ccg:
                 item = pg.PlotDataItem(x_edges, ccg, stepMode='center',
-                                       pen=pg.mkPen(color, width=1.5), fillLevel=None)
+                                       pen=_pen(color), fillLevel=None)
                 p.addItem(item)
             else:
                 p.addItem(pg.BarGraphItem(x=xs, height=ccg, width=width,
@@ -1242,8 +1344,7 @@ class CCGPlotWidget(QWidget):
             color = '#e88' if not ctx.dark_mode else '#cc6666'
             if ctx.line_baseline:
                 item = pg.PlotDataItem(x_edges[:len(null)+1], null, stepMode='center',
-                                       pen=pg.mkPen(color, width=1.5,
-                                                    style=Qt.PenStyle.DashLine))
+                                       pen=_pen(color, Qt.PenStyle.DashLine))
                 p.addItem(item)
             else:
                 p.addItem(pg.BarGraphItem(x=xs[:len(null)], height=null,
@@ -1274,31 +1375,26 @@ class CCGPlotWidget(QWidget):
                 brush=pg.mkBrush(*tw_brush),
                 pen=pg.mkPen(None), movable=False))
 
-        # ACG ref
-        if ctx.acg_ref is not None:
-            acg_ref = np.asarray(ctx.acg_ref, dtype=float) * ctx.acg_yscale_ref
-            nr = len(acg_ref)
-            if ctx.line_ref:
-                ref_pen = '#cccccc' if ctx.dark_mode else '#333'
-                p.addItem(pg.PlotDataItem(x_edges[:nr+1], acg_ref, stepMode='center',
-                                          pen=pg.mkPen(ref_pen, width=1.2)))
+        # ACGs — each on its own right-hand axis so overlays stay readable
+        for (avb, ax), color, data, scale, as_line in (
+                (acg_axes[0], ACG_REF_COLOR, ctx.acg_ref, ctx.acg_yscale_ref, ctx.line_ref),
+                (acg_axes[1], ACG_TGT_COLOR, ctx.acg_tgt, ctx.acg_yscale_tgt, ctx.line_tgt)):
+            if data is None:
+                continue
+            a  = np.asarray(data, dtype=float)
+            na = len(a)
+            if as_line:
+                avb.addItem(pg.PlotDataItem(x_edges[:na+1], a, stepMode='center',
+                                            pen=_pen(color)))
             else:
-                ref_fill = '#666666' if ctx.dark_mode else '#aaa'
-                p.addItem(pg.BarGraphItem(x=xs[:nr], height=acg_ref,
-                                          width=width, brush=ref_fill, pen=None))
-
-        # ACG tgt
-        if ctx.acg_tgt is not None:
-            acg_tgt = np.asarray(ctx.acg_tgt, dtype=float) * ctx.acg_yscale_tgt
-            nt = len(acg_tgt)
-            if ctx.line_tgt:
-                tgt_pen = '#aaaaaa' if ctx.dark_mode else '#555'
-                p.addItem(pg.PlotDataItem(x_edges[:nt+1], acg_tgt, stepMode='center',
-                                          pen=pg.mkPen(tgt_pen, width=1.2)))
-            else:
-                tgt_fill = '#888888' if ctx.dark_mode else '#ccc'
-                p.addItem(pg.BarGraphItem(x=xs[:nt], height=acg_tgt,
-                                          width=width, brush=tgt_fill, pen=None))
+                avb.addItem(pg.BarGraphItem(x=xs[:na], height=a, width=width,
+                                            brush=pg.mkBrush(color + '66'), pen=None))
+            top = float(np.nanmax(a)) if na else 0.0
+            top = top * 1.1 if top > 0 else 1.0
+            avb.setYRange(0, top if ctx.acg_match_ccg else top / max(scale, 0.01),
+                          padding=0)
+            avb.setGeometry(p.vb.sceneBoundingRect())
+            ax.show()
 
         # Jitter overlay
         j = ctx.jitter
@@ -1311,13 +1407,11 @@ class CCGPlotWidget(QWidget):
                 p.addItem(pg.FillBetweenItem(lo_c, hi_c,
                                              brush=pg.mkBrush(180, 160, 210, 100)))
             p.plot(jx, j.j_ccg,
-                   pen=pg.mkPen('#9b59b6', width=1.5,
-                                style=(Qt.PenStyle.DashLine if ctx.line_jitter
-                                       else Qt.PenStyle.SolidLine)))
+                   pen=_pen('#9b59b6', (Qt.PenStyle.DashLine if ctx.line_jitter
+                                        else Qt.PenStyle.SolidLine)))
             if j.j_pval is not None:
                 p.plot(jx, j.j_pval,
-                       pen=pg.mkPen('#6c3483', width=1.0,
-                                    style=Qt.PenStyle.DotLine))
+                       pen=_pen('#6c3483', Qt.PenStyle.DotLine))
 
         # P-value lines on right axis
         for item in pval_items:
@@ -1331,20 +1425,18 @@ class CCGPlotWidget(QWidget):
             pval_vb.setYRange(0, 1, padding=0)
             if ctx.pval is not None:
                 c = pg.PlotDataItem(xs[:len(ctx.pval)], ctx.pval,
-                                    pen=pg.mkPen('#e74c3c', width=1.0))
+                                    pen=_pen('#e74c3c', Qt.PenStyle.DotLine))
                 pval_vb.addItem(c); pval_items.append(c)
             if ctx.pval_corrected is not None:
                 c = pg.PlotDataItem(xs[:len(ctx.pval_corrected)], ctx.pval_corrected,
-                                    pen=pg.mkPen('#922b21', width=1.0,
-                                                 style=Qt.PenStyle.DashLine))
+                                    pen=_pen('#922b21', Qt.PenStyle.DashLine))
                 pval_vb.addItem(c); pval_items.append(c)
             inf = pg.InfiniteLine(pos=ctx.alpha, angle=0,
-                                  pen=pg.mkPen('#e74c3c', width=0.8,
-                                               style=Qt.PenStyle.DotLine))
+                                  pen=_pen('#e74c3c', Qt.PenStyle.DotLine))
             pval_vb.addItem(inf); pval_items.append(inf)
 
         if ctx.ylim is not None:
-            p.setYRange(*ctx.ylim, padding=0)
+            p.setYRange(*ctx.ylim, padding=0.05)   # headroom so overlays aren't clipped at the top edge
         else:
             p.enableAutoRange(axis='xy', enable=True)
             p.autoRange()
@@ -1429,10 +1521,15 @@ class CorrelogramPanel(QWidget):
         super().__init__(parent)
         self.nav = nav
         self._theme_fn = None
-        self._extend_cache: dict = {}
+        self._extend_cache: LRUCache = LRUCache(8)
+        self._same_scale_cache: LRUCache = LRUCache(4)
         self._build()
         self._connect_nav()
         self._connect_sections()
+
+    def refresh_font(self):
+        self.seg_bar.refresh_font()
+        self.cs_section.refresh_font()
 
     def set_jitter_mgr(self, jctrl):
         self.jitter_mgr = jctrl
@@ -1534,29 +1631,27 @@ class CorrelogramPanel(QWidget):
     def request_render(self):
         nav = self.nav
         cor = self.corr_section
-        if nav.resolution == "lo_hi":
-            ctxs = [CCGContextBuilder.build_context(nav, self, hi_res_override=False),
-                    CCGContextBuilder.build_context(nav, self, hi_res_override=True)]
-        elif nav.stacked_segments:
-            ctxs = [CCGContextBuilder.build_context(nav, self, seg_override=i)
-                    for i in nav.stacked_segments]
-            ctxs.append(CCGContextBuilder.build_context(nav, self))
-        else:
-            ctxs = [CCGContextBuilder.build_context(nav, self)]
-        # "Show Together": overlay each pinned pair's CCG on top of the current view.
+        segs = list(nav.stacked_segments) or [nav.current_segment]
+        # Row axis = view kind (lo / hi / extend); column axis = segment. Transposed: swap.
+        builders = ([lambda s, hi=hi: CCGContextBuilder.build_context(nav, self, seg_label=s, hi_res_override=hi)
+                     for hi in ([False, True] if nav.resolution == "lo_hi" else [None])]
+                    + ([lambda s: CCGContextBuilder.build_extend_context(nav, self, seg_label=s)]
+                       if cor.extend_check.isChecked() else []))
+        rows = [[build(seg) for seg in segs] for build in builders]
+        if nav.stacked_transposed:
+            rows = [list(r) for r in zip(*rows)]
+        rows = [[c for c in row if c is not None] for row in rows]
+        # "Show Together": overlay each pinned pair's CCG on top of the current view, own row each.
         for entry in nav.together_pairs:
             pk, r, t = self._together_handle(entry)
             tctx = CCGContextBuilder.build_context(nav, self, pair_override=(pk, r, t))
             if tctx is not None:
-                ctxs.append(tctx)
-        if cor.extend_check.isChecked():
-            ext = CCGContextBuilder.build_extend_context(nav, self)
-            if ext is not None:
-                ctxs.append(ext)
-        if not any(c is not None for c in ctxs):
+                rows.append([tctx])
+        rows = [r for r in rows if r]
+        if not rows:
             print(f"[CCGPanel] RENDER FAILED: {self._render_fail_reason(nav)}",
                   flush=True)
-        self.plot_widget.render(ctxs)
+        self.plot_widget.render(rows)
         self.cs_section.update_display()
         if hasattr(self, '_wf_panel') and self._wf_panel.isVisible():
             if nav.current_pair_inds is not None:
@@ -1572,7 +1667,6 @@ class CorrelogramPanel(QWidget):
                     nav.sig_threshold_changed, nav.scale_mode_changed):
             sig.connect(lambda _: self.plot_update_requested.emit())
         nav.cs_params_changed.connect(lambda *_: self.plot_update_requested.emit())
-        nav.pair_changed.connect(lambda _: setattr(self, '_acg_autoscale_ymax', None))
         nav.pair_changed.connect(self._update_jitter_baseline_state)
         self.plot_update_requested.connect(self.request_render)
 
@@ -1583,7 +1677,7 @@ class CorrelogramPanel(QWidget):
         self.cs_section.sig_changed.connect(lambda: self.plot_update_requested.emit())
         self.corr_section.style_changed.connect(self.plot_update_requested)
         self.corr_section.ref_wf_btn.toggled.connect(self._wf_panel.setVisible)
-        self.corr_section.autoscale_btn.clicked.connect(self._on_autoscale_snap)
+        self.corr_section.autoscale_btn.toggled.connect(self.plot_update_requested)
         self.jitter_section.jitter_done.connect(self.request_render)
         self.sa_section.set_requested.connect(self._on_spike_attr_set)
         self.sa_section.enable_toggled.connect(self._on_spike_attr_enable)
@@ -1593,15 +1687,6 @@ class CorrelogramPanel(QWidget):
         has_jitter = (inds is not None and self.jitter_mgr is not None and
                       self.jitter_mgr.has_result(int(inds[0]), int(inds[1])))
         self.cs_section.set_jitter_baseline_enabled(has_jitter)
-
-    def _on_autoscale_snap(self):
-        ctx = CCGContextBuilder.build_context(self.nav, self)
-        if ctx is None or ctx.ccg is None:
-            return
-        import numpy as _np
-        ccg_max = float(_np.nanmax(_np.abs(ctx.ccg))) or 1.0
-        self._acg_autoscale_ymax = ccg_max
-        self.plot_update_requested.emit()
 
     def refresh_spike_attr_if_enabled(self):
         if not self.sa_section.is_enabled:

@@ -153,7 +153,10 @@ class ConnectionStrength:
 
     @staticmethod
     def jbsi_strength(ccg, fr_ref, fr_tgt, conf, *, j_avg, jscale=None):
-        """Summed JBSI over the test window (last bin axis; leading axes batched)."""
+        """Summed JBSI over the test window (last bin axis; leading axes batched).
+
+        j_avg is the jitter mean (Agmon 2012); callers pass the selected baseline
+        instead when no jitter result exists."""
         if jscale is None:
             jscale = float(JitterConfig(ccg=conf, njitter=1).jscale)
         jbsi = compute_jbsi(real_ccg=ccg, j_ccg_avg=j_avg, fr_ref=fr_ref, fr_tgt=fr_tgt,
@@ -170,16 +173,19 @@ class ConnectionStrength:
         """
         if len(ccg_raw) == 0:
             return None
+        method_eff = 'conv' if method == 'jitter' else method
+        ccg, ccg_null = CCGNorm.apply(
+            ccg_raw, null_raw, ref, tgt, active_norms,
+            neurons, custom_time_hours=custom_time_hours)
+        bl = ConnectionStrength.baseline(ccg, ccg_null, conf, method_eff)
         if metric == 'JBSI':
+            if j_avg is not None:   # same norm as the CCG it is subtracted from
+                j_avg, _ = CCGNorm.apply(j_avg, None, ref, tgt, active_norms,
+                                         neurons, custom_time_hours=custom_time_hours)
             cs_val = ConnectionStrength.jbsi_strength(
-                ccg_raw, fr_ref, fr_tgt, conf, j_avg=j_avg)
+                ccg, fr_ref, fr_tgt, conf,
+                j_avg=j_avg if j_avg is not None else bl)
         else:
-            method_eff = 'conv' if method == 'jitter' else method
-            ccg, ccg_null = CCGNorm.apply(
-                ccg_raw, null_raw, ref, tgt,
-                active_norms - {NormalizeBy.BASELINE},
-                neurons, custom_time_hours=custom_time_hours)
-            bl = ConnectionStrength.baseline(ccg, ccg_null, conf, method_eff)
             cs_val = ConnectionStrength.conn_strength(ccg, bl, conf, excitability)
         if cs_val is not None and nonneg:
             cs_val = max(0.0, float(cs_val))

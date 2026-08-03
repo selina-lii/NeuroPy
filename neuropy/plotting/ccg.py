@@ -13,6 +13,9 @@ from matplotlib.figure import Figure
 
 import neuropy.plotting.probe as probe
 
+ACG_REF_COLOR = '#007434'
+ACG_TGT_COLOR = '#9638AB'
+
 
 def test_window_bin_mask(
     bins_ms: np.ndarray,
@@ -174,8 +177,8 @@ def plot_ccg_panel(
         # switches to step outline (steps-mid)
         _acg_axis_offset = 0.14  # start past p-value axis (at 1.0)
         for acg_data, acg_color, acg_label, acg_scale, acg_line in [
-            (acg_ref, '#007434', 'ACG ref', acg_yscale_ref, line_ref),
-            (acg_tgt, '#9638AB', 'ACG tgt', acg_yscale_tgt, line_tgt),
+            (acg_ref, ACG_REF_COLOR, 'ACG ref', acg_yscale_ref, line_ref),
+            (acg_tgt, ACG_TGT_COLOR, 'ACG tgt', acg_yscale_tgt, line_tgt),
         ]:
             if acg_data is None:
                 continue

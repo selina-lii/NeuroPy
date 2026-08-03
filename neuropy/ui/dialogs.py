@@ -22,7 +22,7 @@ from pyqtgraph.Qt.QtGui import QFont, QColor
 from neuropy.ui.ui_common import _SPECIAL_PREFIX
 from neuropy.analyses.neurons_dataset import Key
 
-from neuropy.ui.utils import SideNavPanel
+from neuropy.ui.utils import SideNavPanel, small_font_pt
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -546,7 +546,7 @@ class LoadSelectionDialog(QDialog):
         lay.addWidget(self._list)
 
         hint = QLabel("gray = backup/autosave  ⚠ = corrupted")
-        hint.setStyleSheet("color: #888; font-size: 10px;")
+        hint.setStyleSheet(f"color: #888; font-size: {small_font_pt()}pt;")
         lay.addWidget(hint)
 
         btn_row = QHBoxLayout()
@@ -672,15 +672,10 @@ class CustomCCGManageDialog(QDialog):
 
     def _scan_entries(self) -> list[dict]:
         """Appended-window segments on disk."""
-        entries = []
         cd = self._mgr._ui.nav.cd
-        for key in cd.saved_customs():
-            entries.append({
-                'name': str(key.segment),
-                'session': str(key.session),
-                'display': f"{key.session} · {key.segment}",
-            })
-        return entries
+        combos = sorted({(str(k.session), str(k.segment)) for k in cd.saved_customs()})
+        return [{'name': name, 'session': sess, 'display': f"{sess} · {name}"}
+                for sess, name in combos]
 
     def _build(self):
         lay = QVBoxLayout(self)

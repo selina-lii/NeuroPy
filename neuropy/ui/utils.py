@@ -191,7 +191,8 @@ def chip_button(label: str, checkable: bool = True, checked: bool = False,
     btn.setFlat(False)
     btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
     btn.setStyleSheet(
-        "QPushButton { border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; }"
+        f"QPushButton {{ border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; "
+        f"font-size: {regular_font_pt()}pt; }}"
         "QPushButton:checked { background: #4a7fd4; color: white; border-color: #3366cc; }"
         "QPushButton:hover { background: #dde; }"
     )
@@ -348,10 +349,13 @@ class SliderWithInput(QWidget):
     value_changed = Signal(float)
 
     def __init__(self, lo: int, hi: int, init: int, scale: float = 0.01,
-                 fmt: str = "{:.2f}", tracking: bool = False, parent=None):
+                 fmt: str = "{:.2f}", tracking: bool = False, min_value: float = 0.01,
+                 parent=None):
         super().__init__(parent)
         self._scale = scale
         self._fmt   = fmt
+        self._min   = min_value
+        self._value = init * scale   # typed input may exceed the slider's range
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(3)
@@ -370,33 +374,32 @@ class SliderWithInput(QWidget):
         lay.addWidget(self._input)
 
     def _on_slider(self, v: int):
-        self._input.setText(self._fmt.format(v * self._scale))
-        self.value_changed.emit(v * self._scale)
+        self._value = v * self._scale
+        self._input.setText(self._fmt.format(self._value))
+        self.value_changed.emit(self._value)
 
     def _on_input(self):
         try:
             v = float(self._input.text())
         except ValueError:
             return
-        raw = int(round(v / self._scale))
-        raw = max(self._slider.minimum(), min(self._slider.maximum(), raw))
-        self._slider.blockSignals(True)
-        self._slider.setValue(raw)
-        self._slider.blockSignals(False)
-        self._input.setText(self._fmt.format(raw * self._scale))
-        self.value_changed.emit(raw * self._scale)
+        self.set_value(v)
+        self.value_changed.emit(self._value)
 
     @property
     def value(self) -> float:
-        return self._slider.value() * self._scale
+        return self._value
 
     def set_value(self, v: float):
+        """Accepts values past the slider's upper range; the slider parks at its end."""
+        v = max(self._min, v)
+        self._value = v
         raw = int(round(v / self._scale))
         raw = max(self._slider.minimum(), min(self._slider.maximum(), raw))
         self._slider.blockSignals(True)
         self._slider.setValue(raw)
         self._slider.blockSignals(False)
-        self._input.setText(self._fmt.format(raw * self._scale))
+        self._input.setText(self._fmt.format(v))
 
 
 class ExclusiveButtonSet:
@@ -698,7 +701,19 @@ class ArrowChipBar(QWidget):
         self._sync_host_width()
 
 
-_UI_FS = 'font-size: 8pt;'
+def regular_font_pt() -> int:
+    """Body-text point size — the live app font (Settings > min font size)."""
+    app = QApplication.instance()
+    return app.font().pointSize() if app is not None else 12
+
+
+def small_font_pt() -> int:
+    """Small/caption-text point size, scaled off the live app font."""
+    return regular_font_pt() - 2
+
+
+def _UI_FS() -> str:
+    return f'font-size: {small_font_pt()}pt;'
 
 class CollapsibleSection(QWidget):
     """Base class for a titled collapsible panel. Subclasses add widgets to body_layout."""
@@ -718,7 +733,7 @@ class CollapsibleSection(QWidget):
         self._arrow_btn = QPushButton(('▾ ' if expanded else '▸ ') + title)
         self._arrow_btn.setFlat(True)
         self._arrow_btn.setStyleSheet(
-            f'font-weight: bold; {_UI_FS} text-align: left; border: none;')
+            f'font-weight: bold; font-size: {regular_font_pt()}pt; text-align: left; border: none;')
         hdr_lay.addWidget(self._arrow_btn)
         hdr_lay.addStretch()
         sec_lay.addWidget(hdr)
@@ -771,10 +786,10 @@ class GroupHotkeysBar(QWidget):
         root.setContentsMargins(4, 0, 4, 0)
         root.setSpacing(6)
         title = QLabel('Hotkeys')
-        title.setStyleSheet('font-size: 8pt; font-weight: bold;')
+        title.setStyleSheet(f'font-size: {small_font_pt()}pt; font-weight: bold;')
         root.addWidget(title)
         del_lbl = QLabel('Del/⌫: deleted')
-        del_lbl.setStyleSheet('color: #888; font-size: 8pt;')
+        del_lbl.setStyleSheet(f'color: #888; font-size: {small_font_pt()}pt;')
         root.addWidget(del_lbl)
         self._bar = ArrowChipBar(self, height=20)
         root.addWidget(self._bar, stretch=1)
@@ -798,7 +813,7 @@ class GroupHotkeysBar(QWidget):
             gname = hk_map[key_str]
             chip = QLabel(f'{key_str}: {gname}')
             chip.setStyleSheet(
-                f'font-size: 8pt; padding: 2px 4px; border: 1px solid {border}; '
+                f'font-size: {small_font_pt()}pt; padding: 2px 4px; border: 1px solid {border}; '
                 f'background: {bg}; color: {fg};')
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             def _select(_, g=gname):

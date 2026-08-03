@@ -8,10 +8,6 @@ Created 2026-07-27.
 - `jitter_ui`: drop `self.cd._jitter_results` / `hasattr` guards → use `self.jd`.
 - Current: jitter results not saved, silently dropped.
 
-## 2. Batch-request store (cd-owned)
-- Implement `cd.save_batch_request(req, kind)` / `list_batch_requests(kind)` / `delete_batch_request` (currently `raise NotImplementedError`).
-- suggest: curated ≤20. history: append-only jsonl. Store conf relpath for recovery.
-
 ## 3. Dissolve CustomCCGState
 - `load/save/update_suggestions` → delegate to cd batch-request store.
 - Remove local `suggested_custom_ccgs.json` ownership.
@@ -40,10 +36,10 @@ Created 2026-07-27.
 - Re-wire under `Modules > Simulation > New simulation…` (was top-level `Simulation` in the spec).
 - Spec: `neuropy/ui/CCGUI Display.md:258` — simulated-CCG area, Run / Export / Import simulation settings.
 
-## 9. Hotkey tag toggle: 1s lag
-- `refresh_lists` (pair_selection_panel.py:757) full-rebuilds both lists on every tag hotkey press.
-- Fix: in-place row relabel when no sel/unsel state transition and sort mode isn't group/tag-ordered; fall back to refresh_lists otherwise.
-- Started, reverted mid-edit — needs 1-line-comment, ≤10-line version, reuse `_make_pair_item`.
+## 10. Special group tags show raw __special_ prefix in row label
+- `pair_label` (ui_common.py:153) tags special group names verbatim, e.g. `[__special_Interesting]` not `[Interesting]`.
+- `ManageGroupsDialog` already strips it for tab display (`dialogs.py:156,171`) — reuse that pattern.
+- Fix: strip `_SPECIAL_PREFIX` when building the `[g]` tag string for names where `is_special_group(g)`.
 
 ## UI todos (next)
 - ~~Stats test segment not refreshing~~ DONE — picker now reads cd.available_segments (disk ccgdata).
