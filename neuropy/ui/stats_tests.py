@@ -319,7 +319,6 @@ class StatsPanelBackend:
         grp_names = cfg.groups or [ALL_PAIRS]
         dtype     = cfg.data_type
         m = METRICS[dtype]
-        print(m.source)
         merged: dict[Key, float] = {}
         used_sessions: set[str] = set()
         for grp_name in grp_names:
