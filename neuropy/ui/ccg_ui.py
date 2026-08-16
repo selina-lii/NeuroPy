@@ -30,6 +30,7 @@ from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
 from neuropy.analyses.ms_connectivity import CCGDataset, ProjectConfig, open_project
 from neuropy.ui.all_session_mode import AllSessionMode
+from neuropy.ui.classifier_ui import ClassifierDialog
 from neuropy.analyses.spike_attribution import compute_spike_pairs
 
 if TYPE_CHECKING:
@@ -199,6 +200,8 @@ class CCGReviewUI(QMainWindow):
         # A ProcessData project's sessions come from the caller and cannot be re-read from its
         # header, so keep each project's nd to switch back to it.
         self._nd_by_project = {self._project_dir: cd.nd}
+
+        self.prediction_store = None   # set by ClassifierDialog after a training run
 
         self.jitter_mgr = JitterManager(self.nav, cd)
         self.jitter_mgr.completed.connect(self._on_jitter_completed)
@@ -430,7 +433,7 @@ class CCGReviewUI(QMainWindow):
         self.stats_panel.raise_()
 
     def _run_classifier(self):
-        QMessageBox.information(self, "Classify", "Classifier not implemented yet.")
+        ClassifierDialog.show_for(self)
 
     def _apply_min_font_size(self, size: int) -> None:
         app = QApplication.instance()
