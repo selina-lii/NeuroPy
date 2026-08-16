@@ -15,10 +15,7 @@ ALPHA    = 0.05
 SESSION  = None          # None = restore last-used, or e.g. 'RatK_Day2'
 import subjects  # notebooks/subjects.py — must run from notebooks/
 from neuropy.io.datasets import bapun
-sess = subjects.nsd.allsess + subjects.sd.allsess
 # ----------------------------------------------------------------------------
-
-neurons, cd, sd = open_project(CONFIG, sess)   # test2 predates headers
 
 """
 Point Qt at PySide6's bundled plugins (a parent kernel can leave QT_* stale/empty).
@@ -35,6 +32,11 @@ if os.path.isdir(plugins):
 from pyqtgraph.Qt.QtWidgets import QApplication
 from neuropy.ui.ccg_ui import CCGReviewUI
 
-app = QApplication.instance() or QApplication([])
-CCGReviewUI.launch(cd, SESSION).raise_()
-app.exec()
+# Guard required: jitter spawns worker processes, and spawn re-imports __main__.
+# Without it every jitter task re-runs this file — reloading sessions and a second UI.
+if __name__ == '__main__':
+    sess = subjects.nsd.allsess + subjects.sd.allsess
+    neurons, cd, sd = open_project(CONFIG, sess)   # test2 has no scannable source
+    app = QApplication.instance() or QApplication([])
+    CCGReviewUI.launch(cd, SESSION).raise_()
+    app.exec()
