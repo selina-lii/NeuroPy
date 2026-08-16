@@ -594,7 +594,7 @@ class JitterResults:
         for nd_key, pairs in self.results.items():
             nd_str = str(nd_key)
             serializable[nd_str] = {}
-            for cache_key, (j_avg, j_pval, j_pval_bins) in pairs.items():
+            for cache_key, (j_avg, j_pval, j_pval_bins, j_lo, j_hi) in pairs.items():
                 ref, tgt, res_key = cache_key[0], cache_key[1], cache_key[2]
                 seg = cache_key[3] if len(cache_key) > 3 else None
                 k = f"{ref}_{tgt}_{res_key}" + (f"_s{seg}" if seg is not None else "")
@@ -606,6 +606,8 @@ class JitterResults:
                     'j_avg': np.asarray(j_avg, dtype=float),
                     'j_pval': np.float64(j_pval),
                     'j_pval_bins': np.asarray(j_pval_bins, dtype=float),
+                    'j_lo': np.asarray(j_lo, dtype=float),
+                    'j_hi': np.asarray(j_hi, dtype=float),
                 }
         hkl.dump(serializable, p)
         total = sum(len(v) for v in self.results.values())
@@ -639,7 +641,8 @@ class JitterResults:
                     seg = (None if (seg_raw is None or int(seg_raw) < 0)
                            else int(seg_raw))
                     self.results[mapped_key][(ref, tgt, res_key, seg)] = (
-                        v['j_avg'], float(v['j_pval']), v['j_pval_bins'])
+                        v['j_avg'], float(v['j_pval']), v['j_pval_bins'],
+                        v.get('j_lo'), v.get('j_hi'))   # absent in files saved before bounds
             loaded = (sum(len(v) for v in self.results.values())
                       if nd_key is None
                       else len(self.results.get(nd_key, {})))

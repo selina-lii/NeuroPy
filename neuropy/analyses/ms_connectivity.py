@@ -253,6 +253,11 @@ class ProjectConfig(JsonSavable):
         """How this dataset names a session; the file stem when it declares no rule."""
         return self.conventions.session_name if self.dataset else None
 
+    @property
+    def scannable(self) -> bool:
+        """True when the header alone can find its sessions; ProcessData projects cannot."""
+        return bool(self.source)
+
     def sessions(self) -> list:
         """This project's sessions, read and mapped as the header describes."""
         return NWBDataset(self.source, naming=self.naming).sessions(
@@ -278,6 +283,10 @@ def open_project(name: str, sessions: list = None):
     conf.load()
     nd_conf = NeuronsDatasetConfig(**(header.nd_conf or {}))
     if sessions is None:                       # scannable source -> stage 1 names them
+        if not header.scannable:
+            raise ValueError(
+                f"project {name!r} is {header.format}: it has no source to scan, "
+                "so open_project(name, sessions) must be given its sessions")
         neurons = NeuronsDataset(header.sessions(), nd_conf)
     else:                                      # caller-supplied (ProcessData) -> name them here
         neurons = NeuronsDataset(sessions, nd_conf, naming=header.naming)
@@ -1119,9 +1128,11 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """First ``Key`` matching ``query`` session; ``type_label`` pins conn type; ``strict=False`` returns None instead of raising."""
         if query is None:                             # only saved-restore passes None
             return None
+        live = {str(k.session) for k in self.nd.session_keys()}   # nd owns session identity
         if not (matches := [                          # '' matches every session → first key
                 k for k in self.ptr.keys()
-                if k.session and query.replace('_', '').replace(' ', '').lower()
+                if k.session and str(k.session) in live
+                and query.replace('_', '').replace(' ', '').lower()
                 in k.session.replace('_', '').replace(' ', '').lower()]):
             if strict:
                 raise KeyError(f"No CCG session matching {query!r}")

@@ -841,8 +841,8 @@ class CCGContextBuilder:
         res = jctrl.get_result(ref, tgt, res_key)
         if res is None:
             return JitterOverlay()
-        j_avg, j_pval, _j_bins = res
-        return JitterOverlay(j_ccg=j_avg, j_pval=j_pval)
+        j_avg, j_pval, _j_bins, j_lo, j_hi = res
+        return JitterOverlay(j_ccg=j_avg, j_pval=j_pval, j_ccg_lo=j_lo, j_ccg_hi=j_hi)
 
     @staticmethod
     def _bin_size(conf, n_bins: int) -> float:

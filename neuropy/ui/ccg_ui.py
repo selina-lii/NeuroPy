@@ -196,6 +196,9 @@ class CCGReviewUI(QMainWindow):
         self.nav = AppState(cd, key)
         self.nav.root = self
         self._project_dir = _Path(cd.save_path).name   # the combo's idea of where we are
+        # A ProcessData project's sessions come from the caller and cannot be re-read from its
+        # header, so keep each project's nd to switch back to it.
+        self._nd_by_project = {self._project_dir: cd.nd}
 
         self.jitter_mgr = JitterManager(self.nav, cd)
         self.jitter_mgr.completed.connect(self._on_jitter_completed)
@@ -341,10 +344,17 @@ class CCGReviewUI(QMainWindow):
 
     def _switch_project(self, project_dir: str):
         config_name = project_dir[len('project_'):]
-        if os.path.isfile(ProjectConfig(name=config_name).save_path() + '.json'):
+        header = ProjectConfig(name=config_name)
+        if os.path.isfile(header.save_path() + '.json'):
+            header.load()
+        # A ProcessData project (or a pre-header one) names no source to scan: its sessions came
+        # from the caller, so reuse the nd it was opened with — never the current project's.
+        if header.scannable:
             _neurons, cd, _sd = open_project(config_name)
-        else:   # predates headers -> keep the sessions already loaded
-            cd = CCGDataset(self.cd.conf.copy(name=config_name), self.cd.nd)
+        else:
+            nd = self._nd_by_project.get(project_dir, self.cd.nd)
+            cd = CCGDataset(self.cd.conf.copy(name=config_name), nd)
+            cd.load()
         self._adopt_project(cd)
         print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
               flush=True)
@@ -352,18 +362,24 @@ class CCGReviewUI(QMainWindow):
     def _adopt_project(self, new_cd: 'CCGDataset'):
         """Point every panel at *new_cd* and reload the current session through it."""
         self.nav.set_cd(new_cd)   # self.cd is a read-only property → nav.cd
+        self._project_dir = _Path(new_cd.save_path).name   # cd owns the path; combo reads this
+        self._nd_by_project[self._project_dir] = new_cd.nd
         self.jitter_mgr.cd = new_cd
         self.time_slider.cd = new_cd
-
-        self.nav.reset_selection_for_project(new_cd)
-        os.makedirs(new_cd.custom_dir, exist_ok=True)
 
         # a freshly built project has different sessions entirely -> fall back to its first;
         # nd keys come first because an uncomputed project has no ptr entries yet
         tk = (new_cd.find(str(self.nav.key.session), strict=False)
               or next(iter(self.nav.real_nd_keys()), None))
         if tk is not None:
+            self.nav.set_key(tk)   # before any refresh: the old key names no session in new_cd
+
+        self.nav.reset_selection_for_project(new_cd)
+        os.makedirs(new_cd.custom_dir, exist_ok=True)
+
+        if tk is not None:
             self._ensure_loaded(tk.nd(), 'lowres', lambda: self._switch_session(tk))
+        self.index_bar.populate_session_combo()   # the new project owns different sessions
         self.index_bar.sync()
 
         self.pairs_view._autoload_session_latest(restore_groups=True)

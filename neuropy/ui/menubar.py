@@ -39,13 +39,7 @@ class IndexBar:
 
         row.addWidget(QLabel("Session:"))
         self.session_combo = AddableDropdown('session', self.add_session, width=180)
-        self.session_combo.blockSignals(True)
-        self.session_combo.addItem("All sessions", _ALL_SESSION_MARKER)
-        self.session_combo.insertSeparator(1)
-        for nk in win.nav.real_nd_keys():
-            self.session_combo.addItem(win.nav.session_label(nk), nk)
-        self.session_combo.append_add_row()
-        self.session_combo.blockSignals(False)
+        self.populate_session_combo()
         self.session_combo.currentIndexChanged.connect(self._on_session_changed)
         row.addWidget(self.session_combo)
 
@@ -63,6 +57,18 @@ class IndexBar:
     def attach(self, root_layout):
         root_layout.addWidget(self.widget)
         self.sync()
+
+    def populate_session_combo(self):
+        """Fill the session list from the current project's dataset (call on project switch)."""
+        w = self._win
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        self.session_combo.addItem("All sessions", _ALL_SESSION_MARKER)
+        self.session_combo.insertSeparator(1)
+        for nk in w.nav.real_nd_keys():
+            self.session_combo.addItem(w.nav.session_label(nk), nk)
+        self.session_combo.append_add_row()
+        self.session_combo.blockSignals(False)
 
     def sync(self):
         """Align session/type combos with nav.key (nav is canonical context)."""
@@ -202,8 +208,7 @@ class IndexBar:
         if built is None:
             return
         _neurons, cd, _sd = built
-        w._project_dir = _Path(cd.save_path).name   # before adopting: panels refresh against it
-        w._adopt_project(cd)
+        w._adopt_project(cd)   # sets _project_dir from the new cd
         self.populate_project_combo()
 
     def add_session(self):
