@@ -1191,9 +1191,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             menu.addAction(f"{'✓ ' if has_tags else ''}Pair tags…", _open_pair_tags)
 
         menu.addSeparator()
-        for fmt in ('png', 'pdf'):
-            menu.addAction(f"Export view as {fmt.upper()}…",
-                           lambda f=fmt: ui._export_mgr._export_current_view(f))
+        menu.addAction("Export view…", ui.root.mainview._export_png)
 
         if ui.session_any_mode:
             all_names = ({g for g in ui.groups if not g.startswith('__')}
@@ -1622,7 +1620,7 @@ class PairSelectionPanelContainer(QWidget, Autosave):
             _after = {p: self.pair_selection._pair_state(p) for p in universe}
             self.pair_selection.push_undo(SelectionCommand(
                 {p: (_before[p], _after[p]) for p in universe if _before[p] != _after[p]}, []))
-            ui._post_load_refresh()
+            ui.root._post_load_refresh()
 
     def _list_selection_versions(self) -> list:
         """Return (name, path, saved_at, is_valid, is_history) tuples for the current
@@ -1691,12 +1689,11 @@ class PairSelectionPanelContainer(QWidget, Autosave):
         ui = self.ui
         ui.apply_sel_for_key(ui.key)
         ui.sd.save()
-        ui._settings_mgr.save_ui_state()
+        ui.root._save_ui_state()
 
     def _current_filter_state(self) -> dict:
-        ui = self.ui
-        toggles = ui.time_slider._ts_legend_toggles
+        ts = self.ui.root.time_slider
         return {
-            'theme': ui.time_slider._current_theme,
-            'labels': {str(lbl): bool(v.get()) for lbl, v in toggles.items()},
+            'theme': ts._current_theme,
+            'labels': {str(lbl): bool(v) for lbl, v in ts._legend_toggles.items()},
         }

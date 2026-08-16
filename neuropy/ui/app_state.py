@@ -225,7 +225,7 @@ class AppState(QObject):
         self.set_key(new_key)
         if load_selection is not None:
             load_selection()
-        self.apply_sel_for_key(new_key)
+        self.apply_sel_for_key(self.key)   # set_key types an nd-key; only that one finds a ptr
         if prev_seg in self.available_segments():
             self.set_current_segment(prev_seg)
         self.clamp_segment()
@@ -424,12 +424,11 @@ class AppState(QObject):
     def real_nd_keys(self) -> list:
         """Unique session nd-keys for the dataset, excluding _ALL_SESSION_MARKER.
 
-        Sourced from cd.nd (the loaded dataset) first so every session appears even before its
-        CCG is lazily generated; cd.ccg/cd.ptr add any extra keys.
+        cd.nd owns session identity: a session exists iff it has neurons. Pointers left on disk
+        under an old naming convention are stale data, not sessions — they have no Neurons.
         """
-        nd_keys = self.cd.nd.session_keys() if self.cd.nd is not None else []
         seen, keys = set(), []
-        for k in nd_keys + list(self.cd.ptr.keys()):
+        for k in self.cd.nd.session_keys():
             nd = k.nd()
             sess = str(nd.session)
             if sess not in seen:

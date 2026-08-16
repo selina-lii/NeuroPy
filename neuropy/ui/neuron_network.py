@@ -1789,7 +1789,7 @@ class NetworkPanel:
             if ui.cd.ptr.get(tk_) is not None
             and ui.cd.ptr.get(tk_).inds is not None)
         if not pair_exists:
-            ui._group_mgr._show_temp_warning(
+            ui.root._show_transient_banner(
                 f'Pair ({ref},{tgt}) not significant — showing position')
         self._focused_pair   = pair
         self._focused_neuron = None

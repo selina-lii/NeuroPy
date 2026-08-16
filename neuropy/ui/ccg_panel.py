@@ -1766,8 +1766,8 @@ class CorrelogramPanel(QWidget):
         ctx = CCGContextBuilder.build_context(self.nav, self)
         if ctx is None:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export PNG", "", "PNG files (*.png)")
+        path, _ = QFileDialog.getSaveFileName(   # savefig picks the format from the suffix
+            self, "Export view", "", "PNG files (*.png);;PDF files (*.pdf)")
         if not path:
             return
         try:

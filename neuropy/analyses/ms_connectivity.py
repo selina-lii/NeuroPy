@@ -1254,11 +1254,13 @@ class CCGDataset(AnalysisDataset, Cacheable):
         for p in self.ptr.values():
             if session is None or str(p.key.session) == str(session):
                 by_sess[p.key.session][str(p.key)] = p
+        n = 0
         for sess, bundle in by_sess.items():
             path = next(iter(bundle.values())).save_path() + '.hkl'
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             hkl.dump(bundle, path)
-        print(f"[CCGDataset] saved {len(self.ptr)} pointers in {len(by_sess)} session file(s)")
+            n += len(bundle)
+        print(f"[CCGDataset] saved {n} pointers in {len(by_sess)} session file(s)")
 
     def save(self, keys=None) -> None:
         """Save in-memory ``CCGData`` (all or ``keys``)."""

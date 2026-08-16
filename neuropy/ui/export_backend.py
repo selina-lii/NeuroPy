@@ -1,7 +1,11 @@
-"""ExportManager — CCG view export logic.
+"""ExportManager — batch CCG export logic. NOT WIRED: nothing constructs ExportManager.
 
-Ported from ccg_ui.py. References ui.* (AppState).
-ExportDialogQt (Qt dialog frontend) is a future TODO.
+Half-ported from the tkinter UI: still calls matplotlib (ui.fig/ui.canvas), a write_png/
+build_context signature that no longer exists, and AppState attrs that were removed
+(_render_engine, _current_inds, _custom_segments, bookmarked_pairs, _selected_pair*).
+Single-view export is live via CorrelogramPanel._export_png; the batch paths here
+(group/session subfolders, per-pair naming) still need porting to CCGContextBuilder.
+build_context(nav, panel, seg_label, hi_res_override, pair_override) + render_ccg_png.
 """
 from __future__ import annotations
 import os
