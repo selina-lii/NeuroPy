@@ -303,7 +303,8 @@ class SelectionDataset(JsonSavable, Autosave):
         else:
             self.groups.__setstate__(groups_v)
         self.sessions = {}
-        for key_str, sd_v in state.get('sessions', {}).items():
+        stored = state.get('sessions', {})   # Key-keyed dicts serialize as [[key, value], ...]
+        for key_str, sd_v in (stored.items() if isinstance(stored, dict) else stored):
             nd = Key.from_str(key_str)
             sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
             if isinstance(sd_v, dict) and '__ref__' in sd_v:

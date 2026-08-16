@@ -76,6 +76,13 @@ class LRUCache(Generic[K, V]):
     def clear(self) -> None:
         self._cache.clear()
 
+    def resize(self, max_size: int) -> None:
+        if max_size < 1:
+            raise ValueError("max_size must be >= 1")
+        self._max_size = max_size
+        while len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
+
 
 def find_nearest(array, value):
     """https://stackoverflow.com/questions/2566412/find-nearest-value-in-numpy-array"""

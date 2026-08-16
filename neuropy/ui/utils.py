@@ -8,7 +8,8 @@ PairListWidget — QListWidget with tkinter-compat helpers and key forwarding.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import inspect
+from typing import Any, Callable, TYPE_CHECKING
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
@@ -21,8 +22,9 @@ from pyqtgraph.Qt.QtWidgets import (
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
-    QSplitter, QStackedWidget, QComboBox
+    QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog
 )
+
 from neuropy.ui.ui_common import qt_dark_mode
 
 if TYPE_CHECKING:
@@ -209,6 +211,81 @@ def make_combo(items: list[str], width: int, current: str = None) -> 'QComboBox'
     return cb
 
 
+class AddableDropdown(QComboBox):
+    """Dropdown whose last row is 'Add <name>…'; picking it calls on_add instead of selecting."""
+
+    ADD_MARKER = object()   # itemData marking the trailing Add row
+
+    def __init__(self, name: str, on_add: Callable[[], None] = None, width: int = None):
+        super().__init__()
+        self.name = name
+        self.on_add = on_add   # None -> no Add row (fixed enum, e.g. conn type)
+        self._prev_index = -1
+        if width:
+            self.setMinimumWidth(width)
+        self.currentIndexChanged.connect(self._on_current_index_changed)
+
+    def set_items(self, items: list, data: list = None) -> None:
+        """Replace all rows (optionally with per-row itemData) and re-append the Add row."""
+        self.clear()
+        for i, text in enumerate(items):
+            self.addItem(text, data[i] if data else None)
+        self.append_add_row()
+
+    def append_add_row(self) -> None:
+        """Separator + Add row at the end; only needed when not using set_items."""
+        if self.on_add is None:
+            return
+        self.insertSeparator(self.count())
+        self.addItem(f"＋ Add {self.name}…", self.ADD_MARKER)
+
+    def is_add_row(self, index: int) -> bool:
+        return index >= 0 and self.itemData(index) is self.ADD_MARKER
+
+    def _on_current_index_changed(self, index: int):
+        if not self.is_add_row(index):
+            self._prev_index = index
+            return
+        self.blockSignals(True)
+        self.setCurrentIndex(self._prev_index)
+        self.blockSignals(False)
+        self.on_add()
+
+
+class MetricInput(QWidget):
+    """Label + free-text number (suggestions autocomplete, don't restrict) + unit dropdown."""
+
+    def __init__(self, label: str, units: list, default: str = "0",
+                 suggestions: list = None, input_width: int = 50, unit_width: int = 55,
+                 parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        if label:
+            lay.addWidget(QLabel(label))
+        self.input = QLineEdit(default)
+        self.input.setFixedWidth(input_width)
+        self.input.setCompleter(QCompleter([str(s) for s in (suggestions or [])], self))
+        lay.addWidget(self.input)
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems([str(u) for u in units])
+        self.unit_combo.setFixedWidth(unit_width)
+        lay.addWidget(self.unit_combo)
+
+    def value(self) -> tuple:
+        """(number, unit); number is 0.0 when the box holds no valid float."""
+        try:
+            return float(self.input.text()), self.unit_combo.currentText()
+        except ValueError:
+            return 0.0, self.unit_combo.currentText()
+
+    def set_value(self, number, unit: str = None) -> None:
+        self.input.setText(str(number))
+        if unit is not None:
+            self.unit_combo.setCurrentText(unit)
+
+
 def make_button(text: str, slot, width: int = None) -> 'QPushButton':
     """QPushButton wired to slot, optionally fixed-width."""
     b = QPushButton(text)
@@ -223,13 +300,16 @@ class ListPickerButton(QPushButton):
     selection_changed = Signal(list)
 
     def __init__(self, title: str, items: list[str] = (), plural: str = "items",
-                 refresh_provider=None, parent=None):
+                 refresh_provider=None, select_all_when_empty: bool = True,
+                 add_name: str = None, parent=None):
         super().__init__(parent)
         self._title  = title
         self._plural = plural
         self._items: list[str] = list(items)
-        self._selected: list[str] = list(items)
+        self._select_all_when_empty = select_all_when_empty
+        self._selected: list[str] = list(items) if select_all_when_empty else []
         self._refresh_provider = refresh_provider   # callable → fresh item list, or None
+        self._add_name = add_name                   # non-None → dialog offers "Add <name>…"
         self._update_label()
         self.clicked.connect(self._open_dialog)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -237,12 +317,21 @@ class ListPickerButton(QPushButton):
     def set_items(self, items: list[str], keep_selection: bool = True):
         prev = set(self._selected) if keep_selection else set()
         self._items = list(items)
-        self._selected = [x for x in self._items if x in prev] or list(items)
+        self._selected = [x for x in self._items if x in prev]
+        if not self._selected and self._select_all_when_empty:
+            self._selected = list(items)
+        self._update_label()
+
+    def add_items(self, items: list[str]):
+        """Offer more choices alongside the ones already listed, keeping order."""
+        self._items += [x for x in items if x not in self._items]
         self._update_label()
 
     def set_selected(self, selected: list[str]):
         want = set(selected)
-        self._selected = [x for x in self._items if x in want] or list(self._items)
+        self._selected = [x for x in self._items if x in want]
+        if not self._selected and self._select_all_when_empty:
+            self._selected = list(self._items)
         self._update_label()
 
     @property
@@ -282,6 +371,16 @@ class ListPickerButton(QPushButton):
             refresh_btn = QPushButton("Refresh")
             refresh_btn.clicked.connect(_refresh)
             btns.addWidget(refresh_btn)
+        if self._add_name is not None:
+            def _add():
+                """Append a label the source didn't offer, pre-selected."""
+                text = QInputDialog.getText(dlg, f"Add {self._add_name}",
+                                            f"New {self._add_name}:")[0].strip()
+                if text and text not in self._items:
+                    self._items.append(text)
+                    _populate()
+                    lst.item(lst.count() - 1).setSelected(True)
+            btns.addWidget(make_button(f"Add {self._add_name}…", _add))
         btns.addStretch()
         apply_btn = QPushButton("Apply")
         cancel_btn = QPushButton("Cancel")
@@ -294,19 +393,135 @@ class ListPickerButton(QPushButton):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._selected = [lst.item(i).text()
                               for i in range(lst.count()) if lst.item(i).isSelected()]
-            if not self._selected:
+            if not self._selected and self._select_all_when_empty:
                 self._selected = list(self._items)
             self._update_label()
             self.selection_changed.emit(self._selected)
 
     def _update_label(self):
         n, total = len(self._selected), len(self._items)
-        if n == 0 or n == total:
+        if n == 0 and not self._select_all_when_empty:
+            self.setText(f"{self._title}: None")
+        elif n == 0 or n == total:
             self.setText(f"{self._title}: All")
         elif n == 1:
             self.setText(self._selected[0])
         else:
             self.setText(f"{self._title}: {n} {self._plural}")
+
+
+_UNIT_SEC = {'s': 1.0, 'ms': 1e-3}
+_BLANK = object()   # number box left empty -> omit the kwarg, let __init__'s default win
+
+
+def _make_multi(choices, default, name):
+    """None choices mean the source scan fills this row, so the user may also add to it."""
+    picker = ListPickerButton('', choices or [], select_all_when_empty=False,
+                              add_name=None if choices else name.rstrip('s'))
+    picker.set_selected(default or [])
+    return picker
+
+
+def _make_choice(choices, default, name):
+    """Choices carry their real value as itemData, so non-str options survive the round trip."""
+    combo = QComboBox()
+    for c in choices:
+        combo.addItem('auto' if c is None else str(c), c)
+    combo.setCurrentIndex(max(0, choices.index(default) if default in choices else 0))
+    return combo
+
+
+def _make_bool(choices, default, name):
+    cb = QCheckBox()
+    cb.setChecked(bool(default))
+    return cb
+
+
+def _make_metric(units, default, name):
+    text = '' if default is None else str(default / _UNIT_SEC[units[0]])
+    return MetricInput('', units, default=text, input_width=70)
+
+
+def _make_number(choices, default, name):
+    edit = QLineEdit('' if default is None else str(default))
+    edit.setFixedWidth(70)
+    return edit
+
+
+def _read_metric(w):
+    if not w.input.text().strip():
+        return _BLANK
+    number, unit = w.value()
+    return number * _UNIT_SEC[unit]
+
+
+def _read_number(w, cast):
+    return cast(w.text()) if w.text().strip() else _BLANK
+
+
+# _options kind -> (build the editor, read it back)
+_OPTION_KINDS = {
+    'multi':  (_make_multi,   lambda w: w.selected),
+    'choice': (_make_choice,  lambda w: w.currentData()),
+    'bool':   (_make_bool,    lambda w: w.isChecked()),
+    'metric': (_make_metric,  _read_metric),
+    'int':    (_make_number,  lambda w: _read_number(w, int)),
+    'float':  (_make_number,  lambda w: _read_number(w, float)),
+}
+
+
+class ConfigOptionsWidget(QGroupBox):
+    """Form built from a Config subclass's _options; values() feeds its constructor."""
+
+    def __init__(self, conf_cls, title: str = None, parent=None):
+        super().__init__(title or conf_cls.__name__, parent)
+        self.conf_cls = conf_cls
+        self._rows = {}     # init-param name -> (reader, widget)
+        defaults = {n: p.default for n, p
+                    in inspect.signature(conf_cls.__init__).parameters.items()}
+        form = QVBoxLayout(self)
+        form.setSpacing(3)
+        for name, (kind, choices) in conf_cls._options.items():
+            make, read = _OPTION_KINDS[kind]
+            w = make(choices, defaults.get(name), name)
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{name}:"))
+            row.addWidget(w)
+            row.addStretch()
+            form.addLayout(row)
+            self._rows[name] = (read, w)
+
+    def add_row(self, label: str, widget: QWidget) -> None:
+        """Append a caller-built row — for a setting the config exposes no _options entry for."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"{label}:"))
+        row.addWidget(widget)
+        row.addStretch()
+        self.layout().addLayout(row)
+
+    def set_choices(self, name: str, choices: list) -> None:
+        """Feed a discovered row the labels a source scan found."""
+        self._rows[name][1].set_items(choices)
+
+    def set_value(self, name: str, value) -> None:
+        """Put a stored value back into its row — the inverse of values()."""
+        w = self._rows[name][1]
+        if isinstance(w, ListPickerButton):
+            w.add_items(value or [])   # a stored choice the scan didn't offer is still valid
+            w.set_selected(value or [])
+        elif isinstance(w, QComboBox):
+            w.setCurrentIndex(max(0, w.findData(value)))
+        elif isinstance(w, QCheckBox):
+            w.setChecked(bool(value))
+        elif isinstance(w, MetricInput):
+            w.set_value(value / _UNIT_SEC[w.unit_combo.currentText()])
+        else:
+            w.setText('' if value is None else str(value))
+
+    def values(self) -> dict:
+        """Kwargs for conf_cls(**values()); a blank number box falls back to the default."""
+        vals = ((name, read(w)) for name, (read, w) in self._rows.items())
+        return {name: v for name, v in vals if v is not _BLANK}
 
 
 class ResultsDialog(QDialog):
@@ -338,6 +553,45 @@ class ResultsDialog(QDialog):
     @classmethod
     def show_report(cls, title: str, body: str, parent=None) -> None:
         cls(title, body, parent).exec()
+
+
+class ValueMapEditor(QDialog):
+    """Build a {source value: target value} dict for whoever applies it downstream."""
+
+    def __init__(self, title: str, values: list, targets: list, current: dict = None,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        current = current or {}
+        self._rows = {}
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Blank keeps a value as it is."))
+        for value in values:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(value), stretch=1)
+            combo = make_combo([''] + list(targets), 120,
+                               current.get(value, value if value in targets else ''))
+            row.addWidget(combo)
+            lay.addLayout(row)
+            self._rows[value] = combo
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    @property
+    def value_map(self) -> dict:
+        """Only the values that change — an unlisted one is left alone by whoever applies this."""
+        return {v: c.currentText() for v, c in self._rows.items()
+                if c.currentText() and c.currentText() != v}
+
+    @classmethod
+    def edit(cls, title: str, values: list, targets: list, current: dict = None,
+             parent=None) -> dict | None:
+        """Run the editor; the new map, or None if cancelled."""
+        dlg = cls(title, values, targets, current, parent)
+        return dlg.value_map if dlg.exec() == QDialog.DialogCode.Accepted else None
 
 
 class SliderWithInput(QWidget):
@@ -583,8 +837,6 @@ class FlowLayout(QtWidgets.QLayout):
         return y + row_h - rect.y()
 
 
-
-
 class SideNavPanel(QWidget):
     """Sidebar-nav shell — shared by the Settings dialog and Manage Groups.
 
@@ -627,8 +879,6 @@ class SideNavPanel(QWidget):
 
     def count(self) -> int:
         return self.stack.count()
-
-
 
 
 class ArrowChipBar(QWidget):
@@ -834,3 +1084,33 @@ class GroupHotkeysBar(QWidget):
             chip.mouseDoubleClickEvent = _dbl
             chips.append(chip)
         self._bar.set_widgets(chips)
+
+
+class Tunable:
+    """Descriptor: default value + on_change propagation to live consumers."""
+
+    def __init__(self, default, *, on_change: Callable[[Any, Any], None] | None = None):
+        self.default = default
+        self.on_change = on_change
+        self.name = None          # set by __set_name__
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return obj.__dict__.get(self.name, self.default)
+
+    def __set__(self, obj, value):
+        obj.__dict__[self.name] = value
+        if self.on_change is not None:
+            self.on_change(obj, value)
+
+    @staticmethod
+    def apply_defaults(obj) -> None:
+        """Materialize declared defaults into obj.__dict__ so they serialize."""
+        for klass in type(obj).__mro__:
+            for name, attr in vars(klass).items():
+                if isinstance(attr, Tunable):
+                    obj.__dict__.setdefault(name, attr.default)

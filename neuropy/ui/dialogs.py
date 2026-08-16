@@ -4,7 +4,9 @@ from __future__ import annotations
 import datetime
 import glob
 import os
+import pkgutil
 import shutil
+from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
 import numpy as np
@@ -16,13 +18,19 @@ from pyqtgraph.Qt.QtWidgets import (
     QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QListWidget, QListWidgetItem,
     QPushButton, QTabWidget, QWidget, QMessageBox, QMenu, QApplication,
     QScrollArea, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
-    QAbstractItemView, QFrame, QComboBox, QInputDialog,
+    QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
 from neuropy.ui.ui_common import _SPECIAL_PREFIX
-from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig, build_project
+from neuropy.analyses.neurons_dataset import Key, NeuronsDatasetConfig
+from neuropy.core.nwb_session import NWBDataset
+from neuropy.io import datasets
+from neuropy.io.fieldmap import FieldMap
+from neuropy.io.nwbio import NWB_DEFAULT, UNITS_SCHEMA, NWBFile
 
-from neuropy.ui.utils import SideNavPanel, small_font_pt
+from neuropy.ui.utils import (ConfigOptionsWidget, FlowLayout, MetricInput, SideNavPanel,
+                              ValueMapEditor, chip_button, make_button, small_font_pt)
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -1137,18 +1145,30 @@ class ExportOptionsDialog(QDialog):
 
 
 class SettingsTabs:
-    """West-tab settings pages (Display | Cache | Autosave) — reusable shell."""
+    """West-tab settings pages, reusable shell.
+    """
 
     def __init__(self, ui, nav: 'SideNavPanel'):
         self._ui = ui
         self.nav = nav
-        self._max_pairs_spin = None
-        self._font_spin = None
-        self._ccg_queue_spin = self._jitter_queue_spin = None
-        self._autosave_sel_cb = self._autosave_sel_spin = self._autosave_sel_unit = None
-        self._autosave_grp_cb = self._autosave_grp_spin = self._autosave_grp_unit = None
+        self._appliers: list = []
+        self._autosave_sel_cb = self._autosave_sel_metric = None
+        self._autosave_grp_cb = self._autosave_grp_metric = None
         self._save_ui_cb = None
         self._build()
+
+    def _spin_row(self, layout, label, obj, attr, lo, hi, on_live=None):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        spin = QSpinBox()
+        spin.setRange(lo, hi)
+        spin.setValue(getattr(obj, attr))
+        if on_live is not None:
+            spin.valueChanged.connect(on_live)
+        row.addWidget(spin)
+        layout.addLayout(row)
+        self._appliers.append(lambda: setattr(obj, attr, spin.value()))
+        return spin
 
     def _build(self):
         ui = self._ui
@@ -1157,41 +1177,19 @@ class SettingsTabs:
         disp = QWidget()
         dl = QVBoxLayout(disp)
         dl.setSpacing(8)
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Max pairs in 'Show Together':"))
-        self._max_pairs_spin = QSpinBox()
-        self._max_pairs_spin.setRange(2, 20)
-        self._max_pairs_spin.setValue(ui.nav.max_together_pairs)
-        row1.addWidget(self._max_pairs_spin)
-        dl.addLayout(row1)
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Minimum font size:"))
-        self._font_spin = QSpinBox()
-        self._font_spin.setRange(6, 32)
-        self._font_spin.setValue(ui.settings.min_font_size)
-        self._font_spin.valueChanged.connect(lambda v: ui._apply_min_font_size(v))
-        row2.addWidget(self._font_spin)
-        dl.addLayout(row2)
+        self._spin_row(dl, "Max pairs in 'Show Together':",
+                       ui.nav, 'max_together_pairs', 2, 20)
+        self._spin_row(dl, "Minimum font size:", ui.settings, 'min_font_size', 6, 32,
+                       on_live=lambda v: ui._apply_min_font_size(v))
         dl.addStretch()
         nav.add_page("Display", disp)
 
         cache = QWidget()
         cl = QVBoxLayout(cache)
         cl.setSpacing(8)
-        crow1 = QHBoxLayout()
-        crow1.addWidget(QLabel("Max CCG queue size:"))
-        self._ccg_queue_spin = QSpinBox()
-        self._ccg_queue_spin.setRange(1, 500)
-        self._ccg_queue_spin.setValue(ui.nav.max_ccg_queue)
-        crow1.addWidget(self._ccg_queue_spin)
-        cl.addLayout(crow1)
-        crow2 = QHBoxLayout()
-        crow2.addWidget(QLabel("Max jitter queue size:"))
-        self._jitter_queue_spin = QSpinBox()
-        self._jitter_queue_spin.setRange(1, 500)
-        self._jitter_queue_spin.setValue(ui.nav.max_jitter_queue)
-        crow2.addWidget(self._jitter_queue_spin)
-        cl.addLayout(crow2)
+        self._spin_row(cl, "Max CCG queue size:", ui.nav, 'max_ccg_queue', 1, 500)
+        self._spin_row(cl, "Max jitter queue size:", ui.nav, 'max_jitter_queue', 1, 500)
+        self._spin_row(cl, "Max jitter cache size:", ui.nav, 'max_jitter_cache', 1, 5000)
         cl.addStretch()
         nav.add_page("Cache", cache)
 
@@ -1204,20 +1202,14 @@ class SettingsTabs:
             s = ui.settings
             cb = QCheckBox(label)
             cb.setChecked(getattr(s, f'{attr_prefix}_on'))
-            spin = QSpinBox()
-            spin.setRange(1, 9999)
-            spin.setValue(getattr(s, f'{attr_prefix}_interval'))
-            spin.setFixedWidth(60)
-            unit = QComboBox()
-            unit.addItems(['min', 'hour', 'day'])
-            unit.setCurrentText(getattr(s, f'{attr_prefix}_unit'))
+            metric = MetricInput("", ['min', 'hour', 'day'],
+                                 suggestions=(1, 5, 10, 15, 30, 60), input_width=60)
+            metric.set_value(*getattr(s, f'{attr_prefix}_interval'))
             row.addWidget(cb)
-            row.addWidget(spin)
-            row.addWidget(unit)
+            row.addWidget(metric)
             row.addStretch()
             setattr(self, f'_{attr_prefix}_cb', cb)
-            setattr(self, f'_{attr_prefix}_spin', spin)
-            setattr(self, f'_{attr_prefix}_unit', unit)
+            setattr(self, f'_{attr_prefix}_metric', metric)
             al.addLayout(row)
 
         _interval_row("Autosave selections:", 'autosave_sel')
@@ -1235,21 +1227,14 @@ class SettingsTabs:
 
     def apply(self):
         ui = self._ui
-        ui.nav.max_together_pairs = self._max_pairs_spin.value()
-        ui.settings.min_font_size = self._font_spin.value()
+        for write in self._appliers:   # each Tunable write fans out via its on_change
+            write()
         ui._apply_min_font_size(ui.settings.min_font_size)
         ui.settings.autosave_sel_on = self._autosave_sel_cb.isChecked()
-        ui.settings.autosave_sel_interval = self._autosave_sel_spin.value()
-        ui.settings.autosave_sel_unit = self._autosave_sel_unit.currentText()
+        ui.settings.autosave_sel_interval = self._autosave_sel_metric.value()
         ui.settings.autosave_grp_on = self._autosave_grp_cb.isChecked()
-        ui.settings.autosave_grp_interval = self._autosave_grp_spin.value()
-        ui.settings.autosave_grp_unit = self._autosave_grp_unit.currentText()
+        ui.settings.autosave_grp_interval = self._autosave_grp_metric.value()
         ui.settings.save_ui_on_close = self._save_ui_cb.isChecked()
-        # Queue caps → nav + push onto the live background runners.
-        ui.nav.max_ccg_queue = self._ccg_queue_spin.value()
-        ui.nav.max_jitter_queue = self._jitter_queue_spin.value()
-        ui.custom_mgr.worker._runner._max_queue = ui.nav.max_ccg_queue
-        ui.jitter_mgr.jitter_worker._runner._max_queue = ui.nav.max_jitter_queue
 
     def _on_clear_autosave(self):
         ui = self._ui
@@ -1263,6 +1248,355 @@ class SettingsTabs:
                 pass
         QMessageBox.information(self.nav, "Clear autosaved data",
                                 f"Removed {removed} autosaved file(s).")
+
+
+class _TargetBox(QFrame):
+    """One schema field's slot: click to select it, holds the chips assigned to it."""
+
+    def __init__(self, field, on_click, on_unassign):
+        super().__init__()
+        self.field = field
+        self.columns: list[str] = []
+        self.value_map: dict = {}       # source value -> what the loader should see
+        self.needs_map = False          # assigned values don't say what the field wants yet
+        self._selected = False
+        self._on_unassign = on_unassign
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._flow = FlowLayout(self, spacing=3)
+        self.mousePressEvent = lambda _e: on_click(self)
+        self.set_selected(False)
+
+    def set_selected(self, on: bool):
+        self._selected = on
+        self.restyle()
+
+    def restyle(self):
+        """Blue while selected, amber while the assigned values still need a map."""
+        border = ('2px solid #4a7fd4' if self._selected
+                  else '2px solid #d99000' if self.needs_map else '1px solid #bbb')
+        self.setStyleSheet(f"QFrame {{ border: {border};"
+                           f" border-radius: 3px; min-height: 24px; }}")
+
+    def binding(self):
+        """What this box contributes to a mapping — the dict form only when values remap."""
+        return {'col': self.columns, 'map': self.value_map} if self.value_map else self.columns
+
+    def set_columns(self, columns: list):
+        """Replace the assigned columns and rebuild their chips."""
+        self.columns = list(columns)
+        self._flow.clear_widgets()
+        for col in self.columns:
+            chip = chip_button(f"{col} ✕", checkable=False)
+            chip.clicked.connect(lambda _c, x=col: self._on_unassign(self, x))
+            self._flow.addWidget(chip)
+            chip.show()
+        self.updateGeometry()
+
+
+class FieldMapWidget(QWidget):
+    """Edit a field map: source columns on the left, one target drop box per schema field."""
+
+    def __init__(self, field_map, available: list, column_values=None, parent=None):
+        super().__init__(parent)
+        self.field_map = field_map      # FieldMap being edited
+        self.available = available      # the dataset's real column names
+        self.column_values = column_values   # NWBDataset.column_values, once a source is scanned
+        self._boxes = {}                # field name -> _TargetBox
+        self._selected: _TargetBox = None
+        self._build()
+
+    def _build(self):
+        """Source list on the left, one drop box per schema field on the right."""
+        root = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Available columns"))
+        self._source_host = QWidget()
+        self._source_flow = FlowLayout(self._source_host, spacing=3)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(self._source_host)
+        left.addWidget(area)
+        root.addLayout(left, stretch=1)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Target fields  (* required)"))
+        for field in self.field_map.schema:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(field.name + (' *' if field.required else '')))
+            box = _TargetBox(field, self._on_target_box_click, self._on_unassign_chip)
+            box.setToolTip(field.note)
+            row.addWidget(box, stretch=1)
+            right.addLayout(row)
+            self._boxes[field.name] = box
+        right.addStretch()
+        root.addLayout(right, stretch=2)
+
+        self.set_available(self.available)
+        self.set_mapping(self.field_map.mapping)
+
+    def set_available(self, columns: list):
+        """Repopulate the source chips from a dataset's real column names."""
+        self.available = list(columns)
+        self._source_flow.clear_widgets()
+        for col in self.available:
+            chip = chip_button(col, checkable=True)
+            self._source_flow.addWidget(chip)
+            chip.show()
+        self._source_host.updateGeometry()
+
+    def set_mapping(self, mapping: dict):
+        """Fill the target boxes from a {"target": "input"} dict, value maps included."""
+        for name, box in self._boxes.items():
+            value = mapping.get(name)
+            if isinstance(value, dict):
+                value, box.value_map = value.get('cols', value.get('col')), value.get('map') or {}
+            else:
+                box.value_map = {}
+            cols = [] if value is None else ([value] if isinstance(value, str) else list(value))
+            box.set_columns([c for c in cols if c in self.available])
+            self._mark_unmapped(box)
+
+    def _checked_chips(self) -> list:
+        """Source chips currently ticked, in display order."""
+        return [self._source_flow.itemAt(i).widget()
+                for i in range(self._source_flow.count())
+                if self._source_flow.itemAt(i).widget().isChecked()]
+
+    def _on_target_box_click(self, box: '_TargetBox'):
+        """Select this box, then move any ticked source chips into it."""
+        if self._selected is not None:
+            self._selected.set_selected(False)
+        self._selected = box
+        box.set_selected(True)
+        picked = self._checked_chips()
+        if not picked and box.needs_map:
+            self._map_values(box)
+            return
+        if picked:
+            cols = [c.text() for c in picked]
+            box.set_columns(box.columns + cols if box.field.multi else cols[:1])
+            for chip in picked:
+                chip.setChecked(False)
+            self._mark_unmapped(box)
+            if box.needs_map:
+                self._map_values(box)
+
+    def _mark_unmapped(self, box: '_TargetBox'):
+        """Amber the box while no value reaches the field — unmapped ones are ignored, not wrong."""
+        if box.field.value_map and self.column_values and box.columns:
+            values = self.column_values(box.columns[0])
+            box.needs_map = not any(box.value_map.get(v, v) in box.field.values
+                                    for v in values)
+        box.restyle()
+
+    def _map_values(self, box: '_TargetBox'):
+        """Open the value editor for the assigned column."""
+        column = box.columns[0]
+        edited = ValueMapEditor.edit(f"Map {column}", self.column_values(column),
+                                     box.field.values, box.value_map, self)
+        if edited is not None:
+            box.value_map = edited
+        self._mark_unmapped(box)
+
+    def _on_unassign_chip(self, box: '_TargetBox', column: str):
+        box.set_columns([c for c in box.columns if c != column])
+        box.value_map = {}
+        self._mark_unmapped(box)
+
+    def mapping(self) -> dict:
+        """The {"target": "input"} dict this widget describes, value maps included."""
+        return {name: box.binding() for name, box in self._boxes.items() if box.columns}
+
+
+class AddProjectDialog(QDialog):
+    """Add a project: pick the source folder, map the fields its sessions share, load them."""
+
+    def __init__(self, nav: 'AppState', parent=None, draft: ProjectConfig = None):
+        super().__init__(parent)
+        self.nav = nav
+        self._out = None
+        self._dataset = None    # NWBDataset, set once a source folder is scanned
+        self.setWindowTitle("Add Project")
+        self._build()
+        if draft is not None:
+            self._restore_draft(draft)
+
+    def _build(self):
+        """Path row + FieldMapWidget + config options + Ok/Cancel."""
+        self.resize(760, 620)
+        lay = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Name:"))
+        self._name_edit = QLineEdit()
+        row.addWidget(self._name_edit, stretch=1)
+        row.addWidget(QLabel("Source:"))
+        self._path_edit = QLineEdit()
+        self._path_edit.setReadOnly(True)
+        row.addWidget(self._path_edit, stretch=2)
+        row.addWidget(make_button("Browse…", self._on_browse_btn))
+        row.addWidget(QLabel("Format:"))
+        self._format_combo = QComboBox()
+        self._format_combo.addItem("NWB", NWBDataset)
+        row.addWidget(self._format_combo)
+        self._dataset_name = None      # the io.datasets module a prefill came from, if any
+        row.addWidget(make_button("Prefill from dataset…", self._on_prefill_btn))
+        lay.addLayout(row)
+
+        self._map_widget = FieldMapWidget(FieldMap(UNITS_SCHEMA, {}, partial=True), [])
+        box = QGroupBox("Fields to load")
+        QVBoxLayout(box).addWidget(self._map_widget)
+
+        opts = QScrollArea()
+        opts.setWidgetResizable(True)
+        host = QWidget()
+        host_lay = QVBoxLayout(host)
+        self._nd_opts = ConfigOptionsWidget(NeuronsDatasetConfig, "Neurons")
+        self._nd_opts.add_row("sampling_rate", self._rate_row())   # how spike times are read
+        self._ccg_opts = ConfigOptionsWidget(CCGConfig, "CCG")
+        host_lay.addWidget(self._nd_opts)
+        host_lay.addWidget(self._ccg_opts)
+        opts.setWidget(host)
+
+        sash = QSplitter(Qt.Orientation.Vertical)   # drag to trade field map for options
+        sash.addWidget(box)
+        sash.addWidget(opts)
+        sash.setSizes([300, 300])
+        lay.addWidget(sash, stretch=1)
+
+        self._compute_check = QCheckBox("Compute CCGs after building")
+        lay.addWidget(self._compute_check)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Build project")
+        bb.accepted.connect(self._on_accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _on_browse_btn(self):
+        """Pick the project root (or one file), scan it, and refresh the field map widget."""
+        path = QFileDialog.getExistingDirectory(self, "Choose project root")
+        if not path:
+            return
+        if not self._name_edit.text().strip():
+            self._name_edit.setText(os.path.basename(os.path.normpath(path)))
+        self._scan_source(path)
+
+    def _scan_source(self, path: str, mapping: dict = None):
+        """Read every session's columns under *path*; *mapping* seeds the field map."""
+        scanner = self._format_combo.currentData()
+        self.setEnabled(False)
+        self._dataset = scanner(path, on_progress=self._on_scan_progress)
+        self.setEnabled(True)
+        n = len(self._dataset.files)
+        self._path_edit.setText(f"{path}   ({n} sessions, "
+                                f"{len(self._dataset.input_fields)} fields)")
+        self._map_widget.set_available(self._dataset.input_fields)
+        self._map_widget.column_values = self._dataset.column_values
+        self._map_widget.set_mapping(mapping or NWB_DEFAULT)
+        self._nd_opts.set_choices('themes', self._dataset.themes)
+
+    def _restore_draft(self, draft: ProjectConfig):
+        """Refill the dialog from a saved-but-unbuilt header so the build can be finished."""
+        self._name_edit.setText(draft.name)
+        self._format_combo.setCurrentText(draft.format)
+        self._dataset_name = draft.dataset
+        self._rate_edit.setText('' if draft.sampling_rate is None else str(draft.sampling_rate))
+        self._scan_source(draft.source, draft.fields)   # its own mapping, never a default
+        for name, value in (draft.nd_conf or {}).items():
+            self._nd_opts.set_value(name, value)
+
+    def _rate_row(self) -> QWidget:
+        """Sampling-rate box plus the button that recovers it from the spike times."""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._rate_edit = QLineEdit()
+        self._rate_edit.setFixedWidth(80)
+        self._rate_edit.setPlaceholderText("derived")
+        self._rate_edit.setToolTip("Clock the spike times quantize onto; blank derives per file")
+        row.addWidget(self._rate_edit)
+        row.addWidget(make_button("Derive", self._on_derive_rate_btn))
+        row.addStretch()
+        return w
+
+    def _on_derive_rate_btn(self):
+        """Recover the spike clock from the smallest gap between pooled spike times."""
+        if self._dataset is None:
+            QMessageBox.information(self, "Sampling rate", "Choose a source folder first.")
+            return
+        with NWBFile(self._dataset.files[0]) as f:
+            rate = f.sampling_rate
+        if rate is None:
+            QMessageBox.information(self, "Sampling rate",
+                                    "This session has too few spikes to derive a rate.")
+            return
+        self._rate_edit.setText(str(rate))
+
+    def _on_prefill_btn(self):
+        """Pick a known dataset and take its field map, value renames included."""
+        names = [m.name for m in pkgutil.iter_modules(datasets.__path__)]
+        name, ok = QInputDialog.getItem(self, "Prefill from dataset",
+                                        "Dataset conventions:", names, 0, False)
+        if ok and name:
+            self._dataset_name = name
+            self._map_widget.set_mapping(import_module(
+                f'neuropy.io.datasets.{name}').FIELDS)
+
+    def _on_scan_progress(self, i: int, total: int, path):
+        self._path_edit.setText(f"scanning {i + 1}/{total}  {path.name}")
+        QApplication.processEvents()
+
+    def _on_accept(self):
+        """Check the mapping against the schema, build the project, store it in _out."""
+        name = self._name_edit.text().strip()
+        if not name or self._dataset is None:
+            QMessageBox.information(self, "Add project",
+                                    "A project name and a source folder are both required.")
+            return
+        existing = ProjectConfig(name=name)
+        if os.path.isfile(existing.save_path() + '.json'):
+            existing.load()
+        if existing.built:   # a header with no build behind it is a failed attempt, not a project
+            QMessageBox.information(self, "Add project",
+                                    f"Project '{name}' already exists "
+                                    f"({existing.n_sessions} sessions, built {existing.built_at}).")
+            return
+        try:
+            field_map = FieldMap(UNITS_SCHEMA, self._map_widget.mapping())
+        except ValueError as e:
+            QMessageBox.information(self, "Fields to load", str(e))
+            return
+        sessions = self._dataset.sessions(field_map)
+        if not sessions:
+            QMessageBox.information(self, "Add project",
+                                    "No session supplies every required field.\n\n"
+                                    + self._dataset.report(field_map))
+            return
+        if QMessageBox.question(self, "Add project",
+                                self._dataset.report(field_map) + "\n\nBuild the project?"
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        header = ProjectConfig(name=name, source=str(self._dataset.path),
+                               format=self._format_combo.currentText(),
+                               dataset=self._dataset_name,
+                               fields=field_map.mapping,
+                               nd_conf=self._nd_opts.values(),
+                               sampling_rate=float(self._rate_edit.text() or 0) or None)
+        neurons, cd, sd = build_project(header, CCGConfig(name=name, **self._ccg_opts.values()),
+                                        compute=self._compute_check.isChecked())
+        self._out = (neurons, cd, sd)
+        self.accept()
+
+    @classmethod
+    def show(cls, nav, parent=None, draft: ProjectConfig = None):
+        """Run the dialog; returns the loaded project, or None if cancelled."""
+        dlg = cls(nav, parent, draft)
+        dlg.exec()
+        return dlg._out
 
 
 class SettingsDialog(QDialog):

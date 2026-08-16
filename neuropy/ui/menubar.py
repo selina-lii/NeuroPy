@@ -1,17 +1,21 @@
 """Top bar: project/session/type index + main menu."""
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
-from pyqtgraph.Qt.QtWidgets import QWidget, QHBoxLayout, QLabel, QComboBox
+from pyqtgraph.Qt.QtWidgets import QWidget, QHBoxLayout, QLabel
 from pyqtgraph.Qt.QtGui import QAction
 
 from pathlib import Path as _Path
 
+from neuropy.analyses.ms_connectivity import ProjectConfig
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.ui.app_state import _ALL_SESSION_MARKER
-from neuropy.ui.dialogs import CreateGroupDialog, ExportOptionsDialog, SettingsDialog
+from neuropy.ui.dialogs import (AddProjectDialog, CreateGroupDialog, ExportOptionsDialog,
+                                SettingsDialog)
 from neuropy.ui.jitter_ui import JitterQueueDialog
+from neuropy.ui.utils import AddableDropdown
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -28,28 +32,25 @@ class IndexBar:
         row.setSpacing(6)
 
         row.addWidget(QLabel("Project:"))
-        self.project_combo = QComboBox()
-        self.project_combo.setMinimumWidth(120)
-        self.project_combo.currentTextChanged.connect(self._on_project_changed)
+        self.project_combo = AddableDropdown('project', self.add_project, width=120)
+        self.project_combo.currentIndexChanged.connect(self._on_project_changed)
         row.addWidget(self.project_combo)
         self.populate_project_combo()
 
         row.addWidget(QLabel("Session:"))
-        self.session_combo = QComboBox()
-        self.session_combo.setMinimumWidth(180)
+        self.session_combo = AddableDropdown('session', self.add_session, width=180)
         self.session_combo.blockSignals(True)
         self.session_combo.addItem("All sessions", _ALL_SESSION_MARKER)
-        if hasattr(self.session_combo, 'insertSeparator'):
-            self.session_combo.insertSeparator(1)
+        self.session_combo.insertSeparator(1)
         for nk in win.nav.real_nd_keys():
             self.session_combo.addItem(win.nav.session_label(nk), nk)
+        self.session_combo.append_add_row()
         self.session_combo.blockSignals(False)
         self.session_combo.currentIndexChanged.connect(self._on_session_changed)
         row.addWidget(self.session_combo)
 
         row.addWidget(QLabel("Type:"))
-        self.type_combo = QComboBox()
-        self.type_combo.setMinimumWidth(120)
+        self.type_combo = AddableDropdown('type', width=120)   # fixed enum -> no Add row
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         row.addWidget(self.type_combo)
 
@@ -119,6 +120,14 @@ class IndexBar:
                 break
         self.type_combo.blockSignals(False)
 
+    @staticmethod
+    def _project_header(project_dir: str) -> 'ProjectConfig':
+        """The project's header; a draft one has never been built."""
+        header = ProjectConfig(name=project_dir[len('project_'):])
+        if os.path.isfile(header.save_path() + '.json'):
+            header.load()
+        return header
+
     def populate_project_combo(self):
         w = self._win
         root = _Path(str(w.nav.cd.data_root))
@@ -127,12 +136,12 @@ class IndexBar:
         current = getattr(w, '_project_dir', None)
         if current and current not in projects:
             projects = [current] + projects
+        headers = [self._project_header(p) for p in projects]
+        labels = [p if h.built else f"{p}  (draft)" for p, h in zip(projects, headers)]
         self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for p in projects:
-            self.project_combo.addItem(p)
+        self.project_combo.set_items(labels, data=projects)
         if current:
-            idx = self.project_combo.findText(current)
+            idx = self.project_combo.findData(current)
             if idx >= 0:
                 self.project_combo.setCurrentIndex(idx)
         self.project_combo.blockSignals(False)
@@ -175,11 +184,31 @@ class IndexBar:
                   f"(session={getattr(tk, 'session', '')})", flush=True)
             w._ensure_loaded(tk.nd(), 'lowres', lambda: w._switch_session(tk))
 
-    def _on_project_changed(self, project_dir: str):
+    def _on_project_changed(self, index: int):
+        """Switch to the picked project; a draft one reopens the builder instead."""
         w = self._win
-        if not project_dir or project_dir == getattr(w, '_project_dir', None):
+        project_dir = self.project_combo.itemData(index)   # the Add row carries no name
+        if not isinstance(project_dir, str) or project_dir == getattr(w, '_project_dir', None):
             return
-        w._switch_project(project_dir)
+        if self._project_header(project_dir).built:
+            w._switch_project(project_dir)
+        else:
+            self.add_project(self._project_header(project_dir))
+
+    def add_project(self, draft: 'ProjectConfig' = None):
+        """Build a project via AddProjectDialog — from scratch, or resuming a saved draft."""
+        w = self._win
+        built = AddProjectDialog.show(w.nav, parent=w, draft=draft)
+        if built is None:
+            return
+        _neurons, cd, _sd = built
+        w._project_dir = _Path(cd.save_path).name   # before adopting: panels refresh against it
+        w._adopt_project(cd)
+        self.populate_project_combo()
+
+    def add_session(self):
+        """Add a session to the current project's dataset and to the combo."""
+        pass
 
 
 class ReviewMenuBar:

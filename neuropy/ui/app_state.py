@@ -18,6 +18,7 @@ from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import _compact_json_str
 from neuropy.ui.ui_common import is_special_group
 from neuropy.ui.pair_selection_panel import SelectionDataset
+from neuropy.ui.utils import Tunable
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
@@ -60,7 +61,6 @@ class NavField:
         signal.emit(value)
 
 
-
 class AppState(QObject):
     """Cross-panel shared state.  Single write path via set_* methods.
     Signals fire only when the value actually changes.
@@ -98,6 +98,14 @@ class AppState(QObject):
     cs_metric            = NavField("cs_metric")
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
 
+    max_together_pairs = Tunable(5)
+    max_ccg_queue = Tunable(50, on_change=lambda nav, v: setattr(
+        nav.root.custom_mgr.worker._runner, '_max_queue', v))
+    max_jitter_queue = Tunable(50, on_change=lambda nav, v: setattr(
+        nav.root.jitter_mgr.jitter_worker._runner, '_max_queue', v))
+    max_jitter_cache = Tunable(500, on_change=lambda nav, v:
+                               nav.root.jitter_mgr.jitter_worker._cache.resize(v))
+
     def __init__(self, cd: 'CCGDataset', key: Key):
         super().__init__()
         self.cd = cd
@@ -118,9 +126,6 @@ class AppState(QObject):
         self._cs_overlay_active = False
         self.root = None  # set by CCGReviewUI after construction
         self.together_pairs: list = []
-        self.max_together_pairs: int = 5
-        self.max_ccg_queue: int = 50       # custom-CCG background queue cap (Settings ▸ Cache)
-        self.max_jitter_queue: int = 50    # jitter background queue cap (Settings ▸ Cache)
         self.bookmarked_pairs: set = set()
         self.any_expanded_group_tags: set = set()
 
@@ -202,6 +207,9 @@ class AppState(QObject):
         self.cd = cd
 
     def set_key(self, key: Key):
+        if key.conn_type is None:   # nd keys carry no type; every reader of nav.key needs one
+            excitability, conn_type = self.cd.conf.conn_types_labeled[0]
+            key = key.change(excitability=excitability, conn_type=conn_type)
         type(self).key.set(self, key, self.key_changed)
         self.themes_changed.emit(self.cd.nd.get_themes(key))
 

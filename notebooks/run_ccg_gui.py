@@ -6,7 +6,7 @@ Separate process so app.exec() never blocks a Jupyter kernel's heartbeat.
 from __future__ import annotations
 import os
 import PySide6
-from neuropy.analyses.project import load_project
+from neuropy.analyses.ms_connectivity import open_project
 
 # --- CONFIG (edit these) ----------------------------------------------------
 CONFIG   = 'test2'
@@ -14,10 +14,11 @@ DURATION = 20e-3
 ALPHA    = 0.05
 SESSION  = None          # None = restore last-used, or e.g. 'RatK_Day2'
 import subjects  # notebooks/subjects.py — must run from notebooks/
+from neuropy.io.datasets import bapun
 sess = subjects.nsd.allsess + subjects.sd.allsess
 # ----------------------------------------------------------------------------
 
-neurons, cd, sd = load_project(CONFIG, sess, duration=DURATION, alpha=ALPHA)
+neurons, cd, sd = open_project(CONFIG, sess)   # test2 predates headers
 
 """
 Point Qt at PySide6's bundled plugins (a parent kernel can leave QT_* stale/empty).

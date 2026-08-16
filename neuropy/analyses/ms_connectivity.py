@@ -1,3 +1,4 @@
+import datetime
 import glob
 import json
 import os
@@ -5,6 +6,7 @@ import copy
 import shutil
 import dataclasses
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path as _Path
 
 import numpy as np
@@ -23,7 +25,11 @@ except ImportError:
 import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import (_san_np, _hasvalue, Config, AnalysisDataset, JsonSavable,
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
-from neuropy.analyses.neurons_dataset import Key, NeuronsDataset
+from neuropy.analyses.neurons_dataset import Key, NeuronsDataset, NeuronsDatasetConfig
+from neuropy.analyses.pair_selection_data import SelectionDataset
+from neuropy.core.nwb_session import NWBDataset
+from neuropy.io.fieldmap import FieldMap
+from neuropy.io.nwbio import UNITS_SCHEMA
 from neuropy.analyses.ccg_transforms import (
     CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig)
 from neuropy.utils.data_storage_util import atomic_write_json
@@ -51,6 +57,23 @@ class CCGConfig(Config):
                 'conn_types', 'use_acceleration', 'symmetrize_ccg'],
         'derived': ['alpha', 'alpha2', 'min_lag', 'max_lag',
                     'min_spkcount', 'spkcnt_scope', 'multiple_correction'],
+    }
+
+    # "init param": ("kind", choices)  — what a builder UI exposes; defaults come from __init__
+    _options = {
+        'duration':            ('metric', ['ms', 's']),
+        'bin_size':            ('metric', ['ms', 's']),   # blank -> resolution preset
+        'resolution':          ('choice', ['lowres', 'highres']),
+        'conv_window':         ('metric', ['ms', 's']),
+        'alpha':               ('float', None),
+        'alpha2':              ('float', None),
+        'min_lag':             ('metric', ['ms', 's']),
+        'max_lag':             ('metric', ['ms', 's']),
+        'min_spkcount':        ('float', None),
+        'spkcount_scope':      ('metric', ['ms', 's']),
+        'multiple_correction': ('choice', ['bonferroni', 'fdr_bh']),
+        'use_acceleration':    ('choice', [None, True, False]),   # None -> auto-detect CuPy
+        'symmetrize_ccg':      ('bool', None),
     }
 
     def __init__(
@@ -173,12 +196,98 @@ class CCGConfig(Config):
                             f"{self.name}_{self.resolution}")
         return f"{base}_{suffix}" if suffix else base
 
+    def __setstate__(self, state: dict) -> None:
+        """JSON has no tuples, so conn types come back as lists — they must stay hashable."""
+        super().__setstate__(state)
+        self.conn_types = [(ei, tuple(ct)) for ei, ct in self.conn_types]
+
     def __str__(self):
         s = ""
         for key, val in self.__dict__.items():
             s += f"{key}: {val}\n"
         s += f"config file: {self.save_path()}\n"
         return s
+
+
+class ProjectConfig(JsonSavable):
+    """Where a project's sessions came from — header at ``project_<name>/project_plan.json``."""
+
+    def __init__(self, name: str = 'default', source: str = None, format: str = None,
+                 dataset: str = None, fields: dict = None, nd_conf: dict = None,
+                 sampling_rate: float = None, resolution: list = None,
+                 built_at: str = None, n_sessions: int = None, root: str = DATA_ROOT):
+        super().__init__()
+        self.name = name
+        self.source = source
+        self.format = format
+        self.dataset = dataset      # neuropy.io.datasets module supplying session_name + FIELDS
+        self.fields = fields
+        self.nd_conf = nd_conf      # NeuronsDatasetConfig kwargs this project was built with
+        self.sampling_rate = sampling_rate   # spike clock; derived per file when None
+        self.resolution = resolution
+        self.built_at = built_at    # set once the build succeeded; absent means it never finished
+        self.n_sessions = n_sessions
+        self._root = root
+
+    def save_path(self, **_) -> str:
+        return os.path.join(self._root, f"project_{self.name}", "project_plan")
+
+    @property
+    def built(self) -> bool:
+        """Whether a build ever ran to completion — a bare header is a failed attempt."""
+        return self.built_at is not None
+
+    def mark_built(self, n_sessions: int) -> None:
+        """Stamp the header now that the project loaded; call only after a build succeeds."""
+        self.built_at = datetime.datetime.now().isoformat(timespec='seconds')
+        self.n_sessions = n_sessions
+        self.save()
+
+    @property
+    def conventions(self):
+        """The dataset module — its session_name, FIELDS, and label lists."""
+        return import_module(f'neuropy.io.datasets.{self.dataset}')
+
+    @property
+    def naming(self):
+        """How this dataset names a session; the file stem when it declares no rule."""
+        return self.conventions.session_name if self.dataset else None
+
+    def sessions(self) -> list:
+        """This project's sessions, read and mapped as the header describes."""
+        return NWBDataset(self.source, naming=self.naming).sessions(
+            FieldMap(UNITS_SCHEMA, self.fields), sampling_rate=self.sampling_rate)
+
+
+def build_project(header: ProjectConfig, ccg_conf: CCGConfig, compute: bool = False):
+    """Create a project: record how to read it, open it, and stamp it once the run finished."""
+    header.save()
+    ccg_conf.save()
+    neurons, cd, sd = open_project(header.name)
+    if compute:
+        cd.get_ccg()
+    header.mark_built(len(neurons.session_keys()))
+    return neurons, cd, sd
+
+
+def open_project(name: str, sessions: list = None):
+    """Everything a project is, from its header; pre-header projects supply their own sessions."""
+    header = ProjectConfig(name=name)
+    header.load()
+    conf = CCGConfig(name=name)
+    conf.load()
+    nd_conf = NeuronsDatasetConfig(**(header.nd_conf or {}))
+    if sessions is None:                       # scannable source -> stage 1 names them
+        neurons = NeuronsDataset(header.sessions(), nd_conf)
+    else:                                      # caller-supplied (ProcessData) -> name them here
+        neurons = NeuronsDataset(sessions, nd_conf, naming=header.naming)
+    cd = CCGDataset(conf, neurons)
+    cd.missing_sessions()
+    cd.load()
+    sd = SelectionDataset(cd)
+    if os.path.isfile(sd.save_path() + '.json'):   # a project starts with nothing selected
+        sd.load()
+    return neurons, cd, sd
 
 
 @dataclass(eq=False)
@@ -644,9 +753,10 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """``nd`` sessions with no CCG pointers on disk; warns if any."""
         on_disk = {str(k.session) for k in self.ptr}
         missing = [name for s in self.nd._sessions
-                   if (name := self.nd._short_session_name(s)) not in on_disk]
+                   if (name := s.session_name) not in on_disk]
         if missing:
-            print(f"[CCGDataset] missing on disk: {missing}")
+            print(f"[CCGDataset] {len(missing)} of {len(self.nd._sessions)} sessions "
+                  f"have no CCGs computed yet: {missing}")
         return missing
 
     @property
@@ -1159,7 +1269,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def load(self, key: Key = None) -> str:
         """Load from disk; returns ``loaded`` | ``missing`` | ``stale``."""
         resolution = key.resolution if key is not None else 'lowres'
-        keys = [key] if key is not None else (self.nd.session_keys() if self.nd else [])
+        keys = [key] if key is not None else self.nd.session_keys()
         if not keys:
             return 'missing'
         loaded = 0

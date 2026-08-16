@@ -574,9 +574,6 @@ class AnalysisDataset(Savable):
         # self.data: Dict[K, Any] = {}
         self._conf = conf
 
-    def __len__(self):
-        return len(self.data)
-
     def example(self, field=None, i=None) -> Any:
         """Get an example from data or another field"""
         var = self.__dict__[field] if field else self.data

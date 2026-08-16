@@ -33,7 +33,8 @@ from neuropy.analyses.utils import JsonSavable, Savable
 from neuropy.core.intervals import IntervalOp as _SetOp
 from neuropy.ui.ui_common import BackgroundTaskRunner
 from neuropy.ui.utils import (
-    chip_button, CollapsibleSection, ListPickerButton, ResultsDialog, small_font_pt, regular_font_pt)
+    AddableDropdown, chip_button, CollapsibleSection, ListPickerButton, MetricInput,
+    ResultsDialog, small_font_pt, regular_font_pt)
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
@@ -47,7 +48,6 @@ _TS_COLORS = [
 _TS_NONE_COLOR = '#E0E0E0'
 
 _ALL_SEGS = "all"  # whole-session view == permanent dim0[0]='all' (must match ccg_ui._ALL_SEGS)
-_MAX_QUEUE = 50
 
 class EpochPlotWidget(pg.PlotWidget):
     """Epoch timeline and draggable timing cursors."""
@@ -397,8 +397,8 @@ class TimeSliderPanel(QWidget):
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Theme:"))
-        self._theme_combo = QComboBox()
-        self._theme_combo.addItem('segments')
+        self._theme_combo = AddableDropdown('theme', self.add_theme)
+        self._theme_combo.set_items(['segments'])
         self._theme_combo.setFixedWidth(140)
         self._theme_combo.currentTextChanged.connect(self._on_theme_change)
         row1.addWidget(self._theme_combo)
@@ -481,14 +481,10 @@ class TimeSliderPanel(QWidget):
         self._splits_spin = QSpinBox()
         self._splits_spin.setRange(1, 99); self._splits_spin.setValue(1); self._splits_spin.setFixedWidth(45)
         extra_lay.addWidget(self._splits_spin)
-        extra_lay.addWidget(QLabel("Overlap:"))
-        self._overlap_entry = self._fixed_line_edit("0", 45)
-        extra_lay.addWidget(self._overlap_entry)
-        self._overlap_unit = QComboBox()
-        for u in ('%', 'hr', 'min', 's'):
-            self._overlap_unit.addItem(u)
-        self._overlap_unit.setFixedWidth(60)
-        extra_lay.addWidget(self._overlap_unit)
+        self._overlap_metric = MetricInput(
+            "Overlap:", ('%', 'hr', 'min', 's'), default="0",
+            suggestions=(0, 10, 25, 50), input_width=45, unit_width=60)
+        extra_lay.addWidget(self._overlap_metric)
         self._equal_effective_check = QCheckBox("Equal duration")
         self._equal_effective_check.setToolTip(
             "Splits share equal effective (filtered) time; real-time edges may differ.")
@@ -547,8 +543,7 @@ class TimeSliderPanel(QWidget):
         cur = self._theme_combo.currentText()
         default = cur if cur in theme_names else (theme_names[1] if len(theme_names) > 1 else 'segments')
         self._theme_combo.blockSignals(True)
-        self._theme_combo.clear()
-        self._theme_combo.addItems(theme_names)
+        self._theme_combo.set_items(theme_names)
         self._theme_combo.setCurrentText(default)
         self._theme_combo.blockSignals(False)
         self._current_theme = default
@@ -568,8 +563,7 @@ class TimeSliderPanel(QWidget):
         # Initialise overlap from source config if available
         source = getattr(self.cd, 'source', None)
         if isinstance(source, CCGSourceConfig):
-            self._overlap_entry.setText(str(source.overlap_sec))
-            self._overlap_unit.setCurrentText('s')
+            self._overlap_metric.set_value(source.overlap_sec, 's')
 
         self._filter_check.blockSignals(True)
         self._filter_check.setChecked(self._filter_checks.get(theme, False))
@@ -672,9 +666,15 @@ class TimeSliderPanel(QWidget):
                    if self._legend_toggles.get(b[2], True)]
         self._main_plot.update_epochs(visible, cmap, 0.0, self._total_sec)
 
+    def add_theme(self):
+        """Add an epoch theme: pick source + format, attach to the session, add to the combo."""
+        pass
+
     def _on_theme_change(self, theme: str):
         if theme == self._current_theme:
             return
+        if self._theme_combo.is_add_row(self._theme_combo.currentIndex()):
+            return   # AddableDropdown reverts the index and calls add_theme
         self._filter_checks[self._current_theme] = self._filter_check.isChecked()
         self._current_theme = theme
         self._label_colors = None
@@ -752,8 +752,7 @@ class TimeSliderPanel(QWidget):
         # keep 'start'/'end' symbolic so each session resolves them against its own bounds
         t0_spec = t0_txt.lower() if t0_txt.lower() in ('start', 'end') else t0
         t1_spec = t1_txt.lower() if t1_txt.lower() in ('start', 'end') else t1
-        return (t0_spec, t1_spec, self._splits_spin.value(),
-                float(self._overlap_entry.text() or 0), self._overlap_unit.currentText())
+        return (t0_spec, t1_spec, self._splits_spin.value(), *self._overlap_metric.value())
 
     def _theme_whitelist(self, theme: str) -> list:
         """Labels checked in the legend for *theme* (unrecorded = checked, as the chips show)."""

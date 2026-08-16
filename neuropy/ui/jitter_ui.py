@@ -6,27 +6,27 @@ JitterManager  — Qt-native orchestration; uses QTimer + signals.
 """
 from __future__ import annotations
 
-import collections
 import multiprocessing as _mp
 from typing import TYPE_CHECKING
 
 from neuropy.analyses._jitter_worker import jitter_worker
 from neuropy.analyses.jitter import JitterTask
 from neuropy.ui.ui_common import BackgroundTaskRunner, LRUCache
+from pyqtgraph.Qt.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton)
+from pyqtgraph.Qt.QtCore import QObject, QTimer, Signal as _Signal
+from pyqtgraph.Qt.QtWidgets import QMessageBox
+
+from neuropy.ui.utils import ResultsDialog
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
 
-# maximum queued jitter tasks (running + pending)
-_MAX_JITTER_QUEUE = 50
 
 _ALL_SEGS = "all"
 
 class JitterWorker:
     """Manages on-demand jitter computation queue, process lifecycle, and in-memory cache.
-
-    Owns no Tk objects.  JitterController provides the Tk event-loop integration
-    (root.after polling) and handles persistence to cd._jitter_results.
 
     Process/queue/deque lifecycle is delegated to BackgroundTaskRunner.
 
@@ -34,17 +34,15 @@ class JitterWorker:
     Cache value: (j_avg, j_pval, j_pval_bins, j_lo, j_hi)
     """
 
-    CACHE_MAX = 500
-
     UNVIEWED_BG = '#FFEE58'
     UNVIEWED_FG = '#333333'
     VIEWED_BG   = '#FFF9C4'
     VIEWED_FG   = '#333333'
 
-    def __init__(self, max_queue: int = _MAX_JITTER_QUEUE):
+    def __init__(self, max_queue: int, max_cache: int):
         self._runner = BackgroundTaskRunner(
             max_queue=max_queue, use_result_queue=True)
-        self._cache: LRUCache = LRUCache(self.CACHE_MAX)
+        self._cache: LRUCache = LRUCache(max_cache)
         self.unviewed: set = set()
 
     def enqueue(self, tag: str, ref: int, tgt: int, njitter: int,
@@ -77,22 +75,9 @@ class JitterWorker:
             self._cache.pop((ref, tgt, res_key, seg_key))
 
 
-from pyqtgraph.Qt.QtCore import QObject, QTimer, Signal as _Signal
-from pyqtgraph.Qt.QtWidgets import QMessageBox
-
-from neuropy.ui.utils import ResultsDialog
-
-if TYPE_CHECKING:
-    from neuropy.ui.app_state import AppState
-
 
 class JitterManager(QObject):
-    """Qt-native jitter orchestration.
-
-    Drop-in replacement for JitterController that owns no tkinter objects.
-    Uses QTimer polling and emits signals so panels can react without
-    being directly coupled to the controller.
-
+    """
     Signals
     -------
     completed(ref, tgt, res_key, seg_key)
@@ -115,7 +100,8 @@ class JitterManager(QObject):
         super().__init__()
         self.nav = nav
         self.cd  = cd
-        self.jitter_worker = JitterWorker(max_queue=nav.max_jitter_queue)
+        self.jitter_worker = JitterWorker(max_queue=nav.max_jitter_queue,
+                                          max_cache=nav.max_jitter_cache)
         self._timer = QTimer()
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._poll)
@@ -325,10 +311,6 @@ class JitterManager(QObject):
         else:
             self.status_changed.emit('')
 
-
-
-from pyqtgraph.Qt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton)
 
 class JitterQueueDialog(QDialog):
     """Shows pending jitter tasks; allows deleting from queue."""

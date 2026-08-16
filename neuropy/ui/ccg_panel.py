@@ -24,7 +24,7 @@ from neuropy.plotting.ccg import (
     ACG_REF_COLOR, ACG_TGT_COLOR,
 )
 from neuropy.ui.ui_common import qt_dark_mode, LRUCache
-from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, SliderWithInput, has_primary_modifier, small_font_pt
+from neuropy.ui.utils import chip_button, CycleButton, FlowLayout, CollapsibleSection, ArrowChipBar, MetricInput, SliderWithInput, has_primary_modifier, small_font_pt
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -559,7 +559,7 @@ class BaselineCSSection(CollapsibleSection):
 
 
 class JitterSection(CollapsibleSection):
-    # Backend: JitterManager (neuropy/analyses/jitter.py)
+    # Backend: JitterManager (neuropy/ui/jitter_ui.py)
     # Injected via set_jitter_mgr() after construction.
 
     jitter_done = Signal()   # emitted when poll completes → CorrelogramPanel rerenders
@@ -673,21 +673,13 @@ class SpikeAttributionSection(CollapsibleSection):
         self.enable_btn.toggled.connect(self._on_enable)
         layout.addWidget(self.enable_btn)
 
-        layout.addWidget(QLabel("Bin:"))
-        self._bin_input = QLineEdit("0")
-        self._bin_input.setFixedWidth(50)
-        self._bin_input.setEnabled(False)
-        layout.addWidget(self._bin_input)
-
-        self._unit_combo = QComboBox()
-        self._unit_combo.addItem("ms", "ms")
-        self._unit_combo.addItem("#",  "#")
-        self._unit_combo.setFixedWidth(45)
-        self._unit_combo.setEnabled(False)
-        self._unit_combo.setToolTip(
+        self._bin_metric = MetricInput("Bin:", ("ms", "#"), default="0",
+                                       suggestions=(0, 1, 2, 5, 10), unit_width=45)
+        self._bin_metric.setEnabled(False)
+        self._bin_metric.unit_combo.setToolTip(
             "ms: lag in milliseconds\n"
             "#: ±i-th bin relative to 0 ms bin")
-        layout.addWidget(self._unit_combo)
+        layout.addWidget(self._bin_metric)
 
         self._set_btn = QPushButton("Set")
         self._set_btn.setEnabled(False)
@@ -696,11 +688,10 @@ class SpikeAttributionSection(CollapsibleSection):
 
         layout.addStretch()
 
-        self._bin_input.returnPressed.connect(self._on_set)
+        self._bin_metric.input.returnPressed.connect(self._on_set)
 
     def _on_enable(self, checked: bool):
-        self._bin_input.setEnabled(checked)
-        self._unit_combo.setEnabled(checked)
+        self._bin_metric.setEnabled(checked)
         self._set_btn.setEnabled(checked)
         self.enable_toggled.emit(checked)
 
@@ -708,9 +699,8 @@ class SpikeAttributionSection(CollapsibleSection):
         if not self.enable_btn.isChecked():
             return
         try:
-            val  = float(self._bin_input.text())
-            unit = self._unit_combo.currentData()
-            self.set_requested.emit(val, unit)
+            val = float(self._bin_metric.input.text())
+            self.set_requested.emit(val, self._bin_metric.unit_combo.currentText())
         except ValueError:
             p = self.window()
             lp = p.pairs_view.spike_pairs if p else None
@@ -836,8 +826,10 @@ class CCGContextBuilder:
         if neurons is None:
             return None, None, None, None
         types = neurons.neuron_type
-        si    = neurons.shank_ids
-        return str(types[ref]), str(types[tgt]), int(si[ref]), int(si[tgt])
+        si    = neurons.shank_ids   # optional field; a dataset may bind no shank column
+        return (str(types[ref]), str(types[tgt]),
+                None if si is None else int(si[ref]),
+                None if si is None else int(si[tgt]))
 
     @staticmethod
     def _jitter_overlay(panel, nav, ref: int, tgt: int) -> JitterOverlay:
@@ -1691,9 +1683,7 @@ class CorrelogramPanel(QWidget):
     def refresh_spike_attr_if_enabled(self):
         if not self.sa_section.is_enabled:
             return
-        self._on_spike_attr_set(
-            float(self.sa_section._bin_input.text()),
-            self.sa_section._unit_combo.currentData())
+        self._on_spike_attr_set(*self.sa_section._bin_metric.value())
 
     def _on_spike_attr_enable(self, enabled: bool):
         if not enabled:

@@ -1566,9 +1566,8 @@ class PairSelectionPanelContainer(QWidget, Autosave):
 
     def _autoload_session_latest(self, restore_groups: bool = False):
         ui = self.ui
-        if restore_groups:
-            groups_path = ui.groups.save_path()
-            ui.groups.load()
+        if restore_groups and os.path.isfile(ui.groups.save_path() + '.json'):
+            ui.groups.load()   # a freshly built project has no groups file yet
         sd = ui.sd.get_selection_by_session(ui.key)
         latest_path = sd.save_path()
         if not latest_path or not os.path.isfile(latest_path + '.json'):

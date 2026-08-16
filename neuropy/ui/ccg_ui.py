@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 
-from dataclasses import dataclass, asdict, field
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 from pyqtgraph.Qt import QtCore, QtWidgets
@@ -15,10 +14,11 @@ from pyqtgraph.Qt.QtWidgets import (
 )
 from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
 from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.utils import JsonSavable
 from neuropy.ui.app_state import AppState, _ALL_SEGS
 from neuropy.ui.pair_selection_panel import PairSelectionPanelContainer
 from neuropy.ui.ui_common import UITheme, qt_dark_mode
-from neuropy.ui.utils import GroupHotkeysBar
+from neuropy.ui.utils import GroupHotkeysBar, Tunable
 from neuropy.ui.dialogs import (
     QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog,
 )
@@ -28,7 +28,7 @@ from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanel
 from neuropy.ui.menubar import ReviewMenuBar, IndexBar
 from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
-from neuropy.analyses.ms_connectivity import CCGDataset
+from neuropy.analyses.ms_connectivity import CCGDataset, ProjectConfig, open_project
 from neuropy.ui.all_session_mode import AllSessionMode
 from neuropy.analyses.spike_attribution import compute_spike_pairs
 
@@ -57,55 +57,49 @@ class _CCGLoadWorker(QObject):
         self.done.emit()
 
 
-# Global UI-state snapshot — not per-project, so it lives beside the data root
-# rather than on any CCGDataset. All project-scoped paths come from cd (its
-# save_path / selections_dir / custom_dir), the single source of truth.
-_UI_STATE_FILE = str(_Path(__file__).resolve().parents[2] / 'data' / 'ui_state_qt.json')
+class UISettings(JsonSavable):
+    """Persisted UI/Settings-dialog values."""
+
+    min_font_size = Tunable(12)
+    save_ui_on_close = Tunable(True)
+    autosave_sel_on = Tunable(True)
+    autosave_sel_interval = Tunable((1, 'hour'))   # MetricInput.value() -> (number, unit)
+    autosave_grp_on = Tunable(True)
+    autosave_grp_interval = Tunable((1, 'hour'))
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        Tunable.apply_defaults(self)
+        self.list_cursor_follows_action: bool = kwargs.pop('list_cursor_follows_action', True)
+        self.ccg_memory_limit_gb: float = kwargs.pop('ccg_memory_limit_gb', 4.0)
+        for name, value in kwargs.items():
+            setattr(self, name, value)
 
 
-@dataclass
-class UISettings:
-    min_font_size: int = 12
-    save_ui_on_close: bool = True
-    list_cursor_follows_action: bool = True
-    autosave_sel_on: bool = True
-    autosave_sel_interval: int = 1
-    autosave_sel_unit: str = 'hour'
-    autosave_grp_on: bool = True
-    autosave_grp_interval: int = 1
-    autosave_grp_unit: str = 'hour'
-    ccg_memory_limit_gb: float = 4.0
+class UIStates(JsonSavable):
+    """The single persisted UI snapshot for CCGReviewUI. Global."""
 
+    def save_path(self) -> str:
+        return str(_Path(__file__).resolve().parents[2] / 'data' / 'ui_state_qt')
 
-@dataclass
-class UIStates:
-    """The single persisted UI snapshot for CCGReviewUI — settings + view + panel layout."""
-    settings: UISettings = field(default_factory=UISettings)
-    session: str = ''
-    type_label: str = ''
-    session_any_mode: bool = False
-    resolution: str = 'lo'
-    current_segment: str = _ALL_SEGS
-    splitter_sizes: list = field(default_factory=list)
-    panel_sizes: dict = field(default_factory=dict)        # panel attr -> pre-collapse width
-    collapsed_panels: list = field(default_factory=list)   # panel attrs currently hidden
-    panel_state: dict = field(default_factory=dict)        # PairSelectionPanelContainer state
+    def __init__(self):
+        super().__init__()
+        self.settings = UISettings()
+        self.session = ''
+        self.type_label = ''
+        self.session_any_mode = False
+        self.resolution = 'lo'
+        self.current_segment = _ALL_SEGS
+        self.splitter_sizes: list = []
+        self.panel_sizes: dict = {}       # panel attr -> pre-collapse width
+        self.collapsed_panels: list = []  # panel attrs currently hidden
+        self.panel_state: dict = {}       # PairSelectionPanelContainer state
 
-    @classmethod
-    def load(cls, path: str) -> 'UIStates':
-        try:
-            with open(path) as f:
-                d = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return cls()
-        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}  # stale-schema safe
-        d['settings'] = UISettings(**d.get('settings', {}))
-        return cls(**d)
-
-    def save(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(asdict(self), f, indent=2)
+    def __setstate__(self, state: dict) -> None:
+        """settings is one nested object, not a dict of them — rebuild it here."""
+        settings = dict(state.pop('settings', {}))
+        super().__setstate__(state)
+        self.settings = UISettings(**settings)
 
 
 class BottomStatusBar:
@@ -180,7 +174,11 @@ class CCGReviewUI(QMainWindow):
     def __init__(self, cd: 'CCGDataset', key=None):
         super().__init__()
         self._loading_thread = self._loading_worker = None   # in-flight lazy-load (see _ensure_loaded)
-        self.ui_states = UIStates.load(_UI_STATE_FILE)   # one snapshot for everything
+        self.ui_states = UIStates()   # one snapshot for everything
+        try:
+            self.ui_states.load()
+        except Exception as e:
+            pass   # first run — keep defaults
         
         if key is None:                               # restore last-used, else default
             s = self.ui_states
@@ -197,6 +195,7 @@ class CCGReviewUI(QMainWindow):
 
         self.nav = AppState(cd, key)
         self.nav.root = self
+        self._project_dir = _Path(cd.save_path).name   # the combo's idea of where we are
 
         self.jitter_mgr = JitterManager(self.nav, cd)
         self.jitter_mgr.completed.connect(self._on_jitter_completed)
@@ -342,9 +341,16 @@ class CCGReviewUI(QMainWindow):
 
     def _switch_project(self, project_dir: str):
         config_name = project_dir[len('project_'):]
-        new_conf = self.cd.conf.copy(name=config_name)
-        new_cd = CCGDataset(new_conf, self.cd.nd)
+        if os.path.isfile(ProjectConfig(name=config_name).save_path() + '.json'):
+            _neurons, cd, _sd = open_project(config_name)
+        else:   # predates headers -> keep the sessions already loaded
+            cd = CCGDataset(self.cd.conf.copy(name=config_name), self.cd.nd)
+        self._adopt_project(cd)
+        print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
+              flush=True)
 
+    def _adopt_project(self, new_cd: 'CCGDataset'):
+        """Point every panel at *new_cd* and reload the current session through it."""
         self.nav.set_cd(new_cd)   # self.cd is a read-only property → nav.cd
         self.jitter_mgr.cd = new_cd
         self.time_slider.cd = new_cd
@@ -352,8 +358,10 @@ class CCGReviewUI(QMainWindow):
         self.nav.reset_selection_for_project(new_cd)
         os.makedirs(new_cd.custom_dir, exist_ok=True)
 
-        sess = str(self.nav.key.session)
-        tk = new_cd.find(sess)
+        # a freshly built project has different sessions entirely -> fall back to its first;
+        # nd keys come first because an uncomputed project has no ptr entries yet
+        tk = (new_cd.find(str(self.nav.key.session), strict=False)
+              or next(iter(self.nav.real_nd_keys()), None))
         if tk is not None:
             self._ensure_loaded(tk.nd(), 'lowres', lambda: self._switch_session(tk))
         self.index_bar.sync()
@@ -363,8 +371,6 @@ class CCGReviewUI(QMainWindow):
 
         self.pairs_view.pair_selection.refresh_lists()
         self._post_load_refresh()
-        print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
-              flush=True)
 
     def _panel_target(self, attr: str):
         """Widget whose visibility represents panel *attr* (splitter frame, else the panel)."""
@@ -598,7 +604,7 @@ class CCGReviewUI(QMainWindow):
         s.session_any_mode = bool(self.nav.session_any_mode)
         s.collapsed_panels = [a for a in self._panel_splitter_map
                               if not self._panel_target(a).isVisible()]
-        s.save(_UI_STATE_FILE)   # settings / panel_sizes already live on s
+        s.save()   # settings / panel_sizes already live on s
 
     def closeEvent(self, event: 'QCloseEvent'):
         self.nav.closing.emit()

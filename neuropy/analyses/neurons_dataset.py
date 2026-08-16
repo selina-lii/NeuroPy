@@ -6,6 +6,7 @@ Extracted from ms_connectivity.py to allow independent construction and reuse.
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Union, Optional
 
 from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, JsonSavable
@@ -193,23 +194,26 @@ class NeuronsDatasetConfig(Config):
     themes:
         None (Default)=All available
         []=No themes
-    epochs (neuron behav_slice via paradigm only):
-        None (Default)=All available
-        [list]=try loading all epochs in list and silent skip missing labels
     """
+
+    # "init param": ("kind", choices)  — what a builder UI exposes; defaults come from __init__
+    _options = {
+        'neuron_types': ('multi', ['pyr', 'inter']),
+        'themes':       ('multi', None),   # None choices -> filled by the source scan
+        'ch_per_shank': ('int', None),
+    }
+
     def __init__(
         self,
         name: str = "default",
         neuron_types: Union[list[str], str, None] = ['pyr', 'inter'],
-        epochs: Union[list[str], str, None] = ['pre', 'maze', 'post', 're-maze'],
-        themes: Union[list[str], str, None] = ['paradigm', 'brainstates', 'ripple'],
+        themes: Union[list[str], str, None] = None,
         ch_per_shank: Union[dict[Key, int], int, None] = 16,
     ):
         super().__init__()
         self.name = name
         self.neuron_types = _san(neuron_types)
         self.themes = _san(themes)
-        self.epochs = _san(epochs)
         self.ch_per_shank = ch_per_shank
 
     def __str__(self):
@@ -248,6 +252,7 @@ class NeuronsDataset(AnalysisDataset):
         self,
         sessions,
         conf: NeuronsDatasetConfig,
+        naming=None,
     ):
         super().__init__()
         self._neurons = {}
@@ -256,6 +261,9 @@ class NeuronsDataset(AnalysisDataset):
         self._slice_cache = {}   # TRANSIENT memo, never persisted
         self._sessions = _san(sessions)
         self.conf = conf
+        naming = naming or (lambda session: Path(session.filePrefix).name)
+        for session in self._sessions:
+            session.session_name = naming(session)
         self._prep(self._sessions)
 
     def neurons_for(self, key: Key) -> Neurons:
@@ -359,17 +367,11 @@ class NeuronsDataset(AnalysisDataset):
         Init ND
         """
         for session in sessions:
-            session_name = self._short_session_name(session)
+            session_name = session.session_name
             key = Key(session=session_name)
             self._neurons[key] = self._load_neurons(session)  # TODO: use neuron ids?
             self.probe_info[key] = self._load_probe_info(session)
             self.themes[key] = self._load_themes(session)
-
-    def _short_session_name(self, session):
-        """Get a printable session name ANIMAL_DayX """
-        sess_name = session.filePrefix.parts[-1].split('_')[:2]
-        sess_name = '_'.join(sess_name)
-        return sess_name
 
     def _load_neurons(self, session):
         """Load and filter neurons."""
@@ -377,12 +379,6 @@ class NeuronsDataset(AnalysisDataset):
         n.metadata['intervals'] = np.array([[n.t_start, n.t_stop]]) 
         if self.conf.neuron_types is not None:
             n = n.get_neuron_type(self.conf.neuron_types)
-        if self.conf.epochs is not None:
-            all_epochs = session.paradigm.get_unique_labels()
-            epochs = np.intersect1d(self.conf.epochs, all_epochs)
-            if len(epochs) < len(all_epochs):
-                n = n.behav_slice(behav_times=session.paradigm, 
-                              labels=epochs)
         return n
 
     # TODO
@@ -424,7 +420,7 @@ class NeuronsDataset(AnalysisDataset):
 
     @property
     def session_names(self):
-        return [self._short_session_name(session) for session in self._sessions]
+        return [session.session_name for session in self._sessions]
 
     def __str__(self):
         lines = [f"NeuronsDataset name={self.conf.name} sessions={len(self._neurons)}"]

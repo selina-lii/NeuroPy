@@ -7,12 +7,41 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from neuropy.io.fieldmap import ANY, Field, FieldMap, FieldSchema, ONE, OPTIONAL
+
 try:
     import pynwb
 except ImportError as _e:
     raise ImportError(
         "pynwb is required for NWB support.  Install with: pip install pynwb"
     ) from _e
+
+
+# What a unit table must supply for the CCG pipeline. Arity and value_map are the
+# constraints the mapping widget enforces; a dataset satisfies them with a plain dict.
+UNITS_SCHEMA = FieldSchema([
+    Field('spike_times',   ONE,      note='per-unit spike train'),
+    Field('neuron_type',   ONE,      value_map=True, values=['pyr', 'inter'],
+          note="cell class; values must end up 'pyr' / 'inter'"),
+    Field('neuron_id',     OPTIONAL, note='unit id; defaults to the units table row id'),
+    Field('peak_channel',  OPTIONAL, note='channel of largest waveform'),
+    Field('shank_id',      OPTIONAL, note='probe shank grouping'),
+    Field('position',      ANY,      note='unit position on the probe: x, then y'),
+    Field('waveforms',     OPTIONAL, note='mean waveform per unit'),
+])
+
+
+# A dataset's field map: {"target": "input"}. The value is a column name, a list of
+# them, or {'col': ..., 'map': {...}} when the column's values need renaming too.
+# Per-dataset maps live in that dataset's module, e.g. io/dandi_001695.py.
+
+NWB_DEFAULT = {
+    'spike_times':  'spike_times',
+    'neuron_type':  'cell_type',
+    'peak_channel': 'peak_channel',
+    'shank_id':     'shank_id',
+    'waveforms':    'waveform_mean',
+}
 
 
 class NWBFile:
@@ -22,9 +51,9 @@ class NWBFile:
     of this object.  Call .close() when done, or use as a context manager.
     """
 
-    def __init__(self, path: str | Path, neuron_type_col: str = 'cell_type'):
+    def __init__(self, path: str | Path, fields: dict = None):
         self._path = Path(path)
-        self._neuron_type_col = neuron_type_col
+        self.fields = FieldMap(UNITS_SCHEMA, fields or NWB_DEFAULT)
         self._io = pynwb.NWBHDF5IO(str(self._path), mode='r', load_namespaces=True)
         self._nwb = self._io.read()
 
@@ -37,6 +66,26 @@ class NWBFile:
     def __exit__(self, *_):
         self.close()
 
+    @property
+    def input_fields(self) -> list:
+        """Source fields a map can bind to — the units table's column names."""
+        units = self._nwb.units
+        return [] if units is None else list(units.colnames)
+
+    def is_categorical(self, column: str) -> bool:
+        """Whether a units column holds labels — only those are worth value-mapping."""
+        units = self._nwb.units
+        if units is None or column not in units.colnames:
+            return False
+        return np.asarray(units[column][:1]).dtype.kind in 'OUS'
+
+    def column_values(self, column: str) -> list:
+        """The distinct values a units column holds — what a value map must translate."""
+        units = self._nwb.units
+        if units is None or column not in units.colnames:
+            return []
+        return sorted({str(v) for v in units[column][:]})
+
     # ── Spike trains ────────────────────────────────────────────────────
 
     @cached_property
@@ -44,139 +93,133 @@ class NWBFile:
         units = self._nwb.units
         if units is None:
             return []
-        return [np.asarray(units['spike_times'][i], dtype=float)
-                for i in range(len(units))]
+        column = self.fields.get('spike_times').column
+        return [np.asarray(units[column][i], dtype=float) for i in range(len(units))]
 
     @cached_property
     def neuron_ids(self) -> np.ndarray:
         units = self._nwb.units
         if units is None:
             return np.array([], dtype=int)
-        return np.asarray(units.id[:], dtype=int)
+        binding = self.fields.get('neuron_id')
+        column = units[binding.column][:] if binding is not None else units.id[:]
+        return np.asarray(column, dtype=int)
 
     @cached_property
     def neuron_type(self) -> np.ndarray:
         units = self._nwb.units
         if units is None:
             return np.array([], dtype=object)
-        col = self._neuron_type_col
-        if units is not None and col in units.colnames:
-            return np.asarray(units[col][:], dtype=object)
-        return np.array(['pyr'] * len(units), dtype=object)
+        binding = self.fields.get('neuron_type')
+        return np.array(binding.apply(units[binding.column][:]), dtype=object)
+
+    @cached_property
+    def positions(self) -> np.ndarray | None:
+        """(n_units, 2) probe coordinates, or None when the map binds no position columns."""
+        units = self._nwb.units
+        binding = self.fields.get('position')
+        if units is None or binding is None:
+            return None
+        return np.column_stack([np.asarray(units[c][:], dtype=float)
+                                for c in binding.columns])
+
+    def _optional(self, name: str, dtype=None) -> np.ndarray | None:
+        """One optional field's column as an array, or None when the map leaves it unbound."""
+        units = self._nwb.units
+        binding = self.fields.get(name)
+        if units is None or binding is None:
+            return None
+        return np.asarray(units[binding.column][:], dtype=dtype)
 
     @cached_property
     def peak_channels(self) -> np.ndarray | None:
-        units = self._nwb.units
-        if units is None:
-            return None
-        for cname in ('peak_channel', 'max_channel', 'electrode_id'):
-            if cname in units.colnames:
-                return np.asarray(units[cname][:], dtype=int)
-        # fall back to first electrode index per unit if linked
-        try:
-            return np.array([
-                int(units['electrodes'][i].index[0])
-                for i in range(len(units))
-            ], dtype=int)
-        except Exception:
-            return None
+        return self._optional('peak_channel', dtype=int)
 
     @cached_property
     def shank_ids(self) -> np.ndarray | None:
-        units = self._nwb.units
-        if units is None:
-            return None
-        for cname in ('shank_id', 'shank', 'group_id'):
-            if cname in units.colnames:
-                return np.asarray(units[cname][:], dtype=int)
-        # derive from electrodes group label if available
-        try:
-            elec_table = self._nwb.electrodes
-            if elec_table is not None and 'group_name' in elec_table.colnames:
-                groups = elec_table['group_name'][:]
-                unique_groups = {g: i for i, g in enumerate(dict.fromkeys(groups))}
-                peak_ch = self.peak_channels
-                if peak_ch is not None:
-                    return np.array([unique_groups.get(groups[c], 0) for c in peak_ch],
-                                    dtype=int)
-        except Exception:
-            pass
-        return None
+        return self._optional('shank_id', dtype=int)
 
     @cached_property
     def waveforms(self) -> np.ndarray | None:
-        units = self._nwb.units
-        if units is None:
-            return None
-        for cname in ('waveform_mean', 'waveforms', 'mean_waveform'):
-            if cname in units.colnames:
-                try:
-                    return np.array([units[cname][i] for i in range(len(units))])
-                except Exception:
-                    return None
+        return self._optional('waveforms')
+
+    def _series_end(self, series) -> float | None:
+        """When a TimeSeries covers the recording, the time its last sample lands on."""
+        if series.timestamps is not None:
+            return float(series.timestamps[-1])
+        if series.rate:
+            return float((series.starting_time or 0.0) + len(series.data) / series.rate)
         return None
 
     @cached_property
+    def recorded_series(self) -> list:
+        """Every continuous series under processing — an acquired signal spans the session."""
+        return [ts for mod in self._nwb.processing.values()
+                for interface in mod.data_interfaces.values()
+                for ts in (getattr(interface, 'electrical_series', None) or {}).values()]
+
+    @cached_property
+    def sampling_rate(self) -> float | None:
+        """The clock spike times were quantized onto, recovered from their smallest gap.
+
+        NWB stores spike times in seconds and records no spike clock, but the times are
+        quantized, so gaps pooled across units are multiples of one tick. Needs the pool:
+        within one unit the smallest gap is the refractory period, not the tick.
+        """
+        pooled = np.sort(np.concatenate([st for st in self.spiketrains if len(st)]))
+        gaps = np.diff(pooled)
+        gaps = gaps[gaps > 0]
+        if not len(gaps):
+            return None
+        return float(np.round(1.0 / gaps.min()))
+
+    @cached_property
     def t_stop(self) -> float:
-        # prefer explicit session end stored in file
-        try:
-            if hasattr(self._nwb, 'session_description'):
-                pass  # not the stop time
-            stop = self._nwb.trials  # sometimes carries timing
-        except Exception:
-            pass
-        # fallback: max spike time + small buffer
-        all_spikes = self.spiketrains
-        if all_spikes:
-            max_t = max((st.max() for st in all_spikes if len(st)), default=0.0)
-            return float(max_t) + 1.0
-        return 1.0
+        """Session end: how long the signal ran, or the last spike when nothing was recorded."""
+        ends = [t for t in map(self._series_end, self.recorded_series) if t is not None]
+        spikes = [st.max() for st in self.spiketrains if len(st)]
+        return float(max(ends + spikes, default=0.0))
 
     # ── Epochs ──────────────────────────────────────────────────────────
 
-    def _load_intervals(self, table_name: str) -> pd.DataFrame | None:
+    @property
+    def interval_tables(self) -> list:
+        """Every TimeIntervals table this file holds — one theme each."""
+        names = ['epochs'] if self._nwb.epochs is not None else []
+        return names + list(self._nwb.intervals or [])
+
+    @property
+    def interval_labels(self) -> dict:
+        """Each intervals table mapped to the distinct labels its rows carry, in first-seen order."""
+        found = {}
+        for name in self.interval_tables:
+            df = self.intervals_df(name)
+            if df is not None and not df.empty:
+                found[name] = list(dict.fromkeys(df['label']))
+        return found
+
+    def intervals_df(self, table_name: str) -> pd.DataFrame | None:
         """Load a named intervals table → DataFrame with start/stop/label columns."""
-        table = None
-        if table_name == 'epochs':
-            table = self._nwb.epochs
-        else:
-            ivs = self._nwb.intervals
-            if ivs is not None and table_name in ivs:
-                table = ivs[table_name]
+        table = (self._nwb.epochs if table_name == 'epochs'
+                 else (self._nwb.intervals or {}).get(table_name))
         if table is None:
             return None
-        df = table.to_dataframe()
-        # normalise column names
-        rename = {}
-        for src, dst in [('start_time', 'start'), ('stop_time', 'stop'),
-                         ('tags', 'label'), ('label', 'label')]:
-            if src in df.columns and dst not in df.columns:
-                rename[src] = dst
-        df = df.rename(columns=rename)
-        if 'label' not in df.columns:
-            df['label'] = table_name
-        else:
-            # tags column from NWB is often a list; take first element
-            df['label'] = df['label'].apply(
-                lambda x: x[0] if isinstance(x, (list, tuple)) and x else str(x))
-        # ensure start/stop columns exist
+        df = table.to_dataframe().rename(columns={'start_time': 'start',
+                                                  'stop_time': 'stop'})
         if 'start' not in df.columns or 'stop' not in df.columns:
             return None
+        df['label'] = self._labels_of(df, table_name)
         return df[['start', 'stop', 'label']].reset_index(drop=True)
 
-    def paradigm_df(self, table_name: str = 'epochs') -> pd.DataFrame | None:
-        return self._load_intervals(table_name)
-
-    def brainstates_df(self) -> pd.DataFrame | None:
-        for name in ('brainstates', 'brain_states', 'sleep_states'):
-            df = self._load_intervals(name)
-            if df is not None:
-                return df
-        return None
-
-    def ripple_df(self) -> pd.DataFrame | None:
-        for name in ('ripple', 'ripples', 'SWR', 'sharp_wave_ripples'):
-            df = self._load_intervals(name)
-            if df is not None:
-                return df
-        return None
+    @staticmethod
+    def _labels_of(df: pd.DataFrame, table_name: str):
+        """Row labels from the table's own label column, falling back to the table name."""
+        columns = [c for c in df.columns if c not in ('start', 'stop')]
+        if not columns:
+            return table_name
+        column = 'tags' if 'tags' in columns else ('label' if 'label' in columns
+                                                   else columns[0])
+        # a tags column holds a list per row; the first tag is the label
+        return df[column].apply(
+            lambda x: str(x[0]) if isinstance(x, (list, tuple, np.ndarray)) and len(x)
+            else str(x))
