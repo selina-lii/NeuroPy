@@ -15,7 +15,7 @@ from neuropy.classifier.models import MODELS, decide
 from neuropy.classifier.train import fit_final, leave_one_rat_out, report
 from neuropy.classifier.verify import verify_all
 
-DEFAULT_MODEL = 'hybrid'
+DEFAULT_MODEL = 'dualres'   # both resolutions: visual inspection relies on highres
 
 
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
@@ -66,13 +66,18 @@ def predict_project(cd, model, keys=None) -> list[dict]:
             continue
         data = cd.ccg_for(key)
         ccg, null = data.ccg[0], data.ccg_null[0]
+        hi = cd.ccg_for(key.change(resolution='highres')) if model.uses_highres else None
         idx = [(int(r), int(t)) for r, t in pairs
                if r < ccg.shape[0] and t < ccg.shape[1]]
         if not idx:
             continue
         X = np.stack([ccg[r, t] for r, t in idx]).astype(float)
         N = np.stack([null[r, t] for r, t in idx]).astype(float)
-        proba = model.predict_proba(X, N)
+        X_hi = N_hi = None
+        if hi is not None and hi.ccg is not None:
+            X_hi = np.stack([hi.ccg[0][r, t] for r, t in idx]).astype(float)
+            N_hi = np.stack([hi.ccg_null[0][r, t] for r, t in idx]).astype(float)
+        proba = model.predict_proba(X, N, X_hi, N_hi)
         labels = decide(proba, model.label_names, model.thresholds)
         for (r, t), p, lab in zip(idx, proba, labels):
             # Only the scores that cleared their threshold are kept: storing all
@@ -81,5 +86,5 @@ def predict_project(cd, model, keys=None) -> list[dict]:
                          'scores': {n: round(float(v), 3)
                                     for n, v in zip(model.label_names, p)
                                     if n in lab}})
-        del X, N, proba
+        del X, N, X_hi, N_hi, proba
     return rows

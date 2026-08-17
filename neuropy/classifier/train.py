@@ -45,17 +45,20 @@ def _auc(y: np.ndarray, p: np.ndarray) -> float:
     return float((ranks[pos].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def leave_one_rat_out(ls: LabeledSet, model_name: str = 'hybrid',
+def leave_one_rat_out(ls: LabeledSet, model_name: str = 'dualres',
                       duration: float = 0.02, **kw) -> dict:
     """Hold out each animal in turn; return pooled out-of-sample predictions."""
     ccg, null, Y, rats = ls.X_ccg, ls.X_null, ls.Y, ls.rats
+    hi, hi_null = _highres_for(ls, model_name)
     P = np.zeros_like(Y, dtype=float)
     T = np.zeros_like(Y, dtype=float)     # each row cut by its own fold's thresholds
     for rat in sorted(set(rats)):
         test = rats == rat
         model = MODELS[model_name](ls.label_names, duration=duration, **kw)
-        model.fit(ccg[~test], null[~test], Y[~test])
-        P[test] = model.predict_proba(ccg[test], null[test])
+        model.fit(ccg[~test], null[~test], Y[~test],
+                  *_slice_highres(hi, hi_null, ~test))
+        P[test] = model.predict_proba(ccg[test], null[test],
+                                      *_slice_highres(hi, hi_null, test))
         T[test] = model.thresholds
         print(f"  fold {rat}: trained on {(~test).sum()}, tested on {test.sum()}",
               flush=True)
@@ -63,6 +66,17 @@ def leave_one_rat_out(ls: LabeledSet, model_name: str = 'hybrid',
     return {'proba': P, 'Y': Y, 'thresholds': T, 'pred': hits,
             'scores': _scores_from_hits(Y, P, hits, ls.label_names),
             'label_names': ls.label_names}
+
+
+def _highres_for(ls: LabeledSet, model_name: str):
+    """Highres arrays when the model wants them and the set has them."""
+    if not MODELS[model_name].uses_highres or not ls.has_highres:
+        return None, None
+    return ls.X_ccg_hi, ls.X_null_hi
+
+
+def _slice_highres(hi, hi_null, mask):
+    return (None, None) if hi is None else (hi[mask], hi_null[mask])
 
 
 def _scores_from_hits(Y, P, hits, names) -> dict[str, dict]:
@@ -81,11 +95,12 @@ def _scores_from_hits(Y, P, hits, names) -> dict[str, dict]:
     return out
 
 
-def fit_final(ls: LabeledSet, model_name: str = 'hybrid',
+def fit_final(ls: LabeledSet, model_name: str = 'dualres',
               duration: float = 0.02, **kw) -> BaseModel:
     """Train on every labeled pair — the model that ships to the UI."""
     model = MODELS[model_name](ls.label_names, duration=duration, **kw)
-    return model.fit(ls.X_ccg, ls.X_null, ls.Y)
+    hi, hi_null = _highres_for(ls, model_name)
+    return model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
 
 
 def report(scores: dict) -> str:

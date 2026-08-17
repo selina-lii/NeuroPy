@@ -17,6 +17,7 @@ import json
 import os
 
 import numpy as np
+from sklearn.decomposition import PCA
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
@@ -44,11 +45,17 @@ class BaseModel:
         self.constant: list[float | None] = []
         self.thresholds = np.full(len(self.label_names), 0.5)
 
-    def _encode(self, ccg: np.ndarray, null: np.ndarray) -> np.ndarray:
+    # Highres inputs are accepted by every model and used by the ones that ask
+    # for them, so callers pass whatever they have without branching per model.
+    uses_highres = False
+
+    def _encode(self, ccg: np.ndarray, null: np.ndarray,
+                ccg_hi: np.ndarray = None, null_hi: np.ndarray = None) -> np.ndarray:
         raise NotImplementedError
 
-    def fit(self, ccg: np.ndarray, null: np.ndarray, Y: np.ndarray):
-        X = self.scaler.fit_transform(self._encode(ccg, null))
+    def fit(self, ccg: np.ndarray, null: np.ndarray, Y: np.ndarray,
+            ccg_hi: np.ndarray = None, null_hi: np.ndarray = None):
+        X = self.scaler.fit_transform(self._encode(ccg, null, ccg_hi, null_hi))
         self.nets, self.constant = [], []
         for j in range(Y.shape[1]):
             y = Y[:, j]
@@ -92,8 +99,11 @@ class BaseModel:
         kw.update(self.params)
         return kw
 
-    def predict_proba(self, ccg: np.ndarray, null: np.ndarray) -> np.ndarray:
-        return self._scores(self.scaler.transform(self._encode(ccg, null)))
+    def predict_proba(self, ccg: np.ndarray, null: np.ndarray,
+                      ccg_hi: np.ndarray = None,
+                      null_hi: np.ndarray = None) -> np.ndarray:
+        X = self._encode(ccg, null, ccg_hi, null_hi)
+        return self._scores(self.scaler.transform(X))
 
     def save(self, path: str):
         import pickle
@@ -119,7 +129,7 @@ class ShapeFeatureNet(BaseModel):
     has to beat before its extra capacity is worth anything.
     """
 
-    def _encode(self, ccg, null):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
         return shape_features(ccg, null, self.duration)
 
 
@@ -131,7 +141,7 @@ class TraceNet(BaseModel):
     own 'msconn' vs '0rhythm' notes turn on.
     """
 
-    def _encode(self, ccg, null):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
         return trace_stack(ccg, null).reshape(len(np.atleast_2d(ccg)), -1)
 
 
@@ -142,10 +152,66 @@ class HybridNet(BaseModel):
     re-derive peak SNR or lag from the trace with limited data.
     """
 
-    def _encode(self, ccg, null):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
         n = len(np.atleast_2d(ccg))
         return np.hstack([trace_stack(ccg, null).reshape(n, -1),
                           shape_features(ccg, null, self.duration)])
+
+
+class DualResNet(BaseModel):
+    """Both resolutions, each through its own embedding head before fusion.
+
+    The two traces cover the *same* ±duration/2 window — lowres at 1 ms bins,
+    highres at 1/30 ms — so they are different views of one interval, not
+    different extents. Padding lowres out to the highres length would misalign
+    lag 0 and destroy exactly the information the fine bins exist to carry.
+
+    Each resolution instead gets its own scaler and PCA head, because highres
+    bins hold ~1/30 the counts of lowres bins: one shared scaler over the
+    concatenation would let 601 highres columns swamp 21 lowres ones by sheer
+    count rather than by information. The heads compress each view to a
+    comparable size, and the fused embedding keeps the scalar descriptors from
+    both so peak SNR and lag survive the compression.
+    """
+
+    uses_highres = True
+
+    def __init__(self, label_names, duration=0.02, n_components=24, **kw):
+        super().__init__(label_names, duration=duration, **kw)
+        self.n_components = n_components
+        self.head_lo = _EmbedHead(n_components)
+        self.head_hi = _EmbedHead(n_components)
+
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+        n = len(np.atleast_2d(ccg))
+        lo_trace = trace_stack(ccg, null).reshape(n, -1)
+        lo_feat = shape_features(ccg, null, self.duration)
+        parts = [self.head_lo.apply(lo_trace), lo_feat]
+        if ccg_hi is not None:
+            # Smoothed harder: at 1/30 ms bins single spikes dominate raw counts,
+            # so the sigma is scaled by the bin-count ratio to match lowres.
+            sigma = max(1.0, ccg_hi.shape[-1] / ccg.shape[-1] / 3)
+            hi_trace = trace_stack(ccg_hi, null_hi, sigma=sigma).reshape(n, -1)
+            hi_feat = shape_features(ccg_hi, null_hi, self.duration)
+            parts += [self.head_hi.apply(hi_trace), hi_feat]
+        return np.hstack(parts)
+
+
+class _EmbedHead:
+    """Per-resolution scaler + PCA, fitted on first use then reused."""
+
+    def __init__(self, n_components: int):
+        self.n_components = n_components
+        self.scaler = StandardScaler()
+        self.pca = None
+
+    def apply(self, X: np.ndarray) -> np.ndarray:
+        """Fit on the first (training) call, transform on every later one."""
+        if self.pca is None:
+            k = min(self.n_components, X.shape[0], X.shape[1])
+            self.pca = PCA(n_components=k, random_state=0)
+            return self.pca.fit_transform(self.scaler.fit_transform(X))
+        return self.pca.transform(self.scaler.transform(X))
 
 
 QUALITY_LABELS = ('best', 'good', 'ok')
@@ -177,8 +243,8 @@ class TwoHeadNet(HybridNet):
         return P
 
 
-MODELS = {'shape': ShapeFeatureNet, 'trace': TraceNet, 'hybrid': HybridNet,
-          'twohead': TwoHeadNet}
+MODELS = {'dualres': DualResNet, 'hybrid': HybridNet, 'shape': ShapeFeatureNet,
+          'trace': TraceNet, 'twohead': TwoHeadNet}
 
 
 def decide(proba: np.ndarray, label_names: list[str],

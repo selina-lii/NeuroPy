@@ -23,15 +23,22 @@ _NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', '?'}
 
 @dataclass
 class PairSample:
-    """One labeled pair: where it came from, plus its raw CCG traces."""
+    """One labeled pair: where it came from, plus its raw CCG traces.
+
+    Both resolutions span the same ±duration/2 window — lowres at 1 ms bins,
+    highres at 1/30 ms — so they carry different information over identical
+    time, not different extents.
+    """
     session: str
     rat: str
     conn_type: str
     ref: int
     tgt: int
-    ccg: np.ndarray        # [n_bin] raw counts
-    null: np.ndarray       # [n_bin] jitter/convolution baseline
+    ccg: np.ndarray             # [n_bin] raw counts, lowres
+    null: np.ndarray            # [n_bin] convolution baseline, lowres
     labels: list[str] = field(default_factory=list)
+    ccg_hi: np.ndarray = None   # [n_bin_hi] highres, None when not on disk
+    null_hi: np.ndarray = None
 
 
 @dataclass
@@ -48,6 +55,19 @@ class LabeledSet:
         # Each sample now views its row of the stack rather than owning a copy.
         for i, s in enumerate(self.samples):
             s.ccg, s.null = self._X_ccg[i], self._X_null[i]
+        self._X_ccg_hi = self._stack_hi('ccg_hi')
+        self._X_null_hi = self._stack_hi('null_hi')
+
+    def _stack_hi(self, attr: str) -> np.ndarray | None:
+        """Stack a highres field, or None when any sample lacks it."""
+        vals = [getattr(s, attr) for s in self.samples]
+        if any(v is None for v in vals):
+            return None
+        return np.stack(vals).astype(float)
+
+    @property
+    def has_highres(self) -> bool:
+        return self._X_ccg_hi is not None
 
     @property
     def X_ccg(self) -> np.ndarray:
@@ -56,6 +76,14 @@ class LabeledSet:
     @property
     def X_null(self) -> np.ndarray:
         return self._X_null
+
+    @property
+    def X_ccg_hi(self) -> np.ndarray | None:
+        return self._X_ccg_hi
+
+    @property
+    def X_null_hi(self) -> np.ndarray | None:
+        return self._X_null_hi
 
     @property
     def Y(self) -> np.ndarray:
@@ -103,12 +131,23 @@ def read_selection_labels(selections_dir: str) -> dict[str, dict[str, list[str]]
     return out
 
 
+def _highres_arrays(cd, key):
+    """``(ccg, null)`` at high resolution, or ``(None, None)`` when absent."""
+    data = cd.ccg_for(key.change(resolution='highres'))
+    if data is None or data.ccg is None:
+        return None, None
+    return data.ccg[0], data.ccg_null[0]
+
+
 def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
-                      min_rats: int = 4) -> LabeledSet:
+                      min_rats: int = 4, highres: bool = True) -> LabeledSet:
     """Join saved labels to their CCG traces; keep labels with enough support.
 
     A label needs *min_count* examples across at least *min_rats* animals, since
     a label seen in one rat cannot be shown to generalize across animals.
+    With *highres*, each sample also carries its fine-binned trace over the same
+    time window; a session missing it drops highres for the whole set, so the
+    models never learn "missing" as a feature.
     """
     labels_by_key = read_selection_labels(selections_dir)
     ptr_by_str = {str(k): k for k in cd.ptr}
@@ -120,18 +159,22 @@ def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
             continue
         data = cd.ccg_for(key)
         ccg, null = data.ccg[0], data.ccg_null[0]
+        ccg_hi, null_hi = _highres_arrays(cd, key) if highres else (None, None)
         session = str(key.session)
         conn = '-'.join(key.conn_type) if key.conn_type else '?'
         for pair, labs in pairs.items():
             ref, tgt = (int(v) for v in pair.split(','))
             if ref >= ccg.shape[0] or tgt >= ccg.shape[1]:
                 continue
+            has_hi = ccg_hi is not None and ref < ccg_hi.shape[0] and tgt < ccg_hi.shape[1]
             samples.append(PairSample(
                 session=session, rat=rat_of(session), conn_type=conn,
                 ref=ref, tgt=tgt,
                 ccg=np.asarray(ccg[ref, tgt], dtype=float),
                 null=np.asarray(null[ref, tgt], dtype=float),
-                labels=labs))
+                labels=labs,
+                ccg_hi=np.asarray(ccg_hi[ref, tgt], dtype=float) if has_hi else None,
+                null_hi=np.asarray(null_hi[ref, tgt], dtype=float) if has_hi else None))
 
     counts = Counter(lab for s in samples for lab in s.labels)
     rats = {}
