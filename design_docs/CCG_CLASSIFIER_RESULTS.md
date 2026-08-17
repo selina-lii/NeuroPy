@@ -21,9 +21,10 @@ while shape labels co-occur freely. `twohead` exploits this; it did **not** help
 ## Models
 | name | input |
 |---|---|
-| `shape` | 14 interpretable descriptors (peak SNR, lag, width, slope, asymmetry, 0 ms bin, rhythm index…) |
-| `trace` | residual + 1st and 2nd derivative, full trace |
-| `hybrid` | both — **default** |
+| `dualres` | **both resolutions, separate embedding heads — default** |
+| `hybrid` | lowres trace + derivatives + descriptors |
+| `trace` | lowres residual + 1st and 2nd derivative |
+| `shape` | 14 interpretable descriptors (peak SNR, lag, width, slope, 0 ms bin, rhythm index…) |
 | `twohead` | hybrid, quality tiers forced exclusive |
 
 All operate on the *residual* `(ccg − null) / √null`, never raw counts.
@@ -31,13 +32,48 @@ All operate on the *residual* `(ccg − null) / √null`, never raw counts.
 ## Results — leave-one-animal-out
 | model | mean F1 | mean AUC |
 |---|---|---|
-| shape | 0.322 | 0.699 |
+| **dualres** | **0.429** | **0.795** |
 | trace | 0.358 | 0.703 |
-| **hybrid** | **0.354** | **0.727** |
+| hybrid | 0.354 | 0.727 |
 | twohead | 0.349 | 0.709 |
+| shape | 0.322 | 0.699 |
 
-Best labels (hybrid): rhythm 0.59, best 0.50, Disinhib 0.49, ok 0.46,
-refractory 0.42. Worst: wideMs 0.09, leak 0.15, rift 0.20.
+Best labels (dualres): rhythm 0.70, Disinhib 0.53, best 0.52, leak 0.51,
+refractory 0.50, rift 0.49. Worst: wideMs 0.17, 2side_dips 0.26.
+
+## Why both resolutions (the biggest single win)
+Lowres is 21 bins at 1 ms; highres is 601 bins at 1/30 ms. **Both span the same
+±10 ms** — they are different views of one interval, not different extents. So
+padding lowres out to 601 would misalign lag 0 and destroy exactly what the fine
+bins exist to carry.
+
+Each resolution instead gets **its own scaler + PCA embedding head** (24
+components), and the two embeddings fuse with the scalar descriptors from both.
+Separate heads are necessary, not cosmetic: highres bins hold ~1/30 the counts of
+lowres bins, so one shared scaler over the concatenation would let 601 highres
+columns swamp 21 lowres ones by sheer count rather than by information.
+
+`n_components` = 24 by sweep: F1 0.408 / **0.429** / 0.385 at 16 / 24 / 40.
+
+Gains land precisely on the sub-millisecond labels, which is the evidence that
+highres is contributing signal and not just capacity:
+
+| label | F1 lowres → dualres | why |
+|---|---|---|
+| `leak` | 0.15 → **0.51** (+0.36) | "ultra-sharp peak at 0ms" — one bin at 1 ms, a shape at 1/30 ms |
+| `rift` | 0.20 → **0.49** (+0.30) | narrow central gap, invisible at 1 ms |
+| `rhythm` | 0.59 → **0.70** (+0.11) | |
+| `2peakms` | 0.27 → **0.37** (+0.10) | "two sharp peaks (<.5ms wide)" — unresolvable in lowres |
+| `refractory` | 0.42 → **0.50** (+0.08) | 0 ms dip; AUC 0.89 |
+| `msconn` | 0.34 → **0.38** (+0.05) | |
+
+Three labels lose, all broad/quality ones where fine bins only add noise:
+`ok` −0.04, `good` −0.07, `2side_dips` −0.08. Worth revisiting by letting those
+labels read the lowres head preferentially.
+
+All 16 test2 sessions have highres on disk, so no missing-data masking is needed.
+A set missing highres for any sample falls back to lowres for **every** sample, so
+the nets can never learn "missing" as a feature.
 
 ### Per-label thresholds matter more than the architecture
 Naive 0.5 cut → mean F1 **0.25**. Calibrated per-label thresholds → **0.35**.
@@ -45,8 +81,9 @@ Every optimal threshold lands well below 0.5 because the labels are rare.
 Thresholds are fit on training folds only, so the number above is honest.
 
 ## How good is this really?
-Same model, random split instead of by-animal: **F1 0.46 / AUC 0.81**.
-The 0.11 F1 gap is *labeling drift between animals*, not shape difficulty —
+`hybrid` on a random split instead of by-animal: **F1 0.46 / AUC 0.81** — which
+`dualres` now nearly matches (0.429 / 0.795) while still generalizing across
+animals. The remaining gap is *labeling drift between animals*, not shape difficulty —
 `rhythm` prevalence runs from 1.7% (RatU) to 72% (RatS), a 40× swing. RatU is
 the single largest fold (1198 pairs) and barely uses the label.
 
@@ -72,6 +109,10 @@ Figures are the real check, not the F1 table.
 - `wideMs` diagnostic: its top-scoring panels look homogeneous but are mostly
   `true=n`, and all come from one animal → sparse/inconsistent tagging, not a
   model failure.
+- `leak` under `dualres`: top scores are now p=0.96–1.00 (were capped ~0.35 with
+  lowres alone), 10/12 true, every panel showing the ultra-sharp peak centered on
+  0 ms. Direct visual confirmation that the fine bins, not extra capacity, are
+  what earned the +0.36.
 
 ## How the UI handles tentative labels
 Predictions never write into group tags on their own — otherwise the next
@@ -83,7 +124,11 @@ training run learns from its own output. They go into a `PredictionStore`
 - promotes to real group tags only on **Accept**.
 
 ## Notes
-- Runs on sklearn MLPs, not torch — torch install hit a full disk, and at n=3129
-  a small MLP is the right size of model anyway. The interface is model-agnostic
-  if a CNN is wanted later.
-- Full pipeline: ~6 s to fit, ~1 min for CV + figures, 8283 pairs scored.
+- Runs on sklearn MLPs, not torch. At n=3129 a small MLP is right-sized, and the
+  dual-resolution result shows the returns are in *input representation*, not
+  model capacity. The interface is model-agnostic if a CNN is wanted later —
+  `fit(ccg, null, Y, ccg_hi, null_hi)` / `predict_proba(...)`.
+- Full pipeline: ~1–2 min for CV + figures, 8283 pairs scored.
+- Both models train on the identical 3047 samples (3129 tagged pairs minus those
+  whose only labels fell below the min_count/min_rats floor), and **zero** samples
+  lack highres — so the F1 comparison above isolates the input representation.
