@@ -9,10 +9,10 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from pyqtgraph.Qt.QtCore import QObject, QThread, Signal
+from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QHBoxLayout, QLabel, QLineEdit,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
@@ -21,9 +21,10 @@ from neuropy.analyses.neurons_dataset import Key
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.utils import BusyButton
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
-from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, list_models,
-                                    missing_highres, open_projects, predict_project,
-                                    scope_keys, scorable_keys, train_project)
+from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
+                                    list_models, missing_highres, open_projects,
+                                    predict_project, rename_model, scope_keys,
+                                    scorable_keys, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -52,7 +53,8 @@ class _ClassifyWorker(QObject):
         o = self._opts
         result = train_project(self._cd, o['model_name'], figures=o['figures'],
                                save_as=o['save_as'], extra=o['extra'],
-                               highres=o['highres'], min_count=o['min_count'])
+                               highres=o['highres'], min_count=o['min_count'],
+                               bias=o['bias'])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -84,7 +86,7 @@ class ClassifierDialog(QDialog):
         super().__init__(win)
         self._win = win
         self._thread = self._worker = None
-        self._review = None
+        self._rows: list[tuple] = []
         self.setWindowTitle("Classify pairs")
         self.resize(620, 520)
         # Non-modal throughout: judging a candidate pair means toggling
@@ -102,6 +104,14 @@ class ClassifierDialog(QDialog):
             self.model_combo.addItem(name)
         self.model_combo.setCurrentText(DEFAULT_MODEL)
         row.addWidget(self.model_combo)
+        self.bias_combo = QComboBox()
+        for mode, tip in (('discover', "find as many true pairs as possible"),
+                          ('balanced', "even trade of coverage against errors"),
+                          ('accurate', "only pairs it is confident about")):
+            self.bias_combo.addItem(mode)
+            self.bias_combo.setItemData(self.bias_combo.count() - 1, tip, Qt.ToolTipRole)
+        self.bias_combo.setCurrentText('balanced')
+        row.addWidget(self.bias_combo)
         row.addWidget(QLabel("Name:"))
         self.name_edit = QLineEdit(self._win.cd.conf.name)   # default: this project
         self.name_edit.setMinimumWidth(140)
@@ -153,16 +163,13 @@ class ClassifierDialog(QDialog):
         saved_row.addWidget(QLabel("Saved:"))
         self.saved_combo = QComboBox()
         self.saved_combo.setMinimumWidth(240)
-        for entry in list_models(self._win.cd):
-            trained = entry.get('trained_on', {})
-            self.saved_combo.addItem(
-                f"{entry['name']}  ({trained.get('n_samples', 0)} pairs from "
-                f"{', '.join(trained.get('projects', ['?']))})", entry['name'])
         saved_row.addWidget(self.saved_combo)
         self.apply_btn = BusyButton("Apply to scope")
         self.apply_btn.clicked.connect(self._on_apply_btn)
-        self.apply_btn.setEnabled(self.saved_combo.count() > 0)
         saved_row.addWidget(self.apply_btn)
+        manage_btn = QPushButton("Manage…")
+        manage_btn.clicked.connect(self._on_manage_btn)
+        saved_row.addWidget(manage_btn)
         saved_row.addStretch()
         lay.addLayout(saved_row)
 
@@ -170,25 +177,62 @@ class ClassifierDialog(QDialog):
         self.status_label.setWordWrap(True)
         lay.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(['label', 'n', 'precision', 'recall', 'F1'])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        lay.addWidget(self.table)
+        # Review lives here rather than in a second dialog: the scores are already
+        # in the status line, so the space belongs to the pairs being judged.
+        filt = QHBoxLayout()
+        filt.addWidget(QLabel("Label:"))
+        self.label_combo = QComboBox()
+        self.label_combo.currentIndexChanged.connect(self._reload)
+        filt.addWidget(self.label_combo)
+        self.session_check = QCheckBox("Current session only")
+        self.session_check.setChecked(True)
+        self.session_check.stateChanged.connect(self._reload)
+        filt.addWidget(self.session_check)
+        filt.addWidget(QLabel("Min confidence:"))
+        self.cutoff_spin = QDoubleSpinBox()
+        self.cutoff_spin.setRange(0.0, 1.0)
+        self.cutoff_spin.setSingleStep(0.05)
+        self.cutoff_spin.setDecimals(2)
+        self.cutoff_spin.valueChanged.connect(self._reload)
+        filt.addWidget(self.cutoff_spin)
+        filt.addStretch()
+        lay.addLayout(filt)
 
-        self.review_btn = QPushButton("Review predictions…")
-        self.review_btn.clicked.connect(self._on_review_btn)
-        self.review_btn.setEnabled(self._store() is not None)
-        lay.addWidget(self.review_btn)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['pair', 'predicted', 'confidence', 'state'])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.itemSelectionChanged.connect(self._on_table_selection)
+        lay.addWidget(self.table, stretch=1)
+
+        act = QHBoxLayout()
+        self.accept_btn = QPushButton("Accept (tag pair)")
+        self.accept_btn.clicked.connect(self._on_accept_btn)
+        act.addWidget(self.accept_btn)
+        self.reject_btn = QPushButton("Reject")
+        self.reject_btn.clicked.connect(self._on_reject_btn)
+        act.addWidget(self.reject_btn)
+        self.accept_all_btn = QPushButton("Accept all shown")
+        self.accept_all_btn.setToolTip(
+            "Tag every row currently listed — narrow the list with the label\n"
+            "filter and the confidence cutoff first.")
+        self.accept_all_btn.clicked.connect(self._on_accept_all_btn)
+        act.addWidget(self.accept_all_btn)
+        act.addStretch()
+        lay.addLayout(act)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        self.refresh_saved()
+        self._reload()
 
+    @property
     def _store(self) -> PredictionStore | None:
+        """The live store: predictions belong to the window, not this dialog."""
         return self._win.prediction_store
 
     def _describe_existing(self) -> str:
-        store = self._store()
+        store = self._store
         if store is None:
             return ("Trains on this project's group tags, then labels every pointer pair.\n"
                     "Predictions stay separate from your tags until you accept them.")
@@ -205,6 +249,7 @@ class ClassifierDialog(QDialog):
         """Everything the worker needs, read once off the widgets."""
         return {'saved': saved,
                 'model_name': self.model_combo.currentText(),
+                'bias': self.bias_combo.currentText(),
                 'save_as': self.name_edit.text().strip() or self._win.cd.conf.name,
                 'figures': self.figures_check.isChecked(),
                 'highres': self.highres_check.isChecked(),
@@ -303,14 +348,6 @@ class ClassifierDialog(QDialog):
     def _show_result(self, result: dict):
         summary = result['summary']
         self._win.prediction_store = result['store']
-        scores = summary['scores']
-        self.table.setRowCount(len(scores))
-        order = sorted(scores, key=lambda n: -scores[n]['f1'])
-        for i, name in enumerate(order):
-            s = scores[name]
-            for col, val in enumerate([name, str(s['n']), f"{s['precision']:.2f}",
-                                       f"{s['recall']:.2f}", f"{s['f1']:.2f}"]):
-                self.table.setItem(i, col, QTableWidgetItem(val))
         trained = summary.get('trained_on', {})
         origin = (f"trained on {trained['project']}" if trained
                   else f"saved as '{result['saved_as']}'")
@@ -319,6 +356,10 @@ class ClassifierDialog(QDialog):
                  f"{summary['n_rats']} animals, {origin}).",
                  f"Leave-one-animal-out mean F1 {summary['mean_f1']:.2f}, "
                  f"AUC {summary['mean_auc']:.2f}."]
+        best = sorted(summary['scores'].items(), key=lambda kv: -kv[1]['f1'])[:4]
+        if best:
+            lines.append("  ".join(f"{n} p{s['precision']:.2f}/r{s['recall']:.2f}"
+                                   for n, s in best))
         if result.get('skipped'):
             lines.append(f"Skipped {len(result['skipped'])} session(s) lacking the "
                          f"CCGs this model needs: {', '.join(result['skipped'][:4])}"
@@ -327,95 +368,7 @@ class ClassifierDialog(QDialog):
             lines.append(f"Figures and model in {result['out_dir']}")
             result['store'].save(os.path.join(result['out_dir'], 'predictions.json'))
         self.status_label.setText("\n".join(lines))
-        self.review_btn.setEnabled(True)
-
-    def _on_review_btn(self):
-        store = self._store()
-        if store is None:
-            return
-        if self._review is None:
-            self._review = PredictionReviewDialog(self._win, store)
-        self._review.show()
-        self._review.raise_()
-
-    @classmethod
-    def show_for(cls, win: 'CCGReviewUI'):
-        """Open (or resurface) the one classifier dialog for *win*."""
-        if win.classifier_dialog is None:
-            win.classifier_dialog = cls(win)
-        win.classifier_dialog.show()
-        win.classifier_dialog.raise_()
-        return win.classifier_dialog
-
-
-class PredictionReviewDialog(QDialog):
-    """Walk the predictions and accept the ones that are right.
-
-    Ordered least-confident first: the confident predictions need no attention,
-    so review time is spent where the model is actually unsure.
-    """
-
-    def __init__(self, win: 'CCGReviewUI', store: PredictionStore):
-        super().__init__(win)
-        self._win = win
-        self._store = store
-        self.setWindowTitle("Review predictions")
-        self.resize(660, 500)
-        self.setModal(False)
-        self._build()
         self._reload()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Label:"))
-        self.label_combo = QComboBox()
-        self.label_combo.addItem("all pending")
-        for name in self._store.labels:
-            self.label_combo.addItem(name)
-        self.label_combo.addItem(UNSURE)
-        self.label_combo.currentIndexChanged.connect(self._reload)
-        row.addWidget(self.label_combo)
-        self.session_check = QCheckBox("Current session only")
-        self.session_check.setChecked(True)
-        self.session_check.stateChanged.connect(self._reload)
-        row.addWidget(self.session_check)
-        row.addWidget(QLabel("Min confidence:"))
-        self.cutoff_spin = QDoubleSpinBox()
-        self.cutoff_spin.setRange(0.0, 1.0)
-        self.cutoff_spin.setSingleStep(0.05)
-        self.cutoff_spin.setDecimals(2)
-        self.cutoff_spin.valueChanged.connect(self._reload)
-        row.addWidget(self.cutoff_spin)
-        row.addStretch()
-        lay.addLayout(row)
-
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(['pair', 'predicted', 'confidence', 'state'])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.itemSelectionChanged.connect(self._on_table_selection)
-        lay.addWidget(self.table)
-
-        row2 = QHBoxLayout()
-        self.accept_btn = QPushButton("Accept (tag pair)")
-        self.accept_btn.clicked.connect(self._on_accept_btn)
-        row2.addWidget(self.accept_btn)
-        self.reject_btn = QPushButton("Reject")
-        self.reject_btn.clicked.connect(self._on_reject_btn)
-        row2.addWidget(self.reject_btn)
-        self.accept_all_btn = QPushButton("Accept all shown")
-        self.accept_all_btn.setToolTip(
-            "Tag every row currently listed — narrow the list with the label\n"
-            "filter and the confidence cutoff first.")
-        self.accept_all_btn.clicked.connect(self._on_accept_all_btn)
-        row2.addWidget(self.accept_all_btn)
-        row2.addStretch()
-        lay.addLayout(row2)
-
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
 
     def _session(self) -> str | None:
         if not self.session_check.isChecked():
@@ -424,6 +377,8 @@ class PredictionReviewDialog(QDialog):
 
     def _visible_pairs(self) -> list[tuple]:
         """Rows the table shows: scope- and label-filtered, above the cutoff."""
+        if self._store is None:
+            return []
         label = self.label_combo.currentText()
         sess = self._session()
         one = None if label in ('all pending', UNSURE) else label
@@ -433,7 +388,21 @@ class PredictionReviewDialog(QDialog):
         return [pk for pk in pairs
                 if self._store.confidence(*pk, label=one) >= cutoff]
 
+    def _sync_labels(self):
+        """Refill the label filter from the current store, keeping the choice."""
+        want = ['all pending'] + (self._store.labels if self._store else []) + [UNSURE]
+        if [self.label_combo.itemText(i)
+                for i in range(self.label_combo.count())] == want:
+            return
+        keep = self.label_combo.currentText()
+        self.label_combo.blockSignals(True)
+        self.label_combo.clear()
+        self.label_combo.addItems(want)
+        self.label_combo.setCurrentText(keep if keep in want else 'all pending')
+        self.label_combo.blockSignals(False)
+
     def _reload(self):
+        self._sync_labels()
         pairs = self._visible_pairs()
         label = self.label_combo.currentText()
         shown = None if label in ('all pending', UNSURE) else label
@@ -506,4 +475,88 @@ class PredictionReviewDialog(QDialog):
 
     def _after_change(self):
         self._win.nav.groups.changed.emit()
+        self._reload()
+
+    def _on_manage_btn(self):
+        ManageModelsDialog(self._win, self).exec()
+
+    def refresh_saved(self):
+        """Repopulate the saved-model combo after the library changed on disk."""
+        keep = self.saved_combo.currentData()
+        self.saved_combo.clear()
+        for entry in list_models(self._win.cd):
+            trained = entry.get('trained_on', {})
+            self.saved_combo.addItem(
+                f"{entry['name']}  ({trained.get('n_samples', 0)} pairs from "
+                f"{', '.join(trained.get('projects', ['?']))})", entry['name'])
+        if keep:
+            self.saved_combo.setCurrentIndex(max(0, self.saved_combo.findData(keep)))
+        self.apply_btn.setEnabled(self.saved_combo.count() > 0)
+
+    @classmethod
+    def show_for(cls, win: 'CCGReviewUI'):
+        """Open (or resurface) the one classifier dialog for *win*."""
+        if win.classifier_dialog is None:
+            win.classifier_dialog = cls(win)
+        win.classifier_dialog.show()
+        win.classifier_dialog.raise_()
+        return win.classifier_dialog
+
+
+class ManageModelsDialog(QDialog):
+    """Rename or delete saved classifiers; the name is the unique identifier."""
+
+    def __init__(self, win: 'CCGReviewUI', parent: ClassifierDialog):
+        super().__init__(parent)
+        self._win = win
+        self._parent = parent
+        self.setWindowTitle("Manage classifiers")
+        self.resize(420, 300)
+        lay = QVBoxLayout(self)
+        self.list = QListWidget()
+        lay.addWidget(self.list)
+        row = QHBoxLayout()
+        for text, slot in (("Rename…", self._on_rename_btn),
+                           ("Delete", self._on_delete_btn)):
+            btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch()
+        lay.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._reload()
+
+    def _reload(self):
+        self.list.clear()
+        for entry in list_models(self._win.cd):
+            self.list.addItem(entry['name'])
+        self._parent.refresh_saved()
+
+    def _current(self) -> str:
+        item = self.list.currentItem()
+        return item.text() if item else ''
+
+    def _on_rename_btn(self):
+        name = self._current()
+        if not name:
+            return
+        new, ok = QInputDialog.getText(self, "Rename classifier", "New name:", text=name)
+        if not ok:
+            return
+        try:
+            rename_model(self._win.cd, name, new)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rename", str(exc))
+            return
+        self._reload()
+
+    def _on_delete_btn(self):
+        name = self._current()
+        if not name or QMessageBox.question(
+                self, "Delete classifier",
+                f"Delete '{name}' permanently?") != QMessageBox.StandardButton.Yes:
+            return
+        delete_model(self._win.cd, name)
         self._reload()

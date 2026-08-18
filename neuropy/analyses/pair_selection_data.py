@@ -30,6 +30,7 @@ class _SelectionData(JsonSavable):
         self.unselected: set = set()
         self.deleted:    set = set()
         self.tags:       dict = {}   # {(ref,tgt): {groups,notes,tags}}
+        self.complete:   bool = False  # reviewed exhaustively → untagged pairs are negatives
 
     def __setstate__(self, state: dict):
         def _to_set(v) -> set:
@@ -56,6 +57,7 @@ class _SelectionData(JsonSavable):
         self.unselected = _to_set(state.get('unselected', []))
         self.deleted    = _to_set(state.get('deleted', []))
         self.tags       = _to_tuple_key_dict(state.get('tags', {}))
+        self.complete   = bool(state.get('complete', False))
 
     def set_pair_state(self, pair: tuple, state: str):
         pair = tuple(pair)

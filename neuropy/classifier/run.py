@@ -47,6 +47,26 @@ def list_models(cd) -> list[dict]:
     return sorted(out, key=lambda m: m.get('saved_at', ''), reverse=True)
 
 
+def delete_model(cd, name: str):
+    """Remove a saved classifier — both the weights and their sidecar."""
+    for path in (model_path(cd, name), model_path(cd, name)[:-4] + '.json'):
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def rename_model(cd, old: str, new: str):
+    """Rename a classifier; the name is its identity, so collisions are refused."""
+    new = new.strip()
+    if not new or new == old:
+        return
+    if os.path.isfile(model_path(cd, new)):
+        raise ValueError(f"a classifier named {new!r} already exists")
+    for ext in ('.pkl', '.json'):
+        src = model_path(cd, old)[:-4] + ext
+        if os.path.isfile(src):
+            os.rename(src, model_path(cd, new)[:-4] + ext)
+
+
 def open_projects(names: list[str]) -> list:
     """Load sibling projects by name, for pooling their selections into training."""
     return [CCGDataset(CCGConfig(name=n)) for n in names]
@@ -59,7 +79,7 @@ def load_model(cd, name: str) -> BaseModel:
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
                   extra: list = None, highres: bool = True,
-                  min_count: int = 20) -> dict:
+                  min_count: int = 20, bias: str = 'balanced') -> dict:
     """Train on saved selections and store the model in the shared library.
 
     Defaults are the widest useful ones: every labeled pair in the loaded
@@ -82,10 +102,10 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
 
-    cv = leave_one_rat_out(ls, model_name, duration=duration)
-    model = fit_final(ls, model_name, duration=duration)
+    cv = leave_one_rat_out(ls, model_name, duration=duration, bias=bias)
+    model = fit_final(ls, model_name, duration=duration, bias=bias)
 
-    summary = {'model': model_name, 'n_samples': len(ls.samples),
+    summary = {'model': model_name, 'bias': bias, 'n_samples': len(ls.samples),
                'n_rats': len(set(ls.rats)), 'labels': ls.label_names,
                'scores': cv['scores'],
                'mean_f1': float(np.mean([s['f1'] for s in cv['scores'].values()])),

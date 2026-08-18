@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 
-PREDICTED_PREFIX = 'pred_'
+ADMITTED = '__admitted__'   # marker group; dataset._NON_SHAPE_PREFIXES keeps it out of training
 
 
 class PredictionStore:
@@ -85,10 +85,16 @@ class PredictionStore:
         return sorted(pend, key=lambda pk: self.confidence(*pk))
 
     def accept(self, session: str, ref: int, tgt: int, groups) -> list[str]:
-        """Promote a pair's predictions into real group tags."""
+        """Promote a pair's predictions into real group tags.
+
+        Group membership is a set, so a pair admitted again by a later model
+        simply re-lands in the same groups — batches accumulate, never conflict.
+        The ADMITTED marker records that a machine proposed it, and is excluded
+        from training so the next model never learns from its own output.
+        """
         pk = self._pk(session, ref, tgt)
         labels = self.labels_for(*pk)
-        for label in labels:
+        for label in labels + [ADMITTED]:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
         self.accepted.add(pk)
         self.rejected.discard(pk)

@@ -32,11 +32,16 @@ from neuropy.classifier.features import (bank_response, kernel_bank, kernel_resp
 UNSURE = '?'
 
 
-def _f1(y: np.ndarray, pred: np.ndarray) -> float:
+BIAS_BETA = {'accurate': 0.5, 'balanced': 1.0, 'discover': 2.0}
+
+
+def _fbeta(y: np.ndarray, pred: np.ndarray, beta: float = 1.0) -> float:
+    """F-beta; beta>1 favours recall (find more), beta<1 favours precision."""
     tp = float((pred & (y == 1)).sum())
     fp = float((pred & (y == 0)).sum())
     fn = float(((~pred) & (y == 1)).sum())
-    return 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+    b2 = beta * beta
+    return (1 + b2) * tp / ((1 + b2) * tp + fp + b2 * fn) if tp else 0.0
 
 
 class BaseModel:
@@ -47,9 +52,10 @@ class BaseModel:
     head = 'mlp'
 
     def __init__(self, label_names: list[str], duration: float = 0.02,
-                 head: str = None, **kw):
+                 head: str = None, bias: str = 'balanced', **kw):
         self.label_names = list(label_names)
         self.duration = duration
+        self.bias = bias   # 'discover' | 'balanced' | 'accurate'; see BIAS_BETA
         self.params = kw
         if head is not None:
             self.head = head
@@ -68,6 +74,9 @@ class BaseModel:
 
     def fit(self, ccg: np.ndarray, null: np.ndarray, Y: np.ndarray,
             ccg_hi: np.ndarray = None, null_hi: np.ndarray = None):
+        # Pin what was actually trained on: a highres-capable model fitted
+        # without it emits narrow features and must be scored the same way.
+        self.uses_highres = self.uses_highres and ccg_hi is not None
         X = self.scaler.fit_transform(self._encode(ccg, null, ccg_hi, null_hi))
         self.nets, self.constant = [], []
         for j in range(Y.shape[1]):
@@ -92,19 +101,20 @@ class BaseModel:
         return out
 
     def _calibrate(self, P: np.ndarray, Y: np.ndarray):
-        """Pick each label's decision threshold by maximizing F1 on training scores.
+        """Pick each label's threshold by maximizing F-beta on training scores.
 
         Labels here are rare (83–919 of 3115), so the natural 0.5 cut classifies
         almost everything negative. Thresholds are fit on training data only —
         an outer CV fold never contributes to its own threshold.
         """
+        beta = BIAS_BETA[self.bias]
         grid = np.arange(0.05, 0.95, 0.01)
         for j in range(Y.shape[1]):
             y, p = Y[:, j], P[:, j]
             if y.min() == y.max():
                 continue
-            f1 = [_f1(y, p >= t) for t in grid]
-            self.thresholds[j] = grid[int(np.argmax(f1))]
+            score = [_fbeta(y, p >= t, beta) for t in grid]
+            self.thresholds[j] = grid[int(np.argmax(score))]
 
     def _new_head(self):
         """One binary classifier for one label, per ``self.head``."""
@@ -138,6 +148,7 @@ class BaseModel:
         self.meta = {'model': type(self).__name__,
                      'model_key': self.model_key(),
                      'head': self.head,
+                     'bias': self.bias,
                      'labels': self.label_names,
                      'duration': self.duration,
                      'thresholds': {n: float(t) for n, t

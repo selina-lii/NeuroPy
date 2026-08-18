@@ -102,6 +102,7 @@ class LabeledSet:
         for smp in self.samples:
             per_session[smp.session] = per_session.get(smp.session, 0) + 1
         return {'n_samples': len(self.samples),
+                'n_negatives': sum(1 for s in self.samples if not s.labels),
                 'sessions': sorted(per_session),
                 'pairs_per_session': per_session,
                 'rats': sorted(set(self.rats.tolist())),
@@ -129,9 +130,13 @@ def rat_of(session: str) -> str:
     return session.split('_')[0]
 
 
-def read_selection_labels(selections_dir: str) -> dict[str, dict[str, list[str]]]:
-    """``{str(Key): {'ref,tgt': [label, ...]}}`` merged over every session file."""
-    out: dict[str, dict[str, list[str]]] = {}
+def read_selection_labels(selections_dir: str) -> dict[str, dict]:
+    """``{str(Key): {'labels': {'ref,tgt': [...]}, 'complete': bool}}`` over every session file.
+
+    ``complete`` marks a slice the user reviewed exhaustively, so its untagged
+    pairs are true negatives rather than pairs nobody looked at yet.
+    """
+    out: dict[str, dict] = {}
     for path in sorted(glob.glob(os.path.join(selections_dir, '*.json'))):
         stem = os.path.basename(path)[:-len('.json')]
         if stem in ('groups', 'selection_dataset'):
@@ -139,10 +144,12 @@ def read_selection_labels(selections_dir: str) -> dict[str, dict[str, list[str]]
         with open(path) as fh:
             doc = json.load(fh)
         for key_str, sel in doc.get('selections', {}).items():
+            entry = out.setdefault(key_str, {'labels': {}, 'complete': False})
+            entry['complete'] |= bool(sel.get('complete', False))
             for pair, meta in sel.get('tags', {}).items():
                 labels = [g for g in meta.get('groups', []) if is_shape_label(g)]
                 if labels:
-                    out.setdefault(key_str, {})[pair] = labels
+                    entry['labels'][pair] = labels
     return out
 
 
@@ -197,10 +204,14 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
     ptr_by_str = {str(k): k for k in cd.ptr}
 
     samples: list[PairSample] = []
-    for key_str, pairs in labels_by_key.items():
+    for key_str, entry in labels_by_key.items():
         key = ptr_by_str.get(key_str)
         if key is None:
             continue
+        pairs = dict(entry['labels'])
+        if entry['complete']:   # reviewed slice → untagged pairs are negatives
+            for ref, tgt in cd.ptr[key.ptr()].pair_set:
+                pairs.setdefault(f'{ref},{tgt}', [])
         data = cd.ccg_for(key)
         ccg, null = data.ccg[0], data.ccg_null[0]
         ccg_hi, null_hi = (_highres_arrays(cd, key, compute_highres)
