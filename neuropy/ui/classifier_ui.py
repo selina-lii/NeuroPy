@@ -18,10 +18,11 @@ from pyqtgraph.Qt.QtWidgets import (
 
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.classifier.models import MODELS, UNSURE
+from neuropy.ui.utils import BusyButton
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, list_models,
-                                    open_projects, predict_project, scope_keys,
-                                    scorable_keys, train_project)
+                                    missing_highres, open_projects, predict_project,
+                                    scope_keys, scorable_keys, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -141,7 +142,7 @@ class ClassifierDialog(QDialog):
         scope_row.addStretch()
         lay.addLayout(scope_row)
 
-        self.train_btn = QPushButton("Train and classify")
+        self.train_btn = BusyButton("Train and classify")
         self.train_btn.clicked.connect(self._on_train_btn)
         lay.addWidget(self.train_btn)
 
@@ -157,7 +158,7 @@ class ClassifierDialog(QDialog):
                 f"{entry['name']}  ({trained.get('n_samples', 0)} pairs from "
                 f"{', '.join(trained.get('projects', ['?']))})", entry['name'])
         saved_row.addWidget(self.saved_combo)
-        self.apply_btn = QPushButton("Apply to scope")
+        self.apply_btn = BusyButton("Apply to scope")
         self.apply_btn.clicked.connect(self._on_apply_btn)
         self.apply_btn.setEnabled(self.saved_combo.count() > 0)
         saved_row.addWidget(self.apply_btn)
@@ -218,14 +219,59 @@ class ClassifierDialog(QDialog):
         self._launch(None)
 
     def _launch(self, saved: str | None):
-        self.train_btn.setEnabled(False)
+        opts = self._options(saved)
+        missing = missing_highres(self._win.cd, opts['scope']) if opts['highres'] else []
+        if missing and not self._confirm_highres(missing):
+            return
+        if missing:
+            self._precompute(missing, opts)
+            return
+        self._start(opts)
+
+    def _confirm_highres(self, sessions: list[str]) -> bool:
+        """High-res compute is minutes and gigabytes — never start it unasked."""
+        shown = ', '.join(sessions[:8]) + ('…' if len(sessions) > 8 else '')
+        return QMessageBox.question(
+            self, "Compute high-res CCGs",
+            f"{len(sessions)} session(s) in scope have no high-res CCGs:\n\n{shown}\n\n"
+            f"A classifier trained on both resolutions cannot score a low-res-only "
+            f"session, so these must be computed first. Proceed?"
+        ) == QMessageBox.StandardButton.Yes
+
+    def _precompute(self, sessions: list[str], opts: dict):
+        """Queue the missing high-res computes, then train when they all land."""
+        self.train_btn.set_busy(True, f"Computing high-res 0/{len(sessions)}")
         self.apply_btn.setEnabled(False)
-        # Status text instead of a modal progress dialog, for the same reason.
-        self.status_label.setText("Applying classifier…" if saved
-                                  else "Training classifier… (~2 min)")
+        started = self._win.custom_mgr.queue_whole_session(
+            sessions, 'highres', on_done=lambda ok: self._on_precomputed(ok, opts))
+        if started != len(sessions):
+            self.train_btn.set_busy(False)
+            self.apply_btn.setEnabled(self.saved_combo.count() > 0)
+            QMessageBox.warning(self, "Classify",
+                                f"Only {started} of {len(sessions)} session(s) could be "
+                                f"queued — the CCG queue is full. Let it drain and retry.")
+
+    def _on_precomputed(self, failed: list[str], opts: dict):
+        self.train_btn.set_busy(False)
+        self.apply_btn.setEnabled(self.saved_combo.count() > 0)
+        if failed:
+            # Refuse rather than train on a subset: which sessions are missing
+            # changes what the model saw, so that is the user's call.
+            QMessageBox.critical(self, "Classify",
+                                 f"High-res compute failed for {len(failed)} session(s):\n"
+                                 f"{', '.join(failed)}\n\nNothing was trained.")
+            return
+        self._start(opts)
+
+    def _start(self, opts: dict):
+        saved = opts.get('saved')
+        busy = self.apply_btn if saved else self.train_btn
+        busy.set_busy(True, "Applying classifier…" if saved
+                      else "Training classifier… (~2 min)")
+        (self.train_btn if saved else self.apply_btn).setEnabled(False)
 
         thread = QThread(self)
-        worker = _ClassifyWorker(self._win.cd, self._options(saved))
+        worker = _ClassifyWorker(self._win.cd, opts)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         self._thread, self._worker = thread, worker
@@ -236,7 +282,8 @@ class ClassifierDialog(QDialog):
             worker.deleteLater()
             thread.deleteLater()
             self._thread = self._worker = None
-            self.train_btn.setEnabled(True)
+            self.train_btn.set_busy(False)
+            self.apply_btn.set_busy(False)
             self.apply_btn.setEnabled(self.saved_combo.count() > 0)
 
         def _on_done(result):

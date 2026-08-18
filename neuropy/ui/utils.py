@@ -1114,3 +1114,39 @@ class Tunable:
             for name, attr in vars(klass).items():
                 if isinstance(attr, Tunable):
                     obj.__dict__.setdefault(name, attr.default)
+
+
+class BusyButton(QPushButton):
+    """Button that shows an inline spinner while its action runs.
+
+    Disabled while busy so the action cannot re-fire, but the button is the only
+    thing blocked — the dialog holding it stays interactive.
+    """
+
+    _FRAMES = '◐◓◑◒'
+
+    def __init__(self, text: str = '', parent=None):
+        super().__init__(text, parent)
+        self._idle_text = text
+        self._frame = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def set_busy(self, busy: bool, text: str = None):
+        """Start/stop the spinner; *text* replaces the label while busy."""
+        self._busy_text = text or self._idle_text
+        self.setEnabled(not busy)
+        if busy:
+            self._timer.start(80)
+            self._tick()
+        else:
+            self._timer.stop()
+            self.setText(self._idle_text)
+
+    def set_busy_text(self, text: str):
+        """Update the message without restarting the spinner (e.g. a progress count)."""
+        self._busy_text = text
+
+    def _tick(self):
+        self._frame = (self._frame + 1) % len(self._FRAMES)
+        self.setText(f"{self._FRAMES[self._frame]}  {self._busy_text}")

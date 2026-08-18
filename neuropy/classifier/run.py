@@ -74,7 +74,9 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
     duration = cd.conf.duration
     datasets = [cd] + list(extra or [])
 
-    ls = build_multi(datasets, highres=highres, compute_highres=highres)
+    # The UI queues any missing high-res compute before calling this, so a
+    # session still lacking it here is an error rather than something to fix inline.
+    ls = build_multi(datasets, highres=highres)
     if not ls.label_names:
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
@@ -145,6 +147,15 @@ def scope_keys(cd, session: str = None, type_label: str = None) -> list:
             continue
         keys.append(key)
     return keys
+
+
+def missing_highres(cd, keys=None) -> list[str]:
+    """Sessions in scope with no high-res CCGs on disk."""
+    out = set()
+    for key in (list(cd.ptr) if keys is None else keys):
+        if loaded_ccg(cd, key, 'highres') is None:
+            out.add(str(key.session))
+    return sorted(out)
 
 
 def scorable_keys(cd, model, keys=None) -> tuple[list, list[str]]:

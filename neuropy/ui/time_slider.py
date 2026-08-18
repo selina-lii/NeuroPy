@@ -843,14 +843,24 @@ class TimeSliderPanel(QWidget):
 
 @dataclass
 class CCGTask:
-    """Queued segment compute: spec + resolution + optional UI load."""
-    spec: CCGSourceConfig
+    """One queued CCG compute.
+
+    With a *spec* this is an appended segment; with *session_key* instead it is
+    a whole-session compute (dim0 index 0), which owns its own storage.
+    """
+    spec: CCGSourceConfig | None
     load_into_ui: bool
     batch_id: int | None = None
     resolution: str = 'lowres'
+    session_key: Key | None = None
+
+    @property
+    def whole_session(self) -> bool:
+        return self.spec is None
 
     def ccg_key(self) -> Key:
-        return self.spec.key.change(resolution=self.resolution)
+        base = self.session_key if self.whole_session else self.spec.key
+        return base.change(resolution=self.resolution)
 
 
 @dataclass
@@ -874,10 +884,13 @@ class CustomCCGWorker:
             max_queue=self._ui.nav.max_ccg_queue, use_result_queue=False)
         self._thread_result: list = []
 
-    def enqueue_task(self, *, spec: CCGSourceConfig, load_into_ui: bool,
-                     batch_id: int | None = None, resolution: str = 'lowres') -> bool:
+    def enqueue_task(self, *, spec: CCGSourceConfig = None, load_into_ui: bool = False,
+                     batch_id: int | None = None, resolution: str = 'lowres',
+                     session_key: Key = None) -> bool:
+        """Queue a segment compute (*spec*) or a whole-session one (*session_key*)."""
         task = CCGTask(spec=spec, load_into_ui=bool(load_into_ui),
-                       batch_id=batch_id, resolution=resolution)
+                       batch_id=batch_id, resolution=resolution,
+                       session_key=session_key)
         return self._runner.enqueue(task)
 
     def on_done(self, completed_task, _result):
@@ -887,15 +900,21 @@ class CustomCCGWorker:
               f"result={'none' if r is None else ('ok' if r.ok else r.error)}", flush=True)
         bid = completed_task.batch_id
         meta = ui.time_slider._batch_meta.get(bid) if bid is not None else None
+        name = ('whole session' if completed_task.whole_session
+                else completed_task.spec.name)
 
         if r is None or not r.ok:
             err = r.error if r else 'unknown error'
             if meta is not None:
                 meta['rows'].append(
-                    (r.session if r else '?', completed_task.spec.name, 'fail', err))
+                    (r.session if r else '?', name, 'fail', err))
             else:
                 QMessageBox.critical(None, "Custom CCG",
                     f"Computation failed:\n{err}")
+        elif completed_task.whole_session:
+            # get_ccg already stored and saved dim0[0]; nothing to splice.
+            if meta is not None:
+                meta['rows'].append((r.session, name, 'ok', str(r.session)))
         else:
             src, seg_data = r.value           # (CCGSourceConfig, single-segment CCGData)
             nm = src.name
@@ -931,11 +950,20 @@ class CustomCCGWorker:
             self._thread_result.clear()
             seg_key = task.ccg_key()
 
+            name = 'whole session' if task.whole_session else str(task.spec.name)
+
             def _ccg_worker():
                 sess = str(seg_key.session)
                 import time as _t; _t0 = _t.time()
-                print(f"[CCGq] START {sess} {task.resolution} '{task.spec.name}'", flush=True)
+                print(f"[CCGq] START {sess} {task.resolution} '{name}'", flush=True)
                 try:
+                    if task.whole_session:
+                        # get_ccg computes dim0 index 0 and writes its own file;
+                        # there is no parent array to splice it onto.
+                        nav.cd.get_ccg(seg_key)
+                        print(f"[CCGq] DONE  {sess} {task.resolution} {_t.time()-_t0:.1f}s", flush=True)
+                        self._thread_result.append(CCGTaskResult(None, None, sess))
+                        return
                     nav.cd.ccg_for(seg_key.cd())   # base array only; the segment is what we are about to compute
                     print(f"[CCGq]   base ready {sess} {task.resolution} {_t.time()-_t0:.1f}s", flush=True)
                     sliced = nav.cd.nd.sliced_neurons_for(task.spec)
@@ -983,6 +1011,9 @@ class CustomCCGWorker:
         names = list(ts._batch_names.pop(bid, []))
         meta = ts._batch_meta.pop(bid, None)
         if meta is not None:
+            if meta.get('on_done') is not None:
+                failed = [s for s, _n, st, _v in meta.get('rows', []) if st == 'fail']
+                QTimer.singleShot(0, lambda f=failed: meta['on_done'](f))
             QTimer.singleShot(100, lambda m=meta: self._show_batch_report(m))
         QTimer.singleShot(100, lambda n=names: self._prompt_save_chunks(n))
 
@@ -1106,6 +1137,28 @@ class CustomCCGManager(Savable):
         self._ui._build_sig_chips()
         self._ui._update_segment_label()
         self._ui.mainview.request_render()
+
+    def queue_whole_session(self, sessions: list, resolution: str, on_done=None) -> int:
+        """Queue whole-session CCG computes; ``on_done(failed_sessions)`` when all land.
+
+        Shares the batch counter and status label with segment computes, so the
+        queue reports one x/total regardless of what kind of work is in it.
+        """
+        ts = self._ui.time_slider
+        bid = ts._batch_next_id
+        ts._batch_next_id += 1
+        queued = 0
+        for sess in sessions:
+            if self.worker.enqueue_task(session_key=Key(session=str(sess)),
+                                        batch_id=bid, resolution=resolution):
+                queued += 1
+        if queued:
+            ts._batch_counts[bid] = queued
+            ts._batch_totals[bid] = queued
+            ts._batch_meta[bid] = {'spec_name': f'{resolution} CCG',
+                                   'skipped': [], 'rows': [], 'on_done': on_done}
+            self.worker._custom_ccg_start_next()
+        return queued
 
     def _generate_suggested_custom_ccgs(self):
         self.state.show_dialog()
