@@ -48,7 +48,8 @@ class IndexBar:
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         row.addWidget(self.type_combo)
 
-        self.complete_chip = chip_button("complete")
+        row.addWidget(QLabel("Labels:"))
+        self.complete_chip = chip_button("incomplete")
         self.complete_chip.setToolTip(
             "Every pair here has been reviewed, so untagged pairs count as\n"
             "negatives when training the classifier.")
@@ -56,6 +57,8 @@ class IndexBar:
             "QPushButton { border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; "
             "background: #f0b0b0; }"
             "QPushButton:checked { background: #90EE90; border-color: #4a8; }")
+        self.complete_chip.toggled.connect(
+            lambda on: self.complete_chip.setText("complete" if on else "incomplete"))
         self.complete_chip.clicked.connect(self._on_complete_chip)
         row.addWidget(self.complete_chip)
 
