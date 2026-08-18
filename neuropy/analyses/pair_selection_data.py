@@ -142,11 +142,6 @@ class SelectionData(JsonSavable):
             raise ValueError(f"session required for pair {p!r}")
         return Key.pair(session, p[0], p[1])
 
-    def group_names_for_pair(self, sess: str, pair: tuple, groups) -> list[str]:
-        """Sorted group names containing this pair; live from Groups (tags['groups'] is a stale save-time snapshot)."""
-        pair = (int(pair[0]), int(pair[1]))
-        return sorted(groups.groups_for_pair(sess, pair[0], pair[1]))
-
     @staticmethod
     def pairs_vals_map(pairs, vals) -> dict[Key, float]:
         if pairs is None or vals is None:

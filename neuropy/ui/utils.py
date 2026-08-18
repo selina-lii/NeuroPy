@@ -208,6 +208,8 @@ class TagChip(QLabel):
     tags, which cannot be tinted).
     """
 
+    RADIUS, PAD, GAP = 6, 5, 4   # pill corner radius; text padding; gap between pills
+
     def __init__(self, text: str, color: str = '', parent=None):
         super().__init__(text, parent)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -227,7 +229,7 @@ class TagChip(QLabel):
         style = (f"background: transparent; border: 1px dashed {border.name()};" if not color
                  else f"background: {fill.name()}; color: {fg.name()}; "
                       f"border: 1px solid {border.name()};")
-        self.setStyleSheet(f"QLabel {{ border-radius: 6px; padding: 0px 6px; "
+        self.setStyleSheet(f"QLabel {{ border-radius: {self.RADIUS}px; padding: 0px {self.PAD+1}px; "
                            f"font-size: {regular_font_pt()}pt; {style} }}")
 
 

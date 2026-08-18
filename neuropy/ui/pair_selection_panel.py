@@ -49,35 +49,46 @@ _ROLE_CHIPS = Qt.UserRole + 3   # list[(display_name, color)] drawn as tag pills
 
 
 class TagRowDelegate(QStyledItemDelegate):
-    """Draw the row's text, then its group tags as Finder-style coloured pills."""
+    """Draw the row's text, then its group tags as Finder-style coloured pills.
 
-    _GAP, _PAD = 4, 5   # px between pills; horizontal text padding inside a pill
+    Chips arrive pre-tinted on _ROLE_CHIPS as (name, fill, fg, border) QColors,
+    so paint reconstructs no colours on the per-repaint path.
+    """
+
+    _TEXT_GAP = 12   # px between the row text and the first pill
+
+    @staticmethod
+    def _chip_width(fm, name: str) -> int:
+        return fm.horizontalAdvance(name) + 2 * TagChip.PAD
 
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
-        chips = index.data(_ROLE_CHIPS) or []
-        x = option.rect.x() + option.fontMetrics.horizontalAdvance(index.data()) + 12
+        chips = index.data(_ROLE_CHIPS)
+        if not chips:
+            return
+        fm = option.fontMetrics
+        x = option.rect.x() + fm.horizontalAdvance(index.data()) + self._TEXT_GAP
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for name, color in chips:
-            w = option.fontMetrics.horizontalAdvance(name) + 2 * self._PAD
+        for name, fill, fg, border in chips:
+            w = self._chip_width(fm, name)
             rect = option.rect.adjusted(0, 2, 0, -2)
             rect.setX(x); rect.setWidth(w)
-            fill, fg, border = TagChip.tint(color)
-            painter.setBrush(fill if color else Qt.BrushStyle.NoBrush)
+            painter.setBrush(fill if fill.alpha() else Qt.BrushStyle.NoBrush)
             painter.setPen(border)
-            painter.drawRoundedRect(rect, 6, 6)
+            painter.drawRoundedRect(rect, TagChip.RADIUS, TagChip.RADIUS)
             painter.setPen(fg)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
-            x += w + self._GAP
+            x += w + TagChip.GAP
         painter.restore()
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
-        chips = index.data(_ROLE_CHIPS) or []
-        extra = sum(option.fontMetrics.horizontalAdvance(n) + 2 * self._PAD + self._GAP
-                    for n, _ in chips)
-        size.setWidth(size.width() + 12 + extra)
+        chips = index.data(_ROLE_CHIPS)
+        if chips:
+            fm = option.fontMetrics
+            size.setWidth(size.width() + self._TEXT_GAP
+                          + sum(self._chip_width(fm, n) + TagChip.GAP for n, *_ in chips))
         return size
 
 # Shift remaps the digit row to symbols (Shift+1 → "!"), so event.key() is the symbol,
@@ -610,7 +621,11 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if should_gray(inds):
             it.setForeground(QBrush(_C_GRAY_FG))
         it.setData(_ROLE_PAIR, inds)
-        it.setData(_ROLE_CHIPS, ui.groups.chips_for_pair(k.session, k.ref, k.tgt))
+        # Pre-tint here (once per populate) so the delegate's per-repaint paint
+        # never reconstructs QColors or hashes a name.
+        it.setData(_ROLE_CHIPS, [(name, *TagChip.tint(color))
+                                 for name, color in
+                                 ui.groups.chips_for_pair(k.session, k.ref, k.tgt)])
         return it
 
     def _populate_avail_list(self, ui, data, should_gray):
@@ -1410,7 +1425,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if special:
             special_menu = QMenu("Special", parent_menu)
             for gname in special:
-                _add_group_action(special_menu, gname, gname[len(_SPECIAL_PREFIX):])
+                _add_group_action(special_menu, gname,
+                                  self.ui.groups.get_group_metadata(gname).display_name)
             parent_menu.addMenu(special_menu)
 
     def _add_bookmarked_pairs_to_group(self, group_name):

@@ -1628,7 +1628,7 @@ class NetworkPanel:
             flow_lay.addWidget(toggle_btn)
             if not self._net_special_collapsed:
                 for gname in special:
-                    display = gname[len(_SPECIAL_PREFIX):]
+                    display = ui.groups.get_group_metadata(gname).display_name
                     cb = self._make_group_button(gname, display, count_sess)
                     flow_lay.addWidget(cb)
         if flow is not None:

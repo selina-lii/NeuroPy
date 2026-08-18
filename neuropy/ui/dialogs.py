@@ -161,7 +161,7 @@ class ManageGroupsDialog(QDialog):
             sp_tabs = QTabWidget()
             sp_tabs.setTabPosition(QTabWidget.TabPosition.North)
             for gname in special:
-                display = gname[len(_SPECIAL_PREFIX):]
+                display = gr.get_group_metadata(gname).display_name
                 sp_tabs.addTab(self._make_group_tab(gname, is_special=True), display)
             sp_tabs.currentChanged.connect(self._autosave_notes)
             nav.add_page("Special", sp_tabs)
@@ -176,7 +176,7 @@ class ManageGroupsDialog(QDialog):
     def _make_group_tab(self, gname: str, is_special: bool) -> QWidget:
         sd = self.sel_data
         gr = self._groups
-        display = gname[len(_SPECIAL_PREFIX):] if is_special else gname
+        display = gr.get_group_metadata(gname).display_name
 
         w = QWidget()
         lay = QVBoxLayout(w)
