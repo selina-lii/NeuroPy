@@ -45,7 +45,7 @@ def _auc(y: np.ndarray, p: np.ndarray) -> float:
     return float((ranks[pos].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def leave_one_rat_out(ls: LabeledSet, model_name: str = 'dualres',
+def leave_one_rat_out(ls: LabeledSet, model_name: str = 'conv',
                       duration: float = 0.02, **kw) -> dict:
     """Hold out each animal in turn; return pooled out-of-sample predictions."""
     ccg, null, Y, rats = ls.X_ccg, ls.X_null, ls.Y, ls.rats
@@ -95,7 +95,7 @@ def _scores_from_hits(Y, P, hits, names) -> dict[str, dict]:
     return out
 
 
-def fit_final(ls: LabeledSet, model_name: str = 'dualres',
+def fit_final(ls: LabeledSet, model_name: str = 'conv',
               duration: float = 0.02, **kw) -> BaseModel:
     """Train on every labeled pair — the model that ships to the UI."""
     model = MODELS[model_name](ls.label_names, duration=duration, **kw)

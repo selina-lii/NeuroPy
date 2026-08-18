@@ -17,14 +17,30 @@ from neuropy.classifier.features import (FEATURE_NAMES, derivative, lag_axis,
                                          residual, shape_features, smooth)
 
 
-def _panel(ax, ccg, null, duration, title=''):
-    """Residual trace with its slope underlaid — the shape the model actually sees."""
+def _panel(ax, ccg, null, duration, title='', ccg_hi=None, null_hi=None):
+    """Residual trace with its slope underlaid — the shape the model actually sees.
+
+    Highres is drawn underneath when available, because that is the trace the
+    labeller inspects; judging a prediction against lowres alone would hide the
+    sub-millisecond structure the model was given.
+    """
     res = smooth(residual(ccg[None], null[None]), 1.0)[0]
+    if ccg_hi is not None:
+        res_hi = smooth(residual(ccg_hi[None], null_hi[None]),
+                        max(1.0, len(ccg_hi) / len(ccg) / 3))[0]
+        # Rescaled to the lowres peak: each fine bin holds ~1/30 the counts, so
+        # plotted raw the highres trace is a flat line and shows nothing.
+        span = np.abs(res_hi).max()
+        if span > 0:
+            res_hi = res_hi * (np.abs(res).max() / span)
+        ax.plot(lag_axis(len(res_hi), duration), res_hi,
+                color='0.45', lw=0.7, alpha=0.9, zorder=1)
     lags = lag_axis(len(res), duration)
     ax.axhline(0, color='0.8', lw=0.6)
     ax.axvline(0, color='0.8', lw=0.6, ls='--')
-    ax.plot(lags, res, color='tab:blue', lw=1.2)
-    ax.plot(lags, derivative(res[None], 1)[0], color='tab:orange', lw=0.7, alpha=0.7)
+    ax.plot(lags, res, color='tab:blue', lw=1.2, zorder=3)
+    ax.plot(lags, derivative(res[None], 1)[0], color='tab:orange', lw=0.7,
+            alpha=0.7, zorder=2)
     ax.set_title(title, fontsize=7)
     ax.tick_params(labelsize=6)
 
@@ -40,17 +56,20 @@ def plot_label_examples(ls, proba, label, out_dir, n=12, duration=0.02,
     j = ls.label_names.index(label)
     order = np.argsort(-proba[:, j])[:n]
     ccg, null, Y = ls.X_ccg, ls.X_null, ls.Y
+    hi, hi_null = ls.X_ccg_hi, ls.X_null_hi
     cols = 4
     rows = int(np.ceil(len(order) / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 2.2, rows * 1.7))
     for ax, i in zip(np.ravel(axes), order):
         truth = 'Y' if Y[i, j] else 'n'
         _panel(ax, ccg[i], null[i], duration,
-               f"p={proba[i, j]:.2f} true={truth}\n{ls.samples[i].session}")
+               f"p={proba[i, j]:.2f} true={truth}\n{ls.samples[i].session}",
+               ccg_hi=None if hi is None else hi[i],
+               null_hi=None if hi is None else hi_null[i])
     for ax in np.ravel(axes)[len(order):]:
         ax.axis('off')
-    fig.suptitle(f"'{label}' — highest-scoring pairs (blue=residual, orange=slope)",
-                 fontsize=9)
+    fig.suptitle(f"'{label}' — highest-scoring pairs "
+                 f"(blue=lowres, grey=highres rescaled, orange=slope)", fontsize=9)
     fig.tight_layout()
     path = os.path.join(out_dir, f'examples_{label}.png')
     fig.savefig(path, dpi=110)

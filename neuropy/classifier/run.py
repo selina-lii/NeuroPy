@@ -15,7 +15,7 @@ from neuropy.classifier.models import MODELS, decide
 from neuropy.classifier.train import fit_final, leave_one_rat_out, report
 from neuropy.classifier.verify import verify_all
 
-DEFAULT_MODEL = 'dualres'   # both resolutions: visual inspection relies on highres
+DEFAULT_MODEL = 'conv'   # learned local filters + boosted trees; see CCG_CLASSIFIER_RESULTS.md
 
 
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,

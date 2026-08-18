@@ -18,10 +18,13 @@ import os
 
 import numpy as np
 from sklearn.decomposition import PCA
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
-from neuropy.classifier.features import shape_features, trace_stack
+from neuropy.classifier.features import (bank_response, kernel_bank, kernel_response,
+                                         learned_bank, residual, shape_features,
+                                         smooth, trace_stack)
 
 UNSURE = '?'
 
@@ -36,12 +39,19 @@ def _f1(y: np.ndarray, pred: np.ndarray) -> float:
 class BaseModel:
     """Shared fit/predict plumbing; subclasses only define ``_encode``."""
 
-    def __init__(self, label_names: list[str], duration: float = 0.02, **kw):
+    # 'mlp' or 'gb'; gradient boosting copes better with wide correlated inputs
+    # (a kernel bank is highly correlated by construction) at this sample size.
+    head = 'mlp'
+
+    def __init__(self, label_names: list[str], duration: float = 0.02,
+                 head: str = None, **kw):
         self.label_names = list(label_names)
         self.duration = duration
         self.params = kw
+        if head is not None:
+            self.head = head
         self.scaler = StandardScaler()
-        self.nets: list[MLPClassifier] = []
+        self.nets: list = []
         self.constant: list[float | None] = []
         self.thresholds = np.full(len(self.label_names), 0.5)
 
@@ -64,7 +74,7 @@ class BaseModel:
                 self.nets.append(None)
                 self.constant.append(float(y[0]))
                 continue
-            net = MLPClassifier(**self._net_kw())
+            net = self._new_head()
             net.fit(X, y)
             self.nets.append(net)
             self.constant.append(None)
@@ -93,11 +103,18 @@ class BaseModel:
             f1 = [_f1(y, p >= t) for t in grid]
             self.thresholds[j] = grid[int(np.argmax(f1))]
 
-    def _net_kw(self) -> dict:
+    def _new_head(self):
+        """One binary classifier for one label, per ``self.head``."""
+        if self.head == 'gb':
+            kw = dict(max_iter=300, learning_rate=0.06, max_leaf_nodes=15,
+                      l2_regularization=1.0, early_stopping=True,
+                      validation_fraction=0.15, random_state=0)
+            kw.update(self.params)
+            return HistGradientBoostingClassifier(**kw)
         kw = dict(hidden_layer_sizes=(128, 64), alpha=1e-3, max_iter=600,
                   early_stopping=True, n_iter_no_change=25, random_state=0)
         kw.update(self.params)
-        return kw
+        return MLPClassifier(**kw)
 
     def predict_proba(self, ccg: np.ndarray, null: np.ndarray,
                       ccg_hi: np.ndarray = None,
@@ -214,6 +231,102 @@ class _EmbedHead:
         return self.pca.transform(self.scaler.transform(X))
 
 
+class KernelNet(BaseModel):
+    # Same reasoning as ConvNet: 1012 correlated columns suit trees, not an MLP.
+    head = 'gb'
+
+    """Both resolutions read through a fixed bank of localized shape kernels.
+
+    Replaces the PCA heads with matched filters — Gaussian derivatives at a grid
+    of lags and widths — because PCA learns whole-window templates that maximize
+    dataset variance, while visual inspection judges *local* features: a peak's
+    width, a dip's depth, where a rift sits relative to 0 ms.
+
+    Nothing in the bank is fitted, so it cannot overfit ~3000 samples, and every
+    coefficient names a lag and a width. This is the older ``PeakRule`` vocabulary
+    (lag range, FWHM, polarity, per-resolution) expressed as a continuous basis
+    the net can weight instead of hand-set thresholds.
+    """
+
+    uses_highres = True
+
+    def __init__(self, label_names, duration=0.02, lag_step_ms=0.5, **kw):
+        super().__init__(label_names, duration=duration, **kw)
+        self.lag_step_ms = lag_step_ms
+        self._bank_lo = self._bank_hi = None
+
+    def _bank(self, which: str, n_bin: int):
+        """Cache one bank per resolution — it depends only on the bin count."""
+        attr = f'_bank_{which}'
+        bank = getattr(self, attr)
+        if bank is None or bank.shape[1] != n_bin:
+            bank, _meta = kernel_bank(n_bin, self.duration,
+                                      lag_step_ms=self.lag_step_ms)
+            setattr(self, attr, bank)
+        return getattr(self, attr)
+
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+        ccg = np.atleast_2d(ccg)
+        parts = [kernel_response(ccg, null, self.duration,
+                                 self._bank('lo', ccg.shape[1])),
+                 shape_features(ccg, null, self.duration)]
+        if ccg_hi is not None:
+            ccg_hi = np.atleast_2d(ccg_hi)
+            parts += [kernel_response(ccg_hi, null_hi, self.duration,
+                                      self._bank('hi', ccg_hi.shape[1])),
+                      shape_features(ccg_hi, null_hi, self.duration)]
+        return np.hstack(parts)
+
+
+class ConvNet(BaseModel):
+    """Filters discovered from the data, then convolved and pooled per resolution.
+
+    The literature's CNNs (CoNNECT and successors) learn their first-layer filters
+    rather than fixing them, but they do it on ~80k *simulated* pairs. With ~3000
+    real ones, learning a filter per lag would overfit, so the filters here are
+    learned from sliding **patches**: one small filter is reused at every lag, and
+    therefore trains on n_pos times more examples than a whole-window basis.
+
+    That keeps the CNN's useful inductive bias — local, translation-covariant
+    features — at a parameter count this dataset can actually support. Pooling
+    keeps argmax-lag alongside max and mean, so *where* a feature occurred
+    survives, which plain max-pooling would discard.
+    """
+
+    uses_highres = True
+    # Boosted trees, not an MLP: the pooled bank is wide and correlated, which an
+    # MLP handles poorly at this sample size (+0.06 F1 on a fixed kernel bank).
+    head = 'gb'
+
+    def __init__(self, label_names, duration=0.02, n_filters=16,
+                 width_lo=7, width_hi=31, stride=2, **kw):
+        super().__init__(label_names, duration=duration, **kw)
+        self.n_filters = n_filters
+        self.width_lo, self.width_hi, self.stride = width_lo, width_hi, stride
+        self.bank_lo = self.bank_hi = None
+
+    def _side(self, res, which: str, width: int):
+        """Learn this side's bank on the first (training) call, then reuse it."""
+        attr = f'bank_{which}'
+        if getattr(self, attr) is None:
+            setattr(self, attr, learned_bank(res, self.n_filters,
+                                             min(width, res.shape[1]), self.stride))
+        return bank_response(res, getattr(self, attr), self.stride)
+
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+        ccg, null = np.atleast_2d(ccg), np.atleast_2d(null)
+        res_lo = smooth(residual(ccg, null), 1.0)
+        parts = [self._side(res_lo, 'lo', self.width_lo),
+                 shape_features(ccg, null, self.duration)]
+        if ccg_hi is not None:
+            ccg_hi, null_hi = np.atleast_2d(ccg_hi), np.atleast_2d(null_hi)
+            sigma = max(1.0, ccg_hi.shape[1] / ccg.shape[1] / 3)
+            res_hi = smooth(residual(ccg_hi, null_hi), sigma)
+            parts += [self._side(res_hi, 'hi', self.width_hi),
+                      shape_features(ccg_hi, null_hi, self.duration)]
+        return np.hstack(parts)
+
+
 QUALITY_LABELS = ('best', 'good', 'ok')
 
 
@@ -243,8 +356,9 @@ class TwoHeadNet(HybridNet):
         return P
 
 
-MODELS = {'dualres': DualResNet, 'hybrid': HybridNet, 'shape': ShapeFeatureNet,
-          'trace': TraceNet, 'twohead': TwoHeadNet}
+MODELS = {'conv': ConvNet, 'kernel': KernelNet, 'dualres': DualResNet,
+          'hybrid': HybridNet, 'shape': ShapeFeatureNet, 'trace': TraceNet,
+          'twohead': TwoHeadNet}
 
 
 def decide(proba: np.ndarray, label_names: list[str],

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from sklearn.decomposition import PCA
 
 
 def residual(ccg: np.ndarray, null: np.ndarray) -> np.ndarray:
@@ -41,6 +42,120 @@ def trace_stack(ccg: np.ndarray, null: np.ndarray, sigma: float = 1.0) -> np.nda
     """Per-pair channel stack ``[n, 3, n_bin]`` = residual, its slope, its curvature."""
     res = smooth(residual(ccg, null), sigma)
     return np.stack([res, derivative(res, 1), derivative(res, 2)], axis=-2)
+
+
+# --- localized kernel bank --------------------------------------------------
+#
+# The alternative to a PCA basis. PCA components are whole-window templates
+# chosen to explain dataset variance, so a 0.3 ms peak at lag +1 gets smeared
+# across many components and mixed with whatever covaries with it. Visual
+# inspection instead judges *local* shape — a peak's width, a dip's depth, where
+# a rift sits relative to 0 ms — which is what `PeakRule(lag, width, polarity)`
+# in the older template classifier encoded by hand.
+#
+# So the basis here is a fixed bank of Gaussian derivatives placed at a grid of
+# lags and widths. Fixed means nothing is fitted, so it cannot overfit n≈3000;
+# localized means a narrow feature lights up a few coefficients whose lag and
+# width are known, keeping the representation readable.
+
+# (width in ms, order): order 0 matches a bump, 1 an edge/slope, 2 a
+# peak-with-flanking-dips — the rift/2side_dips shape.
+KERNEL_WIDTHS_MS = (0.2, 0.5, 1.0, 2.0, 4.0)
+KERNEL_ORDERS = (0, 1, 2)
+
+
+def _gaussian_derivative(x: np.ndarray, sigma: float, order: int) -> np.ndarray:
+    """Normalized *order*-th derivative of a Gaussian over lag offsets *x* (ms)."""
+    g = np.exp(-0.5 * (x / sigma) ** 2)
+    if order == 1:
+        g = -(x / sigma ** 2) * g
+    elif order == 2:
+        g = ((x ** 2 - sigma ** 2) / sigma ** 4) * g
+    norm = np.sqrt(np.sum(g ** 2))
+    return g / norm if norm > 0 else g
+
+
+def kernel_bank(n_bin: int, duration: float, lag_step_ms: float = 0.5,
+                widths_ms=KERNEL_WIDTHS_MS, orders=KERNEL_ORDERS):
+    """Matched-filter bank ``([n_kernel, n_bin], [(lag, width, order), ...])``.
+
+    Kernels narrower than the bin size are dropped — they cannot be represented
+    at that resolution, so including them would only inject noise.
+    """
+    lags = lag_axis(n_bin, duration)
+    bin_ms = float(lags[1] - lags[0]) if n_bin > 1 else 1.0
+    half = duration * 1e3 / 2
+    centers = np.arange(-half, half + 1e-9, lag_step_ms)
+    rows, meta = [], []
+    for width in widths_ms:
+        if width < bin_ms:
+            continue
+        for order in orders:
+            for c in centers:
+                rows.append(_gaussian_derivative(lags - c, width, order))
+                meta.append((float(c), float(width), int(order)))
+    return np.asarray(rows), meta
+
+
+def kernel_response(ccg: np.ndarray, null: np.ndarray, duration: float,
+                    bank: np.ndarray = None, **kw) -> np.ndarray:
+    """Project each pair's residual onto the kernel bank → ``[n, n_kernel]``.
+
+    Each column is "how strongly this pair shows a feature of this width at this
+    lag" — a direct numeric read of the judgment the peak rules described.
+    """
+    ccg = np.atleast_2d(ccg)
+    null = np.atleast_2d(null)
+    res = residual(ccg, null)
+    if bank is None:
+        bank, _ = kernel_bank(res.shape[1], duration, **kw)
+    return res @ bank.T
+
+
+def sliding_windows(res: np.ndarray, width: int, stride: int) -> np.ndarray:
+    """Overlapping patches ``[n * n_pos, width]`` cut from each trace.
+
+    Learning a filter bank from patches rather than whole traces is what keeps
+    the parameter count low enough for ~3000 samples: a whole-window basis needs
+    as many weights as bins, while a patch basis reuses one small filter at every
+    lag and so sees ``n_pos`` times more training examples per filter.
+    """
+    starts = range(0, res.shape[1] - width + 1, stride)
+    return np.concatenate([res[:, s:s + width] for s in starts], axis=0)
+
+
+def learned_bank(res: np.ndarray, n_filters: int, width: int, stride: int,
+                 random_state: int = 0) -> np.ndarray:
+    """Filters discovered from the data by PCA over sliding patches ``[k, width]``.
+
+    Unlike a PCA basis over whole traces, these components are *localized*: each
+    describes a shape of ``width`` bins that can occur at any lag, so the basis
+    is translation-covariant the way a CNN's first layer is, without needing the
+    ~80k training pairs a full CNN does.
+    """
+    patches = sliding_windows(res, width, stride)
+    k = min(n_filters, patches.shape[0], width)
+    pca = PCA(n_components=k, random_state=random_state)
+    pca.fit(patches - patches.mean(axis=1, keepdims=True))
+    return pca.components_
+
+
+def bank_response(res: np.ndarray, bank: np.ndarray, stride: int) -> np.ndarray:
+    """Convolve *bank* over each trace and pool ``[n, k*3]``.
+
+    Max, mean, and argmax-lag per filter: what the strongest match was, how
+    consistently it appears, and *where* — the lag that the peak rules named
+    explicitly and that plain max-pooling would discard.
+    """
+    n, n_bin = res.shape
+    width = bank.shape[1]
+    starts = np.arange(0, n_bin - width + 1, stride)
+    # [n, n_pos, width] windows -> [n, n_pos, k] activations
+    windows = np.stack([res[:, s:s + width] for s in starts], axis=1)
+    act = windows @ bank.T
+    lags = starts / max(len(starts) - 1, 1)
+    return np.hstack([act.max(axis=1), act.mean(axis=1),
+                      lags[act.argmax(axis=1)]])
 
 
 # --- scalar descriptors -----------------------------------------------------
