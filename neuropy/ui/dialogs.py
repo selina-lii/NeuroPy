@@ -1223,7 +1223,8 @@ class SettingsTabs:
             cb.setChecked(getattr(s, f'{attr_prefix}_on'))
             metric = MetricInput("", ['min', 'hour', 'day'],
                                  suggestions=(1, 5, 10, 15, 30, 60), input_width=60)
-            metric.set_value(*getattr(s, f'{attr_prefix}_interval'))
+            metric.set_value(getattr(s, f'{attr_prefix}_interval'),
+                             getattr(s, f'{attr_prefix}_unit'))
             row.addWidget(cb)
             row.addWidget(metric)
             row.addStretch()
@@ -1250,9 +1251,11 @@ class SettingsTabs:
             write()
         ui._apply_min_font_size(ui.settings.min_font_size)
         ui.settings.autosave_sel_on = self._autosave_sel_cb.isChecked()
-        ui.settings.autosave_sel_interval = self._autosave_sel_metric.value()
+        (ui.settings.autosave_sel_interval,
+         ui.settings.autosave_sel_unit) = self._autosave_sel_metric.value()
         ui.settings.autosave_grp_on = self._autosave_grp_cb.isChecked()
-        ui.settings.autosave_grp_interval = self._autosave_grp_metric.value()
+        (ui.settings.autosave_grp_interval,
+         ui.settings.autosave_grp_unit) = self._autosave_grp_metric.value()
         ui.settings.save_ui_on_close = self._save_ui_cb.isChecked()
 
     def _on_clear_autosave(self):

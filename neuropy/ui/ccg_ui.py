@@ -64,9 +64,11 @@ class UISettings(JsonSavable):
     min_font_size = Tunable(12)
     save_ui_on_close = Tunable(True)
     autosave_sel_on = Tunable(True)
-    autosave_sel_interval = Tunable((1, 'hour'))   # MetricInput.value() -> (number, unit)
+    autosave_sel_interval = Tunable(1)        # number + unit kept as two scalars,
+    autosave_sel_unit = Tunable('hour')       # so neither can drift into a bad shape
     autosave_grp_on = Tunable(True)
-    autosave_grp_interval = Tunable((1, 'hour'))
+    autosave_grp_interval = Tunable(1)
+    autosave_grp_unit = Tunable('hour')
     # Fewest tagged pairs a label needs before the classifier will train on it.
     classifier_min_count = Tunable(20)
 
