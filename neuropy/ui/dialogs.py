@@ -18,7 +18,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QListWidget, QListWidgetItem,
     QPushButton, QTabWidget, QWidget, QMessageBox, QMenu, QApplication,
     QScrollArea, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
-    QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog,
+    QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog, QColorDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
 from neuropy.ui.ui_common import _SPECIAL_PREFIX
@@ -221,6 +221,23 @@ class ManageGroupsDialog(QDialog):
 
             set_hk.clicked.connect(_set_hk)
             hk_row.addWidget(set_hk)
+            hk_row.addWidget(QLabel("Colour:"))
+            meta = gr.get_group_metadata(gname)
+            swatch = QPushButton()
+            swatch.setFixedWidth(40)
+            swatch.setStyleSheet(f"background: {meta.display_color};")
+
+            def _pick(_checked=False, g=gname, sw=swatch):
+                m = gr.get_group_metadata(g)
+                c = QColorDialog.getColor(QColor(m.display_color), self, "Tag colour")
+                if c.isValid():
+                    m.ui_color = c.name()
+                    sw.setStyleSheet(f"background: {c.name()};")
+                    gr.changed.emit()
+                    gr.ui.refresh_lists()
+
+            swatch.clicked.connect(_pick)
+            hk_row.addWidget(swatch)
             hk_row.addStretch()
             lay.addLayout(hk_row)
 

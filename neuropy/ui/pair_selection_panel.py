@@ -23,14 +23,14 @@ from pyqtgraph.Qt.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QCheckBox,
     QTabWidget, QFrame, QLineEdit, QPushButton,
     QMenu, QApplication, QMessageBox,
-    QSizePolicy,
+    QSizePolicy, QStyledItemDelegate,
 )
-from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction
+from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction, QPainter
 
 from neuropy.ui.ui_common import (
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
-    pair_label, group_names_for_pair,
+    pair_label,
 )
 from neuropy.ui.dialogs import (
     PairTagsDialog as PairTagsDialog,
@@ -45,6 +45,40 @@ if TYPE_CHECKING:
 _ROLE_PAIR = Qt.UserRole        # tuple | None
 _ROLE_TAG  = Qt.UserRole + 1   # 'deleted' | 'header' | 'sep' | None
 _ROLE_HKEY = Qt.UserRole + 2   # str | None  (group key for collapsible headers)
+_ROLE_CHIPS = Qt.UserRole + 3   # list[(display_name, color)] drawn as tag pills
+
+
+class TagRowDelegate(QStyledItemDelegate):
+    """Draw the row's text, then its group tags as Finder-style coloured pills."""
+
+    _GAP, _PAD = 4, 5   # px between pills; horizontal text padding inside a pill
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        chips = index.data(_ROLE_CHIPS) or []
+        x = option.rect.x() + option.fontMetrics.horizontalAdvance(index.data()) + 12
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for name, color in chips:
+            w = option.fontMetrics.horizontalAdvance(name) + 2 * self._PAD
+            rect = option.rect.adjusted(0, 2, 0, -2)
+            rect.setX(x); rect.setWidth(w)
+            fill, fg, border = TagChip.tint(color)
+            painter.setBrush(fill if color else Qt.BrushStyle.NoBrush)
+            painter.setPen(border)
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.setPen(fg)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
+            x += w + self._GAP
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        chips = index.data(_ROLE_CHIPS) or []
+        extra = sum(option.fontMetrics.horizontalAdvance(n) + 2 * self._PAD + self._GAP
+                    for n, _ in chips)
+        size.setWidth(size.width() + 12 + extra)
+        return size
 
 # Shift remaps the digit row to symbols (Shift+1 → "!"), so event.key() is the symbol,
 # not the digit. Map the shifted symbols back to their digit char (US layout).
@@ -89,7 +123,7 @@ from neuropy.analyses.pair_selection_data import (
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    has_primary_modifier, small_font_pt,
+    TagChip, has_primary_modifier, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -442,6 +476,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
         splitter = QSplitter(Qt.Horizontal)
         self._pair_list_pane = splitter
+        self._tag_delegate = TagRowDelegate(self)
         for title, side, list_attr in (
             ('Available (0)', 'avail', 'unselected_list'),
             ('Selected (0)',  'sel',   'selected_list'),
@@ -458,6 +493,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             _f = QApplication.instance().font()
             _f.setPointSize(small_font_pt())
             lst.setFont(_f)
+            lst.setItemDelegate(self._tag_delegate)
             setattr(self, list_attr, lst)
             layout.addWidget(lst)
             splitter.addWidget(col)
@@ -568,14 +604,13 @@ class PairSelectionPanel(QWidget, UndoRedo):
         ui = self.ui
         k  = ui.key_for_pair(inds)
         label = pair_label(inds,
-                            bookmarked=ui.key_for_pair(inds) in ui.bookmarked_pairs,
-                            group_names=group_names_for_pair(self.data, ui, inds),
-                            pair_tags=self.data.selections[ui.key].tags.get((k.ref, k.tgt), {}),
-                            any_mode=any_mode)
+                           bookmarked=k in ui.bookmarked_pairs,
+                           any_mode=any_mode)
         it = QListWidgetItem(label)
         if should_gray(inds):
             it.setForeground(QBrush(_C_GRAY_FG))
         it.setData(_ROLE_PAIR, inds)
+        it.setData(_ROLE_CHIPS, ui.groups.chips_for_pair(k.session, k.ref, k.tgt))
         return it
 
     def _populate_avail_list(self, ui, data, should_gray):

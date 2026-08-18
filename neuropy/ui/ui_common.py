@@ -137,15 +137,8 @@ def group_header_label(name: str, count: int, collapsed: bool) -> str:
 from neuropy.utils.data_storage_util import atomic_write_json  # noqa: F401
 
 
-def group_names_for_pair(data, ui, inds) -> list:
-    """Sorted group names containing this pair in the current session."""
-    k = ui.key_for_pair(inds)
-    return data.group_names_for_pair(k.session, (k.ref, k.tgt), ui.groups)
-
-
-def pair_label(inds, *, bookmarked=False, group_names=None, pair_tags=None,
-               any_mode=False) -> str:
-    """Format a pair row label for Available / Selected lists."""
+def pair_label(inds, *, bookmarked=False, any_mode=False) -> str:
+    """Pair identifier for a list row; tags now render as coloured chips beside it."""
     ref, tgt = int(inds[-2]), int(inds[-1])
     label = f"[{ref}, {tgt}]"
     if any_mode and len(inds) >= 3:
@@ -153,15 +146,6 @@ def pair_label(inds, *, bookmarked=False, group_names=None, pair_tags=None,
         label = f"{sess} {label}"
     if bookmarked:
         label = "★ " + label
-    pt = pair_tags or {}
-    names = set(group_names or [])   # live from Groups; pt['groups'] is a stale save-time snapshot
-    tags = [f"[{g}]" for g in sorted(names)]
-    for k, v in sorted(pt.items()):
-        if k in ('groups', 'admitted', 'notes') or not v:
-            continue
-        tags.append(f"[{k}]")
-    if tags:
-        label += " " + " ".join(tags)
     return label
 
 

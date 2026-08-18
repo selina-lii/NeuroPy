@@ -12,11 +12,12 @@ backward compatibility.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
 from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
-    JsonSavable, Autosave, BiIndex, _to_json, is_special_group,
+    JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
 )
 from neuropy.analyses.neurons_dataset import Key
 
@@ -156,11 +157,32 @@ class SelectionData(JsonSavable):
 class Group(JsonSavable):
     """One group's metadata (name + optional hotkey + notes)."""
 
-    def __init__(self, name: str = '', hotkey: str = '', notes: str = ''):
+    def __init__(self, name: str = '', hotkey: str = '', notes: str = '',
+                 ui_color: str = ''):
         JsonSavable.__init__(self)
-        self.name    = name
-        self.hotkey  = hotkey
-        self.notes   = notes
+        self.name     = name
+        self.hotkey   = hotkey
+        self.notes    = notes
+        self.ui_color = ui_color   # '' = auto colour from name; special groups stay ''
+
+    @property
+    def display_name(self) -> str:
+        """Name without the internal ``__special_`` prefix, for display."""
+        return (self.name[len(_SPECIAL_PREFIX):] if is_special_group(self.name)
+                else self.name)
+
+    @property
+    def display_color(self) -> str:
+        """'#rrggbb' tint for tag chips: set colour, else one seeded by the name.
+
+        Special groups get '' (transparent) — they are not colour-tagged.
+        """
+        if is_special_group(self.name):
+            return ''
+        if self.ui_color:
+            return self.ui_color
+        h = int(hashlib.md5(self.name.encode()).hexdigest(), 16)
+        return f'#{0x808080 | (h & 0x7f7f7f):06x}'   # light, name-stable
 
 
 class GroupDataset(JsonSavable, BiIndex):
@@ -235,6 +257,12 @@ class GroupDataset(JsonSavable, BiIndex):
 
     def groups_for_pair(self, sess: str, ref: int, tgt: int) -> set:
         return self.inverse((sess, int(ref), int(tgt)))
+
+    def chips_for_pair(self, sess: str, ref: int, tgt: int) -> list:
+        """(display_name, display_color) per group tagging this pair, sorted by name."""
+        metas = [self.get_group_metadata(g)
+                 for g in sorted(self.groups_for_pair(sess, ref, tgt))]
+        return [(m.display_name, m.display_color) for m in metas]
 
     def sessions_for_group(self, gname: str) -> set:
         return {s for s, *_ in self.forward(gname)}

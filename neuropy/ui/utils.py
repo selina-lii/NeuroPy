@@ -201,6 +201,36 @@ def chip_button(label: str, checkable: bool = True, checked: bool = False,
     return btn
 
 
+class TagChip(QLabel):
+    """Display-only Finder-style tag pill: filled rounded label, full outline.
+
+    Empty *color* → transparent fill with a dashed border (special/uncoloured
+    tags, which cannot be tinted).
+    """
+
+    def __init__(self, text: str, color: str = '', parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.set_color(color)
+
+    @staticmethod
+    def tint(color: str):
+        """(fill, fg, border) QColors for a tag pill; empty → transparent+dashed."""
+        if not color:
+            return QColor(Qt.transparent), QColor('#888'), QColor('#999')
+        c = QColor(color)
+        lum = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+        return c, QColor('#000' if lum > 140 else '#fff'), c.darker(130)
+
+    def set_color(self, color: str) -> None:
+        fill, fg, border = self.tint(color)
+        style = (f"background: transparent; border: 1px dashed {border.name()};" if not color
+                 else f"background: {fill.name()}; color: {fg.name()}; "
+                      f"border: 1px solid {border.name()};")
+        self.setStyleSheet(f"QLabel {{ border-radius: 6px; padding: 0px 6px; "
+                           f"font-size: {regular_font_pt()}pt; {style} }}")
+
+
 def make_combo(items: list[str], width: int, current: str = None) -> 'QComboBox':
     """Fixed-width QComboBox pre-filled with items (and optional current selection)."""
     cb = QComboBox()
@@ -1053,18 +1083,13 @@ class GroupHotkeysBar(QWidget):
         hk_map = {g.hotkey: name
                   for name in gr.defined_groups
                   for g in [gr.get_group_metadata(name)] if g.hotkey}
-        dark = qt_dark_mode()
-        bg, fg, border = (('#3a3a3a', '#e0e0e0', '#666') if dark
-                          else ('#fafafa', '#202020', '#aaa'))
         chips: list = []
         for key_str in self._SLOT_ORDER:
             if key_str not in hk_map:
                 continue
             gname = hk_map[key_str]
-            chip = QLabel(f'{key_str}: {gname}')
-            chip.setStyleSheet(
-                f'font-size: {small_font_pt()}pt; padding: 2px 4px; border: 1px solid {border}; '
-                f'background: {bg}; color: {fg};')
+            meta = gr.get_group_metadata(gname)
+            chip = TagChip(f'{key_str}: {meta.display_name}', meta.display_color)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             def _select(_, g=gname):
                 pairs = gr.pairs_in_group(g, nav.current_session_str)
