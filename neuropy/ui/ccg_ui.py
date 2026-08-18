@@ -201,7 +201,8 @@ class CCGReviewUI(QMainWindow):
         # header, so keep each project's nd to switch back to it.
         self._nd_by_project = {self._project_dir: cd.nd}
 
-        self.prediction_store = None   # set by ClassifierDialog after a training run
+        self.prediction_store = None      # set by ClassifierDialog after a run
+        self.classifier_dialog = None     # kept alive so it stays non-modal
 
         self.jitter_mgr = JitterManager(self.nav, cd)
         self.jitter_mgr.completed.connect(self._on_jitter_completed)

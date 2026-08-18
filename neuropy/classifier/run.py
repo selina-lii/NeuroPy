@@ -11,7 +11,9 @@ import os
 
 import numpy as np
 
-from neuropy.classifier.dataset import build_labeled_set, loaded_ccg
+from neuropy.analyses.ms_connectivity import CCGConfig, CCGDataset
+
+from neuropy.classifier.dataset import build_multi, loaded_ccg
 from neuropy.classifier.models import MODELS, BaseModel, decide
 from neuropy.classifier.train import fit_final, leave_one_rat_out, report
 from neuropy.classifier.verify import verify_all
@@ -45,23 +47,34 @@ def list_models(cd) -> list[dict]:
     return sorted(out, key=lambda m: m.get('saved_at', ''), reverse=True)
 
 
+def open_projects(names: list[str]) -> list:
+    """Load sibling projects by name, for pooling their selections into training."""
+    return [CCGDataset(CCGConfig(name=n)) for n in names]
+
+
 def load_model(cd, name: str) -> BaseModel:
     return BaseModel.load(model_path(cd, name))
 
 
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
-                  figures: bool = True, save_as: str = None) -> dict:
-    """Train on a project's saved selections and write model + figures.
+                  figures: bool = True, save_as: str = None,
+                  extra: list = None, highres: bool = True) -> dict:
+    """Train on saved selections and store the model in the shared library.
 
-    The model also lands in the shared library under *save_as* (default: the
-    project name plus the model), so it can later be applied to a different
-    project without retraining.
+    Defaults are the widest useful ones: every labeled pair in the loaded
+    project, both resolutions, saved under the project's name. *extra* pools in
+    other projects' selections; *save_as* names the classifier.
+
+    With *highres*, any session missing its fine-binned CCGs is computed and
+    saved first — a model trained on both resolutions emits a fixed feature
+    width and could never score a lowres-only session afterwards.
     """
     out_dir = out_dir or os.path.join(cd.save_path, 'classifier')
     os.makedirs(out_dir, exist_ok=True)
     duration = cd.conf.duration
+    datasets = [cd] + list(extra or [])
 
-    ls = build_labeled_set(cd, cd.selections_dir)
+    ls = build_multi(datasets, highres=highres, compute_highres=highres)
     if not ls.label_names:
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
@@ -77,13 +90,14 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
 
     # Training sources travel with the weights: a model applied to another
     # project is only interpretable if you can see what taught it.
-    provenance = {'project': cd.conf.name,
+    provenance = {'projects': list(getattr(ls, 'sources', [cd.conf.name])),
+                  'project': cd.conf.name,
                   'selections_dir': str(cd.selections_dir),
                   'cross_validation': 'leave-one-rat-out',
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
                   **ls.provenance()}
+    saved_as = save_as or cd.conf.name
     model.save(os.path.join(out_dir, f'{model_name}.pkl'), provenance)
-    saved_as = save_as or f'{cd.conf.name}_{model_name}'
     model.save(model_path(cd, saved_as), provenance)
     summary['saved_as'] = saved_as
     with open(os.path.join(out_dir, 'scores.json'), 'w') as fh:
@@ -97,7 +111,7 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
             'out_dir': out_dir, 'saved_as': saved_as}
 
 
-def apply_model(cd, name: str) -> dict:
+def apply_model(cd, name: str, scope: list = None) -> dict:
     """Score *cd* with a saved classifier — the cross-project path, no training.
 
     Sessions whose CCGs the model cannot read (a resolution it was trained with
@@ -109,7 +123,7 @@ def apply_model(cd, name: str) -> dict:
     if problems:
         raise ValueError(f"classifier {name!r} does not fit this project: "
                          + "; ".join(problems))
-    keys, skipped = scorable_keys(cd, model)
+    keys, skipped = scorable_keys(cd, model, scope)
     if not keys:
         raise ValueError(f"classifier {name!r} can score no session in this "
                          f"project: every one lacks the CCGs it needs")
@@ -117,16 +131,32 @@ def apply_model(cd, name: str) -> dict:
             'meta': getattr(model, 'meta', {}), 'skipped': skipped}
 
 
-def scorable_keys(cd, model) -> tuple[list, list[str]]:
-    """Pointer keys this model can read, plus the sessions it must skip."""
-    keys, skipped = [], set()
+def scope_keys(cd, session: str = None, type_label: str = None) -> list:
+    """Pointer keys inside a scope; both ``None`` means the whole project.
+
+    Scope narrows *which* pairs get scored, never how the model works — the
+    default is always the widest one the loaded project offers.
+    """
+    keys = []
     for key in cd.ptr:
-        needed = ['lowres'] + (['highres'] if model.uses_highres else [])
+        if session and str(key.session) != str(session):
+            continue
+        if type_label and key.type_label() != type_label:
+            continue
+        keys.append(key)
+    return keys
+
+
+def scorable_keys(cd, model, keys=None) -> tuple[list, list[str]]:
+    """Split *keys* into those this model can read and the sessions it cannot."""
+    ok, skipped = [], set()
+    needed = ['lowres'] + (['highres'] if model.uses_highres else [])
+    for key in (list(cd.ptr) if keys is None else keys):
         if all(loaded_ccg(cd, key, r) is not None for r in needed):
-            keys.append(key)
+            ok.append(key)
         else:
             skipped.add(str(key.session))
-    return keys, sorted(skipped)
+    return ok, sorted(skipped)
 
 
 def predict_project(cd, model, keys=None) -> list[dict]:

@@ -9,17 +9,19 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from pyqtgraph.Qt.QtCore import Qt, QObject, QThread, Signal
+from pyqtgraph.Qt.QtCore import QObject, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QMessageBox, QProgressDialog, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
+    QVBoxLayout,
 )
 
+from neuropy.analyses.neurons_dataset import Key
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, list_models,
-                                    predict_project, train_project)
+                                    open_projects, predict_project, scope_keys,
+                                    scorable_keys, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -30,12 +32,11 @@ class _ClassifyWorker(QObject):
     done = Signal(object)
     error = Signal(str)
 
-    def __init__(self, cd, model_name: str, figures: bool, saved: str = None):
+    def __init__(self, cd, opts: dict):
         super().__init__()
         self._cd = cd
-        self._model_name = model_name
-        self._figures = figures
-        self._saved = saved
+        self._opts = opts
+        self._saved = opts.get('saved')
 
     def run(self):
         try:
@@ -46,14 +47,19 @@ class _ClassifyWorker(QObject):
         self.done.emit(result)
 
     def _train(self) -> dict:
-        result = train_project(self._cd, self._model_name, figures=self._figures)
-        rows = predict_project(self._cd, result['model'])
+        o = self._opts
+        result = train_project(self._cd, o['model_name'], figures=o['figures'],
+                               save_as=o['save_as'], extra=o['extra'],
+                               highres=o['highres'])
+        keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
+        rows = predict_project(self._cd, result['model'], keys)
+        result['skipped'] = skipped
         result['store'] = store_from_rows(rows, result['saved_as'],
                                           result['model'].label_names)
         return result
 
     def _apply(self) -> dict:
-        out = apply_model(self._cd, self._saved)
+        out = apply_model(self._cd, self._saved, self._opts['scope'])
         trained = out['meta'].get('trained_on', {})
         return {'model': out['model'], 'figures': [], 'out_dir': '',
                 'saved_as': self._saved, 'skipped': out['skipped'],
@@ -76,8 +82,12 @@ class ClassifierDialog(QDialog):
         super().__init__(win)
         self._win = win
         self._thread = self._worker = None
+        self._review = None
         self.setWindowTitle("Classify pairs")
-        self.resize(560, 460)
+        self.resize(620, 520)
+        # Non-modal throughout: judging a candidate pair means toggling
+        # resolution and panels in the main window while this stays open.
+        self.setModal(False)
         self._build()
 
     def _build(self):
@@ -90,11 +100,46 @@ class ClassifierDialog(QDialog):
             self.model_combo.addItem(name)
         self.model_combo.setCurrentText(DEFAULT_MODEL)
         row.addWidget(self.model_combo)
-        self.figures_check = QCheckBox("Write verification figures")
+        row.addWidget(QLabel("Name:"))
+        self.name_edit = QLineEdit(self._win.cd.conf.name)   # default: this project
+        self.name_edit.setMinimumWidth(140)
+        row.addWidget(self.name_edit)
+        self.highres_check = QCheckBox("Use high-res")
+        self.highres_check.setChecked(True)
+        self.highres_check.setToolTip(
+            "Adds the fine-binned CCGs as extra features. Sessions missing them "
+            "are computed first, since a model trained on both resolutions "
+            "cannot score a low-res-only session.")
+        row.addWidget(self.highres_check)
+        self.figures_check = QCheckBox("Figures")
         self.figures_check.setChecked(True)
         row.addWidget(self.figures_check)
         row.addStretch()
         lay.addLayout(row)
+
+        # Scope narrows which pairs get scored. Both dropdowns default to the
+        # widest option, so out of the box the whole loaded project is used.
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Scope:"))
+        self.session_combo = QComboBox()
+        self.session_combo.addItem("all sessions", None)
+        for nk in self._win.nav.real_nd_keys():
+            self.session_combo.addItem(str(nk.session), str(nk.session))
+        scope_row.addWidget(self.session_combo)
+        self.type_combo = QComboBox()
+        self.type_combo.addItem("all types", None)
+        for ei, conn in self._win.cd.conf.conn_types_labeled:
+            label = Key(excitability=ei, conn_type=conn).type_label()
+            self.type_combo.addItem(label, label)
+        scope_row.addWidget(self.type_combo)
+        scope_row.addWidget(QLabel("Also train on:"))
+        self.extra_combo = QComboBox()
+        self.extra_combo.addItem("this project only", [])
+        for other in self._other_projects():
+            self.extra_combo.addItem(f"+ {other}", [other])
+        scope_row.addWidget(self.extra_combo)
+        scope_row.addStretch()
+        lay.addLayout(scope_row)
 
         self.train_btn = QPushButton("Train and classify")
         self.train_btn.clicked.connect(self._on_train_btn)
@@ -105,14 +150,14 @@ class ClassifierDialog(QDialog):
         saved_row = QHBoxLayout()
         saved_row.addWidget(QLabel("Saved:"))
         self.saved_combo = QComboBox()
-        self.saved_combo.setMinimumWidth(220)
+        self.saved_combo.setMinimumWidth(240)
         for entry in list_models(self._win.cd):
             trained = entry.get('trained_on', {})
             self.saved_combo.addItem(
                 f"{entry['name']}  ({trained.get('n_samples', 0)} pairs from "
-                f"{trained.get('project', '?')})", entry['name'])
+                f"{', '.join(trained.get('projects', ['?']))})", entry['name'])
         saved_row.addWidget(self.saved_combo)
-        self.apply_btn = QPushButton("Apply to this project")
+        self.apply_btn = QPushButton("Apply to scope")
         self.apply_btn.clicked.connect(self._on_apply_btn)
         self.apply_btn.setEnabled(self.saved_combo.count() > 0)
         saved_row.addWidget(self.apply_btn)
@@ -147,6 +192,25 @@ class ClassifierDialog(QDialog):
                     "Predictions stay separate from your tags until you accept them.")
         return f"{len(store)} pairs already classified by '{store.model_name}'."
 
+    def _other_projects(self) -> list[str]:
+        """Sibling projects whose selections could be pooled into training."""
+        root = os.path.dirname(str(self._win.cd.save_path))
+        here = self._win.cd.conf.name
+        return sorted(d[len('project_'):] for d in os.listdir(root)
+                      if d.startswith('project_') and d[len('project_'):] != here)
+
+    def _options(self, saved: str | None) -> dict:
+        """Everything the worker needs, read once off the widgets."""
+        return {'saved': saved,
+                'model_name': self.model_combo.currentText(),
+                'save_as': self.name_edit.text().strip() or self._win.cd.conf.name,
+                'figures': self.figures_check.isChecked(),
+                'highres': self.highres_check.isChecked(),
+                'extra': open_projects(self.extra_combo.currentData() or []),
+                'scope': scope_keys(self._win.cd,
+                                    self.session_combo.currentData(),
+                                    self.type_combo.currentData())}
+
     def _on_apply_btn(self):
         self._launch(self.saved_combo.currentData())
 
@@ -156,21 +220,17 @@ class ClassifierDialog(QDialog):
     def _launch(self, saved: str | None):
         self.train_btn.setEnabled(False)
         self.apply_btn.setEnabled(False)
-        dlg = QProgressDialog("Applying classifier…" if saved else
-                              "Training classifier…", None, 0, 0, self)
-        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
-        dlg.setCancelButton(None)
-        dlg.show()
+        # Status text instead of a modal progress dialog, for the same reason.
+        self.status_label.setText("Applying classifier…" if saved
+                                  else "Training classifier… (~2 min)")
 
         thread = QThread(self)
-        worker = _ClassifyWorker(self._win.cd, self.model_combo.currentText(),
-                                 self.figures_check.isChecked(), saved)
+        worker = _ClassifyWorker(self._win.cd, self._options(saved))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         self._thread, self._worker = thread, worker
 
         def _teardown():
-            dlg.close()
             thread.quit()
             thread.wait()
             worker.deleteLater()
@@ -224,11 +284,19 @@ class ClassifierDialog(QDialog):
         store = self._store()
         if store is None:
             return
-        PredictionReviewDialog(self._win, store).exec()
+        if self._review is None:
+            self._review = PredictionReviewDialog(self._win, store)
+        self._review.show()
+        self._review.raise_()
 
     @classmethod
     def show_for(cls, win: 'CCGReviewUI'):
-        cls(win).exec()
+        """Open (or resurface) the one classifier dialog for *win*."""
+        if win.classifier_dialog is None:
+            win.classifier_dialog = cls(win)
+        win.classifier_dialog.show()
+        win.classifier_dialog.raise_()
+        return win.classifier_dialog
 
 
 class PredictionReviewDialog(QDialog):
@@ -243,7 +311,8 @@ class PredictionReviewDialog(QDialog):
         self._win = win
         self._store = store
         self.setWindowTitle("Review predictions")
-        self.resize(620, 480)
+        self.resize(660, 500)
+        self.setModal(False)
         self._build()
         self._reload()
 

@@ -166,16 +166,25 @@ def loaded_ccg(cd, key, resolution: str):
     return None
 
 
-def _highres_arrays(cd, key):
-    """``(ccg, null)`` at high resolution, or ``(None, None)`` when absent."""
-    data = cd.ccg_for(key.change(resolution='highres'))
+def _highres_arrays(cd, key, compute: bool = False):
+    """``(ccg, null)`` at high resolution, or ``(None, None)`` when absent.
+
+    With *compute*, a session missing highres is computed and saved. A model
+    trained on both resolutions emits a fixed feature width, so it can never
+    score a lowres-only session — the data has to exist, not be worked around.
+    """
+    data = loaded_ccg(cd, key, 'highres')
+    if data is None and compute:
+        cd.get_ccg(key.change(resolution='highres'))
+        data = loaded_ccg(cd, key, 'highres')
     if data is None or data.ccg is None:
         return None, None
     return data.ccg[0], data.ccg_null[0]
 
 
-def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
-                      min_rats: int = 4, highres: bool = True) -> LabeledSet:
+def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
+                      min_rats: int = 4, highres: bool = True,
+                      compute_highres: bool = False) -> LabeledSet:
     """Join saved labels to their CCG traces; keep labels with enough support.
 
     A label needs *min_count* examples across at least *min_rats* animals, since
@@ -184,7 +193,7 @@ def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
     time window; a session missing it drops highres for the whole set, so the
     models never learn "missing" as a feature.
     """
-    labels_by_key = read_selection_labels(selections_dir)
+    labels_by_key = read_selection_labels(selections_dir or cd.selections_dir)
     ptr_by_str = {str(k): k for k in cd.ptr}
 
     samples: list[PairSample] = []
@@ -194,7 +203,8 @@ def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
             continue
         data = cd.ccg_for(key)
         ccg, null = data.ccg[0], data.ccg_null[0]
-        ccg_hi, null_hi = _highres_arrays(cd, key) if highres else (None, None)
+        ccg_hi, null_hi = (_highres_arrays(cd, key, compute_highres)
+                           if highres else (None, None))
         session = str(key.session)
         conn = '-'.join(key.conn_type) if key.conn_type else '?'
         for pair, labs in pairs.items():
@@ -211,11 +221,46 @@ def build_labeled_set(cd, selections_dir: str, min_count: int = 60,
                 ccg_hi=np.asarray(ccg_hi[ref, tgt], dtype=float) if has_hi else None,
                 null_hi=np.asarray(null_hi[ref, tgt], dtype=float) if has_hi else None))
 
+    return LabeledSet(samples=samples,
+                      label_names=supported_labels(samples, min_count, min_rats))
+
+
+def supported_labels(samples: list, min_count: int, min_rats: int) -> list[str]:
+    """Labels with enough examples across enough animals to be learnable.
+
+    A label seen in one animal cannot be shown to generalize, so both bars apply.
+    """
     counts = Counter(lab for s in samples for lab in s.labels)
-    rats = {}
+    rats: dict[str, set] = {}
     for s in samples:
         for lab in s.labels:
             rats.setdefault(lab, set()).add(s.rat)
-    names = sorted(lab for lab, n in counts.items()
-                   if n >= min_count and len(rats[lab]) >= min_rats)
-    return LabeledSet(samples=samples, label_names=names)
+    return sorted(lab for lab, n in counts.items()
+                  if n >= min_count and len(rats[lab]) >= min_rats)
+
+
+def build_multi(datasets: list, min_count: int = 60, min_rats: int = 4,
+                highres: bool = True, compute_highres: bool = False) -> LabeledSet:
+    """One labeled set pooled over several projects.
+
+    Label support is judged on the pooled counts, so a label too rare in any one
+    project can still qualify once its examples are combined. Bin widths must
+    agree across projects — a trace of a different length is not the same feature.
+    """
+    samples, sources = [], []
+    for cd in datasets:
+        part = build_labeled_set(cd, min_count=1, min_rats=1, highres=highres,
+                                 compute_highres=compute_highres)
+        samples.extend(part.samples)
+        sources.append(cd.conf.name)
+    if not samples:
+        raise ValueError('no labeled pairs found in the selected projects')
+    widths = {(s.ccg.shape[-1],
+               None if s.ccg_hi is None else s.ccg_hi.shape[-1]) for s in samples}
+    if len(widths) > 1:
+        raise ValueError(f'projects disagree on CCG bin widths {sorted(widths)}; '
+                         'they must be computed with the same window and bin size')
+    ls = LabeledSet(samples=samples,
+                    label_names=supported_labels(samples, min_count, min_rats))
+    ls.sources = sources
+    return ls
