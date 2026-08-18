@@ -471,7 +471,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._select_timer.timeout.connect(self._do_pair_select_update)
         self._next_focus_pair: tuple | None = None
         self.__init_undo__()
-        ui.groups.bind(ui)
 
         self._build(ui_state_cache)
 

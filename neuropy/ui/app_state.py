@@ -115,7 +115,7 @@ class AppState(QObject):
         self._resolution = "lo"
         self._session_any_mode = False
         self._cross_session_handles = []
-        self.sd = SelectionDataset(cd)
+        self.set_sd(SelectionDataset(cd))
         self._active_sig_threshold = cd.conf.alpha
         self._active_norms = set()
         self._same_scale_mode = None
@@ -202,6 +202,16 @@ class AppState(QObject):
     def refresh_lists(self):
         self.root.pairs_view.pair_selection.refresh_lists()
 
+    def set_sd(self, sd) -> None:
+        """Install a SelectionDataset, bound to this nav.
+
+        Binding belongs here rather than at the call site: its groups reach back
+        through ``groups.ui`` (hotkey tagging, save paths), so a dataset that is
+        installed but unbound is broken, and a project switch builds a new one.
+        """
+        self.sd = sd
+        sd.groups.bind(self)
+
     def set_cd(self, cd: 'CCGDataset'):
         """Replace the CCGDataset (on project switch). No signal."""
         self.cd = cd
@@ -254,7 +264,7 @@ class AppState(QObject):
 
     def reset_selection_for_project(self, cd) -> None:
         """Replace selection state with a fresh dataset when switching projects."""
-        self.sd = SelectionDataset(cd)
+        self.set_sd(SelectionDataset(cd))
         self.notify_selection_changed()
 
     def set_active_sig_threshold(self, alpha: float):
