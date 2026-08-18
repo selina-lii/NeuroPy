@@ -9,7 +9,7 @@ import PySide6
 from neuropy.analyses.ms_connectivity import open_project
 
 # --- CONFIG (edit these) ----------------------------------------------------
-CONFIG   = 'test2'
+CONFIG   = None          # None = reopen last-used project, or e.g. 'test2'
 DURATION = 20e-3
 ALPHA    = 0.05
 SESSION  = None          # None = restore last-used, or e.g. 'RatK_Day2'
@@ -30,13 +30,14 @@ if os.path.isdir(plugins):
 
 # Qt-dependent imports must follow the plugin-path fix above.
 from pyqtgraph.Qt.QtWidgets import QApplication
-from neuropy.ui.ccg_ui import CCGReviewUI
+from neuropy.ui.ccg_ui import CCGReviewUI, UIStates
 
 # Guard required: jitter spawns worker processes, and spawn re-imports __main__.
 # Without it every jitter task re-runs this file — reloading sessions and a second UI.
 if __name__ == '__main__':
     sess = subjects.nsd.allsess + subjects.sd.allsess
-    neurons, cd, sd = open_project(CONFIG, sess)   # test2 has no scannable source
+    config = CONFIG or UIStates.last_project() or 'test2'
+    neurons, cd, sd = open_project(config, sess)   # test2 has no scannable source
     app = QApplication.instance() or QApplication([])
     CCGReviewUI.launch(cd, SESSION).raise_()
     app.exec()

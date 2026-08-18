@@ -90,6 +90,7 @@ class UIStates(JsonSavable):
     def __init__(self):
         super().__init__()
         self.settings = UISettings()
+        self.project = ''       # project_<name> dir; the launcher reopens it
         self.session = ''
         self.type_label = ''
         self.session_any_mode = False
@@ -107,6 +108,20 @@ class UIStates(JsonSavable):
         settings = dict(state.pop('settings', {}))
         super().__setstate__(state)
         self.settings = UISettings(**settings)
+
+    @classmethod
+    def last_project(cls) -> str:
+        """Config name of the project open at last close, '' if none was saved.
+
+        The window is handed a built CCGDataset, so it cannot reopen a project
+        itself — the launcher reads this and opens that one instead.
+        """
+        s = cls()
+        try:
+            s.load()
+        except Exception:
+            return ''
+        return s.project[len('project_'):] if s.project.startswith('project_') else ''
 
 
 class BottomStatusBar:
@@ -565,9 +580,9 @@ class CCGReviewUI(QMainWindow):
             # Restore saved view (segment / resolution / splitter / collapse) before first draw.
             s = self.ui_states
             self.nav.set_current_segment(_ALL_SEGS)   # segment is per-session view state, never restored
-            if s.resolution == 'hi':
+            if s.resolution in ('hi', 'lo_hi'):   # both need highres on disk first
                 self._ensure_loaded(self.nav.key.nd(), 'highres',
-                                    lambda: self.nav.set_resolution('hi'))
+                                    lambda r=s.resolution: self.nav.set_resolution(r))
             if s.stacked_transposed != self.nav.stacked_transposed:
                 self.nav.toggle_stacked_transposed()
             self.mainview.cs_section.restore_chip_state(s.sig_chips)
@@ -628,6 +643,7 @@ class CCGReviewUI(QMainWindow):
         s.splitter_sizes = self._splitter.sizes()
         s.resolution = self.nav.resolution
         s.current_segment = self.nav.current_segment
+        s.project = self._project_dir
         s.session = str(self.nav.key.session)
         s.type_label = self.nav.key.type_label()
         s.session_any_mode = bool(self.nav.session_any_mode)
