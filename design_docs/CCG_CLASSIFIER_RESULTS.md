@@ -163,14 +163,51 @@ Figures are the real check, not the F1 table.
   bin holds ~1/30 the counts. Visual inspection happens at highres, so the
   verification figures have to show it.
 
+## The unlabeled-pair problem (2026-08-18)
+Every number above shares one flaw: only **3129 of 8283** pointer pairs (38%) were
+ever tagged, and the builder counted every untagged pair as a confirmed negative.
+But an untagged pair is *unreviewed*, not negative — so a correct prediction on a
+real-but-untagged pair scored as a false positive. Precision was understated and
+recall's denominator was never trustworthy.
+
+Fix: a **"complete" chip** per (session, conn-type), stored in
+`selections/<session>.json` beside `selected`/`tags` — the same granularity that
+file already uses. Inside a slice marked complete, an untagged pointer pair is a
+real negative. Slices left unmarked still contribute their tagged pairs as
+positives and no negatives, so nothing already labeled is discarded.
+
+Until slices are actually flagged the scores are unchanged (the flag defaults to
+off everywhere). **Re-measuring after flagging is the point** — that is the first
+honest precision/recall this classifier will have produced.
+
+## Discover vs. accurate
+Threshold calibration generalizes F1 to F-beta, selectable at train time:
+
+| mode | beta | precision | recall | F1 |
+|---|---|---|---|---|
+| discover | 2.0 | 0.360 | **0.388** | 0.362 |
+| balanced | 1.0 | 0.410 | 0.301 | 0.336 |
+| accurate | 0.5 | **0.460** | 0.227 | 0.297 |
+
+`discover` is the mode to use when the goal is to find candidate pairs and reject
+the wrong ones by eye; the review dialog's confidence cutoff then tunes coverage
+per run. Reported F1/precision/recall stay plain F1 so the table above remains
+comparable to the earlier sections.
+
 ## How the UI handles tentative labels
 Predictions never write into group tags on their own — otherwise the next
 training run learns from its own output. They go into a `PredictionStore`
-(`predictions.json`), and the review dialog:
+(`predictions.json`), and the review list (now part of the classifier dialog,
+not a second window):
 - lists pairs **least-confident first** (confident ones need no attention),
-- filters by label or to the current session,
+- filters by label or to the current session, with a confidence cutoff,
 - shows the selected pair in the main CCG view,
 - promotes to real group tags only on **Accept**.
+
+Accepting also tags `__admitted__`, which the dataset builder excludes from
+training. Group membership is a set, so a pair admitted again by a later model
+simply re-lands in the same groups — **batches accumulate across runs of
+different models rather than conflicting**.
 
 ## Notes
 - Runs on sklearn MLPs, not torch. At n=3129 a small MLP is right-sized, and the
