@@ -51,3 +51,29 @@ Created 2026-07-27.
 
 ## UI cleanup (separate branch — 10-item plan)
 - items 1–8, 10 approved. item 9 (drop `legend_toggles` from save_state) pending: verify per-theme state fully reconstructs toggles before removing.
+
+## 11. Probe as a first-class object (not started — decide before adding datasets)
+Trigger: bapun's data has a dangling issue with contact numbering per probe channel.
+Need one object holding every parameter the network visuals and the connectivity
+compute read, so probe geometry stops being re-derived per call site.
+
+**Does a standard define this?** Partly, and not enough on its own:
+- Core NWB has only `ElectrodeGroup` + the electrodes table (`x/y/z`, `location`,
+  `group`). It describes *channels*, not a probe: no shank index, no contact
+  layout, no per-probe geometry. `pynwb` 3.1.3 here exposes nothing else.
+- `ndx-extracellular-channels` (NWB extension, not installed) does model
+  `Probe`/`ProbeInsertion`/`ContactsTable`, mirroring **ProbeInterface**'s JSON
+  schema — that is the closest thing to a standard probe object.
+- SpikeInterface/ProbeInterface `Probe` is the de-facto standard: contact
+  positions, shapes, shank ids, device-channel mapping, `to_dataframe()`.
+
+**Recommendation**: do not invent a schema. `neuropy/core/probe.py:216`
+`ProbeGroup` already carries `x, y, contact_id, channel_id, shank_id, connected,
+probe_id` — the same columns ProbeInterface uses. Keep it as the in-memory object
+and give it ProbeInterface JSON import/export, so probes round-trip through the
+standard while the UI keeps one type to read.
+
+Open questions to settle first:
+- Where `ch_per_shank` belongs (currently `nd_conf`, applied in `_load_probe_info`).
+- Whether dataset x/y columns override probegroup coords (see project_neuron_xy_override).
+- What the bapun per-channel numbering issue actually is — diagnose before designing.
