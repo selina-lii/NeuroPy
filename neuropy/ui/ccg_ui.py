@@ -238,6 +238,8 @@ class CCGReviewUI(QMainWindow):
         self.nav.cross_session_handles_changed.connect(
             lambda: self.mainview.request_render() if self.nav.session_any_mode else None)
         self.nav.groups.changed.connect(self._on_groups_changed)
+        # A project switch replaces sd.groups, taking its connections with it.
+        self.nav.groups_rewired.connect(self._on_groups_rewired)
 
         self._build_layout()
         self._bind_shortcuts()
@@ -534,6 +536,11 @@ class CCGReviewUI(QMainWindow):
     def _on_segment_changed(self):
         self.mainview.refresh_spike_attr_if_enabled()
         self.mainview.request_render()
+
+    def _on_groups_rewired(self):
+        """Re-subscribe to the new Groups instance and show its tags."""
+        self.nav.groups.changed.connect(self._on_groups_changed)
+        self._on_groups_changed()
 
     def _on_groups_changed(self):
         self.hotkeys_bar.refresh()

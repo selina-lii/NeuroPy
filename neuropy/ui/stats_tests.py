@@ -1096,6 +1096,9 @@ class StatsTestPanel(QWidget):
         self.nav.custom_segs_changed.connect(self._refresh_rows)
         self.nav.groups.changed.connect(self._refresh_rows)
         self.nav.selection_changed.connect(self._refresh_rows)
+        # A project switch replaces sd.groups, taking its connections with it.
+        self.nav.groups_rewired.connect(
+            lambda: self.nav.groups.changed.connect(self._refresh_rows))
 
     # -- rows ----------------------------------------------------------------
     def _add_row(self, cfg: RowConfig | None = None):

@@ -80,6 +80,7 @@ class AppState(QObject):
     cs_params_changed        = Signal(str, str)
     cs_overlay_changed       = Signal(bool)
     custom_segs_changed      = Signal()
+    groups_rewired           = Signal()   # sd.groups replaced → reconnect groups.changed
     themes_changed           = Signal(dict)   # {attr: Epoch} for current session
     closing                  = Signal()
 
@@ -203,14 +204,17 @@ class AppState(QObject):
         self.root.pairs_view.pair_selection.refresh_lists()
 
     def set_sd(self, sd) -> None:
-        """Install a SelectionDataset, bound to this nav.
+        """Install a SelectionDataset, bound and rewired to this nav.
 
         Binding belongs here rather than at the call site: its groups reach back
         through ``groups.ui`` (hotkey tagging, save paths), so a dataset that is
         installed but unbound is broken, and a project switch builds a new one.
+        ``groups_rewired`` lets panels re-subscribe: ``groups.changed`` belongs to
+        the Groups instance, so connections made to the old one are dropped with it.
         """
         self.sd = sd
         sd.groups.bind(self)
+        self.groups_rewired.emit()
 
     def set_cd(self, cd: 'CCGDataset'):
         """Replace the CCGDataset (on project switch). No signal."""
