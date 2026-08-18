@@ -16,7 +16,7 @@ describe different axes.
 Quality tiers behave differently from shape labels: 1427 pairs carry exactly one
 of best/good/ok and only 14 carry two, i.e. they are near mutually exclusive
 while shape labels co-occur freely. `twohead` exploits this; it did **not** help
-(see below), so `hybrid` remains the default.
+(see below), so no model forces the quality tiers to compete.
 
 ## Models
 | name | representation | head |
@@ -86,7 +86,7 @@ dataset supports.
   cross-domain generalization**. Our `residual()` divides by `√null`, which is
   that kind of normalization — an ablation worth running.
 
-## Why both resolutions (the biggest single win)
+## Why both resolutions
 Lowres is 21 bins at 1 ms; highres is 601 bins at 1/30 ms. **Both span the same
 ±10 ms** — they are different views of one interval, not different extents. So
 padding lowres out to 601 would misalign lag 0 and destroy exactly what the fine
@@ -126,9 +126,10 @@ Every optimal threshold lands well below 0.5 because the labels are rare.
 Thresholds are fit on training folds only, so the number above is honest.
 
 ## How good is this really?
-`hybrid` on a random split instead of by-animal: **F1 0.46 / AUC 0.81** — which
-`dualres` now nearly matches (0.429 / 0.795) while still generalizing across
-animals. The remaining gap is *labeling drift between animals*, not shape difficulty —
+`hybrid` on a random (leaky) split instead of by-animal: **F1 0.46 / AUC 0.81**.
+The shipping `conv`+GB now *matches* that (0.457 / 0.832) while still holding out
+whole animals — i.e. the representation gained back everything the leaky split was
+worth. Remaining error is *labeling drift between animals*, not shape difficulty —
 `rhythm` prevalence runs from 1.7% (RatU) to 72% (RatS), a 40× swing. RatU is
 the single largest fold (1198 pairs) and barely uses the label.
 
