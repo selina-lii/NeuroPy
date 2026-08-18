@@ -79,7 +79,8 @@ def load_model(cd, name: str) -> BaseModel:
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
                   extra: list = None, highres: bool = True,
-                  min_count: int = 20, bias: str = 'balanced') -> dict:
+                  min_count: int = 20, bias: str = 'balanced',
+                  only_labels: list = None) -> dict:
     """Train on saved selections and store the model in the shared library.
 
     Defaults are the widest useful ones: every labeled pair in the loaded
@@ -97,7 +98,8 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
 
     # The UI queues any missing high-res compute before calling this, so a
     # session still lacking it here is an error rather than something to fix inline.
-    ls = build_multi(datasets, min_count=min_count, highres=highres)
+    ls = build_multi(datasets, min_count=min_count, highres=highres,
+                     only_labels=only_labels)
     if not ls.label_names:
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
@@ -153,6 +155,30 @@ def apply_model(cd, name: str, scope: list = None) -> dict:
                          f"project: every one lacks the CCGs it needs")
     return {'model': model, 'rows': predict_project(cd, model, keys),
             'meta': getattr(model, 'meta', {}), 'skipped': skipped}
+
+
+def apply_cascade(cd, names: list[str], scope: list = None) -> dict:
+    """Apply saved classifiers in order, each seeing only what the earlier ones missed.
+
+    A pair labeled by an earlier model is not offered to a later one, so the
+    order is a priority: put the model you trust most first. This is the cheap
+    way to combine specialists (one trained on quality grades, one on the fast
+    patterns) without training a joint model over their union of labels.
+    """
+    rows, labels, decided, skipped = [], [], set(), set()
+    for name in names:
+        out = apply_model(cd, name, scope)
+        skipped.update(out['skipped'])
+        for label in out['model'].label_names:
+            if label not in labels:
+                labels.append(label)
+        for row in out['rows']:
+            pk = (str(row['key'].session), row['ref'], row['tgt'])
+            if pk in decided or not row['labels']:
+                continue
+            rows.append({**row, 'model': name})
+            decided.add(pk)
+    return {'rows': rows, 'labels': labels, 'skipped': sorted(skipped)}
 
 
 def scope_keys(cd, session: str = None, type_label: str = None) -> list:

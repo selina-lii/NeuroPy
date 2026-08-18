@@ -532,6 +532,16 @@ class BaselineCSSection(CollapsibleSection):
 
     # baseline_method and cs_metric live in nav.baseline_method / nav.cs_metric
 
+    CHIPS = ('p_btn', 'pc_btn', 'test_window_btn')   # persisted significance chips
+
+    def chip_state(self) -> dict:
+        """Which significance chips are on, for persisting across sessions."""
+        return {name: getattr(self, name).isChecked() for name in self.CHIPS}
+
+    def restore_chip_state(self, state: dict):
+        for name, on in state.items():
+            getattr(self, name).setChecked(bool(on))
+
     def set_cs(self, lo_val, hi_val):
         """Format lo|hi connection-strength values into the CS label."""
         def _fmt(v):

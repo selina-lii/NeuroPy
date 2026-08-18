@@ -251,12 +251,18 @@ def supported_labels(samples: list, min_count: int, min_rats: int) -> list[str]:
 
 
 def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
-                highres: bool = True, compute_highres: bool = False) -> LabeledSet:
+                highres: bool = True, compute_highres: bool = False,
+                only_labels: list[str] = None) -> LabeledSet:
     """One labeled set pooled over several projects.
 
     Label support is judged on the pooled counts, so a label too rare in any one
     project can still qualify once its examples are combined. Bin widths must
     agree across projects — a trace of a different length is not the same feature.
+
+    *only_labels* narrows training to one family of shapes (say the quality
+    grades, or the fast patterns). The rest stay in the samples as unlabeled
+    negatives, which is the point: telling best from good is an easier problem
+    than telling all thirteen apart at once.
     """
     samples, sources = [], []
     for cd in datasets:
@@ -271,7 +277,11 @@ def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
     if len(widths) > 1:
         raise ValueError(f'projects disagree on CCG bin widths {sorted(widths)}; '
                          'they must be computed with the same window and bin size')
-    ls = LabeledSet(samples=samples,
-                    label_names=supported_labels(samples, min_count, min_rats))
+    names = supported_labels(samples, min_count, min_rats)
+    if only_labels:
+        names = [n for n in names if n in set(only_labels)]
+        if not names:
+            raise ValueError(f'none of {sorted(only_labels)} has enough examples to train on')
+    ls = LabeledSet(samples=samples, label_names=names)
     ls.sources = sources
     return ls

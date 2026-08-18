@@ -13,13 +13,13 @@ from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.classifier.models import MODELS, UNSURE
-from neuropy.ui.utils import BusyButton
+from neuropy.ui.utils import BusyButton, TagChip
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
                                     list_models, missing_highres, open_projects,
@@ -28,6 +28,16 @@ from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
+
+# Shapes that differ only in degree are easier to separate from each other than
+# from all thirteen labels at once, so they train as one family. Labels absent
+# from a project are dropped by the support filter, so a family costs nothing.
+LABEL_FAMILIES = {
+    'quality (best/good/ok)': ['best', 'good', 'ok', 'bad'],
+    'fast patterns': ['msconn', '2peakms', 'wideMs', 'rift', 'triple', 'leak'],
+    'rhythm': ['rhythm', '0rhythm', 'burst', 'bimodal'],
+    'inhibition': ['ppinhib', 'inhib2sides', 'Disinhib', 'I-I-flip'],
+}
 
 
 class _ClassifyWorker(QObject):
@@ -54,7 +64,7 @@ class _ClassifyWorker(QObject):
         result = train_project(self._cd, o['model_name'], figures=o['figures'],
                                save_as=o['save_as'], extra=o['extra'],
                                highres=o['highres'], min_count=o['min_count'],
-                               bias=o['bias'])
+                               bias=o['bias'], only_labels=o['only_labels'])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -79,6 +89,23 @@ class _ClassifyWorker(QObject):
                             'trained_on': trained}}
 
 
+class _AcceptChip(TagChip):
+    """One predicted label, clicked to tag the pair with just that label.
+
+    A prediction is often partly right, so each label is its own click target;
+    the extra "all" chip takes the whole row when every label is correct.
+    """
+    clicked = Signal(str)
+
+    def __init__(self, text: str, color: str, label: str):
+        super().__init__(text, color)
+        self._label = label
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self._label)
+
+
 class ClassifierDialog(QDialog):
     """Pick a model, train it, then read the per-label scores it achieved."""
 
@@ -95,7 +122,14 @@ class ClassifierDialog(QDialog):
         self._build()
 
     def _build(self):
-        lay = QVBoxLayout(self)
+        # Training above, review below: two jobs that compete for height, so the
+        # sash lets whichever one is in use take the space.
+        outer = QVBoxLayout(self)
+        self._splitter = QSplitter(Qt.Vertical)
+        outer.addWidget(self._splitter)
+        train_box, lay = QWidget(), QVBoxLayout()
+        train_box.setLayout(lay)
+        self._splitter.addWidget(train_box)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Model:"))
@@ -150,6 +184,14 @@ class ClassifierDialog(QDialog):
         for other in self._other_projects():
             self.extra_combo.addItem(f"+ {other}", [other])
         scope_row.addWidget(self.extra_combo)
+        scope_row.addWidget(QLabel("Labels:"))
+        # Training one family at a time is easier than all shapes at once, so the
+        # families are offered as named presets over whatever tags exist.
+        self.family_combo = QComboBox()
+        self.family_combo.addItem("all labels", None)
+        for name, labels in LABEL_FAMILIES.items():
+            self.family_combo.addItem(name, list(labels))
+        scope_row.addWidget(self.family_combo)
         scope_row.addStretch()
         lay.addLayout(scope_row)
 
@@ -177,8 +219,13 @@ class ClassifierDialog(QDialog):
         self.status_label.setWordWrap(True)
         lay.addWidget(self.status_label)
 
+        lay.addStretch()
+
         # Review lives here rather than in a second dialog: the scores are already
         # in the status line, so the space belongs to the pairs being judged.
+        review_box, lay = QWidget(), QVBoxLayout()
+        review_box.setLayout(lay)
+        self._splitter.addWidget(review_box)
         filt = QHBoxLayout()
         filt.addWidget(QLabel("Label:"))
         self.label_combo = QComboBox()
@@ -222,7 +269,8 @@ class ClassifierDialog(QDialog):
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        outer.addWidget(bb)
+        self._splitter.setStretchFactor(1, 1)   # review pane absorbs resizes
         self.refresh_saved()
         self._reload()
 
@@ -255,6 +303,7 @@ class ClassifierDialog(QDialog):
                 'highres': self.highres_check.isChecked(),
                 'extra': open_projects(self.extra_combo.currentData() or []),
                 'min_count': int(self._win.settings.classifier_min_count),
+                'only_labels': self.family_combo.currentData(),
                 'scope': scope_keys(self._win.cd,
                                     self.session_combo.currentData(),
                                     self.type_combo.currentData())}
@@ -412,11 +461,34 @@ class ClassifierDialog(QDialog):
         for i, pk in enumerate(pairs):
             state = ('accepted' if pk in self._store.accepted else
                      'rejected' if pk in self._store.rejected else '')
-            cells = [f"{pk[0]}  {pk[1]}→{pk[2]}",
-                     ', '.join(self._store.labels_for(*pk)),
-                     f"{self._store.confidence(*pk, label=shown):.2f}", state]
-            for col, val in enumerate(cells):
+            for col, val in ((0, f"{pk[0]}  {pk[1]}→{pk[2]}"),
+                             (2, f"{self._store.confidence(*pk, label=shown):.2f}"),
+                             (3, state)):
                 self.table.setItem(i, col, QTableWidgetItem(val))
+            self.table.setCellWidget(i, 1, self._chip_cell(pk))
+        self.table.resizeRowsToContents()
+
+    def _chip_cell(self, pk: tuple) -> QWidget:
+        """The predicted-label cell: one clickable chip per label, plus 'all'."""
+        cell = QWidget()
+        row = QHBoxLayout(cell)
+        row.setContentsMargins(2, 1, 2, 1)
+        row.setSpacing(TagChip.GAP)
+        labels = self._store.labels_for(*pk)
+        groups = self._win.nav.groups
+        for label in labels + (['all'] if len(labels) > 1 else []):
+            colour = ('' if label == 'all'
+                      else groups.get_group_metadata(label).display_color)
+            chip = _AcceptChip(label, colour, '' if label == 'all' else label)
+            chip.clicked.connect(lambda only, p=pk: self._accept_one(p, only))
+            row.addWidget(chip)
+        row.addStretch()
+        return cell
+
+    def _accept_one(self, pk: tuple, only: str):
+        """Tag *pk* with one predicted label (or all of them when only is empty)."""
+        self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups, only=only or None)
+        self._after_change()
 
     def _selected(self) -> list[tuple]:
         rows = {i.row() for i in self.table.selectedIndexes()}

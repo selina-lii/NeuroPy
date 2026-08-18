@@ -3,7 +3,7 @@
 
     python notebooks/run_classifier.py                  # default model, writes figures
     python notebooks/run_classifier.py conv kernel      # compare models
-    python notebooks/run_classifier.py --project 001695 # another project
+    python notebooks/run_classifier.py --project 001695 # another project (dir dandi001695)
 """
 from __future__ import annotations
 import argparse

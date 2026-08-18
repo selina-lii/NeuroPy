@@ -78,22 +78,25 @@ class PredictionStore:
         return [pk for pk, _ in hits]
 
     def review_order(self, session: str = None) -> list[tuple]:
-        """Undecided pairs, least confident first — where review pays off most."""
+        """Undecided pairs, most confident first — the likeliest hits lead."""
         pend = [pk for pk in self.rows
                 if pk not in self.accepted and pk not in self.rejected
                 and (session is None or pk[0] == session)]
-        return sorted(pend, key=lambda pk: self.confidence(*pk))
+        return sorted(pend, key=lambda pk: -self.confidence(*pk))
 
-    def accept(self, session: str, ref: int, tgt: int, groups) -> list[str]:
+    def accept(self, session: str, ref: int, tgt: int, groups,
+               only: str = None) -> list[str]:
         """Promote a pair's predictions into real group tags.
 
+        *only* tags that one label instead of all of them — a prediction is often
+        partly right, and the wrong labels should not ride along with the right one.
         Group membership is a set, so a pair admitted again by a later model
         simply re-lands in the same groups — batches accumulate, never conflict.
         The ADMITTED marker records that a machine proposed it, and is excluded
         from training so the next model never learns from its own output.
         """
         pk = self._pk(session, ref, tgt)
-        labels = self.labels_for(*pk)
+        labels = [only] if only else self.labels_for(*pk)
         for label in labels + [ADMITTED]:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
         self.accepted.add(pk)

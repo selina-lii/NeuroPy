@@ -671,7 +671,7 @@ def data_table(sessions: list):
 class Group:
     tag = None
     import os
-    basedir = Path(os.path.expanduser("~/Documents/ms_synchrony/sessions"))
+    basedir = Path(os.path.expanduser("~/Documents/ms_synchrony/bapun"))
     # basedir = Path("/data/Clustering/sessions/")
 
     def _process(self, rel_path, use_relaligned_pos=False):

@@ -99,6 +99,8 @@ class UIStates(JsonSavable):
         self.panel_sizes: dict = {}       # panel attr -> pre-collapse width
         self.collapsed_panels: list = []  # panel attrs currently hidden
         self.panel_state: dict = {}       # PairSelectionPanelContainer state
+        self.stacked_transposed = False
+        self.sig_chips: dict = {}         # BaselineCSSection chip name -> checked
 
     def __setstate__(self, state: dict) -> None:
         """settings is one nested object, not a dict of them — rebuild it here."""
@@ -566,6 +568,9 @@ class CCGReviewUI(QMainWindow):
             if s.resolution == 'hi':
                 self._ensure_loaded(self.nav.key.nd(), 'highres',
                                     lambda: self.nav.set_resolution('hi'))
+            if s.stacked_transposed != self.nav.stacked_transposed:
+                self.nav.toggle_stacked_transposed()
+            self.mainview.cs_section.restore_chip_state(s.sig_chips)
             if s.splitter_sizes:
                 self._splitter.setSizes(s.splitter_sizes)
             for attr in list(s.collapsed_panels):
@@ -626,6 +631,8 @@ class CCGReviewUI(QMainWindow):
         s.session = str(self.nav.key.session)
         s.type_label = self.nav.key.type_label()
         s.session_any_mode = bool(self.nav.session_any_mode)
+        s.stacked_transposed = bool(self.nav.stacked_transposed)
+        s.sig_chips = self.mainview.cs_section.chip_state()
         s.collapsed_panels = [a for a in self._panel_splitter_map
                               if not self._panel_target(a).isVisible()]
         s.save()   # settings / panel_sizes already live on s
