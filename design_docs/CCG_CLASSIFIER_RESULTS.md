@@ -19,27 +19,72 @@ while shape labels co-occur freely. `twohead` exploits this; it did **not** help
 (see below), so `hybrid` remains the default.
 
 ## Models
-| name | input |
-|---|---|
-| `dualres` | **both resolutions, separate embedding heads — default** |
-| `hybrid` | lowres trace + derivatives + descriptors |
-| `trace` | lowres residual + 1st and 2nd derivative |
-| `shape` | 14 interpretable descriptors (peak SNR, lag, width, slope, 0 ms bin, rhythm index…) |
-| `twohead` | hybrid, quality tiers forced exclusive |
+| name | representation | head |
+|---|---|---|
+| `conv` | **learned local filters, both resolutions — default** | GB |
+| `kernel` | fixed Gaussian-derivative bank at (lag, width, order) | GB |
+| `dualres` | whole-trace PCA per resolution | MLP |
+| `hybrid` | lowres trace + derivatives + descriptors | MLP |
+| `trace` | lowres residual + 1st and 2nd derivative | MLP |
+| `shape` | 14 interpretable descriptors | MLP |
+| `twohead` | hybrid, quality tiers forced exclusive | MLP |
 
 All operate on the *residual* `(ccg − null) / √null`, never raw counts.
+Every model takes `head='mlp'|'gb'`, so representation and classifier vary
+independently.
 
 ## Results — leave-one-animal-out
-| model | mean F1 | mean AUC |
-|---|---|---|
-| **dualres** | **0.429** | **0.795** |
-| trace | 0.358 | 0.703 |
-| hybrid | 0.354 | 0.727 |
-| twohead | 0.349 | 0.709 |
-| shape | 0.322 | 0.699 |
 
-Best labels (dualres): rhythm 0.70, Disinhib 0.53, best 0.52, leak 0.51,
-refractory 0.50, rift 0.49. Worst: wideMs 0.17, 2side_dips 0.26.
+Representation × head, mean F1:
+
+| representation | + MLP | + GB |
+|---|---|---|
+| whole-trace PCA (`dualres`) | 0.429 | 0.431 |
+| fixed kernels (`kernel`) | 0.401 | **0.462** |
+| **learned filters (`conv`)** | 0.437 | **0.457** |
+
+Lowres-only baselines: `trace` 0.358, `hybrid` 0.354, `twohead` 0.349, `shape` 0.322.
+
+**Shipping default `conv`+GB: F1 0.457, AUC 0.832.** Per label:
+rhythm 0.67, best 0.61, leak 0.53, 2peakms 0.51, rift 0.50, 0rhythm 0.50,
+Disinhib 0.47, refractory 0.47, good 0.45, ok 0.45, msconn 0.39,
+2side_dips 0.28, wideMs 0.11. AUC is strong where it matters —
+refractory 0.94, best 0.92, leak 0.92, 2peakms 0.90, rift 0.90.
+
+### The head mattered more than the representation
+GB beats MLP on every representation, and by **+0.061** on a fixed kernel bank.
+A bank is 1012 correlated columns: an MLP drowns in that, boosted trees select
+from it. This is the most likely explanation for why the older hand-tuned
+`PeakRule` template classifier disappointed — the representation was reasonable,
+the decision rule was not (hard pass/fail thresholds on lag and width, so a pair
+0.1 ms outside a window scored zero).
+
+### Learned filters ≈ fixed kernels at this sample size
+Over 3 seeds: `kernel` 0.462 ± 0.008, `conv` 0.459 ± 0.003, identical AUC 0.833.
+The gap is inside the seed spread. This matches the literature — CoNNECT
+([Sci Rep 2021](https://pmc.ncbi.nlm.nih.gov/articles/PMC8187444/)) learns its
+first-layer filters but trains on **~80,000 simulated pairs**; at n=3047 real
+ones there is no measurable advantage to learning them.
+
+`conv` ships anyway on secondary criteria: **97 features vs 1012**, ~35% faster,
+and more stable across seeds. It learns filters from sliding *patches* rather
+than whole traces, so one small filter is reused at every lag and trains on
+n_pos× more examples — the CNN's inductive bias at a parameter count this
+dataset supports.
+
+### What the literature says
+- **CoNNECT** — 1D CNN over CCGs, ~50k params, beat conventional cross-correlation
+  and jitter methods; traded wins with GLMCC. Trained purely on simulation.
+- **[PLOS Comp Biol 2026 diagnostic study](https://journals.plos.org/ploscompbiol/article?id=10.1371%2Fjournal.pcbi.1014615)**
+  — three CNN failure modes: *amplitude over-reliance* (narrow training data →
+  model keys on absolute magnitude, not relational shape), *unimodal
+  representation collapse*, and *activity-distribution shift*. Finding:
+  **diversity beats quantity** (6 simulated networks → >95% on unseen networks;
+  1 network → 71–93%). Our 7 rats with rhythm prevalence swinging 1.7%→72% is
+  that narrow-distribution regime.
+- Same study: tail-reference normalization helps within-domain but **degrades
+  cross-domain generalization**. Our `residual()` divides by `√null`, which is
+  that kind of normalization — an ablation worth running.
 
 ## Why both resolutions (the biggest single win)
 Lowres is 21 bins at 1 ms; highres is 601 bins at 1/30 ms. **Both span the same
@@ -109,10 +154,13 @@ Figures are the real check, not the F1 table.
 - `wideMs` diagnostic: its top-scoring panels look homogeneous but are mostly
   `true=n`, and all come from one animal → sparse/inconsistent tagging, not a
   model failure.
-- `leak` under `dualres`: top scores are now p=0.96–1.00 (were capped ~0.35 with
-  lowres alone), 10/12 true, every panel showing the ultra-sharp peak centered on
-  0 ms. Direct visual confirmation that the fine bins, not extra capacity, are
-  what earned the +0.36.
+- `leak`: top scores reach p=0.96–1.00 (were capped ~0.35 with lowres alone),
+  10/12 true, every panel showing the ultra-sharp peak centered on 0 ms. Direct
+  visual confirmation that the fine bins, not extra capacity, earned the +0.36.
+- Example panels draw the **highres trace in grey under the lowres blue**,
+  rescaled to the lowres peak — plotted raw it is a flat line, since each fine
+  bin holds ~1/30 the counts. Visual inspection happens at highres, so the
+  verification figures have to show it.
 
 ## How the UI handles tentative labels
 Predictions never write into group tags on their own — otherwise the next
