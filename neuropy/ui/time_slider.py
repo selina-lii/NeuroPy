@@ -896,12 +896,12 @@ class CustomCCGWorker:
     def on_done(self, completed_task, _result):
         ui, mgr = self._ui, self._mgr
         r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
-        print(f"[CCGq] on_done {completed_task.spec.name} {completed_task.resolution} "
+        name = ('whole session' if completed_task.whole_session
+                else completed_task.spec.name)
+        print(f"[CCGq] on_done {name} {completed_task.resolution} "
               f"result={'none' if r is None else ('ok' if r.ok else r.error)}", flush=True)
         bid = completed_task.batch_id
         meta = ui.time_slider._batch_meta.get(bid) if bid is not None else None
-        name = ('whole session' if completed_task.whole_session
-                else completed_task.spec.name)
 
         if r is None or not r.ok:
             err = r.error if r else 'unknown error'
