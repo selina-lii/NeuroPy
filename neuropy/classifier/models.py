@@ -13,8 +13,10 @@ Interface shared by all models::
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import pickle
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -22,6 +24,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
+from neuropy.classifier.dataset import loaded_ccg
 from neuropy.classifier.features import (bank_response, kernel_bank, kernel_response,
                                          learned_bank, residual, shape_features,
                                          smooth, trace_stack)
@@ -122,21 +125,82 @@ class BaseModel:
         X = self._encode(ccg, null, ccg_hi, null_hi)
         return self._scores(self.scaler.transform(X))
 
-    def save(self, path: str):
-        import pickle
+    def save(self, path: str, provenance: dict = None):
+        """Write the model plus a sidecar recording what produced it.
+
+        The sidecar is the point: a trained model applied to another project is
+        only interpretable if you can see which selections taught it, so the
+        training sources travel with the weights.
+        """
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         with open(path, 'wb') as fh:
             pickle.dump(self, fh)
-        meta = {'model': type(self).__name__, 'labels': self.label_names,
-                'duration': self.duration}
+        self.meta = {'model': type(self).__name__,
+                     'model_key': self.model_key(),
+                     'head': self.head,
+                     'labels': self.label_names,
+                     'duration': self.duration,
+                     'thresholds': {n: float(t) for n, t
+                                    in zip(self.label_names, self.thresholds)},
+                     'saved_at': datetime.datetime.now().isoformat(),
+                     'trained_on': provenance or getattr(self, 'meta', {}).get(
+                         'trained_on', {})}
         with open(os.path.splitext(path)[0] + '.json', 'w') as fh:
-            json.dump(meta, fh, indent=1)
+            json.dump(self.meta, fh, indent=1)
+        return path
+
+    def model_key(self) -> str:
+        """Registry name for this class (inverse of ``MODELS``)."""
+        for name, cls in MODELS.items():
+            if cls is type(self):
+                return name
+        return type(self).__name__
 
     @staticmethod
     def load(path: str) -> 'BaseModel':
-        import pickle
         with open(path, 'rb') as fh:
-            return pickle.load(fh)
+            model = pickle.load(fh)
+        side = os.path.splitext(path)[0] + '.json'
+        if os.path.isfile(side):
+            with open(side) as fh:
+                model.meta = json.load(fh)
+        return model
+
+    def compatible_with(self, cd) -> list[str]:
+        """Reasons this model cannot score *cd*'s CCGs; empty means it can.
+
+        A model encodes traces of a fixed bin count and window, so applying one
+        trained elsewhere is only valid when the target project was computed the
+        same way. Checked explicitly rather than failing inside numpy.
+        """
+        problems = []
+        if abs(float(cd.conf.duration) - float(self.duration)) > 1e-9:
+            problems.append(f"window {cd.conf.duration * 1e3:.1f} ms "
+                            f"!= trained {self.duration * 1e3:.1f} ms")
+        trained = getattr(self, 'meta', {}).get('trained_on', {})
+        for res, attr in (('n_bins_lowres', 'lowres'), ('n_bins_highres', 'highres')):
+            want = trained.get(res)
+            if want is None:
+                continue
+            got = _n_bins(cd, attr)
+            if got is None:
+                # The encoder emits a fixed width, so a resolution the model was
+                # trained with must be present for every session it scores.
+                problems.append(f"{attr} CCGs missing (model was trained with them)")
+            elif got != want:
+                problems.append(f"{attr} bins {got} != trained {want}")
+        return problems
+
+
+def _n_bins(cd, resolution: str) -> int | None:
+    """Bin count at *resolution*, or None unless every pointer session has it."""
+    widths = set()
+    for key in cd.ptr:
+        data = loaded_ccg(cd, key, resolution)
+        if data is None:
+            return None
+        widths.add(int(data.ccg.shape[-1]))
+    return widths.pop() if len(widths) == 1 else None
 
 
 class ShapeFeatureNet(BaseModel):

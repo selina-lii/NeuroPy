@@ -18,33 +18,55 @@ from pyqtgraph.Qt.QtWidgets import (
 
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
-from neuropy.classifier.run import DEFAULT_MODEL, predict_project, train_project
+from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, list_models,
+                                    predict_project, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
 
 
-class _TrainWorker(QObject):
-    """Runs training + prediction off the Qt main thread."""
+class _ClassifyWorker(QObject):
+    """Trains a new classifier, or applies a saved one, off the Qt main thread."""
     done = Signal(object)
     error = Signal(str)
 
-    def __init__(self, cd, model_name: str, figures: bool):
+    def __init__(self, cd, model_name: str, figures: bool, saved: str = None):
         super().__init__()
         self._cd = cd
         self._model_name = model_name
         self._figures = figures
+        self._saved = saved
 
     def run(self):
         try:
-            result = train_project(self._cd, self._model_name, figures=self._figures)
-            rows = predict_project(self._cd, result['model'])
-            result['store'] = store_from_rows(rows, self._model_name,
-                                              result['model'].label_names)
+            result = (self._apply() if self._saved else self._train())
         except Exception as exc:
             self.error.emit(str(exc))
             return
         self.done.emit(result)
+
+    def _train(self) -> dict:
+        result = train_project(self._cd, self._model_name, figures=self._figures)
+        rows = predict_project(self._cd, result['model'])
+        result['store'] = store_from_rows(rows, result['saved_as'],
+                                          result['model'].label_names)
+        return result
+
+    def _apply(self) -> dict:
+        out = apply_model(self._cd, self._saved)
+        trained = out['meta'].get('trained_on', {})
+        return {'model': out['model'], 'figures': [], 'out_dir': '',
+                'saved_as': self._saved, 'skipped': out['skipped'],
+                'store': store_from_rows(out['rows'], self._saved,
+                                         out['model'].label_names),
+                # An applied model reports the scores it earned when trained;
+                # this project has no labels to re-score it against.
+                'summary': {'model': self._saved, 'scores': {},
+                            'n_samples': trained.get('n_samples', 0),
+                            'n_rats': len(trained.get('rats', [])),
+                            'mean_f1': trained.get('mean_f1', 0.0),
+                            'mean_auc': trained.get('mean_auc', 0.0),
+                            'trained_on': trained}}
 
 
 class ClassifierDialog(QDialog):
@@ -78,6 +100,25 @@ class ClassifierDialog(QDialog):
         self.train_btn.clicked.connect(self._on_train_btn)
         lay.addWidget(self.train_btn)
 
+        # Applying a model trained elsewhere is the cross-project path: one
+        # picker and one button, sharing the training run's worker and handlers.
+        saved_row = QHBoxLayout()
+        saved_row.addWidget(QLabel("Saved:"))
+        self.saved_combo = QComboBox()
+        self.saved_combo.setMinimumWidth(220)
+        for entry in list_models(self._win.cd):
+            trained = entry.get('trained_on', {})
+            self.saved_combo.addItem(
+                f"{entry['name']}  ({trained.get('n_samples', 0)} pairs from "
+                f"{trained.get('project', '?')})", entry['name'])
+        saved_row.addWidget(self.saved_combo)
+        self.apply_btn = QPushButton("Apply to this project")
+        self.apply_btn.clicked.connect(self._on_apply_btn)
+        self.apply_btn.setEnabled(self.saved_combo.count() > 0)
+        saved_row.addWidget(self.apply_btn)
+        saved_row.addStretch()
+        lay.addLayout(saved_row)
+
         self.status_label = QLabel(self._describe_existing())
         self.status_label.setWordWrap(True)
         lay.addWidget(self.status_label)
@@ -106,16 +147,24 @@ class ClassifierDialog(QDialog):
                     "Predictions stay separate from your tags until you accept them.")
         return f"{len(store)} pairs already classified by '{store.model_name}'."
 
+    def _on_apply_btn(self):
+        self._launch(self.saved_combo.currentData())
+
     def _on_train_btn(self):
+        self._launch(None)
+
+    def _launch(self, saved: str | None):
         self.train_btn.setEnabled(False)
-        dlg = QProgressDialog("Training classifier…", None, 0, 0, self)
+        self.apply_btn.setEnabled(False)
+        dlg = QProgressDialog("Applying classifier…" if saved else
+                              "Training classifier…", None, 0, 0, self)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setCancelButton(None)
         dlg.show()
 
         thread = QThread(self)
-        worker = _TrainWorker(self._win.cd, self.model_combo.currentText(),
-                              self.figures_check.isChecked())
+        worker = _ClassifyWorker(self._win.cd, self.model_combo.currentText(),
+                                 self.figures_check.isChecked(), saved)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         self._thread, self._worker = thread, worker
@@ -128,20 +177,21 @@ class ClassifierDialog(QDialog):
             thread.deleteLater()
             self._thread = self._worker = None
             self.train_btn.setEnabled(True)
+            self.apply_btn.setEnabled(self.saved_combo.count() > 0)
 
         def _on_done(result):
             _teardown()
-            self._apply(result)
+            self._show_result(result)
 
         def _on_error(msg: str):
             _teardown()
-            QMessageBox.critical(self, "Classify", f"Training failed:\n{msg}")
+            QMessageBox.critical(self, "Classify", msg)
 
         worker.done.connect(_on_done)
         worker.error.connect(_on_error)
         thread.start()
 
-    def _apply(self, result: dict):
+    def _show_result(self, result: dict):
         summary = result['summary']
         self._win.prediction_store = result['store']
         scores = summary['scores']
@@ -152,14 +202,23 @@ class ClassifierDialog(QDialog):
             for col, val in enumerate([name, str(s['n']), f"{s['precision']:.2f}",
                                        f"{s['recall']:.2f}", f"{s['f1']:.2f}"]):
                 self.table.setItem(i, col, QTableWidgetItem(val))
-        self.status_label.setText(
-            f"{summary['n_samples']} tagged pairs / {summary['n_rats']} animals → "
-            f"{len(result['store'])} pairs classified.\n"
-            f"Leave-one-animal-out mean F1 {summary['mean_f1']:.2f}, "
-            f"AUC {summary['mean_auc']:.2f}.\n"
-            f"Figures and model in {result['out_dir']}")
+        trained = summary.get('trained_on', {})
+        origin = (f"trained on {trained['project']}" if trained
+                  else f"saved as '{result['saved_as']}'")
+        lines = [f"{len(result['store'])} pairs classified "
+                 f"({summary['n_samples']} training pairs / "
+                 f"{summary['n_rats']} animals, {origin}).",
+                 f"Leave-one-animal-out mean F1 {summary['mean_f1']:.2f}, "
+                 f"AUC {summary['mean_auc']:.2f}."]
+        if result.get('skipped'):
+            lines.append(f"Skipped {len(result['skipped'])} session(s) lacking the "
+                         f"CCGs this model needs: {', '.join(result['skipped'][:4])}"
+                         + ("…" if len(result['skipped']) > 4 else ""))
+        if result['out_dir']:
+            lines.append(f"Figures and model in {result['out_dir']}")
+            result['store'].save(os.path.join(result['out_dir'], 'predictions.json'))
+        self.status_label.setText("\n".join(lines))
         self.review_btn.setEnabled(True)
-        result['store'].save(os.path.join(result['out_dir'], 'predictions.json'))
 
     def _on_review_btn(self):
         store = self._store()

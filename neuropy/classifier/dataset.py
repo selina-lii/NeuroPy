@@ -96,6 +96,21 @@ class LabeledSet:
                     y[i, idx[lab]] = 1
         return y
 
+    def provenance(self) -> dict:
+        """What this set was built from — recorded with any model trained on it."""
+        per_session: dict[str, int] = {}
+        for smp in self.samples:
+            per_session[smp.session] = per_session.get(smp.session, 0) + 1
+        return {'n_samples': len(self.samples),
+                'sessions': sorted(per_session),
+                'pairs_per_session': per_session,
+                'rats': sorted(set(self.rats.tolist())),
+                'labels': list(self.label_names),
+                'label_counts': {k: int(v) for k, v in self.counts().items()},
+                'n_bins_lowres': int(self._X_ccg.shape[1]),
+                'n_bins_highres': (None if self._X_ccg_hi is None
+                                   else int(self._X_ccg_hi.shape[1]))}
+
     @property
     def rats(self) -> np.ndarray:
         """Grouping variable for leave-one-rat-out CV."""
@@ -129,6 +144,26 @@ def read_selection_labels(selections_dir: str) -> dict[str, dict[str, list[str]]
                 if labels:
                     out.setdefault(key_str, {})[pair] = labels
     return out
+
+
+def loaded_ccg(cd, key, resolution: str):
+    """CCGData for *key* at *resolution*, read from disk and never computed.
+
+    ``ccg_for`` recomputes on a cache miss, which needs neurons a scoring-only
+    dataset does not carry. ``load`` caches under the full key while ``ccg_for``
+    reads ``key.cd()``, so both spellings are checked here.
+    """
+    k = key.change(resolution=resolution)
+    for probe in (k.cd(), k):
+        data = cd._ccg.get(probe)
+        if data is not None and data.ccg is not None:
+            return data
+    cd.load(k)
+    for probe in (k.cd(), k):
+        data = cd._ccg.get(probe)
+        if data is not None and data.ccg is not None:
+            return data
+    return None
 
 
 def _highres_arrays(cd, key):
