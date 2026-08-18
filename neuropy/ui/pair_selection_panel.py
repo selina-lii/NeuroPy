@@ -89,7 +89,7 @@ from neuropy.analyses.pair_selection_data import (
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    chip_button, has_primary_modifier, small_font_pt,
+    has_primary_modifier, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -489,12 +489,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
             setattr(self, var_attr, var)
             btn_layout.addWidget(btn)
         btn_layout.addStretch()
-        self._complete_chip = chip_button("complete", parent=btn_row)
-        self._complete_chip.setToolTip(
-            "Every pair here has been reviewed, so untagged pairs count as\n"
-            "negatives when training the classifier.")
-        self._complete_chip.clicked.connect(self._on_complete_chip)
-        btn_layout.addWidget(self._complete_chip)
         root.addWidget(btn_row)
 
         for lst, action, other in (
@@ -771,7 +765,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def refresh_lists(self):
         ui, data = self.ui, self.data
-        ab = ui.active_selections
         unsel_frac, sel_frac = self._save_scroll_positions()
         self.unselected_list.clear()
         self.selected_list.clear()
@@ -787,7 +780,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._sort_by_min_p_cb.setEnabled(True)
         self._sort_btns.button('session').setVisible(ui.session_any_mode)
 
-        self._complete_chip.setChecked(ab.complete)
         self._populate_avail_list(ui, data, should_gray)
         total_any = self._populate_selected_list(ui, should_gray)
         self._update_list_labels(ui, data, total_any)
@@ -802,9 +794,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
             self._focus_next_pair(move_cursor=cursor_follows)
         if self._next_focus_pair is None or not cursor_follows:
             self._restore_scroll_positions(unsel_frac, sel_frac)
-
-    def _on_complete_chip(self):
-        self.ui.active_selections.complete = self._complete_chip.isChecked()
 
     def _on_item_clicked(self, widget: PairListWidget, item: QListWidgetItem):
         """Single click: debounced pair navigation."""

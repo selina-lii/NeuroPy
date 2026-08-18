@@ -150,9 +150,11 @@ class SegmentBar(QWidget):
         verb = "Unstack" if is_stacked else "Stack"
         menu.addAction(f"{verb} segment" + (f"s ({len(labels)})" if len(labels) > 1 else ""),
                        lambda: self._stack_labels(labels))
+        menu.addSeparator()
+        transpose = menu.addAction("Transpose rows/columns", nav.toggle_stacked_transposed)
+        transpose.setCheckable(True)
+        transpose.setChecked(nav.stacked_transposed)
         if nav.stacked_segments:
-            menu.addSeparator()
-            menu.addAction("Transpose stacked", nav.toggle_stacked_transposed)
             menu.addAction(f"Clear stacked ({len(nav.stacked_segments)})",
                            nav.clear_stacked_segments)
         menu.exec(global_pos)

@@ -118,6 +118,7 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
                   'selections_dir': str(cd.selections_dir),
                   'cross_validation': 'leave-one-rat-out',
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
+                  'scores': cv['scores'],
                   **ls.provenance()}
     saved_as = save_as or cd.conf.name
     model.save(os.path.join(out_dir, f'{model_name}.pkl'), provenance)

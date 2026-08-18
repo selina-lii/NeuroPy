@@ -425,7 +425,7 @@ class CCGReviewUI(QMainWindow):
             spl.setSizes(sizes)
         target.setVisible(visible)
         panel = getattr(self, attr, None)
-        if panel is not None and panel is not target:
+        if isinstance(panel, QWidget) and panel is not target:
             panel.setVisible(visible)
         act = self._panel_actions.get(attr)
         if act:

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
@@ -511,10 +511,15 @@ class ManageModelsDialog(QDialog):
         self._win = win
         self._parent = parent
         self.setWindowTitle("Manage classifiers")
-        self.resize(420, 300)
+        self.resize(420, 420)
         lay = QVBoxLayout(self)
         self.list = QListWidget()
+        self.list.currentItemChanged.connect(self._on_selected)
         lay.addWidget(self.list)
+        self.stats_table = QTableWidget(0, 4)
+        self.stats_table.setHorizontalHeaderLabels(['label', 'n', 'prec/rec', 'F1/AUC'])
+        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.stats_table)
         row = QHBoxLayout()
         for text, slot in (("Rename…", self._on_rename_btn),
                            ("Delete", self._on_delete_btn)):
@@ -531,12 +536,23 @@ class ManageModelsDialog(QDialog):
     def _reload(self):
         self.list.clear()
         for entry in list_models(self._win.cd):
-            self.list.addItem(entry['name'])
+            item = QListWidgetItem(entry['name'])
+            item.setData(Qt.UserRole, entry.get('trained_on', {}).get('scores', {}))
+            self.list.addItem(item)
         self._parent.refresh_saved()
 
     def _current(self) -> str:
         item = self.list.currentItem()
         return item.text() if item else ''
+
+    def _on_selected(self, item: 'QListWidgetItem'):
+        """Per-label CV scores for the selected model, recorded at training time."""
+        scores = item.data(Qt.UserRole) if item else {}
+        self.stats_table.setRowCount(len(scores))
+        for i, (label, s) in enumerate(sorted(scores.items(), key=lambda kv: -kv[1]['f1'])):
+            for col, val in enumerate([label, str(s['n']), f"{s['precision']:.2f}/{s['recall']:.2f}",
+                                       f"{s['f1']:.2f}/{s['auc']:.2f}"]):
+                self.stats_table.setItem(i, col, QTableWidgetItem(val))
 
     def _on_rename_btn(self):
         name = self._current()

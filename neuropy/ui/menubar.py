@@ -15,7 +15,7 @@ from neuropy.ui.app_state import _ALL_SESSION_MARKER
 from neuropy.ui.dialogs import (AddProjectDialog, CreateGroupDialog, ExportOptionsDialog,
                                 SettingsDialog)
 from neuropy.ui.jitter_ui import JitterQueueDialog
-from neuropy.ui.utils import AddableDropdown
+from neuropy.ui.utils import AddableDropdown, chip_button
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -47,6 +47,13 @@ class IndexBar:
         self.type_combo = AddableDropdown('type', width=120)   # fixed enum -> no Add row
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         row.addWidget(self.type_combo)
+
+        self.complete_chip = chip_button("complete")
+        self.complete_chip.setToolTip(
+            "Every pair here has been reviewed, so untagged pairs count as\n"
+            "negatives when training the classifier.")
+        self.complete_chip.clicked.connect(self._on_complete_chip)
+        row.addWidget(self.complete_chip)
 
         win._project_combo = self.project_combo
         win._session_combo = self.session_combo
@@ -125,6 +132,10 @@ class IndexBar:
                 self.type_combo.setCurrentIndex(i)
                 break
         self.type_combo.blockSignals(False)
+        self.complete_chip.setChecked(w.nav.active_selections.complete)
+
+    def _on_complete_chip(self):
+        self._win.nav.active_selections.complete = self.complete_chip.isChecked()
 
     @staticmethod
     def _project_header(project_dir: str) -> 'ProjectConfig':
