@@ -1206,8 +1206,7 @@ class SettingsTabs:
             cb.setChecked(getattr(s, f'{attr_prefix}_on'))
             metric = MetricInput("", ['min', 'hour', 'day'],
                                  suggestions=(1, 5, 10, 15, 30, 60), input_width=60)
-            v = getattr(s, f'{attr_prefix}_interval')
-            metric.set_value(*(v if isinstance(v, tuple) else (v, 'hour')))
+            metric.set_value(*getattr(s, f'{attr_prefix}_interval'))
             row.addWidget(cb)
             row.addWidget(metric)
             row.addStretch()
