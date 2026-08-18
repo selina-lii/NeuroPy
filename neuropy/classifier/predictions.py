@@ -33,9 +33,12 @@ class PredictionStore:
         return (str(session), int(ref), int(tgt))
 
     def add(self, session: str, ref: int, tgt: int, labels: list[str],
-            scores: dict[str, float]):
+            scores: dict[str, float], type_label: str = ''):
+        # type_label is kept so the review list can navigate to a pair that
+        # lives under a different conn type than the one currently shown.
         self.rows[self._pk(session, ref, tgt)] = {'labels': list(labels),
-                                                  'scores': dict(scores)}
+                                                  'scores': dict(scores),
+                                                  'type_label': type_label}
 
     def labels_for(self, session: str, ref: int, tgt: int) -> list[str]:
         row = self.rows.get(self._pk(session, ref, tgt))
@@ -45,15 +48,26 @@ class PredictionStore:
         row = self.rows.get(self._pk(session, ref, tgt))
         return dict(row['scores']) if row else {}
 
+    def type_label_for(self, session: str, ref: int, tgt: int) -> str:
+        row = self.rows.get(self._pk(session, ref, tgt))
+        return row.get('type_label', '') if row else ''
+
     def top_label(self, session: str, ref: int, tgt: int) -> str:
         labs = self.labels_for(session, ref, tgt)
         return labs[0] if labs else ''
 
-    def confidence(self, session: str, ref: int, tgt: int) -> float:
-        """Score of the pair's top predicted label (0 when it abstained)."""
+    def confidence(self, session: str, ref: int, tgt: int,
+                   label: str = None) -> float:
+        """Score for *label*, or the pair's strongest label when none is given.
+
+        The review list ranks and cuts on the same number: filtered to one
+        label that is the label's own score, otherwise the top score overall.
+        """
         row = self.rows.get(self._pk(session, ref, tgt))
         if not row or not row['labels']:
             return 0.0
+        if label is not None:
+            return float(row['scores'].get(label, 0.0))
         return max(row['scores'].get(l, 0.0) for l in row['labels'])
 
     def pairs_for_label(self, label: str, session: str = None) -> list[tuple]:
@@ -110,7 +124,7 @@ class PredictionStore:
         store = cls(doc.get('model', ''), doc.get('labels', []))
         for row in doc.get('rows', []):
             store.add(row['session'], row['ref'], row['tgt'],
-                      row['labels'], row['scores'])
+                      row['labels'], row['scores'], row.get('type_label', ''))
         store.accepted = {(s, int(r), int(t)) for s, r, t in doc.get('accepted', [])}
         store.rejected = {(s, int(r), int(t)) for s, r, t in doc.get('rejected', [])}
         return store
@@ -122,5 +136,5 @@ def store_from_rows(rows: list[dict], model_name: str,
     store = PredictionStore(model_name, labels)
     for row in rows:
         store.add(str(row['key'].session), row['ref'], row['tgt'],
-                  row['labels'], row['scores'])
+                  row['labels'], row['scores'], row['key'].type_label())
     return store

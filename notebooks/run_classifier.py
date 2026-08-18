@@ -20,7 +20,8 @@ if __name__ == '__main__':
     ap.add_argument('models', nargs='*', default=[], help=f'default: {DEFAULT_MODEL}')
     ap.add_argument('--project', default='test2')
     ap.add_argument('--head', choices=['mlp', 'gb'], help='override the model default')
-    ap.add_argument('--no-figures', action='store_true')
+    ap.add_argument("--no-figures", action="store_true")
+    ap.add_argument("--min-count", type=int, default=20)
     ap.add_argument('--apply', metavar='NAME', help='score with a saved classifier')
     ap.add_argument('--list', action='store_true', help='show saved classifiers')
     args = ap.parse_args()
@@ -58,14 +59,15 @@ if __name__ == '__main__':
 
     if len(names) == 1 and not args.head:
         # Single model: full pipeline — trains, scores, saves model + figures.
-        r = train_project(cd, names[0], figures=not args.no_figures)
+        r = train_project(cd, names[0], figures=not args.no_figures,
+                          min_count=args.min_count)
         s = r['summary']
         print(f"\n{s['model']}: {s['n_samples']} pairs / {s['n_rats']} animals")
         print(report(s['scores']))
         print(f"\nwrote {len(r['figures'])} figures to {r['out_dir']}")
     else:
         # Comparison: cross-validate each, no model/figure output.
-        ls = build_labeled_set(cd, cd.selections_dir)
+        ls = build_labeled_set(cd, min_count=args.min_count)
         kw = {'head': args.head} if args.head else {}
         for name in names:
             if name not in MODELS:

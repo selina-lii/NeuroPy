@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 
 from pyqtgraph.Qt.QtCore import QObject, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
@@ -51,7 +52,7 @@ class _ClassifyWorker(QObject):
         o = self._opts
         result = train_project(self._cd, o['model_name'], figures=o['figures'],
                                save_as=o['save_as'], extra=o['extra'],
-                               highres=o['highres'])
+                               highres=o['highres'], min_count=o['min_count'])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -208,6 +209,7 @@ class ClassifierDialog(QDialog):
                 'figures': self.figures_check.isChecked(),
                 'highres': self.highres_check.isChecked(),
                 'extra': open_projects(self.extra_combo.currentData() or []),
+                'min_count': int(self._win.settings.classifier_min_count),
                 'scope': scope_keys(self._win.cd,
                                     self.session_combo.currentData(),
                                     self.type_combo.currentData())}
@@ -379,6 +381,13 @@ class PredictionReviewDialog(QDialog):
         self.session_check.setChecked(True)
         self.session_check.stateChanged.connect(self._reload)
         row.addWidget(self.session_check)
+        row.addWidget(QLabel("Min confidence:"))
+        self.cutoff_spin = QDoubleSpinBox()
+        self.cutoff_spin.setRange(0.0, 1.0)
+        self.cutoff_spin.setSingleStep(0.05)
+        self.cutoff_spin.setDecimals(2)
+        self.cutoff_spin.valueChanged.connect(self._reload)
+        row.addWidget(self.cutoff_spin)
         row.addStretch()
         lay.addLayout(row)
 
@@ -396,6 +405,9 @@ class PredictionReviewDialog(QDialog):
         self.reject_btn.clicked.connect(self._on_reject_btn)
         row2.addWidget(self.reject_btn)
         self.accept_all_btn = QPushButton("Accept all shown")
+        self.accept_all_btn.setToolTip(
+            "Tag every row currently listed — narrow the list with the label\n"
+            "filter and the confidence cutoff first.")
         self.accept_all_btn.clicked.connect(self._on_accept_all_btn)
         row2.addWidget(self.accept_all_btn)
         row2.addStretch()
@@ -411,22 +423,29 @@ class PredictionReviewDialog(QDialog):
         return str(self._win.nav.key.session)
 
     def _visible_pairs(self) -> list[tuple]:
+        """Rows the table shows: scope- and label-filtered, above the cutoff."""
         label = self.label_combo.currentText()
         sess = self._session()
-        if label == 'all pending':
-            return self._store.review_order(sess)
-        return self._store.pairs_for_label(label, sess)
+        one = None if label in ('all pending', UNSURE) else label
+        pairs = (self._store.review_order(sess) if label == 'all pending'
+                 else self._store.pairs_for_label(label, sess))
+        cutoff = self.cutoff_spin.value()
+        return [pk for pk in pairs
+                if self._store.confidence(*pk, label=one) >= cutoff]
 
     def _reload(self):
         pairs = self._visible_pairs()
+        label = self.label_combo.currentText()
+        shown = None if label in ('all pending', UNSURE) else label
         self.table.setRowCount(len(pairs))
         self._rows = pairs
+        self.accept_all_btn.setText(f"Accept all shown ({len(pairs)})")
         for i, pk in enumerate(pairs):
             state = ('accepted' if pk in self._store.accepted else
                      'rejected' if pk in self._store.rejected else '')
             cells = [f"{pk[0]}  {pk[1]}→{pk[2]}",
                      ', '.join(self._store.labels_for(*pk)),
-                     f"{self._store.confidence(*pk):.2f}", state]
+                     f"{self._store.confidence(*pk, label=shown):.2f}", state]
             for col, val in enumerate(cells):
                 self.table.setItem(i, col, QTableWidgetItem(val))
 
@@ -435,14 +454,34 @@ class PredictionReviewDialog(QDialog):
         return [self._rows[i] for i in sorted(rows) if i < len(self._rows)]
 
     def _on_table_selection(self):
-        """Show the highlighted pair in the main CCG view so it can be judged."""
+        """Show the highlighted pair in the main CCG view so it can be judged.
+
+        A prediction may belong to another session or conn type than the one on
+        screen, so navigate there first — otherwise the pair index resolves
+        against the wrong list and shows an unrelated CCG.
+        """
         picked = self._selected()
         if len(picked) != 1:
             return
         sess, ref, tgt = picked[0]
-        if str(self._win.nav.key.session) != sess:
+        nav = self._win.nav
+        want_type = self._store.type_label_for(sess, ref, tgt)
+        if str(nav.key.session) != sess or (want_type
+                                            and nav.key.type_label() != want_type):
+            target = self._win.cd.find(sess, type_label=want_type, strict=False)
+            if target is None:
+                return
+            self._win._ensure_loaded(target.nd(), 'lowres',
+                                     lambda t=target: self._goto(t, ref, tgt))
             return
-        self._win.nav.set_current_pair(self._win.nav.get_pair_index((ref, tgt)))
+        self._goto(None, ref, tgt)
+
+    def _goto(self, target, ref: int, tgt: int):
+        """Land on (ref, tgt), switching session/type first when given a target."""
+        nav = self._win.nav
+        if target is not None:
+            self._win._switch_session(target)
+        nav.set_current_pair(nav.get_pair_index((ref, tgt)))
 
     def _on_accept_btn(self):
         for pk in self._selected():

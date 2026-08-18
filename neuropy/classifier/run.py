@@ -58,7 +58,8 @@ def load_model(cd, name: str) -> BaseModel:
 
 def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
-                  extra: list = None, highres: bool = True) -> dict:
+                  extra: list = None, highres: bool = True,
+                  min_count: int = 20) -> dict:
     """Train on saved selections and store the model in the shared library.
 
     Defaults are the widest useful ones: every labeled pair in the loaded
@@ -76,7 +77,7 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
 
     # The UI queues any missing high-res compute before calling this, so a
     # session still lacking it here is an error rather than something to fix inline.
-    ls = build_multi(datasets, highres=highres)
+    ls = build_multi(datasets, min_count=min_count, highres=highres)
     if not ls.label_names:
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")

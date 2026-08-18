@@ -239,7 +239,7 @@ def supported_labels(samples: list, min_count: int, min_rats: int) -> list[str]:
                   if n >= min_count and len(rats[lab]) >= min_rats)
 
 
-def build_multi(datasets: list, min_count: int = 60, min_rats: int = 4,
+def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
                 highres: bool = True, compute_highres: bool = False) -> LabeledSet:
     """One labeled set pooled over several projects.
 

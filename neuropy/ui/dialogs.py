@@ -1181,6 +1181,8 @@ class SettingsTabs:
                        ui.nav, 'max_together_pairs', 2, 20)
         self._spin_row(dl, "Minimum font size:", ui.settings, 'min_font_size', 6, 32,
                        on_live=lambda v: ui._apply_min_font_size(v))
+        self._spin_row(dl, "Classifier: min pairs per label:", ui.settings,
+                       'classifier_min_count', 5, 500)
         dl.addStretch()
         nav.add_page("Display", disp)
 

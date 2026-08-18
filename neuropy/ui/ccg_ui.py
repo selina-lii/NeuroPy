@@ -67,6 +67,8 @@ class UISettings(JsonSavable):
     autosave_sel_interval = Tunable((1, 'hour'))   # MetricInput.value() -> (number, unit)
     autosave_grp_on = Tunable(True)
     autosave_grp_interval = Tunable((1, 'hour'))
+    # Fewest tagged pairs a label needs before the classifier will train on it.
+    classifier_min_count = Tunable(20)
 
     def __init__(self, **kwargs):
         super().__init__()
