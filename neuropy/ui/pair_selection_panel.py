@@ -84,6 +84,7 @@ class TagRowDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
+        size.setHeight(size.height() + 2)   # breathing room between rows
         chips = index.data(_ROLE_CHIPS)
         if chips:
             fm = option.fontMetrics
