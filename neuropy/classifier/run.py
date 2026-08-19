@@ -181,20 +181,16 @@ def apply_cascade(cd, names: list[str], scope: list = None) -> dict:
     return {'rows': rows, 'labels': labels, 'skipped': sorted(skipped)}
 
 
-def scope_keys(cd, session: str = None, type_label: str = None) -> list:
-    """Pointer keys inside a scope; both ``None`` means the whole project.
+def scope_keys(cd, sessions: list = None, type_labels: list = None) -> list:
+    """Pointer keys inside a scope; an empty or ``None`` list means no narrowing.
 
     Scope narrows *which* pairs get scored, never how the model works — the
     default is always the widest one the loaded project offers.
     """
-    keys = []
-    for key in cd.ptr:
-        if session and str(key.session) != str(session):
-            continue
-        if type_label and key.type_label() != type_label:
-            continue
-        keys.append(key)
-    return keys
+    want_sess, want_type = set(sessions or []), set(type_labels or [])
+    return [key for key in cd.ptr
+            if (not want_sess or str(key.session) in want_sess)
+            and (not want_type or key.type_label() in want_type)]
 
 
 def missing_highres(cd, keys=None) -> list[str]:

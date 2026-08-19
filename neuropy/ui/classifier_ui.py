@@ -17,9 +17,9 @@ from pyqtgraph.Qt.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from neuropy.analyses.neurons_dataset import Key
+from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
-from neuropy.ui.utils import BusyButton, TagChip
+from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
                                     list_models, missing_highres, open_projects,
@@ -163,34 +163,36 @@ class ClassifierDialog(QDialog):
         row.addStretch()
         lay.addLayout(row)
 
-        # Scope narrows which pairs get scored. Both dropdowns default to the
-        # widest option, so out of the box the whole loaded project is used.
+        # Scope narrows which pairs get scored. Every picker starts with all of
+        # its options selected, so out of the box the whole loaded project is used.
+        nav = self._win.nav
         scope_row = QHBoxLayout()
         scope_row.addWidget(QLabel("Scope:"))
-        self.session_combo = QComboBox()
-        self.session_combo.addItem("all sessions", None)
-        for nk in self._win.nav.real_nd_keys():
-            self.session_combo.addItem(str(nk.session), str(nk.session))
-        scope_row.addWidget(self.session_combo)
-        self.type_combo = QComboBox()
-        self.type_combo.addItem("all types", None)
-        for ei, conn in self._win.cd.conf.conn_types_labeled:
-            label = Key(excitability=ei, conn_type=conn).type_label()
-            self.type_combo.addItem(label, label)
-        scope_row.addWidget(self.type_combo)
+        self.session_picker = ListPickerButton(
+            "Session", nav.available_sessions(), plural="sessions",
+            refresh_provider=nav.available_sessions)
+        scope_row.addWidget(self.session_picker)
+        self.type_picker = ListPickerButton(
+            "ConnType", nav.available_conn_types(), plural="types",
+            refresh_provider=nav.available_conn_types)
+        scope_row.addWidget(self.type_picker)
         scope_row.addWidget(QLabel("Also train on:"))
-        self.extra_combo = QComboBox()
-        self.extra_combo.addItem("this project only", [])
-        for other in self._other_projects():
-            self.extra_combo.addItem(f"+ {other}", [other])
-        scope_row.addWidget(self.extra_combo)
+        self.extra_picker = ListPickerButton(
+            "Projects", self._other_projects(), plural="projects",
+            select_all_when_empty=False)
+        scope_row.addWidget(self.extra_picker)
         scope_row.addWidget(QLabel("Labels:"))
+        self.label_picker = ListPickerButton(
+            "Labels", self._shape_labels(), plural="labels",
+            refresh_provider=self._shape_labels)
+        scope_row.addWidget(self.label_picker)
         # Training one family at a time is easier than all shapes at once, so the
-        # families are offered as named presets over whatever tags exist.
+        # families are presets that fill the picker, which stays freely editable.
         self.family_combo = QComboBox()
         self.family_combo.addItem("all labels", None)
         for name, labels in LABEL_FAMILIES.items():
             self.family_combo.addItem(name, list(labels))
+        self.family_combo.currentIndexChanged.connect(self._on_family_combo)
         scope_row.addWidget(self.family_combo)
         scope_row.addStretch()
         lay.addLayout(scope_row)
@@ -293,6 +295,15 @@ class ClassifierDialog(QDialog):
         return sorted(d[len('project_'):] for d in os.listdir(root)
                       if d.startswith('project_') and d[len('project_'):] != here)
 
+    def _shape_labels(self) -> list[str]:
+        """Group tags that name a CCG shape — the ones a model can be trained on."""
+        return [g for g in self._win.nav.groups.groups if is_shape_label(g)]
+
+    def _on_family_combo(self):
+        """A family is a preset: it fills the label picker, which stays editable."""
+        family = self.family_combo.currentData()
+        self.label_picker.set_selected(family if family else self._shape_labels())
+
     def _options(self, saved: str | None) -> dict:
         """Everything the worker needs, read once off the widgets."""
         return {'saved': saved,
@@ -301,12 +312,11 @@ class ClassifierDialog(QDialog):
                 'save_as': self.name_edit.text().strip() or self._win.cd.conf.name,
                 'figures': self.figures_check.isChecked(),
                 'highres': self.highres_check.isChecked(),
-                'extra': open_projects(self.extra_combo.currentData() or []),
+                'extra': open_projects(self.extra_picker.selected),
                 'min_count': int(self._win.settings.classifier_min_count),
-                'only_labels': self.family_combo.currentData(),
-                'scope': scope_keys(self._win.cd,
-                                    self.session_combo.currentData(),
-                                    self.type_combo.currentData())}
+                'only_labels': self.label_picker.selected,
+                'scope': scope_keys(self._win.cd, self.session_picker.selected,
+                                    self.type_picker.selected)}
 
     def _on_apply_btn(self):
         self._launch(self.saved_combo.currentData())
