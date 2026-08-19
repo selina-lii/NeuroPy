@@ -19,6 +19,7 @@ from pyqtgraph.Qt.QtWidgets import (
 
 from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
+from neuropy.ui.ui_common import SelectionCommand
 from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
@@ -247,8 +248,11 @@ class ClassifierDialog(QDialog):
         filt.addStretch()
         lay.addLayout(filt)
 
+        # Predicted/accepted are the two halves of an available/selected editor:
+        # a chip click moves one label across, and the row stays until it is empty.
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(['pair', 'predicted', 'confidence', 'state'])
+        self.table.setHorizontalHeaderLabels(
+            ['pair', 'predicted', 'confidence', 'accepted'])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self._on_table_selection)
         lay.addWidget(self.table, stretch=1)
@@ -441,7 +445,8 @@ class ClassifierDialog(QDialog):
         label = self.label_combo.currentText()
         sess = self._session()
         one = None if label in ('all pending', UNSURE) else label
-        pairs = (self._store.review_order(sess) if label == 'all pending'
+        pairs = (self._store.review_order(sess, self._win.nav.groups)
+                 if label == 'all pending'
                  else self._store.pairs_for_label(label, sess))
         cutoff = self.cutoff_spin.value()
         return [pk for pk in pairs
@@ -469,35 +474,66 @@ class ClassifierDialog(QDialog):
         self._rows = pairs
         self.accept_all_btn.setText(f"Accept all shown ({len(pairs)})")
         for i, pk in enumerate(pairs):
-            state = ('accepted' if pk in self._store.accepted else
-                     'rejected' if pk in self._store.rejected else '')
-            for col, val in ((0, f"{pk[0]}  {pk[1]}→{pk[2]}"),
-                             (2, f"{self._store.confidence(*pk, label=shown):.2f}"),
-                             (3, state)):
+            pair = f"{pk[0]}  {pk[1]}→{pk[2]}"
+            for col, val in ((0, pair + ('  ✗' if pk in self._store.rejected else '')),
+                             (2, f"{self._store.confidence(*pk, label=shown):.2f}")):
                 self.table.setItem(i, col, QTableWidgetItem(val))
-            self.table.setCellWidget(i, 1, self._chip_cell(pk))
+            self.table.setCellWidget(i, 1, self._chip_cell(pk, taken=False))
+            self.table.setCellWidget(i, 3, self._chip_cell(pk, taken=True))
         self.table.resizeRowsToContents()
 
-    def _chip_cell(self, pk: tuple) -> QWidget:
-        """The predicted-label cell: one clickable chip per label, plus 'all'."""
+    def _chip_cell(self, pk: tuple, taken: bool) -> QWidget:
+        """One side of the row's editor: accepted labels when *taken*, else pending.
+
+        Clicking a chip moves that label to the other side — accepting one label
+        leaves the pair's other predictions on the table, still to be judged.
+        """
         cell = QWidget()
         row = QHBoxLayout(cell)
         row.setContentsMargins(2, 1, 2, 1)
         row.setSpacing(TagChip.GAP)
-        labels = self._store.labels_for(*pk)
         groups = self._win.nav.groups
-        for label in labels + (['all'] if len(labels) > 1 else []):
+        labels = (self._store.taken(*pk, groups) if taken
+                  else self._store.pending(*pk, groups))
+        for label in labels + (['all'] if len(labels) > 1 and not taken else []):
             colour = ('' if label == 'all'
                       else groups.get_group_metadata(label).display_color)
             chip = _AcceptChip(label, colour, '' if label == 'all' else label)
-            chip.clicked.connect(lambda only, p=pk: self._accept_one(p, only))
+            chip.clicked.connect(
+                (lambda only, p=pk: self._unaccept_one(p, only)) if taken
+                else (lambda only, p=pk: self._accept_one(p, only)))
             row.addWidget(chip)
         row.addStretch()
         return cell
 
+    def _accept(self, pairs: list[tuple], only: str = None):
+        """Accept across *pairs* as one undoable step, then refresh both chip sides."""
+        added = []
+        for pk in pairs:
+            added += self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups,
+                                        only=only)
+        if added:
+            self._push_undo([(g, s, p, 'add') for g, s, p in added])
+        self._after_change()
+
+    def _push_undo(self, group_changes: list):
+        """Record group edits on the pair panel's stack so Ctrl+Z reaches them.
+
+        Accepting writes real tags — Accept all can write hundreds — so it belongs
+        on the same stack as hand tagging rather than being irreversible.
+        """
+        self._win.pairs_view.pair_selection.push_undo(
+            SelectionCommand({}, group_changes))
+
     def _accept_one(self, pk: tuple, only: str):
         """Tag *pk* with one predicted label (or all of them when only is empty)."""
-        self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups, only=only or None)
+        self._accept([pk], only=only or None)
+
+    def _unaccept_one(self, pk: tuple, label: str):
+        """Send an accepted label back to pending, untagging the pair."""
+        self._win.nav.groups.discard_from_group(label, pk[0], (pk[1], pk[2]))
+        self._store.unaccept(pk[0], pk[1], pk[2], label)
+        self._push_undo([(label, pk[0], (pk[1], pk[2]), 'remove')])
         self._after_change()
 
     def _selected(self) -> list[tuple]:
@@ -535,9 +571,7 @@ class ClassifierDialog(QDialog):
         nav.set_current_pair(nav.get_pair_index((ref, tgt)))
 
     def _on_accept_btn(self):
-        for pk in self._selected():
-            self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups)
-        self._after_change()
+        self._accept(self._selected())
 
     def _on_reject_btn(self):
         for pk in self._selected():
@@ -548,12 +582,11 @@ class ClassifierDialog(QDialog):
         pairs = self._visible_pairs()
         if QMessageBox.question(
                 self, "Accept all",
-                f"Tag {len(pairs)} pairs with their predicted labels?") \
+                f"Tag {len(pairs)} pairs with their predicted labels?\n"
+                "Ctrl+Z undoes this as one step.") \
                 != QMessageBox.StandardButton.Yes:
             return
-        for pk in pairs:
-            self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups)
-        self._after_change()
+        self._accept(pairs)
 
     def _after_change(self):
         self._win.nav.groups.changed.emit()

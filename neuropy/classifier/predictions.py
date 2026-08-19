@@ -22,7 +22,7 @@ class PredictionStore:
         self.model_name = model_name
         self.labels = list(labels or [])
         self.rows: dict[tuple, dict] = {}      # (sess, ref, tgt) -> {labels, scores}
-        self.accepted: set[tuple] = set()
+        self.accepted: dict[tuple, set] = {}   # pk -> labels taken so far
         self.rejected: set[tuple] = set()
 
     def __len__(self) -> int:
@@ -77,36 +77,72 @@ class PredictionStore:
         hits.sort(key=lambda kv: -kv[1]['scores'].get(label, 0.0))
         return [pk for pk, _ in hits]
 
-    def review_order(self, session: str = None) -> list[tuple]:
-        """Undecided pairs, most confident first — the likeliest hits lead."""
+    def review_order(self, session: str = None, groups=None) -> list[tuple]:
+        """Pairs with a label still to judge, most confident first.
+
+        A partly-accepted pair stays listed: its remaining labels are still open.
+        """
         pend = [pk for pk in self.rows
-                if pk not in self.accepted and pk not in self.rejected
+                if self.pending(*pk, groups) and pk not in self.rejected
                 and (session is None or pk[0] == session)]
         return sorted(pend, key=lambda pk: -self.confidence(*pk))
 
+    def taken(self, session: str, ref: int, tgt: int, groups=None) -> list[str]:
+        """Labels of this pair already accepted, in the order the model ranked them.
+
+        With *groups* the tags themselves are the answer, so an accept undone
+        elsewhere shows up here as pending again — no second copy to resync.
+        """
+        got = (groups.groups_for_pair(session, ref, tgt) if groups is not None
+               else self.accepted.get(self._pk(session, ref, tgt), set()))
+        return [l for l in self.labels_for(session, ref, tgt) if l in got]
+
+    def pending(self, session: str, ref: int, tgt: int, groups=None) -> list[str]:
+        """Labels still awaiting judgement — the left half of the row's editor."""
+        got = set(self.taken(session, ref, tgt, groups))
+        return [l for l in self.labels_for(session, ref, tgt) if l not in got]
+
     def accept(self, session: str, ref: int, tgt: int, groups,
-               only: str = None) -> list[str]:
+               only: str = None) -> list[tuple]:
         """Promote a pair's predictions into real group tags.
 
         *only* tags that one label instead of all of them — a prediction is often
         partly right, and the wrong labels should not ride along with the right one.
-        Group membership is a set, so a pair admitted again by a later model
-        simply re-lands in the same groups — batches accumulate, never conflict.
+        Accepting moves a label from pending to taken rather than retiring the whole
+        row, so the rest of the pair's labels stay judgeable.
+
+        Returns the group additions actually made, as ``(group, sess, pair)``, so
+        the caller can undo them; a label already taken adds nothing.
         The ADMITTED marker records that a machine proposed it, and is excluded
         from training so the next model never learns from its own output.
         """
         pk = self._pk(session, ref, tgt)
-        labels = [only] if only else self.labels_for(*pk)
-        for label in labels + [ADMITTED]:
+        got = self.accepted.setdefault(pk, set())
+        have = groups.groups_for_pair(*pk)
+        new = [l for l in ([only] if only else self.labels_for(*pk)) if l not in have]
+        if not new:
+            return []
+        added = [ADMITTED] if ADMITTED not in have else []   # marker lands once per pair
+        for label in new + added:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
-        self.accepted.add(pk)
+        got.update(new)
         self.rejected.discard(pk)
-        return labels
+        return [(l, pk[0], (pk[1], pk[2])) for l in new + added]
+
+    def unaccept(self, session: str, ref: int, tgt: int, label: str):
+        """Forget one accepted label; the group edit itself is undone by the caller."""
+        pk = self._pk(session, ref, tgt)
+        got = self.accepted.get(pk)
+        if got is None:
+            return
+        got.discard(label)
+        if not got:
+            del self.accepted[pk]
 
     def reject(self, session: str, ref: int, tgt: int):
         pk = self._pk(session, ref, tgt)
         self.rejected.add(pk)
-        self.accepted.discard(pk)
+        self.accepted.pop(pk, None)
 
     def summary(self) -> dict[str, int]:
         """Predicted-pair count per label, for the review dialog's overview."""
@@ -121,7 +157,7 @@ class PredictionStore:
         doc = {'model': self.model_name, 'labels': self.labels,
                'rows': [{'session': s, 'ref': r, 'tgt': t, **row}
                         for (s, r, t), row in self.rows.items()],
-               'accepted': [list(pk) for pk in sorted(self.accepted)],
+               'accepted': [list(pk) + [sorted(v)] for pk, v in sorted(self.accepted.items())],
                'rejected': [list(pk) for pk in sorted(self.rejected)]}
         with open(path, 'w') as fh:
             json.dump(doc, fh, indent=1)
@@ -134,7 +170,10 @@ class PredictionStore:
         for row in doc.get('rows', []):
             store.add(row['session'], row['ref'], row['tgt'],
                       row['labels'], row['scores'], row.get('type_label', ''))
-        store.accepted = {(s, int(r), int(t)) for s, r, t in doc.get('accepted', [])}
+        for s, r, t, *rest in doc.get('accepted', []):
+            pk = store._pk(s, r, t)
+            # Pre-per-label files recorded only the pair: every label was taken.
+            store.accepted[pk] = set(rest[0]) if rest else set(store.labels_for(*pk))
         store.rejected = {(s, int(r), int(t)) for s, r, t in doc.get('rejected', [])}
         return store
 
