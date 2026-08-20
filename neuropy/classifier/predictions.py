@@ -26,8 +26,21 @@ def admitted_group(model_name: str) -> str:
 
 def prior_admissions(groups, model_name: str, sessions: set = None) -> int:
     """How many pairs *model_name* has already had accepted, within *sessions*."""
-    members = groups.forward(admitted_group(model_name))
-    return sum(1 for s, *_ in members if sessions is None or s in sessions)
+    marker = admitted_group(model_name)
+    want = sessions if sessions is not None else groups.sessions_for_group(marker)
+    return sum(len(groups.pairs_in_group(marker, s)) for s in want)
+
+
+def by_owner(owner_of: dict, order: list = None) -> list[tuple]:
+    """Invert ``{item: owner}`` into ``[(owner, [item, ...]), ...]``.
+
+    Owners appear in the order their first item does, so a cascade's models
+    line up with the order they ran in.
+    """
+    out: dict = {}
+    for item in (order if order is not None else owner_of):
+        out.setdefault(owner_of[item], []).append(item)
+    return list(out.items())
 
 
 class PredictionStore:
@@ -37,7 +50,8 @@ class PredictionStore:
         self.model_name = model_name
         self.labels = list(labels or [])
         self.rows: dict[tuple, dict] = {}      # (sess, ref, tgt) -> {labels, scores}
-        self.accepted: dict[tuple, set] = {}   # pk -> labels taken so far
+        # What was accepted is read off the group tags themselves, never copied
+        # here; only a rejection has no tag to record it.
         self.rejected: set[tuple] = set()
 
     def __len__(self) -> int:
@@ -68,10 +82,7 @@ class PredictionStore:
         if not row:
             return []
         names = self.labels_for(session, ref, tgt) if labels is None else labels
-        out: dict[str, list] = {}
-        for label in names:
-            out.setdefault(row['by'].get(label, self.model_name), []).append(label)
-        return list(out.items())
+        return by_owner({l: row['by'].get(l, self.model_name) for l in names}, names)
 
     def labels_for(self, session: str, ref: int, tgt: int) -> list[str]:
         row = self.rows.get(self._pk(session, ref, tgt))
@@ -110,29 +121,28 @@ class PredictionStore:
         hits.sort(key=lambda kv: -kv[1]['scores'].get(label, 0.0))
         return [pk for pk, _ in hits]
 
-    def review_order(self, session: str = None, groups=None) -> list[tuple]:
+    def review_order(self, groups, session: str = None) -> list[tuple]:
         """Pairs with a label still to judge, most confident first.
 
         A partly-accepted pair stays listed: its remaining labels are still open.
         """
         pend = [pk for pk in self.rows
-                if self.pending(*pk, groups) and pk not in self.rejected
+                if self.pending(groups, *pk) and pk not in self.rejected
                 and (session is None or pk[0] == session)]
         return sorted(pend, key=lambda pk: -self.confidence(*pk))
 
-    def taken(self, session: str, ref: int, tgt: int, groups=None) -> list[str]:
+    def taken(self, groups, session: str, ref: int, tgt: int) -> list[str]:
         """Labels of this pair already accepted, in the order the model ranked them.
 
-        With *groups* the tags themselves are the answer, so an accept undone
-        elsewhere shows up here as pending again — no second copy to resync.
+        The tags themselves are the answer, so an accept undone elsewhere shows up
+        here as pending again — there is no second copy that could go stale.
         """
-        got = (groups.groups_for_pair(session, ref, tgt) if groups is not None
-               else self.accepted.get(self._pk(session, ref, tgt), set()))
+        got = groups.groups_for_pair(session, ref, tgt)
         return [l for l in self.labels_for(session, ref, tgt) if l in got]
 
-    def pending(self, session: str, ref: int, tgt: int, groups=None) -> list[str]:
+    def pending(self, groups, session: str, ref: int, tgt: int) -> list[str]:
         """Labels still awaiting judgement — the left half of the row's editor."""
-        got = set(self.taken(session, ref, tgt, groups))
+        got = set(self.taken(groups, session, ref, tgt))
         return [l for l in self.labels_for(session, ref, tgt) if l not in got]
 
     def accept(self, session: str, ref: int, tgt: int, groups,
@@ -150,7 +160,6 @@ class PredictionStore:
         can see which of its own suggestions have already been judged.
         """
         pk = self._pk(session, ref, tgt)
-        got = self.accepted.setdefault(pk, set())
         have = groups.groups_for_pair(*pk)
         new = [l for l in ([only] if only else self.labels_for(*pk)) if l not in have]
         if not new:
@@ -159,24 +168,11 @@ class PredictionStore:
         added = [marker] if marker not in have else []   # lands once per pair per model
         for label in new + added:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
-        got.update(new)
         self.rejected.discard(pk)
         return [(l, pk[0], (pk[1], pk[2])) for l in new + added]
 
-    def unaccept(self, session: str, ref: int, tgt: int, label: str):
-        """Forget one accepted label; the group edit itself is undone by the caller."""
-        pk = self._pk(session, ref, tgt)
-        got = self.accepted.get(pk)
-        if got is None:
-            return
-        got.discard(label)
-        if not got:
-            del self.accepted[pk]
-
     def reject(self, session: str, ref: int, tgt: int):
-        pk = self._pk(session, ref, tgt)
-        self.rejected.add(pk)
-        self.accepted.pop(pk, None)
+        self.rejected.add(self._pk(session, ref, tgt))
 
     def summary(self) -> dict[str, int]:
         """Predicted-pair count per label, for the review dialog's overview."""
@@ -191,7 +187,6 @@ class PredictionStore:
         doc = {'model': self.model_name, 'labels': self.labels,
                'rows': [{'session': s, 'ref': r, 'tgt': t, **row}
                         for (s, r, t), row in self.rows.items()],
-               'accepted': [list(pk) + [sorted(v)] for pk, v in sorted(self.accepted.items())],
                'rejected': [list(pk) for pk in sorted(self.rejected)]}
         with open(path, 'w') as fh:
             json.dump(doc, fh, indent=1)
@@ -205,10 +200,6 @@ class PredictionStore:
             store.add(row['session'], row['ref'], row['tgt'],
                       row['labels'], row['scores'], row.get('type_label', ''),
                       row.get('by'))
-        for s, r, t, *rest in doc.get('accepted', []):
-            pk = store._pk(s, r, t)
-            # Pre-per-label files recorded only the pair: every label was taken.
-            store.accepted[pk] = set(rest[0]) if rest else set(store.labels_for(*pk))
         store.rejected = {(s, int(r), int(t)) for s, r, t in doc.get('rejected', [])}
         return store
 

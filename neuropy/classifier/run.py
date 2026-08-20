@@ -77,7 +77,7 @@ def load_model(cd, name: str) -> BaseModel:
     return BaseModel.load(model_path(cd, name))
 
 
-def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
+def train_project(cd, model_names: list = None, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
                   extra: list = None, highres: bool = True,
                   min_count: int = 20, bias: str = 'balanced',
@@ -108,7 +108,7 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
     # Several strategies -> one routed model: each label answered by whichever
     # strategy cross-validates best for it, since the encoding that suits a
     # quality grade is not the one that suits a rhythm label.
-    names = [model_name] if isinstance(model_name, str) else list(model_name)
+    names = list(model_names or [DEFAULT_MODEL])
     routes = {}
     if len(names) > 1:
         model, per_model = fit_routed(ls, names, duration=duration, bias=bias)

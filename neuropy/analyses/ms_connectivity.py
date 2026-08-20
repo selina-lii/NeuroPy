@@ -26,7 +26,8 @@ import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import (_san_np, _hasvalue, Config, AnalysisDataset, JsonSavable,
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDataset, NeuronsDatasetConfig
-from neuropy.analyses.pair_selection_data import SelectionDataset
+from neuropy.analyses.pair_selection_data import (SelectionDataset,
+                                                  adopt_project_groups)
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
@@ -286,6 +287,9 @@ def open_project(name: str, sessions: list = None):
     # caller offered: those belong to whichever project the caller had open, and
     # its naming rule reads paths, not the session objects handed in here.
     if header.scannable:                       # scannable source -> stage 1 names them
+        if sessions is not None:
+            print(f"[open_project] {name!r} scans its own source; ignoring the "
+                  f"{len(sessions)} session(s) passed in", flush=True)
         neurons = NeuronsDataset(header.sessions(), nd_conf)
     elif sessions is None:
         raise ValueError(
@@ -296,6 +300,7 @@ def open_project(name: str, sessions: list = None):
     cd = CCGDataset(conf, neurons)
     cd.missing_sessions()
     cd.load()
+    adopt_project_groups(cd)   # one-time: pre-sharing groups.json moves up to data_root
     sd = SelectionDataset(cd)
     if os.path.isfile(sd.save_path() + '.json'):   # a project starts with nothing selected
         sd.load()

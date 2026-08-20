@@ -35,13 +35,25 @@ UNSURE = '?'
 BIAS_BETA = {'accurate': 0.5, 'balanced': 1.0, 'discover': 2.0}
 
 
+def fbeta_from_pr(precision: float, recall: float, beta: float = 1.0) -> float:
+    """F-beta from precision and recall — the one definition of the run's objective.
+
+    Thresholds are calibrated with it and labels are routed with it, so the two
+    decisions cannot drift apart.
+    """
+    b2 = beta * beta
+    denom = b2 * precision + recall
+    return (1 + b2) * precision * recall / denom if denom else 0.0
+
+
 def _fbeta(y: np.ndarray, pred: np.ndarray, beta: float = 1.0) -> float:
     """F-beta; beta>1 favours recall (find more), beta<1 favours precision."""
     tp = float((pred & (y == 1)).sum())
     fp = float((pred & (y == 0)).sum())
     fn = float(((~pred) & (y == 1)).sum())
-    b2 = beta * beta
-    return (1 + b2) * tp / ((1 + b2) * tp + fp + b2 * fn) if tp else 0.0
+    if not tp:
+        return 0.0
+    return fbeta_from_pr(tp / (tp + fp), tp / (tp + fn), beta)
 
 
 class BaseModel:
@@ -442,7 +454,9 @@ class RoutedNet(BaseModel):
     column from its winner, which is chosen by cross-validated F-beta.
 
     ``routes`` maps label -> strategy key. Labels with no entry fall back to the
-    first sub-model, so a route table never has to be exhaustive.
+    first sub-model, so a route table never has to be exhaustive. Everything a
+    sub-model owns is read back from it rather than copied here: a threshold
+    recalibrated on a sub-model is the threshold this model uses.
     """
 
     def __init__(self, label_names, duration=0.02, routes: dict = None, **kw):
@@ -455,41 +469,48 @@ class RoutedNet(BaseModel):
         """True when any routed sub-model reads the fine bins."""
         return any(m.uses_highres for m in self.subs.values())
 
+    @property
+    def thresholds(self) -> np.ndarray:
+        """Each label's cut, taken live from the sub-model that answers it."""
+        return np.array([self.subs[k].thresholds[self.subs[k].label_names.index(n)]
+                         for n, k in ((n, self._key_for(n))
+                                      for n in self.label_names)])
+
+    @thresholds.setter
+    def thresholds(self, value):
+        pass          # BaseModel.__init__ seeds a default; the sub-models own it
+
+    def _key_for(self, label: str) -> str:
+        """The strategy answering *label* — the one route-resolution rule."""
+        key = self.routes.get(label)
+        return key if key in self.subs else next(iter(self.subs))
+
     def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
         raise NotImplementedError("RoutedNet delegates encoding to its sub-models")
+
+    def _scores(self, X):
+        raise NotImplementedError("RoutedNet scores through its sub-models")
 
     def fit(self, ccg, null, Y, ccg_hi=None, null_hi=None):
         for sub in self.subs.values():
             sub.fit(ccg, null, Y, ccg_hi, null_hi)
-        self._sync_thresholds()
         return self
 
-    def _sync_thresholds(self):
-        """Adopt each label's threshold from the sub-model that owns it."""
-        for j, name in enumerate(self.label_names):
-            sub = self._sub_for(name)
-            if sub is not None and name in sub.label_names:
-                self.thresholds[j] = sub.thresholds[sub.label_names.index(name)]
-
-    def _sub_for(self, label: str) -> 'BaseModel | None':
-        if not self.subs:
-            return None
-        key = self.routes.get(label)
-        return self.subs.get(key) or next(iter(self.subs.values()))
-
     def predict_proba(self, ccg, null, ccg_hi=None, null_hi=None):
-        cache = {key: sub.predict_proba(ccg, null, ccg_hi, null_hi)
-                 for key, sub in self.subs.items()}
-        n = len(np.atleast_2d(ccg))
-        out = np.zeros((n, len(self.label_names)))
+        # Only strategies that actually answer a label are run: an unrouted
+        # sub-model would encode and score every pair for nothing.
+        used = {self._key_for(n) for n in self.label_names}
+        cache = {k: self.subs[k].predict_proba(ccg, null, ccg_hi, null_hi)
+                 for k in used}
+        out = np.zeros((len(np.atleast_2d(ccg)), len(self.label_names)))
         for j, name in enumerate(self.label_names):
-            key = self.routes.get(name) or next(iter(self.subs))
-            sub = self.subs[key]
-            out[:, j] = cache[key][:, sub.label_names.index(name)]
+            key = self._key_for(name)
+            out[:, j] = cache[key][:, self.subs[key].label_names.index(name)]
         return out
 
     def model_key(self) -> str:
-        return 'routed'
+        """Not a MODELS key: this model is a composition, not a registry entry."""
+        return 'routed(' + '+'.join(self.subs) + ')'
 
 
 MODELS = {'conv': ConvNet, 'kernel': KernelNet, 'dualres': DualResNet,

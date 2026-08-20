@@ -311,16 +311,24 @@ def groups_dir(cd) -> str:
 
     Tags name CCG shapes, which mean the same thing in every project, so one
     registry serves all of them — the same reasoning that puts the trained
-    classifiers in ``data_root``. A project's own groups.json, from before this
-    was shared, is migrated up the first time it is the only copy.
+    classifiers in ``data_root``.
     """
-    root = str(cd.data_root)
-    shared, local = os.path.join(root, 'groups.json'), \
-        os.path.join(cd.selections_dir, 'groups.json')
-    if not os.path.isfile(shared) and os.path.isfile(local):
-        shutil.copyfile(local, shared)
-        print(f"[Groups] adopted {local} as the shared registry → {shared}")
-    return root
+    return str(cd.data_root)
+
+
+def adopt_project_groups(cd) -> bool:
+    """Move a pre-sharing project groups.json up to the shared location, once.
+
+    Kept out of ``groups_dir`` so that resolving a path never writes: this runs
+    at project-open time, where the rest of the one-time setup lives.
+    """
+    shared = os.path.join(groups_dir(cd), 'groups.json')
+    local = os.path.join(cd.selections_dir, 'groups.json')
+    if os.path.isfile(shared) or not os.path.isfile(local):
+        return False
+    shutil.copyfile(local, shared)
+    print(f"[Groups] adopted {local} as the shared registry → {shared}")
+    return True
 
 
 class SelectionDataset(JsonSavable, Autosave):
@@ -336,6 +344,11 @@ class SelectionDataset(JsonSavable, Autosave):
         save_dir = cd.selections_dir
         self.groups = groups_factory()
         self.groups._save_dir = groups_dir(cd)
+        # The registry is shared and project-independent, so it is read here
+        # rather than waiting on a project's own saved selections — a project
+        # with none of its own still knows every tag.
+        if os.path.isfile(self.groups.save_path() + '.json'):
+            self.groups.load(self.groups.save_path())
         self.sessions: dict[Key, SelectionData] = {}
         self.save_dir = save_dir
 

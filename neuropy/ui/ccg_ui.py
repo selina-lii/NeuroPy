@@ -29,6 +29,7 @@ from neuropy.ui.menubar import ReviewMenuBar, IndexBar
 from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
 from neuropy.analyses.ms_connectivity import CCGDataset, ProjectConfig, open_project
+from neuropy.analyses.pair_selection_data import adopt_project_groups
 from neuropy.ui.all_session_mode import AllSessionMode
 from neuropy.ui.classifier_ui import ClassifierDialog
 from neuropy.analyses.spike_attribution import compute_spike_pairs
@@ -382,6 +383,7 @@ class CCGReviewUI(QMainWindow):
             nd = self._nd_by_project.get(project_dir, self.cd.nd)
             cd = CCGDataset(self.cd.conf.copy(name=config_name), nd)
             cd.load()
+            adopt_project_groups(cd)   # open_project does this on the other branch
         self._adopt_project(cd)
         print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
               flush=True)

@@ -61,7 +61,7 @@ if __name__ == '__main__':
 
     if len(names) == 1 and not args.head:
         # Single model: full pipeline — trains, scores, saves model + figures.
-        r = train_project(cd, names[0], figures=not args.no_figures,
+        r = train_project(cd, names, figures=not args.no_figures,
                           min_count=args.min_count, bias=args.bias)
         s = r['summary']
         print(f"\n{s['model']}: {s['n_samples']} pairs / {s['n_rats']} animals")

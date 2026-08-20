@@ -21,8 +21,8 @@ from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.ui_common import SelectionCommand
 from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
-from neuropy.classifier.predictions import (PredictionStore, prior_admissions,
-                                            store_from_rows)
+from neuropy.classifier.predictions import (PredictionStore, by_owner,
+                                            prior_admissions, store_from_rows)
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
                                     delete_model, list_models, missing_highres,
                                     open_projects, predict_project, rename_model,
@@ -71,11 +71,8 @@ class _ClassifyWorker(QObject):
         o = self._opts
         names = o['model_names']
         if len(names) > 1 and not o['route']:
-            return self._train_cascade(names, o)
-        result = train_project(self._cd, names, figures=o['figures'],
-                               save_as=o['save_as'], extra=o['extra'],
-                               highres=o['highres'], min_count=o['min_count'],
-                               bias=o['bias'], only_labels=o['only_labels'])
+            return self._train_cascade(names)
+        result = self._fit(names, o['save_as'])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -83,13 +80,18 @@ class _ClassifyWorker(QObject):
                                           result['model'].label_names)
         return result
 
-    def _train_cascade(self, names: list[str], o: dict) -> dict:
+    def _fit(self, names: list[str], save_as: str) -> dict:
+        """One train_project call, so a new training option is added in one place."""
+        o = self._opts
+        return train_project(self._cd, names, figures=o['figures'],
+                             save_as=save_as, extra=o['extra'],
+                             highres=o['highres'], min_count=o['min_count'],
+                             bias=o['bias'], only_labels=o['only_labels'])
+
+    def _train_cascade(self, names: list[str]) -> dict:
         """Train one model per strategy, then let each claim what the earlier missed."""
-        heads = [train_project(self._cd, name, figures=o['figures'],
-                               save_as=f"{o['save_as']}.{name}", extra=o['extra'],
-                               highres=o['highres'], min_count=o['min_count'],
-                               bias=o['bias'], only_labels=o['only_labels'])
-                 for name in names]
+        o = self._opts
+        heads = [self._fit([name], f"{o['save_as']}.{name}") for name in names]
         out = apply_cascade(self._cd, [h['saved_as'] for h in heads], o['scope'])
         result = dict(heads[-1])
         result['saved_as'] = ' → '.join(h['saved_as'] for h in heads)
@@ -141,6 +143,7 @@ class ClassifierDialog(QDialog):
         self._win = win
         self._thread = self._worker = None
         self._rows: list[tuple] = []
+        self._key_cache: dict = {}   # (session, type_label) -> nd-key; see _key_of
         self.setWindowTitle("Classify pairs")
         self.resize(620, 520)
         # Non-modal throughout: judging a candidate pair means toggling
@@ -481,12 +484,10 @@ class ClassifierDialog(QDialog):
                                    for n, s in best))
         routes = summary.get('routes') or {}
         if routes:   # which strategy won each label, most-used first
-            per: dict[str, list] = {}
-            for label, key in sorted(routes.items()):
-                per.setdefault(key, []).append(label)
+            per = by_owner(routes, sorted(routes))
             lines.append("Routing — " + " | ".join(
                 f"{k}: {', '.join(v)}" for k, v
-                in sorted(per.items(), key=lambda kv: -len(kv[1]))))
+                in sorted(per, key=lambda kv: -len(kv[1]))))
         if result.get('skipped'):
             lines.append(f"Skipped {len(result['skipped'])} session(s) lacking the "
                          f"CCGs this model needs: {', '.join(result['skipped'][:4])}"
@@ -509,7 +510,7 @@ class ClassifierDialog(QDialog):
         label = self.label_combo.currentText()
         sess = self._session()
         one = None if label in ('all pending', UNSURE) else label
-        pairs = (self._store.review_order(sess, self._win.nav.groups)
+        pairs = (self._store.review_order(self._win.nav.groups, sess)
                  if label == 'all pending'
                  else self._store.pairs_for_label(label, sess))
         cutoff = self.cutoff_spin.value()
@@ -557,36 +558,36 @@ class ClassifierDialog(QDialog):
         col.setContentsMargins(2, 1, 2, 1)
         col.setSpacing(1)
         groups = self._win.nav.groups
-        labels = (self._store.taken(*pk, groups) if taken
-                  else self._store.pending(*pk, groups))
+        labels = (self._store.taken(groups, *pk) if taken
+                  else self._store.pending(groups, *pk))
         # One line per head that proposed something, so a cascade reads
-        # "conv: [best] [refractory] / kernel: [burst]".
+        # "conv: [best] [refractory] / kernel: [burst]"; 'all' takes the row.
         lines = self._store.by_model(*pk, labels)
+        if len(labels) > 1 and not taken:
+            lines = lines + [(None, ['all'])]
         for model, names in lines:
             row = QHBoxLayout()
             row.setSpacing(TagChip.GAP)
-            if len(lines) > 1:
+            if model is not None and len(lines) > 1:
                 tag = QLabel(f"{model}:")
                 tag.setStyleSheet("color: gray;")
                 row.addWidget(tag)
             for label in names:
-                chip = _AcceptChip(label, groups.get_group_metadata(label).display_color,
-                                   label)
+                only = '' if model is None else label
+                chip = _AcceptChip(label, self._colour(label, model), only)
                 chip.clicked.connect(
-                    (lambda only, p=pk: self._unaccept_one(p, only)) if taken
-                    else (lambda only, p=pk: self._accept_one(p, only)))
+                    (lambda one, p=pk: self._unaccept_one(p, one)) if taken
+                    else (lambda one, p=pk: self._accept_one(p, one)))
                 row.addWidget(chip)
             row.addStretch()
             col.addLayout(row)
-        if len(labels) > 1 and not taken:
-            row = QHBoxLayout()
-            row.setSpacing(TagChip.GAP)
-            chip = _AcceptChip('all', '', '')
-            chip.clicked.connect(lambda only, p=pk: self._accept_one(p, only))
-            row.addWidget(chip)
-            row.addStretch()
-            col.addLayout(row)
         return cell
+
+    def _colour(self, label: str, model) -> str:
+        """Chip tint for *label*; the 'all' chip carries no group of its own."""
+        if model is None:
+            return ''
+        return self._win.nav.groups.get_group_metadata(label).display_color
 
     def _accept(self, pairs: list[tuple], only: str = None):
         """Accept across *pairs* as one undoable step, then refresh both chip sides."""
@@ -601,24 +602,43 @@ class ClassifierDialog(QDialog):
             self._push_undo([(g, s, p, 'add') for g, s, p in added], promoted)
         self._after_change()
 
-    def _promote(self, pk: tuple) -> dict:
-        """Move an accepted pair into the selected list, as hand tagging does.
+    def _key_of(self, pk: tuple):
+        """The nd-key a predicted pair belongs to, memoized across a batch.
 
-        Returns the state change for undo, keyed by pair — empty unless the pair
-        was unselected in the key currently on screen, which is the only bucket
-        SelectionCommand can restore.
+        ``cd.find`` rescans every pointer key, and Accept-all resolves hundreds
+        of pairs that fall into a handful of (session, conn type) buckets.
+        """
+        ident = (pk[0], self._store.type_label_for(*pk))
+        if ident not in self._key_cache:
+            self._key_cache[ident] = self._win.cd.find(
+                ident[0], type_label=ident[1], strict=False)
+        return self._key_cache[ident]
+
+    def _promote(self, pk: tuple, add: bool = True) -> dict:
+        """Move a pair between the selected and unselected lists, as tagging does.
+
+        Tagging a pair selects it and untagging its last shape label puts it back,
+        the same rule the pair panel applies by hand. Returns the state change for
+        undo, keyed by pair — empty unless the pair sits in the key on screen,
+        which is the only bucket SelectionCommand can restore.
         """
         nav = self._win.nav
-        key = self._win.cd.find(pk[0], type_label=self._store.type_label_for(*pk),
-                                strict=False)
+        key = self._key_of(pk)
         if key is None:
             return {}
-        pair = (pk[1], pk[2])
+        pair, want = (pk[1], pk[2]), ('sel' if add else 'unsel')
         bucket = nav.sd.get_selection_by_session(key).selections[key]
-        if pair not in bucket.unselected:
+        was = 'sel' if pair in bucket.selected else (
+            'unsel' if pair in bucket.unselected else 'del')
+        if was == want or was == 'del':
             return {}
-        bucket.set_pair_state(pair, 'sel')
-        return {pair: ('unsel', 'sel')} if key == nav.key else {}
+        bucket.set_pair_state(pair, want)
+        return {pair: (was, want)} if key == nav.key else {}
+
+    def _still_tagged(self, pk: tuple) -> bool:
+        """True while the pair carries any shape tag — an admitted marker is not one."""
+        return any(is_shape_label(g)
+                   for g in self._win.nav.groups.groups_for_pair(*pk))
 
     def _push_undo(self, group_changes: list, pair_changes: dict = None):
         """Record group edits on the pair panel's stack so Ctrl+Z reaches them.
@@ -634,10 +654,14 @@ class ClassifierDialog(QDialog):
         self._accept([pk], only=only or None)
 
     def _unaccept_one(self, pk: tuple, label: str):
-        """Send an accepted label back to pending, untagging the pair."""
+        """Send an accepted label back to pending, untagging the pair.
+
+        Losing the last shape tag returns the pair to unselected, so accept and
+        unaccept are symmetric rather than leaving it selected with no tags.
+        """
         self._win.nav.groups.discard_from_group(label, pk[0], (pk[1], pk[2]))
-        self._store.unaccept(pk[0], pk[1], pk[2], label)
-        self._push_undo([(label, pk[0], (pk[1], pk[2]), 'remove')])
+        demoted = {} if self._still_tagged(pk) else self._promote(pk, add=False)
+        self._push_undo([(label, pk[0], (pk[1], pk[2]), 'remove')], demoted)
         self._after_change()
 
     def _selected(self) -> list[tuple]:
@@ -720,6 +744,7 @@ class ClassifierDialog(QDialog):
         the scope comes out empty and nothing can be scored.
         """
         nav = self._win.nav
+        self._key_cache.clear()   # keys belong to the project that resolved them
         for picker, provider in ((self.session_picker, nav.available_sessions),
                                  (self.type_picker, nav.available_conn_types),
                                  (self.label_picker, self._shape_labels),

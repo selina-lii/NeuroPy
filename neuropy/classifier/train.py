@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 
 from neuropy.classifier.dataset import LabeledSet
-from neuropy.classifier.models import MODELS, BaseModel
+from neuropy.classifier.models import (BIAS_BETA, MODELS, BaseModel, RoutedNet,
+                                       fbeta_from_pr)
 
 MODEL_DIR = 'data/classifier'
 
@@ -117,8 +118,7 @@ def route_by_score(cv: dict[str, dict], names: list[str],
             s = res['scores'].get(name)
             if s is None:
                 continue
-            p, r = s['precision'], s['recall']
-            f = ((1 + beta ** 2) * p * r / (beta ** 2 * p + r)) if p + r else 0.0
+            f = fbeta_from_pr(s['precision'], s['recall'], beta)
             if f > best_score:
                 best, best_score = key, f
         routes[name] = best or next(iter(cv))
@@ -127,22 +127,21 @@ def route_by_score(cv: dict[str, dict], names: list[str],
 
 def fit_routed(ls: LabeledSet, model_names: list[str], duration: float = 0.02,
                **kw) -> tuple['BaseModel', dict]:
-    """Cross-validate every strategy, route each label to its winner, refit all.
+    """Cross-validate every strategy, route each label to its winner, refit.
 
     Returns the routed model and the per-strategy CV results it chose from, so
-    the sidecar can record why each label went where it did.
+    the sidecar can record why each label went where it did. Only strategies
+    that won a label are refitted — an unrouted one would never be asked.
     """
-    from neuropy.classifier.models import BIAS_BETA, RoutedNet
     cv = {name: leave_one_rat_out(ls, name, duration=duration, **kw)
           for name in model_names}
     beta = BIAS_BETA.get(kw.get('bias', 'balanced'), 1.0)
     routes = route_by_score(cv, ls.label_names, beta)
     model = RoutedNet(ls.label_names, duration=duration, routes=routes, **kw)
     model.subs = {name: MODELS[name](ls.label_names, duration=duration, **kw)
-                  for name in model_names}
-    hi_any = any(MODELS[n].uses_highres for n in model_names)
-    hi, hi_null = ((ls.X_ccg_hi, ls.X_null_hi)
-                   if hi_any and ls.has_highres else (None, None))
+                  for name in dict.fromkeys(routes.values())}
+    hi, hi_null = next((_highres_for(ls, n) for n in model.subs
+                        if MODELS[n].uses_highres), (None, None))
     model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
     return model, cv
 

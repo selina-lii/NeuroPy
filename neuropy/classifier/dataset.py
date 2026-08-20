@@ -17,6 +17,8 @@ import numpy as np
 # '?' means "unsure pattern": it co-occurs with every other label and is only
 # a third of the time applied alone, so it marks the labeler's confidence, not a
 # shape. The model reproduces it by abstaining, never by learning it as a class.
+# '__special_' covers today's admitted markers; '__admitted__' is the pre-per-model
+# marker, still present in saved group files and never a shape.
 _NON_SHAPE_PREFIXES = ('__special_', '__admitted__')
 _NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', '?'}
 
