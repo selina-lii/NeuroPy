@@ -518,25 +518,6 @@ MODELS = {'conv': ConvNet, 'kernel': KernelNet, 'dualres': DualResNet,
           'twohead': TwoHeadNet}
 
 
-# Grades of one judgement: one-vs-rest heads score these independently, so only this rule keeps them apart.
-EXCLUSIVE_GROUPS = (('best', 'good', 'ok'),)
-
-
-def _drop_rival_grades(hits: list[str]) -> list[str]:
-    """Keep only the first (highest-scoring) member of each mutually exclusive group."""
-    for group in EXCLUSIVE_GROUPS:
-        seen = False
-        kept = []
-        for label in hits:
-            if label in group:
-                if seen:
-                    continue
-                seen = True
-            kept.append(label)
-        hits = kept
-    return hits
-
-
 def decide(proba: np.ndarray, label_names: list[str],
            thresholds: np.ndarray | float = 0.5) -> list[list[str]]:
     """Per-pair label lists, best score first; a row clearing nothing becomes ``['?']``.
@@ -548,5 +529,5 @@ def decide(proba: np.ndarray, label_names: list[str],
     out = []
     for row in proba:
         hits = [label_names[j] for j in np.argsort(-row) if row[j] >= thr[j]]
-        out.append(_drop_rival_grades(hits) or [UNSURE])
+        out.append(hits or [UNSURE])
     return out
