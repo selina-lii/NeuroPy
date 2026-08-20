@@ -21,7 +21,8 @@ from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.ui_common import SelectionCommand
 from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
-from neuropy.classifier.predictions import PredictionStore, store_from_rows
+from neuropy.classifier.predictions import (PredictionStore, prior_admissions,
+                                            store_from_rows)
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
                                     list_models, missing_highres, open_projects,
                                     predict_project, rename_model, scope_keys,
@@ -330,6 +331,8 @@ class ClassifierDialog(QDialog):
 
     def _launch(self, saved: str | None):
         opts = self._options(saved)
+        if saved and not self._confirm_reapply(saved, opts['scope']):
+            return
         missing = missing_highres(self._win.cd, opts['scope']) if opts['highres'] else []
         if missing and not self._confirm_highres(missing):
             return
@@ -337,6 +340,24 @@ class ClassifierDialog(QDialog):
             self._precompute(missing, opts)
             return
         self._start(opts)
+
+    def _confirm_reapply(self, saved: str, scope: list) -> bool:
+        """Warn when *saved* has already had admissions accepted in this scope.
+
+        Re-running is allowed — a model re-scores pairs whose tags have changed
+        since — but its own past suggestions will come back as predictions, so
+        say how many were already judged rather than letting them look new.
+        """
+        n = prior_admissions(self._win.nav.groups, saved,
+                             {str(k.session) for k in scope})
+        if not n:
+            return True
+        return QMessageBox.question(
+            self, "Already applied",
+            f"'{saved}' has {n} accepted pair(s) in this scope from an earlier run.\n\n"
+            f"Applying it again re-proposes them alongside anything new. "
+            f"Accepted labels are kept either way. Proceed?"
+        ) == QMessageBox.StandardButton.Yes
 
     def _confirm_highres(self, sessions: list[str]) -> bool:
         """High-res compute is minutes and gigabytes — never start it unasked."""
@@ -508,22 +529,44 @@ class ClassifierDialog(QDialog):
 
     def _accept(self, pairs: list[tuple], only: str = None):
         """Accept across *pairs* as one undoable step, then refresh both chip sides."""
-        added = []
+        added, promoted = [], {}
         for pk in pairs:
-            added += self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups,
-                                        only=only)
+            new = self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups,
+                                     only=only)
+            if new:
+                promoted.update(self._promote(pk))
+            added += new
         if added:
-            self._push_undo([(g, s, p, 'add') for g, s, p in added])
+            self._push_undo([(g, s, p, 'add') for g, s, p in added], promoted)
         self._after_change()
 
-    def _push_undo(self, group_changes: list):
+    def _promote(self, pk: tuple) -> dict:
+        """Move an accepted pair into the selected list, as hand tagging does.
+
+        Returns the state change for undo, keyed by pair — empty unless the pair
+        was unselected in the key currently on screen, which is the only bucket
+        SelectionCommand can restore.
+        """
+        nav = self._win.nav
+        key = self._win.cd.find(pk[0], type_label=self._store.type_label_for(*pk),
+                                strict=False)
+        if key is None:
+            return {}
+        pair = (pk[1], pk[2])
+        bucket = nav.sd.get_selection_by_session(key).selections[key]
+        if pair not in bucket.unselected:
+            return {}
+        bucket.set_pair_state(pair, 'sel')
+        return {pair: ('unsel', 'sel')} if key == nav.key else {}
+
+    def _push_undo(self, group_changes: list, pair_changes: dict = None):
         """Record group edits on the pair panel's stack so Ctrl+Z reaches them.
 
         Accepting writes real tags — Accept all can write hundreds — so it belongs
         on the same stack as hand tagging rather than being irreversible.
         """
         self._win.pairs_view.pair_selection.push_undo(
-            SelectionCommand({}, group_changes))
+            SelectionCommand(pair_changes or {}, group_changes))
 
     def _accept_one(self, pk: tuple, only: str):
         """Tag *pk* with one predicted label (or all of them when only is empty)."""

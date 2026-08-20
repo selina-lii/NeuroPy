@@ -12,7 +12,22 @@ from __future__ import annotations
 import json
 import os
 
-ADMITTED = '__admitted__'   # marker group; dataset._NON_SHAPE_PREFIXES keeps it out of training
+from neuropy.analyses.utils import ADMITTED_PREFIX
+
+
+def admitted_group(model_name: str) -> str:
+    """Marker group recording which model proposed a pair the user accepted.
+
+    ``__special_`` keeps it off the tag chips and out of training, and naming the
+    model means a later model can tell its own admissions from another's.
+    """
+    return ADMITTED_PREFIX + model_name
+
+
+def prior_admissions(groups, model_name: str, sessions: set = None) -> int:
+    """How many pairs *model_name* has already had accepted, within *sessions*."""
+    members = groups.forward(admitted_group(model_name))
+    return sum(1 for s, *_ in members if sessions is None or s in sessions)
 
 
 class PredictionStore:
@@ -113,8 +128,8 @@ class PredictionStore:
 
         Returns the group additions actually made, as ``(group, sess, pair)``, so
         the caller can undo them; a label already taken adds nothing.
-        The ADMITTED marker records that a machine proposed it, and is excluded
-        from training so the next model never learns from its own output.
+        The admitted marker names the model that proposed it, so a later model
+        can see which of its own suggestions have already been judged.
         """
         pk = self._pk(session, ref, tgt)
         got = self.accepted.setdefault(pk, set())
@@ -122,7 +137,8 @@ class PredictionStore:
         new = [l for l in ([only] if only else self.labels_for(*pk)) if l not in have]
         if not new:
             return []
-        added = [ADMITTED] if ADMITTED not in have else []   # marker lands once per pair
+        marker = admitted_group(self.model_name)
+        added = [marker] if marker not in have else []   # lands once per pair per model
         for label in new + added:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
         got.update(new)

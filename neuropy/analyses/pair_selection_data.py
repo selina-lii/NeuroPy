@@ -18,6 +18,7 @@ from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
     JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
+    ADMITTED_PREFIX,
 )
 from neuropy.analyses.neurons_dataset import Key
 
@@ -254,9 +255,14 @@ class GroupDataset(JsonSavable, BiIndex):
         return self.inverse((sess, int(ref), int(tgt)))
 
     def chips_for_pair(self, sess: str, ref: int, tgt: int) -> list:
-        """(display_name, display_color) per group tagging this pair, sorted by name."""
+        """(display_name, display_color) per group tagging this pair, sorted by name.
+
+        Admitted markers are bookkeeping — which model proposed the pair — so they
+        are kept on the pair but never shown as a tag.
+        """
         metas = [self.get_group_metadata(g)
-                 for g in sorted(self.groups_for_pair(sess, ref, tgt))]
+                 for g in sorted(self.groups_for_pair(sess, ref, tgt))
+                 if not g.startswith(ADMITTED_PREFIX)]
         return [(m.display_name, m.display_color) for m in metas]
 
     def sessions_for_group(self, gname: str) -> set:

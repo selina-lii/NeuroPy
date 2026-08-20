@@ -672,6 +672,10 @@ class AnalysisDataset(Savable):
 _SPECIAL_PREFIX = "__special_"
 is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
 
+# Marks a pair as machine-proposed and user-accepted, one group per model. Kept
+# as a record only: never trained on, never shown as a tag.
+ADMITTED_PREFIX = _SPECIAL_PREFIX + "admitted_"
+
 
 class BiIndex:
     """Generic bidirectional multimap: A ↔ set(B) and B ↔ set(A), both O(1).
