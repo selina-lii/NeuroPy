@@ -282,12 +282,15 @@ def open_project(name: str, sessions: list = None):
     conf = CCGConfig(name=name)
     conf.load()
     nd_conf = NeuronsDatasetConfig(**(header.nd_conf or {}))
-    if sessions is None:                       # scannable source -> stage 1 names them
-        if not header.scannable:
-            raise ValueError(
-                f"project {name!r} is {header.format}: it has no source to scan, "
-                "so open_project(name, sessions) must be given its sessions")
+    # A scannable project finds and names its own sessions, so it ignores any the
+    # caller offered: those belong to whichever project the caller had open, and
+    # its naming rule reads paths, not the session objects handed in here.
+    if header.scannable:                       # scannable source -> stage 1 names them
         neurons = NeuronsDataset(header.sessions(), nd_conf)
+    elif sessions is None:
+        raise ValueError(
+            f"project {name!r} is {header.format}: it has no source to scan, "
+            "so open_project(name, sessions) must be given its sessions")
     else:                                      # caller-supplied (ProcessData) -> name them here
         neurons = NeuronsDataset(sessions, nd_conf, naming=header.naming)
     cd = CCGDataset(conf, neurons)

@@ -261,9 +261,11 @@ class NeuronsDataset(AnalysisDataset):
         self._slice_cache = {}   # TRANSIENT memo, never persisted
         self._sessions = _san(sessions)
         self.conf = conf
-        naming = naming or (lambda session: Path(session.filePrefix).name)
+        # naming takes a path, the same argument NWBDataset gives it, so one
+        # dataset's rule reads the same either way it is reached.
+        naming = naming or (lambda path: Path(path).name)
         for session in self._sessions:
-            session.session_name = naming(session)
+            session.session_name = naming(session.filePrefix)
         self._prep(self._sessions)
 
     def neurons_for(self, key: Key) -> Neurons:
