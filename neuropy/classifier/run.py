@@ -111,16 +111,19 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
     # strategy cross-validates best for it, since the encoding that suits a
     # quality grade is not the one that suits a rhythm label.
     names = list(model_names or [DEFAULT_MODEL])
-    routes = {}
+    routes, per_strategy = {}, {}
     if len(names) > 1:
         model, per_model = fit_routed(ls, names, duration=duration, bias=bias)
         routes = model.routes
         cv = routed_cv(per_model, routes, ls.label_names)
+        per_strategy = {n: r['scores'] for n, r in per_model.items()}
     else:
         cv = leave_one_rat_out(ls, names[0], duration=duration, bias=bias)
         model = fit_final(ls, names[0], duration=duration, bias=bias)
+        per_strategy = {names[0]: cv['scores']}
 
     summary = {'model': ' + '.join(names), 'bias': bias, 'routes': routes,
+               'per_strategy': per_strategy,
                'n_samples': len(ls.samples),
                'n_rats': len(set(ls.rats)), 'labels': ls.label_names,
                'scores': cv['scores'],
@@ -136,6 +139,7 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
                   'conn_types': list(conn_types or []),
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
                   'scores': cv['scores'], 'routes': routes,
+                  'per_strategy': per_strategy,
                   **ls.provenance()}
     saved_as = save_as or cd.conf.name
     model.save(os.path.join(out_dir, f"{'+'.join(names)}.pkl"), provenance)

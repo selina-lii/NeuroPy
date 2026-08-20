@@ -22,7 +22,8 @@ from pyqtgraph.Qt.QtWidgets import (
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
-    QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog
+    QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog,
+    QTableWidget,
 )
 
 from neuropy.ui.ui_common import qt_dark_mode
@@ -1188,3 +1189,13 @@ class BusyButton(QPushButton):
     def _tick(self):
         self._frame = (self._frame + 1) % len(self._FRAMES)
         self.setText(f"{self._FRAMES[self._frame]}  {self._busy_text}")
+
+
+def read_only_table(headers: list[str]) -> QTableWidget:
+    """A table the user reads but never edits, with its last column stretched."""
+    t = QTableWidget(0, len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    t.horizontalHeader().setStretchLastSection(True)
+    t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+    t.verticalHeader().setVisible(False)
+    return t

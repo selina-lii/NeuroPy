@@ -20,7 +20,7 @@ from pyqtgraph.Qt.QtWidgets import (
 from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.ui_common import SelectionCommand
-from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
+from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip, read_only_table
 from neuropy.classifier.predictions import (PredictionStore, by_owner,
                                             prior_admissions, store_from_rows)
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
@@ -288,10 +288,7 @@ class ClassifierDialog(QDialog):
 
         # Predicted/accepted are the two halves of an available/selected editor:
         # a chip click moves one label across, and the row stays until it is empty.
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(
-            ['pair', 'predicted', 'confidence', 'accepted'])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table = read_only_table(['pair', 'predicted', 'confidence', 'accepted'])
         self.table.itemSelectionChanged.connect(self._on_table_selection)
         lay.addWidget(self.table, stretch=1)
 
@@ -542,7 +539,7 @@ class ClassifierDialog(QDialog):
             pair = f"{pk[0]}  {pk[1]}→{pk[2]}"
             for col, val in ((0, pair + ('  ✗' if pk in self._store.rejected else '')),
                              (2, f"{self._store.confidence(*pk, label=shown):.2f}")):
-                self.table.setItem(i, col, QTableWidgetItem(val))
+                self.table.setItem(i, col, _cell(val))
             self.table.setCellWidget(i, 1, self._chip_cell(pk, taken=False))
             self.table.setCellWidget(i, 3, self._chip_cell(pk, taken=True))
         self.table.resizeRowsToContents()
@@ -767,6 +764,43 @@ class ClassifierDialog(QDialog):
         return win.classifier_dialog
 
 
+def _score_cells(s: dict) -> list[str]:
+    return [str(s['n']), f"{s['precision']:.2f}/{s['recall']:.2f}",
+            f"{s['f1']:.2f}/{s['auc']:.2f}"]
+
+
+def _cell(val: str) -> QTableWidgetItem:
+    item = QTableWidgetItem(val)
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    return item
+
+
+def _fill_rows(table: QTableWidget, rows: list[list[str]]):
+    table.setRowCount(len(rows))
+    for i, cells in enumerate(rows):
+        for col, val in enumerate(cells):
+            table.setItem(i, col, _cell(val))
+
+
+class StrategyScoresDialog(QDialog):
+    """How every strategy scored on one label, best first — why the router chose."""
+
+    def __init__(self, parent, label: str, per_strategy: dict, chosen: str):
+        super().__init__(parent)
+        self.setWindowTitle(f"{label}: every strategy")
+        self.resize(380, 320)
+        lay = QVBoxLayout(self)
+        rows = [(n, s) for n, sc in per_strategy.items() if (s := sc.get(label))]
+        rows.sort(key=lambda ns: -ns[1]['f1'])
+        table = read_only_table(['strategy', 'n', 'prec/rec', 'F1/AUC'])
+        _fill_rows(table, [[f"{n} ←" if n == chosen else n] + _score_cells(s)
+                           for n, s in rows])
+        lay.addWidget(table)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+
 class ManageModelsDialog(QDialog):
     """Rename or delete saved classifiers; the name is the unique identifier."""
 
@@ -780,9 +814,8 @@ class ManageModelsDialog(QDialog):
         self.list = QListWidget()
         self.list.currentItemChanged.connect(self._on_selected)
         lay.addWidget(self.list)
-        self.stats_table = QTableWidget(0, 4)
-        self.stats_table.setHorizontalHeaderLabels(['label', 'n', 'prec/rec', 'F1/AUC'])
-        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_table = read_only_table(
+            ['label', 'strategy', 'n', 'prec/rec', 'F1/AUC', ''])
         lay.addWidget(self.stats_table)
         row = QHBoxLayout()
         for text, slot in (("Rename…", self._on_rename_btn),
@@ -801,7 +834,9 @@ class ManageModelsDialog(QDialog):
         self.list.clear()
         for entry in list_models(self._win.cd):
             item = QListWidgetItem(entry['name'])
-            item.setData(Qt.UserRole, entry.get('trained_on', {}).get('scores', {}))
+            item.setData(Qt.UserRole,
+                         {'model_key': entry.get('model_key', '—'),
+                          **entry.get('trained_on', {})})
             self.list.addItem(item)
         self._parent.refresh_saved()
 
@@ -811,12 +846,22 @@ class ManageModelsDialog(QDialog):
 
     def _on_selected(self, item: 'QListWidgetItem'):
         """Per-label CV scores for the selected model, recorded at training time."""
-        scores = item.data(Qt.UserRole) if item else {}
-        self.stats_table.setRowCount(len(scores))
-        for i, (label, s) in enumerate(sorted(scores.items(), key=lambda kv: -kv[1]['f1'])):
-            for col, val in enumerate([label, str(s['n']), f"{s['precision']:.2f}/{s['recall']:.2f}",
-                                       f"{s['f1']:.2f}/{s['auc']:.2f}"]):
-                self.stats_table.setItem(i, col, QTableWidgetItem(val))
+        meta = item.data(Qt.UserRole) if item else {}
+        scores = meta.get('scores', {})
+        routes = meta.get('routes', {})
+        per_strategy = meta.get('per_strategy', {})
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1]['f1'])
+        _fill_rows(self.stats_table,
+                   [[label, routes.get(label) or meta['model_key']] + _score_cells(s)
+                    for label, s in ranked])
+        for i, (label, _) in enumerate(ranked):
+            if len(per_strategy) < 2:
+                continue
+            btn = QPushButton("more info")
+            btn.clicked.connect(
+                lambda _=False, l=label: StrategyScoresDialog(
+                    self, l, per_strategy, routes.get(l, '')).exec())
+            self.stats_table.setCellWidget(i, 5, btn)
 
     def _on_rename_btn(self):
         name = self._current()
