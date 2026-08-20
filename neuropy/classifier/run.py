@@ -15,7 +15,8 @@ from neuropy.analyses.ms_connectivity import CCGConfig, CCGDataset
 
 from neuropy.classifier.dataset import build_multi, loaded_ccg
 from neuropy.classifier.models import MODELS, BaseModel, decide
-from neuropy.classifier.train import fit_final, leave_one_rat_out, report
+from neuropy.classifier.train import (fit_final, fit_routed, leave_one_rat_out,
+                                      report, routed_cv)
 from neuropy.classifier.verify import verify_all
 
 DEFAULT_MODEL = 'conv'   # learned local filters + boosted trees; see CCG_CLASSIFIER_RESULTS.md
@@ -104,10 +105,21 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
 
-    cv = leave_one_rat_out(ls, model_name, duration=duration, bias=bias)
-    model = fit_final(ls, model_name, duration=duration, bias=bias)
+    # Several strategies -> one routed model: each label answered by whichever
+    # strategy cross-validates best for it, since the encoding that suits a
+    # quality grade is not the one that suits a rhythm label.
+    names = [model_name] if isinstance(model_name, str) else list(model_name)
+    routes = {}
+    if len(names) > 1:
+        model, per_model = fit_routed(ls, names, duration=duration, bias=bias)
+        routes = model.routes
+        cv = routed_cv(per_model, routes, ls.label_names)
+    else:
+        cv = leave_one_rat_out(ls, names[0], duration=duration, bias=bias)
+        model = fit_final(ls, names[0], duration=duration, bias=bias)
 
-    summary = {'model': model_name, 'bias': bias, 'n_samples': len(ls.samples),
+    summary = {'model': ' + '.join(names), 'bias': bias, 'routes': routes,
+               'n_samples': len(ls.samples),
                'n_rats': len(set(ls.rats)), 'labels': ls.label_names,
                'scores': cv['scores'],
                'mean_f1': float(np.mean([s['f1'] for s in cv['scores'].values()])),
@@ -120,10 +132,10 @@ def train_project(cd, model_name: str = DEFAULT_MODEL, out_dir: str = None,
                   'selections_dir': str(cd.selections_dir),
                   'cross_validation': 'leave-one-rat-out',
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
-                  'scores': cv['scores'],
+                  'scores': cv['scores'], 'routes': routes,
                   **ls.provenance()}
     saved_as = save_as or cd.conf.name
-    model.save(os.path.join(out_dir, f'{model_name}.pkl'), provenance)
+    model.save(os.path.join(out_dir, f"{'+'.join(names)}.pkl"), provenance)
     model.save(model_path(cd, saved_as), provenance)
     summary['saved_as'] = saved_as
     with open(os.path.join(out_dir, 'scores.json'), 'w') as fh:

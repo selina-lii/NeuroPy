@@ -103,6 +103,72 @@ def fit_final(ls: LabeledSet, model_name: str = 'conv',
     return model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
 
 
+def route_by_score(cv: dict[str, dict], names: list[str],
+                   beta: float = 1.0) -> dict[str, str]:
+    """Pick each label's strategy: the one with the best cross-validated F-beta.
+
+    Beta follows the run's bias, so a 'discover' run routes each label to the
+    strategy that finds the most of it rather than the one that is tidiest.
+    """
+    routes = {}
+    for name in names:
+        best, best_score = None, -1.0
+        for key, res in cv.items():
+            s = res['scores'].get(name)
+            if s is None:
+                continue
+            p, r = s['precision'], s['recall']
+            f = ((1 + beta ** 2) * p * r / (beta ** 2 * p + r)) if p + r else 0.0
+            if f > best_score:
+                best, best_score = key, f
+        routes[name] = best or next(iter(cv))
+    return routes
+
+
+def fit_routed(ls: LabeledSet, model_names: list[str], duration: float = 0.02,
+               **kw) -> tuple['BaseModel', dict]:
+    """Cross-validate every strategy, route each label to its winner, refit all.
+
+    Returns the routed model and the per-strategy CV results it chose from, so
+    the sidecar can record why each label went where it did.
+    """
+    from neuropy.classifier.models import BIAS_BETA, RoutedNet
+    cv = {name: leave_one_rat_out(ls, name, duration=duration, **kw)
+          for name in model_names}
+    beta = BIAS_BETA.get(kw.get('bias', 'balanced'), 1.0)
+    routes = route_by_score(cv, ls.label_names, beta)
+    model = RoutedNet(ls.label_names, duration=duration, routes=routes, **kw)
+    model.subs = {name: MODELS[name](ls.label_names, duration=duration, **kw)
+                  for name in model_names}
+    hi_any = any(MODELS[n].uses_highres for n in model_names)
+    hi, hi_null = ((ls.X_ccg_hi, ls.X_null_hi)
+                   if hi_any and ls.has_highres else (None, None))
+    model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
+    return model, cv
+
+
+def routed_cv(cv: dict[str, dict], routes: dict[str, str],
+              names: list[str]) -> dict:
+    """Assemble the routed model's own CV result, column by column.
+
+    Every matrix is taken from the head that owns each label, so the scores and
+    the figures describe the model that will actually ship — not the first
+    strategy that happened to run.
+    """
+    first = cv[next(iter(cv))]
+    out = {k: np.array(first[k], copy=True)
+           for k in ('proba', 'Y', 'thresholds', 'pred')}
+    for j, name in enumerate(names):
+        src = cv.get(routes.get(name))
+        if src is None:
+            continue
+        for k in ('proba', 'thresholds', 'pred'):
+            out[k][:, j] = src[k][:, j]
+    out['label_names'] = list(names)
+    out['scores'] = _scores_from_hits(out['Y'], out['proba'], out['pred'], names)
+    return out
+
+
 def report(scores: dict) -> str:
     rows = ["  label            n   prec   rec    F1    AUC",
             "  " + "-" * 44]

@@ -62,34 +62,41 @@ class _ClassifyWorker(QObject):
         self.done.emit(result)
 
     def _train(self) -> dict:
-        """Train one head per chosen strategy, then cascade them in that order.
+        """Train the chosen strategies as one model, then score the scope with it.
 
-        Each head learns the same labels its own way; the cascade lets a later
-        one claim what an earlier one missed, so a series discovers more tags
-        than any single strategy.
+        Several strategies train as a routed model: each label is answered by
+        whichever strategy cross-validates best for it. Unchecking *route* trains
+        them as separate heads and cascades them in the listed order instead.
         """
         o = self._opts
         names = o['model_names']
-        heads = []
-        for i, model_name in enumerate(names):
-            save_as = o['save_as'] if len(names) == 1 else f"{o['save_as']}.{model_name}"
-            result = train_project(self._cd, model_name, figures=o['figures'],
-                                   save_as=save_as, extra=o['extra'],
-                                   highres=o['highres'], min_count=o['min_count'],
-                                   bias=o['bias'], only_labels=o['only_labels'])
-            heads.append(result)
-        result = heads[0] if len(heads) == 1 else dict(heads[-1])
-        if len(heads) == 1:
-            keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
-            rows = predict_project(self._cd, result['model'], keys)
-            labels = result['model'].label_names
-        else:
-            out = apply_cascade(self._cd, [h['saved_as'] for h in heads], o['scope'])
-            rows, labels, skipped = out['rows'], out['labels'], out['skipped']
-            result['saved_as'] = ' → '.join(h['saved_as'] for h in heads)
-            result['heads'] = [h['summary'] for h in heads]
+        if len(names) > 1 and not o['route']:
+            return self._train_cascade(names, o)
+        result = train_project(self._cd, names, figures=o['figures'],
+                               save_as=o['save_as'], extra=o['extra'],
+                               highres=o['highres'], min_count=o['min_count'],
+                               bias=o['bias'], only_labels=o['only_labels'])
+        keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
+        rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
-        result['store'] = store_from_rows(rows, result['saved_as'], labels)
+        result['store'] = store_from_rows(rows, result['saved_as'],
+                                          result['model'].label_names)
+        return result
+
+    def _train_cascade(self, names: list[str], o: dict) -> dict:
+        """Train one model per strategy, then let each claim what the earlier missed."""
+        heads = [train_project(self._cd, name, figures=o['figures'],
+                               save_as=f"{o['save_as']}.{name}", extra=o['extra'],
+                               highres=o['highres'], min_count=o['min_count'],
+                               bias=o['bias'], only_labels=o['only_labels'])
+                 for name in names]
+        out = apply_cascade(self._cd, [h['saved_as'] for h in heads], o['scope'])
+        result = dict(heads[-1])
+        result['saved_as'] = ' → '.join(h['saved_as'] for h in heads)
+        result['heads'] = [h['summary'] for h in heads]
+        result['skipped'] = out['skipped']
+        result['store'] = store_from_rows(out['rows'], result['saved_as'],
+                                          out['labels'])
         return result
 
     def _apply(self) -> dict:
@@ -160,6 +167,13 @@ class ClassifierDialog(QDialog):
             select_all_when_empty=False, ordered=True)
         self.model_picker.set_selected([DEFAULT_MODEL])
         row.addWidget(self.model_picker)
+        self.route_check = QCheckBox("route per label")
+        self.route_check.setChecked(True)
+        self.route_check.setToolTip(
+            "With several strategies: give each label to the one that scores it\n"
+            "best in cross-validation. Unchecked, they run as a cascade in the\n"
+            "listed order and each claims what the earlier ones missed.")
+        row.addWidget(self.route_check)
         self.bias_combo = QComboBox()
         for mode, tip in (('discover', "find as many true pairs as possible"),
                           ('balanced', "even trade of coverage against errors"),
@@ -333,6 +347,7 @@ class ClassifierDialog(QDialog):
         """Everything the worker needs, read once off the widgets."""
         return {'saved': saved,
                 'model_names': self.model_picker.selected or [DEFAULT_MODEL],
+                'route': self.route_check.isChecked(),
                 'bias': self.bias_combo.currentText(),
                 'save_as': self.name_edit.text().strip() or self._win.cd.conf.name,
                 'figures': self.figures_check.isChecked(),
@@ -464,6 +479,14 @@ class ClassifierDialog(QDialog):
         if best:
             lines.append("  ".join(f"{n} p{s['precision']:.2f}/r{s['recall']:.2f}"
                                    for n, s in best))
+        routes = summary.get('routes') or {}
+        if routes:   # which strategy won each label, most-used first
+            per: dict[str, list] = {}
+            for label, key in sorted(routes.items()):
+                per.setdefault(key, []).append(label)
+            lines.append("Routing — " + " | ".join(
+                f"{k}: {', '.join(v)}" for k, v
+                in sorted(per.items(), key=lambda kv: -len(kv[1]))))
         if result.get('skipped'):
             lines.append(f"Skipped {len(result['skipped'])} session(s) lacking the "
                          f"CCGs this model needs: {', '.join(result['skipped'][:4])}"

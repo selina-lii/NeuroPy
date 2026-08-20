@@ -431,6 +431,67 @@ class TwoHeadNet(HybridNet):
         return P
 
 
+class RoutedNet(BaseModel):
+    """Per-label routing: each label answered by the strategy that scores it best.
+
+    The one-vs-rest heads inside a single model already learn each label
+    separately, but they all read the *same* features, because ``_encode``
+    belongs to the strategy. A quality grade turns on peak SNR while a rhythm
+    label turns on structure at long lags, so one encoding cannot be right for
+    both. This holds one fitted sub-model per strategy and takes each label's
+    column from its winner, which is chosen by cross-validated F-beta.
+
+    ``routes`` maps label -> strategy key. Labels with no entry fall back to the
+    first sub-model, so a route table never has to be exhaustive.
+    """
+
+    def __init__(self, label_names, duration=0.02, routes: dict = None, **kw):
+        super().__init__(label_names, duration=duration, **kw)
+        self.routes = dict(routes or {})
+        self.subs: dict[str, BaseModel] = {}
+
+    @property
+    def uses_highres(self) -> bool:
+        """True when any routed sub-model reads the fine bins."""
+        return any(m.uses_highres for m in self.subs.values())
+
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+        raise NotImplementedError("RoutedNet delegates encoding to its sub-models")
+
+    def fit(self, ccg, null, Y, ccg_hi=None, null_hi=None):
+        for sub in self.subs.values():
+            sub.fit(ccg, null, Y, ccg_hi, null_hi)
+        self._sync_thresholds()
+        return self
+
+    def _sync_thresholds(self):
+        """Adopt each label's threshold from the sub-model that owns it."""
+        for j, name in enumerate(self.label_names):
+            sub = self._sub_for(name)
+            if sub is not None and name in sub.label_names:
+                self.thresholds[j] = sub.thresholds[sub.label_names.index(name)]
+
+    def _sub_for(self, label: str) -> 'BaseModel | None':
+        if not self.subs:
+            return None
+        key = self.routes.get(label)
+        return self.subs.get(key) or next(iter(self.subs.values()))
+
+    def predict_proba(self, ccg, null, ccg_hi=None, null_hi=None):
+        cache = {key: sub.predict_proba(ccg, null, ccg_hi, null_hi)
+                 for key, sub in self.subs.items()}
+        n = len(np.atleast_2d(ccg))
+        out = np.zeros((n, len(self.label_names)))
+        for j, name in enumerate(self.label_names):
+            key = self.routes.get(name) or next(iter(self.subs))
+            sub = self.subs[key]
+            out[:, j] = cache[key][:, sub.label_names.index(name)]
+        return out
+
+    def model_key(self) -> str:
+        return 'routed'
+
+
 MODELS = {'conv': ConvNet, 'kernel': KernelNet, 'dualres': DualResNet,
           'hybrid': HybridNet, 'shape': ShapeFeatureNet, 'trace': TraceNet,
           'twohead': TwoHeadNet}
