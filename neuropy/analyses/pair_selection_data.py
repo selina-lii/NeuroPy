@@ -12,6 +12,7 @@ backward compatibility.
 from __future__ import annotations
 
 import datetime
+import glob
 import hashlib
 import os
 import shutil
@@ -19,7 +20,7 @@ from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
     JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
-    ADMITTED_PREFIX,
+    ADMITTED_PREFIX, is_shape_label, is_admitted_group,
 )
 from neuropy.analyses.neurons_dataset import Key
 
@@ -218,7 +219,9 @@ class GroupDataset(JsonSavable, BiIndex):
 
     @property
     def groups(self) -> list[str]:
-        return sorted(g for g in self.defined_groups if not is_special_group(g))
+        """Tags a user can apply — machine markers are not offered as choices."""
+        return sorted(g for g in self.defined_groups
+                      if not is_special_group(g) and not is_admitted_group(g))
 
     def special_groups(self) -> list[str]:
         return sorted(g for g in self.defined_groups if is_special_group(g))
@@ -263,7 +266,7 @@ class GroupDataset(JsonSavable, BiIndex):
         """
         metas = [self.get_group_metadata(g)
                  for g in sorted(self.groups_for_pair(sess, ref, tgt))
-                 if not g.startswith(ADMITTED_PREFIX)]
+                 if not is_admitted_group(g)]
         return [(m.display_name, m.display_color) for m in metas]
 
     def sessions_for_group(self, gname: str) -> set:
@@ -376,6 +379,48 @@ class SelectionDataset(JsonSavable, Autosave):
                 sd.__setstate__(sd_v)
             self.sessions[nd] = sd
 
+    def flush_tags(self) -> None:
+        """Copy live group membership into each bucket's ``tags``, ready to write.
+
+        ``groups`` is the source of truth while the project is open; ``tags`` is
+        how that reaches disk. Rewriting the whole key rather than patching it
+        means a tag removed in this session cannot survive in the file.
+        """
+        for sel in self.sessions.values():
+            if sel._nd_key is None:   # placeholder with no nd-key → nothing to tag
+                continue
+            sess = str(sel._nd_key.session)
+            for bucket in sel.selections.values():
+                for entry in bucket.tags.values():
+                    entry.pop('groups', None)
+                for pair in bucket.all_pairs:
+                    names = sorted(self.groups.groups_for_pair(sess, pair[0], pair[1]))
+                    if names:
+                        bucket.tags.setdefault(pair, {})['groups'] = names
+
+    def save_as(self, *names: str) -> list[str]:
+        """Write every session's selections, under ``latest`` and/or named snapshots.
+
+        ``latest`` is ``<session>.json``, the file the next open reads; any other
+        name is a snapshot beside it that nothing overwrites. Tags are flushed
+        first, so a snapshot always carries the tags that were on screen.
+        """
+        self.flush_tags()
+        written = []
+        for name in (names or ('latest',)):
+            for sel in self.sessions.values():
+                if sel._nd_key is None:
+                    continue
+                if name == 'latest':
+                    sel.save()
+                else:
+                    sel.save(path=os.path.join(
+                        self.save_dir, f'{sel._nd_key.session}__{name}'))
+            written.append(name)
+        self.save()
+        self.groups.save()
+        return written
+
     def get_selection_by_session(self, key: Key) -> SelectionData:
         nd = key.nd()
         sd = self.sessions.get(nd)
@@ -383,6 +428,37 @@ class SelectionDataset(JsonSavable, Autosave):
             sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
             self.sessions[nd] = sd
         return sd
+
+    def tag_pair(self, key: Key, pair: tuple, gname: str,
+                 add: bool = True, move: bool = True) -> tuple:
+        """Add or remove one group tag, moving the pair between the lists to match.
+
+        Tagging a pair selects it and untagging its last shape label puts it back.
+        This is the one place that rule lives; the pair panel and the classifier
+        both come here rather than each spelling it out.
+
+        Returns ``(group_change, pair_change)`` for the undo stack, either of
+        which is ``None`` when nothing moved.
+        """
+        sess, p = str(key.session), (int(pair[0]), int(pair[1]))
+        if add:
+            self.groups.add_to_group(gname, sess, p)
+        else:
+            self.groups.discard_from_group(gname, sess, p)
+        group_change = (gname, sess, p, 'add' if add else 'remove')
+        bucket = self.get_selection_by_session(key).selections[key]
+        was = ('sel' if p in bucket.selected
+               else 'del' if p in bucket.deleted else 'unsel')
+        want = 'sel' if add else ('sel' if self.has_shape_tag(sess, p) else 'unsel')
+        if not move or was == want or was == 'del':
+            return group_change, None
+        bucket.set_pair_state(p, want)
+        return group_change, (p, (was, want))
+
+    def has_shape_tag(self, sess: str, pair: tuple) -> bool:
+        """True while the pair carries a tag naming a shape, not a marker or a note."""
+        return any(is_shape_label(g)
+                   for g in self.groups.groups_for_pair(sess, pair[0], pair[1]))
 
     def reconcile(self, key: Key, pair_set: set) -> None:
         """Restrict saved selection to universe."""
@@ -397,6 +473,20 @@ class SelectionDataset(JsonSavable, Autosave):
                     deleted=b.deleted & universe)
             return
         b.reset(set())
+
+    def load_all(self) -> 'SelectionDataset':
+        """Read every session's saved selections, without a UI browsing to them.
+
+        The UI accumulates sessions as the user visits them; a script has no such
+        walk, so it asks for the whole project at once. Snapshot files
+        (``<session>__<name>.json``) are skipped — only ``latest`` is the state.
+        """
+        names = [os.path.basename(p)[:-5]
+                 for p in sorted(glob.glob(os.path.join(self.save_dir, '*.json')))]
+        self.ensure_groups_loaded_for(
+            [n for n in names
+             if n not in ('groups', 'selection_dataset') and '__' not in n])
+        return self
 
     def ensure_groups_loaded_for(self, sessions: list[str]) -> None:
         """Load SelectionData from disk for unvisited sessions; sync group tags into groups.
@@ -413,11 +503,13 @@ class SelectionDataset(JsonSavable, Autosave):
             path = os.path.join(self.save_dir, sess)
             if not os.path.exists(path + '.json'):
                 continue
-            sel = SelectionData()
+            sel = SelectionData(save_dir=self.save_dir)
             sel.load(path)
             if sel.selections:
-                nd_key = next(iter(sel.selections)).nd()
-                self.sessions[nd_key] = sel
+                # Loading has to leave the bucket writable: without its nd-key a
+                # SelectionData has no save_path and silently never persists.
+                sel._nd_key = next(iter(sel.selections)).nd()
+                self.sessions[sel._nd_key] = sel
             for bucket in sel.selections.values():
                 for (ref, tgt), entry in bucket.tags.items():
                     for gname in (entry.get('groups') or []):

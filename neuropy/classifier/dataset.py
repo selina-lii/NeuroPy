@@ -13,14 +13,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# Labels that name a saved view or a note rather than a CCG shape.
-# '?' means "unsure pattern": it co-occurs with every other label and is only
-# a third of the time applied alone, so it marks the labeler's confidence, not a
-# shape. The model reproduces it by abstaining, never by learning it as a class.
-# '__special_' covers today's admitted markers; '__admitted__' is the pre-per-model
-# marker, still present in saved group files and never a shape.
-_NON_SHAPE_PREFIXES = ('__special_', '__admitted__')
-_NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', '?'}
+# The group vocabulary belongs to the data layer, so which labels name a CCG
+# shape is decided there and only re-exported here for the classifier's callers.
+from neuropy.analyses.utils import is_shape_label   # noqa: F401
 
 
 @dataclass
@@ -123,11 +118,6 @@ class LabeledSet:
         return Counter(lab for s in self.samples for lab in s.labels)
 
 
-def is_shape_label(name: str) -> bool:
-    """True for labels describing CCG shape (the only ones worth learning)."""
-    return not name.startswith(_NON_SHAPE_PREFIXES) and name not in _NON_SHAPE
-
-
 def rat_of(session: str) -> str:
     return session.split('_')[0]
 
@@ -219,7 +209,9 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
         ccg_hi, null_hi = (_highres_arrays(cd, key, compute_highres)
                            if highres else (None, None))
         session = str(key.session)
-        conn = '-'.join(key.conn_type) if key.conn_type else '?'
+        # The same spelling the scope pickers and scope_keys use, so a conn-type
+        # filter reads the same everywhere rather than needing a translation.
+        conn = key.type_label()
         for pair, labs in pairs.items():
             ref, tgt = (int(v) for v in pair.split(','))
             if ref >= ccg.shape[0] or tgt >= ccg.shape[1]:
@@ -254,7 +246,8 @@ def supported_labels(samples: list, min_count: int, min_rats: int) -> list[str]:
 
 def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
                 highres: bool = True, compute_highres: bool = False,
-                only_labels: list[str] = None) -> LabeledSet:
+                only_labels: list[str] = None,
+                conn_types: list[str] = None) -> LabeledSet:
     """One labeled set pooled over several projects.
 
     Label support is judged on the pooled counts, so a label too rare in any one
@@ -272,6 +265,11 @@ def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
                                  compute_highres=compute_highres)
         samples.extend(part.samples)
         sources.append(cd.conf.name)
+    if conn_types:
+        # Applied to the pooled samples, so every project is narrowed the same
+        # way — an excitatory model never sees an inhibitory trace from any of them.
+        want = set(conn_types)
+        samples = [s for s in samples if s.conn_type in want]
     if not samples:
         raise ValueError('no labeled pairs found in the selected projects')
     widths = {(s.ccg.shape[-1],

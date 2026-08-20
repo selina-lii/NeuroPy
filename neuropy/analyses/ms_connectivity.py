@@ -247,7 +247,7 @@ class ProjectConfig(JsonSavable):
     @property
     def conventions(self):
         """The dataset module — its session_name, FIELDS, and label lists."""
-        return import_module(f'neuropy.io.datasets.{self.dataset}')
+        return import_module(f'neuropy.io.datasets.{self.dataset}') if self.dataset else None
 
     @property
     def naming(self):
@@ -256,11 +256,13 @@ class ProjectConfig(JsonSavable):
 
     @property
     def scannable(self) -> bool:
-        """True when the header alone can find its sessions; ProcessData projects cannot."""
-        return bool(self.source)
+        """True when the header alone can find its sessions: a source to scan, or a dataset naming its own."""
+        return bool(self.source) or hasattr(self.conventions, 'sessions')
 
     def sessions(self) -> list:
         """This project's sessions, read and mapped as the header describes."""
+        if not self.source:
+            return self.conventions.sessions()
         return NWBDataset(self.source, naming=self.naming).sessions(
             FieldMap(UNITS_SCHEMA, self.fields), sampling_rate=self.sampling_rate)
 
@@ -290,7 +292,8 @@ def open_project(name: str, sessions: list = None):
         if sessions is not None:
             print(f"[open_project] {name!r} scans its own source; ignoring the "
                   f"{len(sessions)} session(s) passed in", flush=True)
-        neurons = NeuronsDataset(header.sessions(), nd_conf)
+        neurons = NeuronsDataset(header.sessions(), nd_conf,
+                                 naming=None if header.source else header.naming)
     elif sessions is None:
         raise ValueError(
             f"project {name!r} is {header.format}: it has no source to scan, "

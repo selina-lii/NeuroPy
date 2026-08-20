@@ -380,7 +380,7 @@ class CCGReviewUI(QMainWindow):
         if header.scannable:
             _neurons, cd, _sd = open_project(config_name)
         else:
-            nd = self._nd_by_project.get(project_dir, self.cd.nd)
+            nd = self._nd_by_project.get(project_dir)
             cd = CCGDataset(self.cd.conf.copy(name=config_name), nd)
             cd.load()
             adopt_project_groups(cd)   # open_project does this on the other branch

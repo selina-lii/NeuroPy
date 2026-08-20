@@ -81,7 +81,8 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
                   extra: list = None, highres: bool = True,
                   min_count: int = 20, bias: str = 'balanced',
-                  only_labels: list = None) -> dict:
+                  only_labels: list = None, conn_types: list = None,
+                  min_rats: int = 4) -> dict:
     """Train on saved selections and store the model in the shared library.
 
     Defaults are the widest useful ones: every labeled pair in the loaded
@@ -99,8 +100,9 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
 
     # The UI queues any missing high-res compute before calling this, so a
     # session still lacking it here is an error rather than something to fix inline.
-    ls = build_multi(datasets, min_count=min_count, highres=highres,
-                     only_labels=only_labels)
+    ls = build_multi(datasets, min_count=min_count, min_rats=min_rats,
+                     highres=highres, only_labels=only_labels,
+                     conn_types=conn_types)
     if not ls.label_names:
         raise ValueError("no label has enough examples to train on — "
                          "tag more pairs before running the classifier")
@@ -131,6 +133,7 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
                   'project': cd.conf.name,
                   'selections_dir': str(cd.selections_dir),
                   'cross_validation': 'leave-one-rat-out',
+                  'conn_types': list(conn_types or []),
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
                   'scores': cv['scores'], 'routes': routes,
                   **ls.provenance()}
