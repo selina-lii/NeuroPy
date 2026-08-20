@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 
-from neuropy.analyses.utils import ADMITTED_PREFIX
+from neuropy.analyses.utils import ADMITTED_PREFIX, is_shape_label
 
 
 def admitted_group(model_name: str) -> str:
@@ -144,6 +144,16 @@ class PredictionStore:
         """Labels still awaiting judgement — the left half of the row's editor."""
         got = set(self.taken(groups, session, ref, tgt))
         return [l for l in self.labels_for(session, ref, tgt) if l not in got]
+
+    def hand_tags(self, groups, session: str, ref: int, tgt: int) -> list[str]:
+        """Shape tags this pair carries that the model never proposed.
+
+        A hotkey tags the pair whatever the model thought, so accepted shows
+        those too — otherwise the tag lands nowhere the reviewer can see it.
+        """
+        predicted = set(self.labels_for(session, ref, tgt))
+        return sorted(g for g in groups.groups_for_pair(session, ref, tgt)
+                      if g not in predicted and is_shape_label(g))
 
     def accept(self, session: str, ref: int, tgt: int, groups,
                only: str = None) -> list[tuple]:

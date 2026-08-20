@@ -309,7 +309,8 @@ class ClassifierDialog(QDialog):
 
         # Predicted/accepted are the two halves of an available/selected editor:
         # a chip click moves one label across, and the row stays until it is empty.
-        self.table = read_only_table(['pair', 'predicted', 'confidence', 'accepted'])
+        self.table = read_only_table(
+            ['session', 'pair', 'predicted', 'confidence', 'accepted'])
         self.table.itemSelectionChanged.connect(self._on_table_selection)
         lay.addWidget(self.table, stretch=1)
 
@@ -561,12 +562,13 @@ class ClassifierDialog(QDialog):
         self._rows = pairs
         self.accept_all_btn.setText(f"Accept all shown ({len(pairs)})")
         for i, pk in enumerate(pairs):
-            pair = f"{pk[0]}  {pk[1]}→{pk[2]}"
-            for col, val in ((0, pair + ('  ✗' if pk in self._store.rejected else '')),
-                             (2, f"{self._store.confidence(*pk, label=shown):.2f}")):
+            pair = f"{pk[1]}→{pk[2]}"
+            for col, val in ((0, pk[0]),
+                             (1, pair + ('  ✗' if pk in self._store.rejected else '')),
+                             (3, f"{self._store.confidence(*pk, label=shown):.2f}")):
                 self.table.setItem(i, col, _cell(val))
-            self.table.setCellWidget(i, 1, self._chip_cell(pk, taken=False))
-            self.table.setCellWidget(i, 3, self._chip_cell(pk, taken=True))
+            self.table.setCellWidget(i, 2, self._chip_cell(pk, taken=False))
+            self.table.setCellWidget(i, 4, self._chip_cell(pk, taken=True))
         self.table.resizeRowsToContents()
 
     def _chip_cell(self, pk: tuple, taken: bool) -> QWidget:
@@ -587,6 +589,10 @@ class ClassifierDialog(QDialog):
         lines = self._store.by_model(*pk, labels)
         if len(labels) > 1 and not taken:
             lines = lines + [(None, ['all'])]
+        if taken:
+            hand = self._store.hand_tags(groups, *pk)
+            if hand:
+                lines = lines + [('by hand', hand)]
         for model, names in lines:
             row = QHBoxLayout()
             row.setSpacing(TagChip.GAP)
