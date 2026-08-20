@@ -13,9 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# The group vocabulary belongs to the data layer, so which labels name a CCG
-# shape is decided there and only re-exported here for the classifier's callers.
-from neuropy.analyses.utils import is_shape_label   # noqa: F401
+from neuropy.analyses.utils import is_shape_label
 
 
 @dataclass
@@ -183,7 +181,8 @@ def _highres_arrays(cd, key, compute: bool = False):
 
 def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
                       min_rats: int = 4, highres: bool = True,
-                      compute_highres: bool = False) -> LabeledSet:
+                      compute_highres: bool = False,
+                      conn_types: list[str] = None) -> LabeledSet:
     """Join saved labels to their CCG traces; keep labels with enough support.
 
     A label needs *min_count* examples across at least *min_rats* animals, since
@@ -194,11 +193,14 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
     """
     labels_by_key = read_selection_labels(selections_dir or cd.selections_dir)
     ptr_by_str = {str(k): k for k in cd.ptr}
+    want_type = set(conn_types or [])
 
     samples: list[PairSample] = []
     for key_str, entry in labels_by_key.items():
         key = ptr_by_str.get(key_str)
         if key is None:
+            continue
+        if want_type and key.type_label() not in want_type:
             continue
         pairs = dict(entry['labels'])
         if entry['complete']:   # reviewed slice → untagged pairs are negatives
@@ -209,9 +211,7 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
         ccg_hi, null_hi = (_highres_arrays(cd, key, compute_highres)
                            if highres else (None, None))
         session = str(key.session)
-        # The same spelling the scope pickers and scope_keys use, so a conn-type
-        # filter reads the same everywhere rather than needing a translation.
-        conn = key.type_label()
+        conn = key.type_label()   # same spelling scope_keys uses
         for pair, labs in pairs.items():
             ref, tgt = (int(v) for v in pair.split(','))
             if ref >= ccg.shape[0] or tgt >= ccg.shape[1]:
@@ -262,14 +262,10 @@ def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
     samples, sources = [], []
     for cd in datasets:
         part = build_labeled_set(cd, min_count=1, min_rats=1, highres=highres,
-                                 compute_highres=compute_highres)
+                                 compute_highres=compute_highres,
+                                 conn_types=conn_types)
         samples.extend(part.samples)
         sources.append(cd.conf.name)
-    if conn_types:
-        # Applied to the pooled samples, so every project is narrowed the same
-        # way — an excitatory model never sees an inhibitory trace from any of them.
-        want = set(conn_types)
-        samples = [s for s in samples if s.conn_type in want]
     if not samples:
         raise ValueError('no labeled pairs found in the selected projects')
     widths = {(s.ccg.shape[-1],

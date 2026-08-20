@@ -1,10 +1,11 @@
 """The classifier workflow as one object, with no user interface attached.
 
-Everything the Classify dialog does is a call on ``ClassifierSession``: set a
-scope, train or load a classifier, score the scope, narrow the predictions, and
-admit what survives. The dialog holds no state of its own — it reads this and
-draws it — so the same workflow runs from a notebook, a script, or a future
-front end without any of them re-implementing a step.
+The steps the Classify dialog takes, as calls: set a scope, train or load a
+classifier, score the scope, narrow the predictions, and admit what survives —
+so the same workflow runs from a notebook or a script.
+
+The dialog does not yet delegate to this; until it does, the two are separate
+implementations of the same workflow and changes belong in both.
 
     cs = ClassifierSession(cd)
     cs.set_scope(sessions=['RatJ_Day1'], conn_types=['pyr-pyr'])
@@ -16,23 +17,15 @@ front end without any of them re-implementing a step.
 """
 from __future__ import annotations
 
-import numpy as np
-
 from neuropy.analyses.pair_selection_data import SelectionDataset
-from neuropy.classifier.dataset import build_labeled_set
 from neuropy.classifier.predictions import PredictionStore, store_from_rows
-from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
-                                    list_models, load_model, missing_highres,
-                                    predict_project, scope_keys, scorable_keys,
-                                    train_project)
+from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, list_models,
+                                    load_model, missing_highres, predict_project,
+                                    scope_keys, scorable_keys, train_project)
 
 
 class Scope:
-    """Which pointer keys a run covers, and the questions asked of that set.
-
-    A scope is a filter, never a mutation: it narrows *which* pairs are scored
-    and never how a model works, so widening it later cannot invalidate a model.
-    """
+    """Which pointer keys a run covers, and the questions asked of that set."""
 
     def __init__(self, cd, sessions: list = None, conn_types: list = None):
         self.cd = cd
@@ -57,12 +50,7 @@ class Scope:
 
 
 class ClassifierSession:
-    """One pass of the classify workflow: scope → model → predictions → tags.
-
-    Holds the three things a run needs to be resumable — the scope, the model,
-    and the predictions — and nothing that belongs to a view. Selections and
-    group tags stay owned by ``SelectionDataset``; this only calls it.
-    """
+    """One pass of the classify workflow: scope → model → predictions → tags."""
 
     def __init__(self, cd, sd: SelectionDataset = None):
         self.cd = cd
@@ -84,11 +72,7 @@ class ClassifierSession:
         return self.scope
 
     def complete_sessions(self) -> list[str]:
-        """Sessions with at least one slice marked reviewed-exhaustively.
-
-        These are the ones whose untagged pairs are true negatives, so they are
-        the honest training scope.
-        """
+        """Sessions with at least one slice marked reviewed-exhaustively."""
         out = set()
         for key, sel in self.sd.sessions.items():
             if any(b.complete for b in sel.selections.values()):
@@ -116,15 +100,7 @@ class ClassifierSession:
               bias: str = 'balanced', min_count: int = 20, min_rats: int = 4,
               highres: bool = True, only_labels: list = None,
               extra: list = None, figures: bool = False) -> dict:
-        """Fit on the project's saved labels and keep the result on this session.
-
-        Several strategies train as one routed model: each label is answered by
-        whichever strategy cross-validates best for it, since the encoding that
-        suits a quality grade is not the one that suits a rhythm label.
-
-        Training inherits the scope's conn types, so a scope set to the
-        excitatory pairs trains a model that has only ever seen them.
-        """
+        """Fit on the project's saved labels and keep the result on this session."""
         names = list(models or [DEFAULT_MODEL])
         result = train_project(self.cd, names, figures=figures,
                                save_as=save_as, extra=extra, highres=highres,
@@ -137,11 +113,7 @@ class ClassifierSession:
         return result
 
     def train_cascade(self, models: list, save_as: str, **kw) -> dict:
-        """Train one model per strategy and let each claim what the earlier missed.
-
-        Unlike ``train``, the heads stay separate and run in the listed order, so
-        the order is a priority: the first head to claim a label owns it.
-        """
+        """Train one model per strategy and let each claim what the earlier missed."""
         heads = [self.train([name], f'{save_as}.{name}', **kw) for name in models]
         self.model_name = ' → '.join(h['saved_as'] for h in heads)
         out = apply_cascade(self.cd, [h['saved_as'] for h in heads],
@@ -153,12 +125,7 @@ class ClassifierSession:
     # ---- scoring ---------------------------------------------------------
 
     def predict(self, name: str = None) -> PredictionStore:
-        """Score every pair in scope, replacing any earlier predictions.
-
-        Sessions whose CCGs the model cannot read are skipped and named in
-        ``self.skipped``, rather than failing the run or being scored on
-        partial features.
-        """
+        """Score every pair in scope, replacing any earlier predictions."""
         if name is not None:
             self.load(name)
         if self.model is None:
@@ -182,11 +149,7 @@ class ClassifierSession:
     # ---- narrowing the predictions ---------------------------------------
 
     def drop_below(self, threshold: float, label: str = None) -> int:
-        """Drop predicted labels scoring under *threshold*; returns how many went.
-
-        This is the coverage knob: the model's own thresholds are calibrated for
-        an average pair, and a run can be stricter than that without retraining.
-        """
+        """Drop predicted labels scoring under *threshold*; returns how many went."""
         return self._filter(lambda l, s: s >= threshold, label)
 
     def keep_only(self, labels) -> int:
@@ -200,11 +163,7 @@ class ClassifierSession:
         return self._filter(lambda l, s: l not in drop, None)
 
     def _filter(self, keep, label: str = None) -> int:
-        """Apply a keep(label, score) rule across the store; returns labels dropped.
-
-        Rows left with no labels go too — an empty row is not a prediction, and
-        leaving it would put a blank line in every reviewer's list.
-        """
+        """Apply a keep(label, score) rule across the store; returns labels dropped."""
         removed = 0
         for pk, row in list(self.store.rows.items()):
             kept = [l for l in row['labels']
@@ -221,11 +180,7 @@ class ClassifierSession:
     # ---- admitting -------------------------------------------------------
 
     def key_of(self, pk: tuple):
-        """The nd-key a predicted pair belongs to, memoized across a batch.
-
-        ``cd.find`` rescans every pointer key, and admitting resolves hundreds of
-        pairs that fall into a handful of (session, conn type) buckets.
-        """
+        """The nd-key a predicted pair belongs to, memoized across a batch."""
         ident = (pk[0], self.store.type_label_for(*pk))
         if ident not in self._key_cache:
             self._key_cache[ident] = self.cd.find(ident[0], type_label=ident[1],
@@ -233,13 +188,7 @@ class ClassifierSession:
         return self._key_cache[ident]
 
     def admit(self, pairs=None, only: str = None) -> list[tuple]:
-        """Turn predictions into real group tags, selecting the pairs as it goes.
-
-        *pairs* defaults to everything still pending. *only* admits one label
-        rather than all of a pair's, since a prediction is often partly right.
-        Returns the group changes made, so a caller with an undo stack can
-        reverse them.
-        """
+        """Turn predictions into real group tags, selecting the pairs as it goes."""
         changes = []
         for pk in (self.store.review_order(self.sd.groups) if pairs is None
                    else list(pairs)):
@@ -252,11 +201,7 @@ class ClassifierSession:
         return changes
 
     def retract(self, pk: tuple, label: str) -> list[tuple]:
-        """Send an admitted label back to pending, untagging the pair.
-
-        Losing its last shape tag returns the pair to unselected, so admitting
-        and retracting are symmetric rather than leaving it selected but untagged.
-        """
+        """Send an admitted label back to pending, untagging the pair."""
         key = self.key_of(pk)
         if key is not None:
             self.sd.tag_pair(key, (pk[1], pk[2]), label, add=False)

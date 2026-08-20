@@ -17,7 +17,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from neuropy.classifier.dataset import is_shape_label
+from neuropy.analyses.utils import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.ui_common import SelectionCommand
 from neuropy.ui.utils import (BusyButton, ListPickerButton, TagChip,
@@ -82,7 +82,7 @@ class _ClassifyWorker(QObject):
         names = o['model_names']
         if len(names) > 1 and not o['route']:
             return self._train_cascade(names)
-        result = self._fit(names, saved_names(o)[0])
+        result = self._fit(names, o['save_as'])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -649,8 +649,7 @@ class ClassifierDialog(QDialog):
 
     def _still_tagged(self, pk: tuple) -> bool:
         """True while the pair carries any shape tag — an admitted marker is not one."""
-        return any(is_shape_label(g)
-                   for g in self._win.nav.groups.groups_for_pair(*pk))
+        return self._win.nav.sd.has_shape_tag(pk[0], (pk[1], pk[2]))
 
     def _push_undo(self, group_changes: list, pair_changes: dict = None):
         """Record group edits on the pair panel's stack so Ctrl+Z reaches them.
@@ -791,6 +790,7 @@ def _cell(val: str) -> QTableWidgetItem:
 
 
 def _fill_rows(table: QTableWidget, rows: list[list[str]]):
+    table.clearContents()   # setRowCount alone leaves stale cell widgets behind
     table.setRowCount(len(rows))
     for i, cells in enumerate(rows):
         for col, val in enumerate(cells):
@@ -800,13 +800,12 @@ def _fill_rows(table: QTableWidget, rows: list[list[str]]):
 class StrategyScoresDialog(QDialog):
     """How every strategy scored on one label, best first — why the router chose."""
 
-    def __init__(self, parent, label: str, per_strategy: dict, chosen: str):
+    def __init__(self, parent, label: str, by_strategy: dict, chosen: str):
         super().__init__(parent)
         self.setWindowTitle(f"{label}: every strategy")
         self.resize(380, 320)
         lay = QVBoxLayout(self)
-        rows = [(n, s) for n, sc in per_strategy.items() if (s := sc.get(label))]
-        rows.sort(key=lambda ns: -ns[1]['f1'])
+        rows = sorted(by_strategy.items(), key=lambda ns: -ns[1]['f1'])
         table = read_only_table(['strategy', 'n', 'prec/rec', 'F1/AUC'])
         _fill_rows(table, [[f"{n} ←" if n == chosen else n] + _score_cells(s)
                            for n, s in rows])
@@ -869,13 +868,16 @@ class ManageModelsDialog(QDialog):
         _fill_rows(self.stats_table,
                    [[label, routes.get(label) or meta['model_key']] + _score_cells(s)
                     for label, s in ranked])
+        if len(per_strategy) < 2:
+            return
         for i, (label, _) in enumerate(ranked):
-            if len(per_strategy) < 2:
-                continue
             btn = QPushButton("more info")
+            # Slice per row: the button outlives this call, so it holds one
+            # label's scores rather than the whole provenance table.
+            mine = {n: sc[label] for n, sc in per_strategy.items() if label in sc}
             btn.clicked.connect(
-                lambda _=False, l=label: StrategyScoresDialog(
-                    self, l, per_strategy, routes.get(l, '')).exec())
+                lambda _=False, l=label, ps=mine, c=routes.get(label, ''):
+                    StrategyScoresDialog(self, l, ps, c).exec())
             self.stats_table.setCellWidget(i, 5, btn)
 
     def _on_rename_btn(self):

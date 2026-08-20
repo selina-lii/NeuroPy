@@ -380,12 +380,7 @@ class SelectionDataset(JsonSavable, Autosave):
             self.sessions[nd] = sd
 
     def flush_tags(self) -> None:
-        """Copy live group membership into each bucket's ``tags``, ready to write.
-
-        ``groups`` is the source of truth while the project is open; ``tags`` is
-        how that reaches disk. Rewriting the whole key rather than patching it
-        means a tag removed in this session cannot survive in the file.
-        """
+        """Copy live group membership into each bucket's ``tags``, ready to write."""
         for sel in self.sessions.values():
             if sel._nd_key is None:   # placeholder with no nd-key → nothing to tag
                 continue
@@ -399,12 +394,7 @@ class SelectionDataset(JsonSavable, Autosave):
                         bucket.tags.setdefault(pair, {})['groups'] = names
 
     def save_as(self, *names: str) -> list[str]:
-        """Write every session's selections, under ``latest`` and/or named snapshots.
-
-        ``latest`` is ``<session>.json``, the file the next open reads; any other
-        name is a snapshot beside it that nothing overwrites. Tags are flushed
-        first, so a snapshot always carries the tags that were on screen.
-        """
+        """Write every session's selections, under ``latest`` and/or named snapshots."""
         self.flush_tags()
         written = []
         for name in (names or ('latest',)):
@@ -432,10 +422,6 @@ class SelectionDataset(JsonSavable, Autosave):
     def tag_pair(self, key: Key, pair: tuple, gname: str,
                  add: bool = True, move: bool = True) -> tuple:
         """Add or remove one group tag, moving the pair between the lists to match.
-
-        Tagging a pair selects it and untagging its last shape label puts it back.
-        This is the one place that rule lives; the pair panel and the classifier
-        both come here rather than each spelling it out.
 
         Returns ``(group_change, pair_change)`` for the undo stack, either of
         which is ``None`` when nothing moved.
@@ -475,12 +461,7 @@ class SelectionDataset(JsonSavable, Autosave):
         b.reset(set())
 
     def load_all(self) -> 'SelectionDataset':
-        """Read every session's saved selections, without a UI browsing to them.
-
-        The UI accumulates sessions as the user visits them; a script has no such
-        walk, so it asks for the whole project at once. Snapshot files
-        (``<session>__<name>.json``) are skipped — only ``latest`` is the state.
-        """
+        """Read every session's saved selections, without a UI browsing to them."""
         names = [os.path.basename(p)[:-5]
                  for p in sorted(glob.glob(os.path.join(self.save_dir, '*.json')))]
         self.ensure_groups_loaded_for(

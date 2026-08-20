@@ -683,22 +683,14 @@ _NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', '?'}
 
 
 def is_admitted_group(name: str) -> bool:
-    """True for the marker recording which model proposed an accepted pair.
-
-    Both spellings count: ``ADMITTED_PREFIX`` names the model, and the bare
-    ``__admitted__`` is the pre-per-model marker still in saved group files.
-    These are machine bookkeeping — never displayed, never trained on.
-    """
+    """True for the marker recording which model proposed an accepted pair."""
     name = str(name)
+    # Bare '__admitted__' is the pre-per-model marker, still in saved files.
     return name.startswith(ADMITTED_PREFIX) or name.startswith('__admitted__')
 
 
 def is_shape_label(name: str) -> bool:
-    """True for labels describing CCG shape — the only ones worth learning.
-
-    Excludes markers and the notes a labeler leaves for themselves, which name a
-    saved view or a confidence rather than anything visible in the CCG.
-    """
+    """True for labels describing CCG shape — the only ones worth learning."""
     return (not is_admitted_group(name) and not is_special_group(name)
             and name not in _NON_SHAPE)
 
