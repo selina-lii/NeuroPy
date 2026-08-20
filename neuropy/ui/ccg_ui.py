@@ -413,6 +413,9 @@ class CCGReviewUI(QMainWindow):
         self.nav.apply_sel_for_key(self.nav.key)
 
         self.pairs_view.pair_selection.refresh_lists()
+        self.prediction_store = None   # predictions name pairs of the project that made them
+        if self.classifier_dialog is not None:
+            self.classifier_dialog.refresh_scope()   # non-modal: may be open right now
         self._post_load_refresh()
 
     def _panel_target(self, attr: str):

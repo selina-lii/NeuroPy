@@ -608,11 +608,31 @@ class ClassifierDialog(QDialog):
             self.saved_combo.setCurrentIndex(max(0, self.saved_combo.findData(keep)))
         self.apply_btn.setEnabled(self.saved_combo.count() > 0)
 
+    def refresh_scope(self):
+        """Re-read every picker from the live project.
+
+        The dialog outlives a project switch, and its options were read once at
+        construction — stale session names match no key in the new project, so
+        the scope comes out empty and nothing can be scored.
+        """
+        nav = self._win.nav
+        for picker, provider in ((self.session_picker, nav.available_sessions),
+                                 (self.type_picker, nav.available_conn_types),
+                                 (self.label_picker, self._shape_labels),
+                                 (self.extra_picker, self._other_projects)):
+            picker.set_items(provider(), keep_selection=True)
+        self.name_edit.setText(self._win.cd.conf.name)
+        self.status_label.setText(self._describe_existing())
+        self.refresh_saved()
+        self._reload()
+
     @classmethod
     def show_for(cls, win: 'CCGReviewUI'):
         """Open (or resurface) the one classifier dialog for *win*."""
         if win.classifier_dialog is None:
             win.classifier_dialog = cls(win)
+        else:
+            win.classifier_dialog.refresh_scope()
         win.classifier_dialog.show()
         win.classifier_dialog.raise_()
         return win.classifier_dialog
