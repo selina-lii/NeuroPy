@@ -20,12 +20,14 @@ from pyqtgraph.Qt.QtWidgets import (
 from neuropy.classifier.dataset import is_shape_label
 from neuropy.classifier.models import MODELS, UNSURE
 from neuropy.ui.ui_common import SelectionCommand
-from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip, read_only_table
+from neuropy.ui.utils import (BusyButton, ListPickerButton, TagChip,
+                              confirm_overwrite, read_only_table)
 from neuropy.classifier.predictions import (PredictionStore, by_owner,
                                             prior_admissions, store_from_rows)
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
                                     delete_model, list_models, missing_highres,
-                                    open_projects, predict_project, rename_model,
+                                    model_path, open_projects, predict_project,
+                                    rename_model,
                                     scope_keys, scorable_keys, train_project)
 
 if TYPE_CHECKING:
@@ -40,6 +42,14 @@ LABEL_FAMILIES = {
     'rhythm': ['rhythm', '0rhythm', 'burst', 'bimodal'],
     'inhibition': ['ppinhib', 'inhib2sides', 'Disinhib', 'I-I-flip'],
 }
+
+
+def saved_names(opts: dict) -> list[str]:
+    """Every classifier name a training run will write, cascade heads included."""
+    names = opts['model_names']
+    if len(names) > 1 and not opts['route']:
+        return [f"{opts['save_as']}.{n}" for n in names]
+    return [opts['save_as']]
 
 
 class _ClassifyWorker(QObject):
@@ -72,7 +82,7 @@ class _ClassifyWorker(QObject):
         names = o['model_names']
         if len(names) > 1 and not o['route']:
             return self._train_cascade(names)
-        result = self._fit(names, o['save_as'])
+        result = self._fit(names, saved_names(o)[0])
         keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
         rows = predict_project(self._cd, result['model'], keys)
         result['skipped'] = skipped
@@ -91,7 +101,8 @@ class _ClassifyWorker(QObject):
     def _train_cascade(self, names: list[str]) -> dict:
         """Train one model per strategy, then let each claim what the earlier missed."""
         o = self._opts
-        heads = [self._fit([name], f"{o['save_as']}.{name}") for name in names]
+        heads = [self._fit([name], save_as)
+                 for name, save_as in zip(names, saved_names(o))]
         out = apply_cascade(self._cd, [h['saved_as'] for h in heads], o['scope'])
         result = dict(heads[-1])
         result['saved_as'] = ' → '.join(h['saved_as'] for h in heads)
@@ -367,6 +378,10 @@ class ClassifierDialog(QDialog):
     def _launch(self, saved: str | None):
         opts = self._options(saved)
         if saved and not self._confirm_reapply(saved, opts['scope']):
+            return
+        if not saved and not all(
+                confirm_overwrite(self, model_path(self._win.cd, n), 'classifier')
+                for n in saved_names(opts)):
             return
         missing = missing_highres(self._win.cd, opts['scope']) if opts['highres'] else []
         if missing and not self._confirm_highres(missing):

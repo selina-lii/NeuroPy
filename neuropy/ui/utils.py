@@ -9,6 +9,7 @@ PairListWidget — QListWidget with tkinter-compat helpers and key forwarding.
 from __future__ import annotations
 
 import inspect
+import os
 from typing import Any, Callable, TYPE_CHECKING
 
 import pyqtgraph as pg
@@ -23,7 +24,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
     QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog,
-    QTableWidget,
+    QMessageBox, QTableWidget,
 )
 
 from neuropy.ui.ui_common import qt_dark_mode
@@ -1199,3 +1200,15 @@ def read_only_table(headers: list[str]) -> QTableWidget:
     t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     t.verticalHeader().setVisible(False)
     return t
+
+
+def confirm_overwrite(parent, path: str, what: str = 'file') -> bool:
+    """True to go ahead: either nothing is there, or the user agreed to replace it."""
+    if not os.path.exists(path):
+        return True
+    return QMessageBox.question(
+        parent, f"Overwrite {what}?",
+        f"{what.capitalize()} '{os.path.basename(path)}' already exists in "
+        f"{os.path.dirname(path)}.\n\nReplace it?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
