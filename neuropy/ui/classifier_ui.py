@@ -165,7 +165,10 @@ class ClassifierDialog(QDialog):
     def _build(self):
         # Training above, review below: two jobs that compete for height, so the
         # sash lets whichever one is in use take the space.
-        outer = QVBoxLayout(self)
+        self.body = QWidget()   # the panel re-parents this; the dialog just holds it
+        QVBoxLayout(self).addWidget(self.body)
+        outer = QVBoxLayout(self.body)
+        outer.setContentsMargins(0, 0, 0, 0)
         self._splitter = QSplitter(Qt.Vertical)
         outer.addWidget(self._splitter)
         train_box, lay = QWidget(), QVBoxLayout()
@@ -320,7 +323,7 @@ class ClassifierDialog(QDialog):
         lay.addLayout(act)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        bb.rejected.connect(self.reject)
+        bb.rejected.connect(self._on_close_btn)
         outer.addWidget(bb)
         self._splitter.setStretchFactor(1, 1)   # review pane absorbs resizes
         self.refresh_saved()
@@ -766,15 +769,18 @@ class ClassifierDialog(QDialog):
         self.refresh_saved()
         self._reload()
 
+    def _on_close_btn(self):
+        """Close means 'give the left panel back' — the run state stays put."""
+        self._win.show_pair_selection()
+
     @classmethod
     def show_for(cls, win: 'CCGReviewUI'):
-        """Open (or resurface) the one classifier dialog for *win*."""
+        """Open (or resurface) the one classifier for *win*, in the left panel."""
         if win.classifier_dialog is None:
             win.classifier_dialog = cls(win)
         else:
             win.classifier_dialog.refresh_scope()
-        win.classifier_dialog.show()
-        win.classifier_dialog.raise_()
+        win.show_classifier(win.classifier_dialog.body)
         return win.classifier_dialog
 
 

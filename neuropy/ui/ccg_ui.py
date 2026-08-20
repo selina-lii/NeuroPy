@@ -11,6 +11,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QApplication,
     QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton, QScrollArea,
+    QStackedWidget,
 )
 from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
 from neuropy.analyses.neurons_dataset import Key
@@ -314,9 +315,13 @@ class CCGReviewUI(QMainWindow):
             self.ui_states.panel_state)
         lft_layout = QVBoxLayout(left_frame)
         lft_layout.setContentsMargins(0, 0, 0, 0)
-        _lft_title = QLabel("Pair Selection"); _lft_title.setStyleSheet("font-weight:bold;padding:2px 4px;")
-        lft_layout.addWidget(_lft_title)
-        lft_layout.addWidget(self.pairs_view)
+        self.left_title = QLabel("Pair Selection")
+        self.left_title.setStyleSheet("font-weight:bold;padding:2px 4px;")
+        lft_layout.addWidget(self.left_title)
+        # Classify takes over this column when open; Close hands it back.
+        self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(self.pairs_view)
+        lft_layout.addWidget(self.left_stack)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -463,6 +468,17 @@ class CCGReviewUI(QMainWindow):
 
     def _run_classifier(self):
         ClassifierDialog.show_for(self)
+
+    def show_classifier(self, body) -> None:
+        """Put the classifier in the left column, in place of pair selection."""
+        if self.left_stack.indexOf(body) < 0:
+            self.left_stack.addWidget(body)
+        self.left_stack.setCurrentWidget(body)
+        self.left_title.setText("Classify pairs")
+
+    def show_pair_selection(self) -> None:
+        self.left_stack.setCurrentWidget(self.pairs_view)
+        self.left_title.setText("Pair Selection")
 
     def _apply_min_font_size(self, size: int) -> None:
         app = QApplication.instance()
