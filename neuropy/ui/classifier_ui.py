@@ -44,6 +44,13 @@ LABEL_FAMILIES = {
 }
 
 
+def _tight(box):
+    """A control row with no padding around it and none between its widgets."""
+    box.setContentsMargins(0, 0, 0, 0)
+    box.setSpacing(2)
+    return box
+
+
 def saved_names(opts: dict) -> list[str]:
     """Every classifier name a training run will write, cascade heads included."""
     names = opts['model_names']
@@ -171,11 +178,11 @@ class ClassifierDialog(QDialog):
         outer.setContentsMargins(0, 0, 0, 0)
         self._splitter = QSplitter(Qt.Vertical)
         outer.addWidget(self._splitter)
-        train_box, lay = QWidget(), QVBoxLayout()
+        train_box, lay = QWidget(), _tight(QVBoxLayout())
         train_box.setLayout(lay)
         self._splitter.addWidget(train_box)
 
-        row = QHBoxLayout()
+        row = _tight(QHBoxLayout())
         row.addWidget(QLabel("Model:"))
         # Ordered: several strategies train as a cascade of heads, each claiming
         # the labels the earlier ones left, so the order is the priority.
@@ -219,7 +226,7 @@ class ClassifierDialog(QDialog):
         # Scope narrows which pairs get scored. Every picker starts with all of
         # its options selected, so out of the box the whole loaded project is used.
         nav = self._win.nav
-        scope_row = QHBoxLayout()
+        scope_row = _tight(QHBoxLayout())
         scope_row.addWidget(QLabel("Scope:"))
         self.session_picker = ListPickerButton(
             "Session", nav.available_sessions(), plural="sessions",
@@ -256,7 +263,7 @@ class ClassifierDialog(QDialog):
 
         # Applying a model trained elsewhere is the cross-project path: one
         # picker and one button, sharing the training run's worker and handlers.
-        saved_row = QHBoxLayout()
+        saved_row = _tight(QHBoxLayout())
         saved_row.addWidget(QLabel("Saved:"))
         self.saved_combo = QComboBox()
         self.saved_combo.setMinimumWidth(240)
@@ -278,10 +285,10 @@ class ClassifierDialog(QDialog):
 
         # Review lives here rather than in a second dialog: the scores are already
         # in the status line, so the space belongs to the pairs being judged.
-        review_box, lay = QWidget(), QVBoxLayout()
+        review_box, lay = QWidget(), _tight(QVBoxLayout())
         review_box.setLayout(lay)
         self._splitter.addWidget(review_box)
-        filt = QHBoxLayout()
+        filt = _tight(QHBoxLayout())
         filt.addWidget(QLabel("Label:"))
         self.label_combo = QComboBox()
         self.label_combo.currentIndexChanged.connect(self._reload)
@@ -306,7 +313,7 @@ class ClassifierDialog(QDialog):
         self.table.itemSelectionChanged.connect(self._on_table_selection)
         lay.addWidget(self.table, stretch=1)
 
-        act = QHBoxLayout()
+        act = _tight(QHBoxLayout())
         self.accept_btn = QPushButton("Accept (tag pair)")
         self.accept_btn.clicked.connect(self._on_accept_btn)
         act.addWidget(self.accept_btn)
