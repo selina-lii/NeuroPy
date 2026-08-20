@@ -333,7 +333,7 @@ class ListPickerButton(QPushButton):
 
     def __init__(self, title: str, items: list[str] = (), plural: str = "items",
                  refresh_provider=None, select_all_when_empty: bool = True,
-                 add_name: str = None, parent=None):
+                 add_name: str = None, ordered: bool = False, parent=None):
         super().__init__(parent)
         self._title  = title
         self._plural = plural
@@ -342,6 +342,7 @@ class ListPickerButton(QPushButton):
         self._selected: list[str] = list(items) if select_all_when_empty else []
         self._refresh_provider = refresh_provider   # callable → fresh item list, or None
         self._add_name = add_name                   # non-None → dialog offers "Add <name>…"
+        self._ordered = ordered                     # drag to reorder; selection keeps list order
         self._update_label()
         self.clicked.connect(self._open_dialog)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -361,7 +362,9 @@ class ListPickerButton(QPushButton):
 
     def set_selected(self, selected: list[str]):
         want = set(selected)
-        self._selected = [x for x in self._items if x in want]
+        # An ordered picker's selection IS the order, so it is taken as given.
+        self._selected = ([x for x in selected if x in self._items] if self._ordered
+                          else [x for x in self._items if x in want])
         if not self._selected and self._select_all_when_empty:
             self._selected = list(self._items)
         self._update_label()
@@ -377,12 +380,20 @@ class ListPickerButton(QPushButton):
         lay = QVBoxLayout(dlg)
         lst = QListWidget()
         lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        if self._ordered:
+            lst.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+            lay.addWidget(QLabel("Drag to set the order they run in."))
 
         def _populate():
             keep = {lst.item(i).text() for i in range(lst.count())
                     if lst.item(i).isSelected()} or set(self._selected)
             lst.clear()
-            for item in self._items:
+            # Ordered pickers list the chosen items first, in their run order, so
+            # the sequence reads off the top of the list.
+            items = ([x for x in self._selected if x in self._items]
+                     + [x for x in self._items if x not in self._selected]
+                     if self._ordered else self._items)
+            for item in items:
                 it = QListWidgetItem(item)
                 lst.addItem(it)
                 if item in keep:

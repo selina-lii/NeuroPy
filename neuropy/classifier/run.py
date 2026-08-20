@@ -158,14 +158,19 @@ def apply_model(cd, name: str, scope: list = None) -> dict:
 
 
 def apply_cascade(cd, names: list[str], scope: list = None) -> dict:
-    """Apply saved classifiers in order, each seeing only what the earlier ones missed.
+    """Apply models in order, each label decided by the first model to claim it.
 
-    A pair labeled by an earlier model is not offered to a later one, so the
-    order is a priority: put the model you trust most first. This is the cheap
-    way to combine specialists (one trained on quality grades, one on the fast
-    patterns) without training a joint model over their union of labels.
+    Every model sees every pair. What an earlier model already found on a pair is
+    kept; a later model may still add labels the earlier one did not give it, so
+    a series of heads discovers more than any one of them alone. Order is a
+    priority: the first model to claim a label owns it, so put the model you
+    trust most first.
+
+    Each row carries ``by``: ``{label: model}``, so the review UI can show which
+    head proposed what.
     """
-    rows, labels, decided, skipped = [], [], set(), set()
+    rows: dict[tuple, dict] = {}
+    labels, skipped = [], set()
     for name in names:
         out = apply_model(cd, name, scope)
         skipped.update(out['skipped'])
@@ -173,12 +178,21 @@ def apply_cascade(cd, names: list[str], scope: list = None) -> dict:
             if label not in labels:
                 labels.append(label)
         for row in out['rows']:
-            pk = (str(row['key'].session), row['ref'], row['tgt'])
-            if pk in decided or not row['labels']:
+            if not row['labels']:
                 continue
-            rows.append({**row, 'model': name})
-            decided.add(pk)
-    return {'rows': rows, 'labels': labels, 'skipped': sorted(skipped)}
+            pk = (str(row['key'].session), row['ref'], row['tgt'])
+            prev = rows.get(pk)
+            if prev is None:
+                rows[pk] = {**row, 'by': {l: name for l in row['labels']}}
+                continue
+            for label in row['labels']:
+                if label in prev['by']:      # an earlier head already claimed it
+                    continue
+                prev['labels'].append(label)
+                prev['scores'][label] = row['scores'].get(label, 0.0)
+                prev['by'][label] = name
+    return {'rows': list(rows.values()), 'labels': labels,
+            'skipped': sorted(skipped)}
 
 
 def scope_keys(cd, sessions: list = None, type_labels: list = None) -> list:

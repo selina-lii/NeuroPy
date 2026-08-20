@@ -23,10 +23,10 @@ from neuropy.ui.ui_common import SelectionCommand
 from neuropy.ui.utils import BusyButton, ListPickerButton, TagChip
 from neuropy.classifier.predictions import (PredictionStore, prior_admissions,
                                             store_from_rows)
-from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, delete_model,
-                                    list_models, missing_highres, open_projects,
-                                    predict_project, rename_model, scope_keys,
-                                    scorable_keys, train_project)
+from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
+                                    delete_model, list_models, missing_highres,
+                                    open_projects, predict_project, rename_model,
+                                    scope_keys, scorable_keys, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -62,16 +62,34 @@ class _ClassifyWorker(QObject):
         self.done.emit(result)
 
     def _train(self) -> dict:
+        """Train one head per chosen strategy, then cascade them in that order.
+
+        Each head learns the same labels its own way; the cascade lets a later
+        one claim what an earlier one missed, so a series discovers more tags
+        than any single strategy.
+        """
         o = self._opts
-        result = train_project(self._cd, o['model_name'], figures=o['figures'],
-                               save_as=o['save_as'], extra=o['extra'],
-                               highres=o['highres'], min_count=o['min_count'],
-                               bias=o['bias'], only_labels=o['only_labels'])
-        keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
-        rows = predict_project(self._cd, result['model'], keys)
+        names = o['model_names']
+        heads = []
+        for i, model_name in enumerate(names):
+            save_as = o['save_as'] if len(names) == 1 else f"{o['save_as']}.{model_name}"
+            result = train_project(self._cd, model_name, figures=o['figures'],
+                                   save_as=save_as, extra=o['extra'],
+                                   highres=o['highres'], min_count=o['min_count'],
+                                   bias=o['bias'], only_labels=o['only_labels'])
+            heads.append(result)
+        result = heads[0] if len(heads) == 1 else dict(heads[-1])
+        if len(heads) == 1:
+            keys, skipped = scorable_keys(self._cd, result['model'], o['scope'])
+            rows = predict_project(self._cd, result['model'], keys)
+            labels = result['model'].label_names
+        else:
+            out = apply_cascade(self._cd, [h['saved_as'] for h in heads], o['scope'])
+            rows, labels, skipped = out['rows'], out['labels'], out['skipped']
+            result['saved_as'] = ' → '.join(h['saved_as'] for h in heads)
+            result['heads'] = [h['summary'] for h in heads]
         result['skipped'] = skipped
-        result['store'] = store_from_rows(rows, result['saved_as'],
-                                          result['model'].label_names)
+        result['store'] = store_from_rows(rows, result['saved_as'], labels)
         return result
 
     def _apply(self) -> dict:
@@ -135,11 +153,13 @@ class ClassifierDialog(QDialog):
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Model:"))
-        self.model_combo = QComboBox()
-        for name in MODELS:
-            self.model_combo.addItem(name)
-        self.model_combo.setCurrentText(DEFAULT_MODEL)
-        row.addWidget(self.model_combo)
+        # Ordered: several strategies train as a cascade of heads, each claiming
+        # the labels the earlier ones left, so the order is the priority.
+        self.model_picker = ListPickerButton(
+            "Model", list(MODELS), plural="models",
+            select_all_when_empty=False, ordered=True)
+        self.model_picker.set_selected([DEFAULT_MODEL])
+        row.addWidget(self.model_picker)
         self.bias_combo = QComboBox()
         for mode, tip in (('discover', "find as many true pairs as possible"),
                           ('balanced', "even trade of coverage against errors"),
@@ -312,7 +332,7 @@ class ClassifierDialog(QDialog):
     def _options(self, saved: str | None) -> dict:
         """Everything the worker needs, read once off the widgets."""
         return {'saved': saved,
-                'model_name': self.model_combo.currentText(),
+                'model_names': self.model_picker.selected or [DEFAULT_MODEL],
                 'bias': self.bias_combo.currentText(),
                 'save_as': self.name_edit.text().strip() or self._win.cd.conf.name,
                 'figures': self.figures_check.isChecked(),
@@ -510,21 +530,39 @@ class ClassifierDialog(QDialog):
         leaves the pair's other predictions on the table, still to be judged.
         """
         cell = QWidget()
-        row = QHBoxLayout(cell)
-        row.setContentsMargins(2, 1, 2, 1)
-        row.setSpacing(TagChip.GAP)
+        col = QVBoxLayout(cell)
+        col.setContentsMargins(2, 1, 2, 1)
+        col.setSpacing(1)
         groups = self._win.nav.groups
         labels = (self._store.taken(*pk, groups) if taken
                   else self._store.pending(*pk, groups))
-        for label in labels + (['all'] if len(labels) > 1 and not taken else []):
-            colour = ('' if label == 'all'
-                      else groups.get_group_metadata(label).display_color)
-            chip = _AcceptChip(label, colour, '' if label == 'all' else label)
-            chip.clicked.connect(
-                (lambda only, p=pk: self._unaccept_one(p, only)) if taken
-                else (lambda only, p=pk: self._accept_one(p, only)))
+        # One line per head that proposed something, so a cascade reads
+        # "conv: [best] [refractory] / kernel: [burst]".
+        lines = self._store.by_model(*pk, labels)
+        for model, names in lines:
+            row = QHBoxLayout()
+            row.setSpacing(TagChip.GAP)
+            if len(lines) > 1:
+                tag = QLabel(f"{model}:")
+                tag.setStyleSheet("color: gray;")
+                row.addWidget(tag)
+            for label in names:
+                chip = _AcceptChip(label, groups.get_group_metadata(label).display_color,
+                                   label)
+                chip.clicked.connect(
+                    (lambda only, p=pk: self._unaccept_one(p, only)) if taken
+                    else (lambda only, p=pk: self._accept_one(p, only)))
+                row.addWidget(chip)
+            row.addStretch()
+            col.addLayout(row)
+        if len(labels) > 1 and not taken:
+            row = QHBoxLayout()
+            row.setSpacing(TagChip.GAP)
+            chip = _AcceptChip('all', '', '')
+            chip.clicked.connect(lambda only, p=pk: self._accept_one(p, only))
             row.addWidget(chip)
-        row.addStretch()
+            row.addStretch()
+            col.addLayout(row)
         return cell
 
     def _accept(self, pairs: list[tuple], only: str = None):

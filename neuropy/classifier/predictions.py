@@ -48,12 +48,30 @@ class PredictionStore:
         return (str(session), int(ref), int(tgt))
 
     def add(self, session: str, ref: int, tgt: int, labels: list[str],
-            scores: dict[str, float], type_label: str = ''):
+            scores: dict[str, float], type_label: str = '', by: dict = None):
         # type_label is kept so the review list can navigate to a pair that
         # lives under a different conn type than the one currently shown.
+        # by maps label -> model that proposed it, empty for a single model.
         self.rows[self._pk(session, ref, tgt)] = {'labels': list(labels),
                                                   'scores': dict(scores),
-                                                  'type_label': type_label}
+                                                  'type_label': type_label,
+                                                  'by': dict(by or {})}
+
+    def by_model(self, session: str, ref: int, tgt: int,
+                 labels: list[str] = None) -> list[tuple]:
+        """``[(model, [label, ...]), ...]`` grouped by which head proposed each label.
+
+        One model gives one group; a cascade gives one line per head, in the
+        order they ran, so the origin of every chip is visible.
+        """
+        row = self.rows.get(self._pk(session, ref, tgt))
+        if not row:
+            return []
+        names = self.labels_for(session, ref, tgt) if labels is None else labels
+        out: dict[str, list] = {}
+        for label in names:
+            out.setdefault(row['by'].get(label, self.model_name), []).append(label)
+        return list(out.items())
 
     def labels_for(self, session: str, ref: int, tgt: int) -> list[str]:
         row = self.rows.get(self._pk(session, ref, tgt))
@@ -185,7 +203,8 @@ class PredictionStore:
         store = cls(doc.get('model', ''), doc.get('labels', []))
         for row in doc.get('rows', []):
             store.add(row['session'], row['ref'], row['tgt'],
-                      row['labels'], row['scores'], row.get('type_label', ''))
+                      row['labels'], row['scores'], row.get('type_label', ''),
+                      row.get('by'))
         for s, r, t, *rest in doc.get('accepted', []):
             pk = store._pk(s, r, t)
             # Pre-per-label files recorded only the pair: every label was taken.
@@ -200,5 +219,6 @@ def store_from_rows(rows: list[dict], model_name: str,
     store = PredictionStore(model_name, labels)
     for row in rows:
         store.add(str(row['key'].session), row['ref'], row['tgt'],
-                  row['labels'], row['scores'], row['key'].type_label())
+                  row['labels'], row['scores'], row['key'].type_label(),
+                  row.get('by'))
     return store

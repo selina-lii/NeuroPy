@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import os
+import shutil
 from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
@@ -305,6 +306,23 @@ class GroupDataset(JsonSavable, BiIndex):
         return sorted(self.registry, key=_gname_sort_key)
 
 
+def groups_dir(cd) -> str:
+    """Where groups.json lives: beside the projects, not inside one.
+
+    Tags name CCG shapes, which mean the same thing in every project, so one
+    registry serves all of them — the same reasoning that puts the trained
+    classifiers in ``data_root``. A project's own groups.json, from before this
+    was shared, is migrated up the first time it is the only copy.
+    """
+    root = str(cd.data_root)
+    shared, local = os.path.join(root, 'groups.json'), \
+        os.path.join(cd.selections_dir, 'groups.json')
+    if not os.path.isfile(shared) and os.path.isfile(local):
+        shutil.copyfile(local, shared)
+        print(f"[Groups] adopted {local} as the shared registry → {shared}")
+    return root
+
+
 class SelectionDataset(JsonSavable, Autosave):
     """Project-level owner of groups + per-session SelectionData.
 
@@ -317,7 +335,7 @@ class SelectionDataset(JsonSavable, Autosave):
         self.cd = cd
         save_dir = cd.selections_dir
         self.groups = groups_factory()
-        self.groups._save_dir = save_dir
+        self.groups._save_dir = groups_dir(cd)
         self.sessions: dict[Key, SelectionData] = {}
         self.save_dir = save_dir
 
@@ -326,11 +344,12 @@ class SelectionDataset(JsonSavable, Autosave):
 
     def __setstate__(self, state: dict):
         self.save_dir = state.get('save_dir', self.save_dir)
-        self.groups._save_dir = self.save_dir
+        # Groups are shared across projects, so their location is never restored
+        # from a saved file: an old one names the project that wrote it.
+        self.groups._save_dir = groups_dir(self.cd)
         groups_v = state.get('groups', {})
         if isinstance(groups_v, dict) and '__ref__' in groups_v:
-            path = groups_v['__ref__'][:-5]
-            self.groups.load(path)
+            self.groups.load(self.groups.save_path())
         else:
             self.groups.__setstate__(groups_v)
         self.sessions = {}
