@@ -58,7 +58,7 @@ def _np_assemble_spike_arrays(neurons, segments=None):
     # Get all sorted arrays
     spike_times = spike_times[sort_ind]
     spike_clusters = spike_clusters[sort_ind]
-    spike_samples = (spike_times * neurons.sampling_rate).astype(np.int32)
+    spike_samples = (spike_times * neurons.sampling_rate).astype(np.int64)
 
     if segments is not None:
         edges = np.concatenate([[0],
@@ -105,7 +105,7 @@ def _cp_assemble_spike_arrays(neurons, segments=None):
     # Get all sorted arrays
     spike_times = spike_times[sort_ind]
     spike_clusters = spike_clusters[sort_ind]
-    spike_samples = (spike_times * neurons.sampling_rate).astype(cp.int32)
+    spike_samples = (spike_times * neurons.sampling_rate).astype(cp.int64)
 
     if segments is not None:
         edges = np.concatenate([[0],
@@ -1293,13 +1293,6 @@ def spike_correlations(
     """
     Switch between spike correlation cases.
     """
-    n_total_spikes = sum(len(st) for st in neurons.spiketrains)
-    mode = ('snapshots' if start_end_times is not None
-            else '1toN' if (ref_neuron_inds is not None and one_to_many)
-            else '2groups' if ref_neuron_inds is not None
-            else 'all')
-    print(f"[spike_correlations] mode={mode}  n_neurons={neurons.n_neurons}  "
-          f"total_spikes={n_total_spikes}  bin={bin_size}  window={window_size}")
     if start_end_times is not None:
 
         spike_correlations_snapshots = cp_spike_correlations_snapshots \
@@ -1345,7 +1338,6 @@ def spike_correlations(
                                           bin_size=bin_size,
                                           window_size=window_size,
                                           symmetrize=symmetrize)
-    print(f"[spike_correlations] done  shape={correlograms.shape}")
     return correlograms
 
 

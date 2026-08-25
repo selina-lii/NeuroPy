@@ -225,6 +225,11 @@ class GroupDataset(JsonSavable, BiIndex):
     def special_groups(self) -> list[str]:
         return sorted(g for g in self.defined_groups if is_special_group(g))
 
+    def group_for_hotkey(self, key_str: str) -> str | None:
+        """Group a hotkey tags, or ``None`` when the key is unassigned."""
+        return next((g.name for g in self.registry.values()
+                     if g.hotkey and g.hotkey == key_str), None)
+
     def get_group_metadata(self, name: str) -> Group:
         if name not in self.registry:
             self.registry[name] = Group(name=name)

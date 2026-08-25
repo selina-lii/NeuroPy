@@ -6,6 +6,7 @@ import glob
 import os
 import pkgutil
 import shutil
+from collections import Counter
 from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
@@ -21,16 +22,17 @@ from pyqtgraph.Qt.QtWidgets import (
     QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog, QColorDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
-from neuropy.ui.ui_common import _SPECIAL_PREFIX
-from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig, build_project
+from neuropy.ui.ui_common import area_rgb, cell_areas, _SPECIAL_PREFIX
+from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig
 from neuropy.analyses.neurons_dataset import Key, NeuronsDatasetConfig
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io import datasets
-from neuropy.io.fieldmap import FieldMap
+from neuropy.io.fieldmap import Field, FieldMap, OPTIONAL
 from neuropy.io.nwbio import NWB_DEFAULT, UNITS_SCHEMA, NWBFile
 
 from neuropy.ui.utils import (ConfigOptionsWidget, FlowLayout, MetricInput, SideNavPanel,
-                              ValueMapEditor, chip_button, make_button, small_font_pt)
+                              ValueMapEditor, chip_button, make_button, regular_font_pt,
+                              small_font_pt)
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -1187,6 +1189,37 @@ class SettingsTabs:
         self._appliers.append(lambda: setattr(obj, attr, spin.value()))
         return spin
 
+    def _area_colors_row(self, layout, ui):
+        """One swatch per brain region, from the palette plus this session's own."""
+        colors = dict(ui.settings.area_colors)
+        present = cell_areas(getattr(ui, 'neurons', None))
+        for name in ({str(a) for a in present} if present is not None else set()):
+            colors.setdefault(name, list(area_rgb(name, colors)))
+
+        layout.addWidget(QLabel("Brain region colors:"))
+        grid = QWidget()
+        flow = FlowLayout(grid, spacing=6)
+        def paint(btn, name):
+            r, g, b = colors[name]
+            fg = '#fff' if (r * 299 + g * 587 + b * 114) / 1000 < 140 else '#222'
+            btn.setStyleSheet(f'background: rgb({r},{g},{b}); color: {fg}; '
+                              f'border: 1px solid #888; padding: 1px 8px;')
+
+        def pick(btn, name):
+            c = QColorDialog.getColor(QColor(*colors[name]), self, f'Colour for {name}')
+            if c.isValid():
+                colors[name] = [c.red(), c.green(), c.blue()]
+                paint(btn, name)
+
+        for name in sorted(colors):
+            btn = QPushButton(name)
+            btn.setFixedHeight(22)
+            paint(btn, name)
+            btn.clicked.connect(lambda _=False, b=btn, n=name: pick(b, n))
+            flow.addWidget(btn)
+        layout.addWidget(grid)
+        self._appliers.append(lambda: setattr(ui.settings, 'area_colors', colors))
+
     def _build(self):
         ui = self._ui
         nav = self.nav
@@ -1200,6 +1233,7 @@ class SettingsTabs:
                        on_live=lambda v: ui._apply_min_font_size(v))
         self._spin_row(dl, "Classifier: min pairs per label:", ui.settings,
                        'classifier_min_count', 5, 500)
+        self._area_colors_row(dl, ui)
         dl.addStretch()
         nav.add_page("Display", disp)
 
@@ -1316,6 +1350,15 @@ class _TargetBox(QFrame):
         self.updateGeometry()
 
 
+def _chip_ss(background: str = '', color: str = '') -> str:
+    """chip_button's own style, with the resting fill overridden."""
+    fill = f"background: {background}; color: {color};" if background else ''
+    return (f"QPushButton {{ border: 1px solid #aaa; border-radius: 3px; padding: 1px 6px; "
+            f"font-size: {regular_font_pt()}pt; {fill} }}"
+            "QPushButton:checked { background: #4a7fd4; color: white; border-color: #3366cc; }"
+            "QPushButton:hover { background: #dde; }")
+
+
 class FieldMapWidget(QWidget):
     """Edit a field map: source columns on the left, one target drop box per schema field."""
 
@@ -1325,6 +1368,8 @@ class FieldMapWidget(QWidget):
         self.available = available      # the dataset's real column names
         self.column_values = column_values   # NWBDataset.column_values, once a source is scanned
         self._boxes = {}                # field name -> _TargetBox
+        self._rows = {}                 # field name -> its QHBoxLayout
+        self._extra = set()             # names of the wildcard fields, not in the schema
         self._selected: _TargetBox = None
         self._build()
 
@@ -1345,31 +1390,87 @@ class FieldMapWidget(QWidget):
         right = QVBoxLayout()
         right.addWidget(QLabel("Target fields  (* required)"))
         for field in self.field_map.schema:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(field.name + (' *' if field.required else '')))
-            box = _TargetBox(field, self._on_target_box_click, self._on_unassign_chip)
-            box.setToolTip(field.note)
-            row.addWidget(box, stretch=1)
-            right.addLayout(row)
-            self._boxes[field.name] = box
+            self._add_row(right, field)
+        self._extra_rows = right          # extra fields append here, above the stretch
+        right.addWidget(make_button("+ Extra field…", self._on_add_extra_btn))
         right.addStretch()
         root.addLayout(right, stretch=2)
 
         self.set_available(self.available)
         self.set_mapping(self.field_map.mapping)
 
+    def _add_row(self, layout, field, extra: bool = False):
+        """One target field's label + drop box; extra ones also get a remove button."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel(field.name + (' *' if field.required else '')))
+        box = _TargetBox(field, self._on_target_box_click, self._on_unassign_chip)
+        box.setToolTip(field.note)
+        row.addWidget(box, stretch=1)
+        if extra:
+            row.addWidget(make_button("✕", lambda: self._remove_extra(field.name), width=24))
+            self._extra.add(field.name)
+        if extra:
+            layout.insertLayout(layout.count() - 2, row)   # above the button and the stretch
+        else:
+            layout.addLayout(row)
+        self._boxes[field.name] = box
+        self._rows[field.name] = row
+        return box
+
+    def _on_add_extra_btn(self):
+        """Name a field the schema does not have; its values land in Neurons.metadata."""
+        name, ok = QInputDialog.getText(self, "Extra field", "Name for this metadata field:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in self._boxes:
+            QMessageBox.information(self, "Extra field", f"'{name}' is already a field.")
+            return
+        field = Field(name, OPTIONAL, value_map=True,
+                      note=f"carried into Neurons.metadata['{name}']")
+        self._add_row(self._extra_rows, field, extra=True)
+
+    def _remove_extra(self, name: str):
+        row = self._rows.pop(name)
+        while row.count():
+            w = row.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+        self._extra_rows.removeItem(row)
+        self._boxes.pop(name)
+        self._extra.discard(name)
+        self._restyle_chips()
+
     def set_available(self, columns: list):
         """Repopulate the source chips from a dataset's real column names."""
         self.available = list(columns)
         self._source_flow.clear_widgets()
+        self._chips = {}
         for col in self.available:
             chip = chip_button(col, checkable=True)
             self._source_flow.addWidget(chip)
             chip.show()
+            self._chips[col] = chip
         self._source_host.updateGeometry()
+        self._restyle_chips()
+
+    def _restyle_chips(self):
+        """Gray a column already assigned somewhere — still reusable, just spoken for."""
+        assigned = {c for box in self._boxes.values() for c in box.columns}
+        for col, chip in self._chips.items():
+            chip.setStyleSheet(_chip_ss('#e0e0e0', '#777') if col in assigned else _chip_ss())
 
     def set_mapping(self, mapping: dict):
         """Fill the target boxes from a {"target": "input"} dict, value maps included."""
+        for name in list(self._extra):
+            self._remove_extra(name)
+        extra = mapping.get(FieldMap.EXTRA) or {}
+        for name in extra:
+            self._add_row(self._extra_rows,
+                          Field(name, OPTIONAL, value_map=True,
+                                note=f"carried into Neurons.metadata['{name}']"),
+                          extra=True)
+        mapping = {**{k: v for k, v in mapping.items() if k != FieldMap.EXTRA}, **extra}
         for name, box in self._boxes.items():
             value = mapping.get(name)
             if isinstance(value, dict):
@@ -1412,6 +1513,7 @@ class FieldMapWidget(QWidget):
             box.needs_map = not any(box.value_map.get(v, v) in box.field.values
                                     for v in values)
         box.restyle()
+        self._restyle_chips()
 
     def _map_values(self, box: '_TargetBox'):
         """Open the value editor for the assigned column."""
@@ -1429,7 +1531,13 @@ class FieldMapWidget(QWidget):
 
     def mapping(self) -> dict:
         """The {"target": "input"} dict this widget describes, value maps included."""
-        return {name: box.binding() for name, box in self._boxes.items() if box.columns}
+        out = {name: box.binding() for name, box in self._boxes.items()
+               if box.columns and name not in self._extra}
+        extra = {name: self._boxes[name].binding() for name in self._extra
+                 if self._boxes[name].columns}
+        if extra:
+            out[FieldMap.EXTRA] = extra
+        return out
 
 
 class AddProjectDialog(QDialog):
@@ -1440,7 +1548,12 @@ class AddProjectDialog(QDialog):
         self.nav = nav
         self._out = None
         self._dataset = None    # NWBDataset, set once a source folder is scanned
-        self.setWindowTitle("Add Project")
+        self._rate_overrides: dict = {}
+        self._rate_inferred = False
+        self._editing = draft.name if (draft is not None and draft.built) else None
+        self._verb = "Update" if self._editing else "Build"
+        self.setWindowTitle(f"Edit Project — {self._editing}" if self._editing
+                            else "Add Project")
         self._build()
         if draft is not None:
             self._restore_draft(draft)
@@ -1493,7 +1606,7 @@ class AddProjectDialog(QDialog):
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                               QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Build project")
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText(f"{self._verb} project")
         bb.accepted.connect(self._on_accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
@@ -1527,7 +1640,10 @@ class AddProjectDialog(QDialog):
         self._format_combo.setCurrentText(draft.format)
         self._dataset_name = draft.dataset
         self._rate_edit.setText('' if draft.sampling_rate is None else str(draft.sampling_rate))
-        self._scan_source(draft.source, draft.fields)   # its own mapping, never a default
+        self._rate_inferred = draft.sampling_rate_inferred
+        self._rate_overrides = dict(draft.sampling_rate_overrides)
+        if draft.source:   # a ProcessData project has no scannable source to reread
+            self._scan_source(draft.source, draft.fields)   # its own mapping, never a default
         for name, value in (draft.nd_conf or {}).items():
             self._nd_opts.set_value(name, value)
 
@@ -1546,17 +1662,42 @@ class AddProjectDialog(QDialog):
         return w
 
     def _on_derive_rate_btn(self):
-        """Recover the spike clock from the smallest gap between pooled spike times."""
+        """Read every file's clock: the signature rate, plus overrides for the odd ones."""
         if self._dataset is None:
             QMessageBox.information(self, "Sampling rate", "Choose a source folder first.")
             return
-        with NWBFile(self._dataset.files[0]) as f:
-            rate = f.sampling_rate
-        if rate is None:
+        # declared first: deriving one sorts every spike in the file
+        rates, undeclared = {}, []
+        for path in self._dataset.files:
+            with NWBFile(path) as f:
+                rate = f.declared_sampling_rate
+            if rate:
+                rates[self._dataset.naming(path)] = rate
+            else:
+                undeclared.append(path)
+        inferred = False
+        for i, path in enumerate(undeclared):
+            self._path_edit.setText(f"deriving rate {i + 1}/{len(undeclared)}  {path.name}")
+            QApplication.processEvents()
+            with NWBFile(path) as f:
+                rate = f.sampling_rate
+            if rate is not None:
+                rates[self._dataset.naming(path)] = rate
+                inferred = True
+        if not rates:
             QMessageBox.information(self, "Sampling rate",
-                                    "This session has too few spikes to derive a rate.")
+                                    "These sessions have too few spikes to derive a rate.")
             return
-        self._rate_edit.setText(str(rate))
+        signature = Counter(rates.values()).most_common(1)[0][0]
+        self._rate_overrides = {s: r for s, r in rates.items() if r != signature}
+        self._rate_inferred = inferred
+        self._rate_edit.setText(str(signature))
+        if self._rate_overrides:
+            QMessageBox.information(
+                self, "Sampling rate",
+                f"{signature:g} Hz for {len(rates) - len(self._rate_overrides)} sessions; "
+                f"{len(self._rate_overrides)} recorded at a different clock:\n\n"
+                + '\n'.join(f'{s}: {r:g} Hz' for s, r in self._rate_overrides.items()))
 
     def _on_prefill_btn(self):
         """Pick a known dataset and take its field map, value renames included."""
@@ -1573,17 +1714,19 @@ class AddProjectDialog(QDialog):
         QApplication.processEvents()
 
     def _on_accept(self):
-        """Check the mapping against the schema, build the project, store it in _out."""
+        """Check the mapping against the schema and store the build spec in _out."""
         name = self._name_edit.text().strip()
         if not name or self._dataset is None:
-            QMessageBox.information(self, "Add project",
+            QMessageBox.information(self, f"{self._verb} project",
                                     "A project name and a source folder are both required.")
             return
         existing = ProjectConfig(name=name)
         if os.path.isfile(existing.save_path() + '.json'):
             existing.load()
-        if existing.built:   # a header with no build behind it is a failed attempt, not a project
-            QMessageBox.information(self, "Add project",
+        # A header with no build behind it is a failed attempt, not a project. Rebuilding
+        # the one being edited is the point; colliding with a different one is not.
+        if existing.built and name != self._editing:
+            QMessageBox.information(self, f"{self._verb} project",
                                     f"Project '{name}' already exists "
                                     f"({existing.n_sessions} sessions, built {existing.built_at}).")
             return
@@ -1594,12 +1737,13 @@ class AddProjectDialog(QDialog):
             return
         sessions = self._dataset.sessions(field_map)
         if not sessions:
-            QMessageBox.information(self, "Add project",
+            QMessageBox.information(self, f"{self._verb} project",
                                     "No session supplies every required field.\n\n"
                                     + self._dataset.report(field_map))
             return
-        if QMessageBox.question(self, "Add project",
-                                self._dataset.report(field_map) + "\n\nBuild the project?"
+        if QMessageBox.question(self, f"{self._verb} project",
+                                self._dataset.report(field_map)
+                                + f"\n\n{self._verb} the project?"
                                 ) != QMessageBox.StandardButton.Yes:
             return
         header = ProjectConfig(name=name, source=str(self._dataset.path),
@@ -1607,15 +1751,18 @@ class AddProjectDialog(QDialog):
                                dataset=self._dataset_name,
                                fields=field_map.mapping,
                                nd_conf=self._nd_opts.values(),
-                               sampling_rate=float(self._rate_edit.text() or 0) or None)
-        neurons, cd, sd = build_project(header, CCGConfig(name=name, **self._ccg_opts.values()),
-                                        compute=self._compute_check.isChecked())
-        self._out = (neurons, cd, sd)
+                               sampling_rate=float(self._rate_edit.text() or 0) or None,
+                               sampling_rate_inferred=self._rate_inferred,
+                               sampling_rate_overrides=self._rate_overrides)
+        # The build runs after this dialog closes, so it can report into the
+        # window's status bar instead of freezing a modal.
+        self._out = (header, CCGConfig(name=name, **self._ccg_opts.values()),
+                     self._compute_check.isChecked())
         self.accept()
 
     @classmethod
     def show(cls, nav, parent=None, draft: ProjectConfig = None):
-        """Run the dialog; returns the loaded project, or None if cancelled."""
+        """Run the dialog; returns ``(header, ccg_conf, compute)`` or None if cancelled."""
         dlg = cls(nav, parent, draft)
         dlg.exec()
         return dlg._out

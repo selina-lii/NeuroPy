@@ -10,7 +10,8 @@ from pyqtgraph.Qt.QtCore import Qt, QTimer, QThread, QObject, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QApplication,
-    QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton, QScrollArea,
+    QProgressBar, QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton,
+    QScrollArea,
     QStackedWidget,
 )
 from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
@@ -18,7 +19,7 @@ from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import JsonSavable
 from neuropy.ui.app_state import AppState, _ALL_SEGS
 from neuropy.ui.pair_selection_panel import PairSelectionPanelContainer
-from neuropy.ui.ui_common import UITheme, qt_dark_mode
+from neuropy.ui.ui_common import AREA_RGB, UITheme, qt_dark_mode
 from neuropy.ui.utils import GroupHotkeysBar, Tunable
 from neuropy.ui.dialogs import (
     QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog,
@@ -73,6 +74,9 @@ class UISettings(JsonSavable):
     autosave_grp_unit = Tunable('hour')
     # Fewest tagged pairs a label needs before the classifier will train on it.
     classifier_min_count = Tunable(20)
+    # Brain region -> [r, g, b] neuron fill; editable so a new dataset's regions
+    # can be named without a code change.
+    area_colors = Tunable(dict(AREA_RGB))
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -104,6 +108,7 @@ class UIStates(JsonSavable):
         self.panel_state: dict = {}       # PairSelectionPanelContainer state
         self.stacked_transposed = False
         self.sig_chips: dict = {}         # BaselineCSSection chip name -> checked
+        self.extend_rows: list = []       # CorrelogramSection extend views
 
     def __setstate__(self, state: dict) -> None:
         """settings is one nested object, not a dict of them — rebuild it here."""
@@ -135,9 +140,36 @@ class BottomStatusBar:
         status_bar.addWidget(self.label)
         self._pair_info_label = QLabel("")
         status_bar.addPermanentWidget(self._pair_info_label)
+        # Right-aligned and hidden until something long-running claims it.
+        self._task_label = QLabel("")
+        self._task_bar = QProgressBar()
+        self._task_bar.setMaximumWidth(160)
+        self._task_bar.setTextVisible(False)
+        for w in (self._task_label, self._task_bar):
+            w.hide()
+            status_bar.addPermanentWidget(w)
         nav.pair_changed.connect(self.refresh)
         nav.key_changed.connect(self.refresh)
         nav.selection_changed.connect(self.refresh)
+
+    def start_task(self, text: str, total: int = 0):
+        """Show the task bar; ``total`` 0 leaves it busy-looping for unknown work."""
+        self._task_label.setText(text)
+        self._task_bar.setRange(0, total)
+        self._task_bar.setValue(0)
+        self._task_label.show()
+        self._task_bar.show()
+
+    def task_progress(self, done: int, total: int = None, text: str = None):
+        if total is not None:
+            self._task_bar.setRange(0, total)
+        if text is not None:
+            self._task_label.setText(text)
+        self._task_bar.setValue(done)
+
+    def end_task(self):
+        self._task_label.hide()
+        self._task_bar.hide()
 
     def refresh(self, *_):
         self.label.setText(self._str())
@@ -614,6 +646,7 @@ class CCGReviewUI(QMainWindow):
             if s.stacked_transposed != self.nav.stacked_transposed:
                 self.nav.toggle_stacked_transposed()
             self.mainview.cs_section.restore_chip_state(s.sig_chips)
+            self.mainview.corr_section.restore_extend_state(s.extend_rows)
             if s.splitter_sizes:
                 self._splitter.setSizes(s.splitter_sizes)
             for attr in list(s.collapsed_panels):
@@ -677,6 +710,7 @@ class CCGReviewUI(QMainWindow):
         s.session_any_mode = bool(self.nav.session_any_mode)
         s.stacked_transposed = bool(self.nav.stacked_transposed)
         s.sig_chips = self.mainview.cs_section.chip_state()
+        s.extend_rows = self.mainview.corr_section.extend_state()
         s.collapsed_panels = [a for a in self._panel_splitter_map
                               if not self._panel_target(a).isVisible()]
         s.save()   # settings / panel_sizes already live on s
@@ -813,6 +847,9 @@ class CCGReviewUI(QMainWindow):
         # IO decision; nav runs it at the right point in the transition).
         load = None
         if session_changed:
+            # the load rebuilds tags from disk, so write first
+            if self.nav.key.session:
+                self.pairs_view.save_quietly()
             path = os.path.join(self.cd.selections_dir, f"{new_session}.json")
             if os.path.isfile(path):
                 load = lambda: self.pairs_view._load_selection_from_file(

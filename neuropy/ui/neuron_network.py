@@ -17,13 +17,41 @@ from pyqtgraph.Qt.QtWidgets import (
     QMessageBox, QInputDialog, QSizePolicy,
 )
 from pyqtgraph.Qt.QtCore import Qt, QTimer
-from neuropy.ui.ui_common import LRUCache, _SPECIAL_PREFIX
+from neuropy.ui.ui_common import LRUCache, area_rgb, cell_areas, _SPECIAL_PREFIX
 from neuropy.ui.app_state import _ALL_SEGS
 from neuropy.ui.utils import chip_button, FlowLayout, SliderWithInput, small_font_pt
 from neuropy.analyses.neurons_dataset import Key
 
 def _UI_FS() -> str:
     return f'font-size: {small_font_pt()}pt;'
+
+# Legend glyphs: the same marks pyqtgraph draws for 't' and 'o'.
+TRIANGLE = '&#9650;'
+CIRCLE = '&#9679;'
+
+def _css_rgb(rgb) -> str:
+    """CSS colour from any int-like triple — a numpy tuple's repr is not valid CSS."""
+    return 'rgb({},{},{})'.format(*(int(c) for c in rgb))
+
+def _muted(html: str) -> str:
+    return f'<span style="color:#999">{html}</span>'
+
+def _dot(rgb) -> str:
+    return f'<span style="color:{_css_rgb(rgb)}">{CIRCLE}</span>'
+
+_DEFAULT_GRAYS = ((0, 0, 0), (51, 51, 51), (102, 102, 102),
+                  (153, 153, 153), (187, 187, 187))
+
+
+def _ramp(rgb, step: int, n: int) -> tuple:
+    """Later slots lift toward white, keeping the hue readable at every step."""
+    f = step / max(1, n - 1) * 0.55
+    return tuple(int(c + (255 - c) * f) for c in rgb)
+
+
+def _block(rgb) -> str:
+    """One swatch of the gradient ramp — padding gives it width, so it needs no glyph."""
+    return f'<span style="background:{_css_rgb(rgb)}; padding:0 5px">&#8202;</span>'
 
 def _INPUT_SS() -> str:
     return (
@@ -59,6 +87,8 @@ _CT_RGBA: dict = {
 
 def _ct_rgba(ct, ei: str = 'E') -> tuple:
     return _CT_RGBA.get(ct, (211, 47, 47, 255) if ei == 'E' else (21, 101, 192, 255))
+
+
 
 def _with_alpha(rgba: tuple, alpha: float) -> tuple:
     r, g, b, _ = rgba
@@ -277,6 +307,7 @@ class ProbeNetworkData:
     peak_channels: np.ndarray       # (n_neurons,) int
     shank_ids:    np.ndarray | None
     neuron_type:  np.ndarray | None
+    cell_area:    np.ndarray | None
     n_neurons:    int
 
     pg_info:      object | None     # ProbeGroup | None
@@ -339,6 +370,9 @@ class NetworkPanel:
         self._net_spread:           float = 1.0
         self._net_show_chid:        bool  = False
         self._net_show_nid:         bool  = False
+        self._net_style_color:      bool  = True    # fill by brain region
+        self._net_style_shape:      bool  = True    # marker by cell class
+        self._net_style_gradient:   bool  = True    # lightness by channel slot
         self._net_show_pair_ind:    bool  = False
         self._net_special_collapsed: bool = False
 
@@ -694,6 +728,97 @@ class NetworkPanel:
         ac_lay.addStretch()
         ann_lay.addWidget(ann_chip_row)
 
+        # Neuron style: each toggle sits beside the key it switches on.
+        style_lbl = QLabel('Neuron style')
+        self._scale_font(style_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
+        ann_lay.addWidget(style_lbl)
+        self._net_style_row = QWidget()
+        self._net_style_lay = FlowLayout(self._net_style_row, spacing=6)
+        ann_lay.addWidget(self._net_style_row)
+        self.refresh_style_row()
+
+    _STYLE_TOGGLES = (('color',    '_net_style_color',    '_area_legend_html'),
+                      ('shape',    '_net_style_shape',    '_shape_legend_html'),
+                      ('gradient', '_net_style_gradient', '_gradient_legend_html'))
+
+    def refresh_style_row(self):
+        """Build the style toggles and their keys — areas differ per session."""
+        lay = self._net_style_lay
+        self._style_keys = {}
+        for text, attr, html in self._STYLE_TOGGLES:
+            cb = chip_button(text, checked=getattr(self, attr))
+            cb.toggled.connect(lambda v, a=attr: (self._set_bool(a, v),
+                                                  self.refresh_style_keys()))
+            label = self._legend_label(getattr(self, html)())
+            self._style_keys[attr] = label
+            lay.addWidget(cb)
+            lay.addWidget(label)
+
+    def refresh_style_keys(self):
+        """Retext the keys; rebuilding the row would delete the chip mid-signal."""
+        for _, attr, html in self._STYLE_TOGGLES:
+            self._style_keys[attr].setText(getattr(self, html)())
+
+    def _area_legend_html(self) -> str:
+        """A dot per region present, so the key never lists what is not on screen."""
+        areas = self._areas_present()
+        if not areas:
+            return _muted('no region labels')
+        palette = self._area_palette()
+        return ' '.join(f'{_dot(area_rgb(a, palette))} {a}' for a in areas)
+
+    def _shape_legend_html(self) -> str:
+        if not self._net_style_shape:
+            return _muted(f'{CIRCLE} all round')
+        return f'{TRIANGLE} pyr &#8195; {CIRCLE} inter'
+
+    def _gradient_legend_html(self) -> str:
+        """The ramp itself, drawn as the blocks a neuron can actually take."""
+        grays = self._grays()
+        areas = self._areas_present()
+        base = (area_rgb(areas[0], self._area_palette())
+                if self._net_style_color and areas else None)
+        blocks = [_block(grays[step] if base is None else _ramp(base, step, len(grays)))
+                  for step in range(len(grays))]
+        return f'{"".join(blocks)} by channel'
+
+    def _legend_label(self, html: str) -> QLabel:
+        lbl = QLabel(html)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._scale_font(lbl, lambda: f'color: #666; font-size: {small_font_pt()}pt;')
+        return lbl
+
+    def _symbol_for(self, ntype) -> str:
+        """Triangle for pyramidal, circle for interneuron; all round when off."""
+        if not self._net_style_shape:
+            return 'o'
+        return 'o' if ntype == 'inter' else 't'
+
+    def _grays(self) -> tuple:
+        return getattr(getattr(self, '_plot_theme', None), 'neuron_grays', None) or _DEFAULT_GRAYS
+
+    def _neuron_rgb(self, data, idx: int, slot_of, grays, palette) -> tuple:
+        """One neuron's fill: region hue, shaded by channel slot."""
+        step = slot_of[idx] % len(grays)
+        if not self._net_style_color:
+            return grays[step] if self._net_style_gradient else grays[0]
+        area = (data.cell_area[idx]
+                if data.cell_area is not None and idx < len(data.cell_area) else None)
+        rgb = area_rgb(area, palette)
+        return _ramp(rgb, step, len(grays)) if self._net_style_gradient else rgb
+
+    def _area_palette(self) -> dict:
+        return self.ui.root.settings.area_colors
+
+    def _areas_present(self) -> list:
+        """Region names in the loaded session, in palette order then alphabetical."""
+        found = cell_areas(getattr(self.ui, 'neurons', None))
+        if found is None:
+            return []
+        names = {str(a) for a in np.asarray(found).ravel().tolist()}
+        order = list(self._area_palette())
+        return sorted(names, key=lambda n: (order.index(n) if n in order else len(order), n))
+
     def _set_bool(self, attr: str, value: bool):
         setattr(self, attr, value)
         self.draw()
@@ -735,6 +860,13 @@ class NetworkPanel:
                 self._net_ct_vars[ct] = True
             cb = chip_button(lbl, checked=self._net_ct_vars[ct])
             cb.toggled.connect(lambda v, c=ct: (self._net_ct_vars.__setitem__(c, v), self.draw()))
+            # Tinted with the colour this type's arrows are drawn in, so the
+            # filter row doubles as the connection legend.
+            r, g, b, _ = _ct_rgba(ct)
+            cb.setStyleSheet(cb.styleSheet() + (
+                f'QPushButton {{ background: rgba({r},{g},{b},40); '
+                f'border: 1px solid rgb({r},{g},{b}); }}'
+                f'QPushButton:checked {{ background: rgba({r},{g},{b},170); color: white; }}'))
             lay.addWidget(cb)
             self._net_ct_cbs[ct] = cb
         for ct in set(self._net_ct_vars) - ct_set:
@@ -826,6 +958,7 @@ class NetworkPanel:
 
         shank_ids   = getattr(_neurons, 'shank_ids',   None) if _neurons else None
         neuron_type = _neurons.neuron_type               if _neurons else None
+        cell_area   = cell_areas(_neurons)
         pg_info     = self._probegroups().get(nd_key)
 
         if any_mode:
@@ -864,7 +997,7 @@ class NetworkPanel:
         return ProbeNetworkData(
             nd_key=nd_key, session_label=session_label,
             pos=xy, peak_channels=peak_ch,
-            shank_ids=shank_ids, neuron_type=neuron_type,
+            shank_ids=shank_ids, neuron_type=neuron_type, cell_area=cell_area,
             n_neurons=n_neurons, pg_info=pg_info,
             pair_entries=pair_entries, sel_data=ui.sel_data,
             current_pair=current_pair,
@@ -1247,12 +1380,12 @@ class NetworkPanel:
 
         # Per-channel grayscale (white→60% gray in dark mode); spread already applied.
         theme = getattr(self, '_plot_theme', None)
-        _GRAYS = (getattr(theme, 'neuron_grays', None)
-                  or ((0, 0, 0), (51, 51, 51), (102, 102, 102),
-                      (153, 153, 153), (187, 187, 187)))
+        _GRAYS = self._grays()
         nid_color = getattr(theme, 'fg_muted', '#555')
         highlight_pen = 'white' if getattr(theme, 'dark', False) else 'black'
-        neuron_rgb = [_GRAYS[slot_of[i] % len(_GRAYS)] for i in range(data.n_neurons)]
+        _palette = self._area_palette()   # resolved once, not per neuron
+        neuron_rgb = [self._neuron_rgb(data, i, slot_of, _GRAYS, _palette)
+                      for i in range(data.n_neurons)]
         # Fixed-pixel marker sizes (pxMode=True below) → round 1:1 icons at any H/V zoom.
         _NSIZE, _NSIZE_HL = 9, 13
 
@@ -1273,7 +1406,7 @@ class NetworkPanel:
             ntype  = (data.neuron_type[idx]
                       if data.neuron_type is not None
                       and idx < len(data.neuron_type) else None)
-            symbol = 'o' if ntype == 'inter' else 't'
+            symbol = self._symbol_for(ntype)
             a      = 200 if in_any else 64
             r, g, b = neuron_rgb[idx]
             xi, yi  = float(x_spread[idx]), float(y_pos[idx])
@@ -1291,7 +1424,7 @@ class NetworkPanel:
         if fn is not None and 0 <= fn < data.n_neurons:
             ntype  = (data.neuron_type[fn]
                       if data.neuron_type is not None else None)
-            symbol = 'o' if ntype == 'inter' else 't'
+            symbol = self._symbol_for(ntype)
             spots.append({
                 'pos': (float(x_spread[fn]), float(y_pos[fn])),
                 'size': _NSIZE_HL, 'symbol': symbol,
@@ -1305,7 +1438,7 @@ class NetworkPanel:
             if 0 <= nid < data.n_neurons:
                 ntype  = (data.neuron_type[nid]
                           if data.neuron_type is not None else None)
-                symbol = 'o' if ntype == 'inter' else 't'
+                symbol = self._symbol_for(ntype)
                 spots.append({
                     'pos': (float(x_spread[nid]), float(y_pos[nid])),
                     'size': _NSIZE_HL, 'symbol': symbol,
@@ -1837,10 +1970,15 @@ class NetworkPanel:
             return None
         if nd_key is None:
             nd_key = ui.key.nd()
+        peak_ch = np.asarray(neurons.peak_channels, dtype=int)
+        # A dataset shipping real per-unit coordinates needs no probe layout to
+        # place its neurons; the probegroup only draws the empty-channel backdrop.
+        xy = (neurons.metadata or {}).get('positions')
+        if xy is not None:
+            return np.asarray(xy, dtype=float), peak_ch
         pg_info = self._probegroups().get(nd_key)
         if pg_info is None:
             return None
-        peak_ch = np.asarray(neurons.peak_channels, dtype=int)
         pg_df   = pg_info.to_dataframe().set_index('channel_id')
         x = pg_df['x'].reindex(peak_ch).fillna(0.0).to_numpy(dtype=float)
         y = pg_df['y'].reindex(peak_ch).fillna(0.0).to_numpy(dtype=float)

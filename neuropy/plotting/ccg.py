@@ -716,6 +716,7 @@ class RenderContext:
     style:  PlotStyle
     title:  TitleConfig
     dark_mode: bool = False
+    base_window_ms: Optional[float] = None   # extend mode: width of the lo-res window it widened
 
 
 def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded):

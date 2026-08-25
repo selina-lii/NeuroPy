@@ -1002,6 +1002,11 @@ class CustomCCGWorker:
         if ts._batch_counts[bid] > 0:
             done = total - ts._batch_counts[bid]
             ts._status_lbl.setText(f"Computing custom CCG… {done}/{total}")
+            # A panel that queued this batch may own the screen while it runs, so
+            # the slider's own label is not the only place progress has to land.
+            on_progress = (ts._batch_meta.get(bid) or {}).get('on_progress')
+            if on_progress is not None:
+                on_progress(done, total)
             return
         del ts._batch_counts[bid]
         ts._batch_totals.pop(bid, None)
@@ -1138,11 +1143,14 @@ class CustomCCGManager(Savable):
         self._ui._update_segment_label()
         self._ui.mainview.request_render()
 
-    def queue_whole_session(self, sessions: list, resolution: str, on_done=None) -> int:
+    def queue_whole_session(self, sessions: list, resolution: str, on_done=None,
+                            on_progress=None) -> int:
         """Queue whole-session CCG computes; ``on_done(failed_sessions)`` when all land.
 
         Shares the batch counter and status label with segment computes, so the
         queue reports one x/total regardless of what kind of work is in it.
+        ``on_progress(done, total)`` fires per completion, for a caller whose own
+        panel is covering the slider's status label.
         """
         ts = self._ui.time_slider
         bid = ts._batch_next_id
@@ -1156,7 +1164,8 @@ class CustomCCGManager(Savable):
             ts._batch_counts[bid] = queued
             ts._batch_totals[bid] = queued
             ts._batch_meta[bid] = {'spec_name': f'{resolution} CCG',
-                                   'skipped': [], 'rows': [], 'on_done': on_done}
+                                   'skipped': [], 'rows': [], 'on_done': on_done,
+                                   'on_progress': on_progress}
             self.worker._custom_ccg_start_next()
         return queued
 

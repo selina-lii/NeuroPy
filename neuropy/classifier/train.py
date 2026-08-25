@@ -1,9 +1,4 @@
-"""Training and leave-one-rat-out cross-validation.
-
-Splitting is by animal, never at random: pairs from one session share neurons, so
-a random split leaks the same neuron into train and test and reports a score the
-model would not reach on a new animal.
-"""
+"""Training and pooled K-fold CV over pairs; labels describe CCG shape, not animal identity."""
 from __future__ import annotations
 
 import numpy as np
@@ -46,22 +41,27 @@ def _auc(y: np.ndarray, p: np.ndarray) -> float:
     return float((ranks[pos].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def leave_one_rat_out(ls: LabeledSet, model_name: str = 'conv',
-                      duration: float = 0.02, **kw) -> dict:
-    """Hold out each animal in turn; return pooled out-of-sample predictions."""
-    ccg, null, Y, rats = ls.X_ccg, ls.X_null, ls.Y, ls.rats
+def cross_validate(ls: LabeledSet, model_name: str = 'conv',
+                   duration: float = 0.02, n_folds: int = 5, seed: int = 0,
+                   **kw) -> dict:
+    """K-fold over pairs, assigned at random; pooled out-of-sample predictions."""
+    rng = np.random.default_rng(seed)
+    assign = rng.permutation(len(ls.samples)) % n_folds
+    ccg, null, Y = ls.X_ccg, ls.X_null, ls.Y
     hi, hi_null = _highres_for(ls, model_name)
+    arrays = ls.arrays(MODELS[model_name].uses_highres)
     P = np.zeros_like(Y, dtype=float)
     T = np.zeros_like(Y, dtype=float)     # each row cut by its own fold's thresholds
-    for rat in sorted(set(rats)):
-        test = rats == rat
+    for k in range(n_folds):
+        test = assign == k
         model = MODELS[model_name](ls.label_names, duration=duration, **kw)
         model.fit(ccg[~test], null[~test], Y[~test],
-                  *_slice_highres(hi, hi_null, ~test))
+                  *_slice_highres(hi, hi_null, ~test), arrays.subset(~test))
         P[test] = model.predict_proba(ccg[test], null[test],
-                                      *_slice_highres(hi, hi_null, test))
+                                      *_slice_highres(hi, hi_null, test),
+                                      arrays.subset(test))
         T[test] = model.thresholds
-        print(f"  fold {rat}: trained on {(~test).sum()}, tested on {test.sum()}",
+        print(f"  fold {k}: trained on {(~test).sum()}, tested on {test.sum()}",
               flush=True)
     hits = (P >= T).astype(int)
     return {'proba': P, 'Y': Y, 'thresholds': T, 'pred': hits,
@@ -101,7 +101,8 @@ def fit_final(ls: LabeledSet, model_name: str = 'conv',
     """Train on every labeled pair — the model that ships to the UI."""
     model = MODELS[model_name](ls.label_names, duration=duration, **kw)
     hi, hi_null = _highres_for(ls, model_name)
-    return model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
+    return model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null,
+                     ls.arrays(MODELS[model_name].uses_highres))
 
 
 def route_by_score(cv: dict[str, dict], names: list[str],
@@ -133,7 +134,7 @@ def fit_routed(ls: LabeledSet, model_names: list[str], duration: float = 0.02,
     the sidecar can record why each label went where it did. Only strategies
     that won a label are refitted — an unrouted one would never be asked.
     """
-    cv = {name: leave_one_rat_out(ls, name, duration=duration, **kw)
+    cv = {name: cross_validate(ls, name, duration=duration, **kw)
           for name in model_names}
     beta = BIAS_BETA.get(kw.get('bias', 'balanced'), 1.0)
     routes = route_by_score(cv, ls.label_names, beta)
@@ -142,7 +143,7 @@ def fit_routed(ls: LabeledSet, model_names: list[str], duration: float = 0.02,
                   for name in dict.fromkeys(routes.values())}
     hi, hi_null = next((_highres_for(ls, n) for n in model.subs
                         if MODELS[n].uses_highres), (None, None))
-    model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null)
+    model.fit(ls.X_ccg, ls.X_null, ls.Y, hi, hi_null, ls.arrays(hi is not None))
     return model, cv
 
 

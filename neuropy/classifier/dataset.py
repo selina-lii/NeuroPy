@@ -34,6 +34,35 @@ class PairSample:
     labels: list[str] = field(default_factory=list)
     ccg_hi: np.ndarray = None   # [n_bin_hi] highres, None when not on disk
     null_hi: np.ndarray = None
+    # ACGs: the matrix diagonal the pointer drops as self-pairs
+    acg_ref: np.ndarray = None
+    acg_tgt: np.ndarray = None
+
+
+@dataclass
+class PairArrays:
+    """Every array view of a batch of pairs as one argument; ``None`` means unavailable, not empty."""
+    ccg: np.ndarray
+    null: np.ndarray
+    ccg_hi: np.ndarray = None
+    null_hi: np.ndarray = None
+    acg_ref: np.ndarray = None
+    acg_tgt: np.ndarray = None
+
+    @property
+    def has_highres(self) -> bool:
+        return self.ccg_hi is not None
+
+    @property
+    def has_acg(self) -> bool:
+        return self.acg_ref is not None
+
+    def subset(self, mask) -> 'PairArrays':
+        """The same views restricted to a CV fold."""
+        def cut(a):
+            return None if a is None else a[mask]
+        return PairArrays(self.ccg[mask], self.null[mask], cut(self.ccg_hi),
+                          cut(self.null_hi), cut(self.acg_ref), cut(self.acg_tgt))
 
 
 @dataclass
@@ -43,6 +72,9 @@ class LabeledSet:
     label_names: list[str]
 
     def __post_init__(self):
+        if not self.samples:
+            raise ValueError('no pairs in the selected scope — widen the session '
+                             'or connection-type filter')
         # Stacked once and reused: these are read on every fold, and restacking
         # per access made a second full copy of the traces each time.
         self._X_ccg = np.stack([s.ccg for s in self.samples]).astype(float)
@@ -52,6 +84,8 @@ class LabeledSet:
             s.ccg, s.null = self._X_ccg[i], self._X_null[i]
         self._X_ccg_hi = self._stack_hi('ccg_hi')
         self._X_null_hi = self._stack_hi('null_hi')
+        self._X_acg_ref = self._stack_hi('acg_ref')
+        self._X_acg_tgt = self._stack_hi('acg_tgt')
 
     def _stack_hi(self, attr: str) -> np.ndarray | None:
         """Stack a highres field, or None when any sample lacks it."""
@@ -79,6 +113,25 @@ class LabeledSet:
     @property
     def X_null_hi(self) -> np.ndarray | None:
         return self._X_null_hi
+
+    @property
+    def X_acg_ref(self) -> np.ndarray | None:
+        return self._X_acg_ref
+
+    @property
+    def X_acg_tgt(self) -> np.ndarray | None:
+        return self._X_acg_tgt
+
+    @property
+    def has_acg(self) -> bool:
+        return self._X_acg_ref is not None
+
+    def arrays(self, model_uses_highres: bool = True) -> PairArrays:
+        """Every view of this set as one object, for a model's fit/predict."""
+        hi = self._X_ccg_hi if model_uses_highres else None
+        return PairArrays(self._X_ccg, self._X_null, hi,
+                          self._X_null_hi if hi is not None else None,
+                          self._X_acg_ref, self._X_acg_tgt)
 
     @property
     def Y(self) -> np.ndarray:
@@ -180,30 +233,37 @@ def _highres_arrays(cd, key, compute: bool = False):
 
 
 def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
-                      min_rats: int = 4, highres: bool = True,
+                      highres: bool = True,
                       compute_highres: bool = False,
-                      conn_types: list[str] = None) -> LabeledSet:
+                      conn_types: list[str] = None, sessions: list[str] = None,
+                      all_pairs: bool = False) -> LabeledSet:
     """Join saved labels to their CCG traces; keep labels with enough support.
 
-    A label needs *min_count* examples across at least *min_rats* animals, since
-    a label seen in one rat cannot be shown to generalize across animals.
+    A label needs *min_count* examples. Which animal a pair came from is carried
+    as provenance but never gates anything: the labels describe the CCG alone.
     With *highres*, each sample also carries its fine-binned trace over the same
     time window; a session missing it drops highres for the whole set, so the
     models never learn "missing" as a feature.
+
+    *all_pairs* widens from tagged pairs to every pointer pair — for review tools, not training.
     """
     labels_by_key = read_selection_labels(selections_dir or cd.selections_dir)
     ptr_by_str = {str(k): k for k in cd.ptr}
-    want_type = set(conn_types or [])
-
+    want_type, want_sess = set(conn_types or []), set(sessions or [])
     samples: list[PairSample] = []
-    for key_str, entry in labels_by_key.items():
-        key = ptr_by_str.get(key_str)
-        if key is None:
-            continue
+    for key_str, key in ptr_by_str.items():
+        entry = labels_by_key.get(key_str)
+        if entry is None:
+            if not all_pairs:
+                continue
+            entry = {'labels': {}, 'complete': False}
         if want_type and key.type_label() not in want_type:
             continue
+        # narrow before loading CCGs: a filtered session should cost no load
+        if want_sess and str(key.session) not in want_sess:
+            continue
         pairs = dict(entry['labels'])
-        if entry['complete']:   # reviewed slice → untagged pairs are negatives
+        if all_pairs or entry['complete']:   # reviewed slice → untagged are negatives
             for ref, tgt in cd.ptr[key.ptr()].pair_set:
                 pairs.setdefault(f'{ref},{tgt}', [])
         data = cd.ccg_for(key)
@@ -224,30 +284,25 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
                 null=np.asarray(null[ref, tgt], dtype=float),
                 labels=labs,
                 ccg_hi=np.asarray(ccg_hi[ref, tgt], dtype=float) if has_hi else None,
-                null_hi=np.asarray(null_hi[ref, tgt], dtype=float) if has_hi else None))
+                null_hi=np.asarray(null_hi[ref, tgt], dtype=float) if has_hi else None,
+                acg_ref=np.asarray(ccg[ref, ref], dtype=float),
+                acg_tgt=np.asarray(ccg[tgt, tgt], dtype=float)))
 
     return LabeledSet(samples=samples,
-                      label_names=supported_labels(samples, min_count, min_rats))
+                      label_names=supported_labels(samples, min_count))
 
 
-def supported_labels(samples: list, min_count: int, min_rats: int) -> list[str]:
-    """Labels with enough examples across enough animals to be learnable.
-
-    A label seen in one animal cannot be shown to generalize, so both bars apply.
-    """
+def supported_labels(samples: list, min_count: int) -> list[str]:
+    """Labels with enough examples to be learnable."""
     counts = Counter(lab for s in samples for lab in s.labels)
-    rats: dict[str, set] = {}
-    for s in samples:
-        for lab in s.labels:
-            rats.setdefault(lab, set()).add(s.rat)
-    return sorted(lab for lab, n in counts.items()
-                  if n >= min_count and len(rats[lab]) >= min_rats)
+    return sorted(lab for lab, n in counts.items() if n >= min_count)
 
 
-def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
+def build_multi(datasets: list, min_count: int = 20,
                 highres: bool = True, compute_highres: bool = False,
                 only_labels: list[str] = None,
-                conn_types: list[str] = None) -> LabeledSet:
+                conn_types: list[str] = None, sessions: list[str] = None,
+                all_pairs: bool = False) -> LabeledSet:
     """One labeled set pooled over several projects.
 
     Label support is judged on the pooled counts, so a label too rare in any one
@@ -261,19 +316,18 @@ def build_multi(datasets: list, min_count: int = 20, min_rats: int = 4,
     """
     samples, sources = [], []
     for cd in datasets:
-        part = build_labeled_set(cd, min_count=1, min_rats=1, highres=highres,
+        part = build_labeled_set(cd, min_count=1, highres=highres,
                                  compute_highres=compute_highres,
-                                 conn_types=conn_types)
+                                 conn_types=conn_types, sessions=sessions,
+                                 all_pairs=all_pairs)
         samples.extend(part.samples)
         sources.append(cd.conf.name)
-    if not samples:
-        raise ValueError('no labeled pairs found in the selected projects')
     widths = {(s.ccg.shape[-1],
                None if s.ccg_hi is None else s.ccg_hi.shape[-1]) for s in samples}
     if len(widths) > 1:
         raise ValueError(f'projects disagree on CCG bin widths {sorted(widths)}; '
                          'they must be computed with the same window and bin size')
-    names = supported_labels(samples, min_count, min_rats)
+    names = supported_labels(samples, min_count)
     if only_labels:
         names = [n for n in names if n in set(only_labels)]
         if not names:

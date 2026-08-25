@@ -25,9 +25,12 @@ UNITS_SCHEMA = FieldSchema([
           note="cell class; values must end up 'pyr' / 'inter'"),
     Field('neuron_id',     OPTIONAL, note='unit id; defaults to the units table row id'),
     Field('peak_channel',  OPTIONAL, note='channel of largest waveform'),
-    Field('shank_id',      OPTIONAL, note='probe shank grouping'),
+    Field('shank_id',      OPTIONAL, value_map=True,
+          note='probe shank grouping; value_map folds probe coordinates into indices'),
     Field('position',      ANY,      note='unit position on the probe: x, then y'),
     Field('waveforms',     OPTIONAL, note='mean waveform per unit'),
+    Field('cell_area',     OPTIONAL, value_map=True,
+          note='brain region the unit was recorded in'),
 ])
 
 
@@ -72,12 +75,21 @@ class NWBFile:
         units = self._nwb.units
         return [] if units is None else list(units.colnames)
 
+    _MAX_CATEGORIES = 64   # beyond this a column is a measurement, not a label set
+
     def is_categorical(self, column: str) -> bool:
-        """Whether a units column holds labels — only those are worth value-mapping."""
+        """Whether a column takes few enough distinct values to be worth value-mapping.
+
+        Judged by how many values it takes, not by dtype: shank ids and quality
+        scores are integers, and stability is a bool, yet all three are label sets.
+        """
         units = self._nwb.units
         if units is None or column not in units.colnames:
             return False
-        return np.asarray(units[column][:1]).dtype.kind in 'OUS'
+        head = np.asarray(units[column][:1])
+        if head.ndim != 1 or head.dtype.kind == 'f':
+            return False   # per-unit waveforms/acgs are 2-D; floats are measurements
+        return len(set(units[column][:])) <= self._MAX_CATEGORIES
 
     def column_values(self, column: str) -> list:
         """The distinct values a units column holds — what a value map must translate."""
@@ -120,8 +132,11 @@ class NWBFile:
         binding = self.fields.get('position')
         if units is None or binding is None:
             return None
-        return np.column_stack([np.asarray(units[c][:], dtype=float)
-                                for c in binding.columns])
+        xy = np.column_stack([np.asarray(units[c][:], dtype=float)
+                              for c in binding.columns])
+        if xy.shape[1] == 2 and np.array_equal(xy[:, 0], xy[:, 1]):
+            return None   # duplicated column, not two axes
+        return xy
 
     def _optional(self, name: str, dtype=None) -> np.ndarray | None:
         """One optional field's column as an array, or None when the map leaves it unbound."""
@@ -129,7 +144,10 @@ class NWBFile:
         binding = self.fields.get(name)
         if units is None or binding is None:
             return None
-        return np.asarray(units[binding.column][:], dtype=dtype)
+        values = units[binding.column][:]
+        if binding.value_map:
+            values = binding.apply(values)
+        return np.asarray(values, dtype=dtype)
 
     @cached_property
     def peak_channels(self) -> np.ndarray | None:
@@ -138,6 +156,20 @@ class NWBFile:
     @cached_property
     def shank_ids(self) -> np.ndarray | None:
         return self._optional('shank_id', dtype=int)
+
+    @cached_property
+    def cell_area(self) -> np.ndarray | None:
+        return self._optional('cell_area', dtype=object)
+
+    @cached_property
+    def extra_columns(self) -> dict:
+        """The map's wildcard columns, value-mapped, keyed by the names it gave them."""
+        units = self._nwb.units
+        if units is None:
+            return {}
+        return {name: np.asarray(binding.apply(units[binding.column][:]), dtype=object)
+                for name, binding in self.fields.extra.items()
+                if binding.column in units.colnames}
 
     @cached_property
     def waveforms(self) -> np.ndarray | None:
@@ -157,6 +189,14 @@ class NWBFile:
         return [ts for mod in self._nwb.processing.values()
                 for interface in mod.data_interfaces.values()
                 for ts in (getattr(interface, 'electrical_series', None) or {}).values()]
+
+    @cached_property
+    def declared_sampling_rate(self) -> float | None:
+        """The rate the file states outright, when its writer recorded one."""
+        rate = (self._nwb.scratch or {}).get('spike_sampling_rate')
+        if rate is None:
+            return None
+        return float(np.asarray(getattr(rate, 'data', rate)).ravel()[0])
 
     @cached_property
     def sampling_rate(self) -> float | None:

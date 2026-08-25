@@ -56,8 +56,9 @@ class NWBSession:
         self._path = Path(nwb_path)
         self.session_name = session_name or self._path.stem
         self._nwb = NWBFile(self._path, fields=fields)
-        self.sampling_rate = (sampling_rate or self._nwb.sampling_rate
-                              or SPIKE_CLOCK_HZ)
+        # a stated rate beats one recovered from spike gaps
+        self.sampling_rate = (sampling_rate or self._nwb.declared_sampling_rate
+                              or self._nwb.sampling_rate or SPIKE_CLOCK_HZ)
         self.themes    # binds each intervals table as an attribute, before anything discovers them
 
     # ── ProcessData path attributes ────────────────────────────────────
@@ -99,7 +100,10 @@ class NWBSession:
             waveforms=nwb.waveforms,
             peak_channels=nwb.peak_channels,
             shank_ids=nwb.shank_ids,
-            metadata={'positions': nwb.positions} if nwb.positions is not None else None,
+            metadata={**{k: v for k, v in (('positions', nwb.positions),
+                                           ('cell_area', nwb.cell_area))
+                         if v is not None},
+                      **nwb.extra_columns} or None,
         )
 
     @cached_property
@@ -186,13 +190,19 @@ class NWBDataset:
         return {p: missing for p, missing in self.coverage(field_map).items()
                 if not required & set(missing)}
 
-    def sessions(self, field_map: FieldMap, sampling_rate: float = None) -> list:
-        """One NWBSession per usable file, each named and mapped by this dataset's rules."""
-        return [NWBSession(p, session_name=self.naming(p), sampling_rate=sampling_rate,
-                           fields={name: value
-                                   for name, value in field_map.mapping.items()
-                                   if name not in missing})
-                for p, missing in self._usable(field_map).items()]
+    def sessions(self, field_map: FieldMap, sampling_rate: float = None,
+                 overrides: dict = None) -> list:
+        """One NWBSession per usable file; *overrides* names the sessions on a different clock."""
+        overrides = overrides or {}
+        out = []
+        for path, missing in self._usable(field_map).items():
+            name = self.naming(path)
+            out.append(NWBSession(
+                path, session_name=name,
+                sampling_rate=overrides.get(name, sampling_rate),
+                fields={field: value for field, value in field_map.mapping.items()
+                        if field not in missing}))
+        return out
 
     def report(self, field_map: FieldMap) -> str:
         """Which files load whole, which load partial, and which are skipped."""

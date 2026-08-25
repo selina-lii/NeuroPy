@@ -10,7 +10,7 @@ import argparse
 import numpy as np
 
 from neuropy.analyses.ms_connectivity import CCGDataset, CCGConfig
-from neuropy.classifier import build_labeled_set, leave_one_rat_out, report
+from neuropy.classifier import build_labeled_set, cross_validate, report
 from neuropy.classifier.models import BIAS_BETA, MODELS
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_model, list_models,
                                     train_project)
@@ -66,7 +66,8 @@ if __name__ == '__main__':
         s = r['summary']
         print(f"\n{s['model']}: {s['n_samples']} pairs / {s['n_rats']} animals")
         print(report(s['scores']))
-        print(f"\nwrote {len(r['figures'])} figures to {r['out_dir']}")
+        print(f"\nsaved '{r['saved_as']}' + {len(r['figures'])} figures "
+              f"to {r['out_dir']}")
     else:
         # Comparison: cross-validate each, no model/figure output.
         ls = build_labeled_set(cd, min_count=args.min_count)
@@ -75,7 +76,7 @@ if __name__ == '__main__':
         for name in names:
             if name not in MODELS:
                 raise SystemExit(f"unknown model {name!r}; choose from {list(MODELS)}")
-            cv = leave_one_rat_out(ls, name, duration=cd.conf.duration, **kw)
+            cv = cross_validate(ls, name, duration=cd.conf.duration, **kw)
             f1 = np.mean([v['f1'] for v in cv['scores'].values()])
             auc = np.mean([v['auc'] for v in cv['scores'].values()])
             print(f"\n=== {name}{' +' + args.head if args.head else ''}: "

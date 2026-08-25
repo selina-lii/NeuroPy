@@ -38,6 +38,48 @@ _SEPARATOR_ROW   = "__separator_row__"
 
 is_separator_row = lambda e: isinstance(e, tuple) and bool(e) and e[0] == _SEPARATOR_ROW
 
+
+# Brain region -> neuron fill. The hues repeat the connection-type palette; shape
+# carries cell class, so a red neuron and a red arrow say different things.
+AREA_RGB: dict = {
+    'CA1':    (211,  47,  47),
+    'CA3':    ( 46, 125,  50),
+    'RSC':    ( 94,  53, 177),
+    'DG':     (194,  24, 152),
+    'CA2':    (245, 124,   0),
+    'cortex': (  0, 131, 143),
+}
+AREA_FALLBACK = (117, 117, 117)
+
+
+_LOWERED_CACHE: dict = {}
+
+
+def _lowered(table: dict) -> dict:
+    """Case-folded view of a palette, cached — this is read per neuron per repaint."""
+    key = id(table)
+    hit = _LOWERED_CACHE.get(key)
+    if hit is None or hit[0] != len(table):
+        hit = (len(table), {str(k).lower(): v for k, v in table.items()})
+        _LOWERED_CACHE[key] = hit
+    return hit[1]
+
+
+def area_rgb(area, palette: dict = None) -> tuple:
+    """Fill for one region name, matched case-insensitively; gray when unnamed."""
+    table = palette or AREA_RGB
+    if area is None:
+        return AREA_FALLBACK
+    key = str(area)
+    if key in table:
+        return tuple(table[key])
+    return tuple(_lowered(table).get(key.lower(), AREA_FALLBACK))
+
+
+def cell_areas(neurons):
+    """Per-neuron region labels, or None when the dataset names no regions."""
+    return (neurons.metadata or {}).get('cell_area') if neurons is not None else None
+
 from neuropy.analyses.utils import _SPECIAL_PREFIX, is_special_group  # noqa: F401
 
 

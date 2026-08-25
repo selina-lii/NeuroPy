@@ -215,7 +215,8 @@ class ProjectConfig(JsonSavable):
 
     def __init__(self, name: str = 'default', source: str = None, format: str = None,
                  dataset: str = None, fields: dict = None, nd_conf: dict = None,
-                 sampling_rate: float = None, resolution: list = None,
+                 sampling_rate: float = None, sampling_rate_inferred: bool = False,
+                 sampling_rate_overrides: dict = None, resolution: list = None,
                  built_at: str = None, n_sessions: int = None, root: str = DATA_ROOT):
         super().__init__()
         self.name = name
@@ -224,7 +225,9 @@ class ProjectConfig(JsonSavable):
         self.dataset = dataset      # neuropy.io.datasets module supplying session_name + FIELDS
         self.fields = fields
         self.nd_conf = nd_conf      # NeuronsDatasetConfig kwargs this project was built with
-        self.sampling_rate = sampling_rate   # spike clock; derived per file when None
+        self.sampling_rate = sampling_rate   # the dataset's signature clock; None = read each file
+        self.sampling_rate_inferred = sampling_rate_inferred   # recovered, not stated by the source
+        self.sampling_rate_overrides = sampling_rate_overrides or {}
         self.resolution = resolution
         self.built_at = built_at    # set once the build succeeded; absent means it never finished
         self.n_sessions = n_sessions
@@ -264,7 +267,8 @@ class ProjectConfig(JsonSavable):
         if not self.source:
             return self.conventions.sessions()
         return NWBDataset(self.source, naming=self.naming).sessions(
-            FieldMap(UNITS_SCHEMA, self.fields), sampling_rate=self.sampling_rate)
+            FieldMap(UNITS_SCHEMA, self.fields), sampling_rate=self.sampling_rate,
+            overrides=self.sampling_rate_overrides)
 
 
 def build_project(header: ProjectConfig, ccg_conf: CCGConfig, compute: bool = False):
@@ -278,8 +282,18 @@ def build_project(header: ProjectConfig, ccg_conf: CCGConfig, compute: bool = Fa
     return neurons, cd, sd
 
 
-def open_project(name: str, sessions: list = None):
-    """Everything a project is, from its header; pre-header projects supply their own sessions."""
+def projects_on_disk(root: str = DATA_ROOT) -> list:
+    """Names of the projects that have a saved header, in name order."""
+    base = _Path(root)
+    return [d.name[len('project_'):] for d in sorted(base.iterdir())
+            if d.is_dir() and (d / 'project_plan.json').is_file()] if base.is_dir() else []
+
+
+def open_project(name: str = None, sessions: list = None):
+    """Everything a project is, from its header; falls back to the first on disk."""
+    available = projects_on_disk()
+    if name not in available:
+        name = available[0]
     header = ProjectConfig(name=name)
     header.load()
     conf = CCGConfig(name=name)
@@ -451,6 +465,8 @@ class CCGPointer(HklSavable):
         if self._inds.ndim == 2 and self._inds.shape[1] == 2:
             self._inds = np.column_stack(
                 [np.zeros(len(self._inds), dtype=int), self._inds])
+        if self._inds.size and (self._inds[:, -2] == self._inds[:, -1]).any():
+            self._inds = self._inds[self._inds[:, -2] != self._inds[:, -1]]   # stale pointers predate the eranconv ACG filter
         return self._inds
 
     @property
@@ -1082,6 +1098,9 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def _compute_ccg_data(self, key, neurons, neuron_inds, conf,
                           start_end_times=None) -> 'CCGData':
         """Compute CCG + baseline; result not stored on ``cd``."""
+        floor = 1.0 / (neurons.sampling_rate or np.inf)
+        if conf.bin_size < floor:
+            conf = conf.copy(bin_size=floor)
         print(f"[CCGDataset] {key.session} {key.resolution} "
               f"bin={conf.bin_size*1e3:.2f}ms …", flush=True)
         ccg = correlations.spike_correlations(

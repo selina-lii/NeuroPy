@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 
-from neuropy.analyses.utils import ADMITTED_PREFIX, is_shape_label
+from neuropy.analyses.utils import ADMITTED_PREFIX, NOTHING, is_shape_label
 
 
 def admitted_group(model_name: str) -> str:
@@ -22,13 +22,6 @@ def admitted_group(model_name: str) -> str:
     model means a later model can tell its own admissions from another's.
     """
     return ADMITTED_PREFIX + model_name
-
-
-def prior_admissions(groups, model_name: str, sessions: set = None) -> int:
-    """How many pairs *model_name* has already had accepted, within *sessions*."""
-    marker = admitted_group(model_name)
-    want = sessions if sessions is not None else groups.sessions_for_group(marker)
-    return sum(len(groups.pairs_in_group(marker, s)) for s in want)
 
 
 def by_owner(owner_of: dict, order: list = None) -> list[tuple]:
@@ -50,9 +43,7 @@ class PredictionStore:
         self.model_name = model_name
         self.labels = list(labels or [])
         self.rows: dict[tuple, dict] = {}      # (sess, ref, tgt) -> {labels, scores}
-        # What was accepted is read off the group tags themselves, never copied
-        # here; only a rejection has no tag to record it.
-        self.rejected: set[tuple] = set()
+        # verdicts live in the group tags and the pair's deleted state, which outlive a run
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -121,15 +112,10 @@ class PredictionStore:
         hits.sort(key=lambda kv: -kv[1]['scores'].get(label, 0.0))
         return [pk for pk, _ in hits]
 
-    def review_order(self, groups, session: str = None) -> list[tuple]:
-        """Pairs with a label still to judge, most confident first.
-
-        A partly-accepted pair stays listed: its remaining labels are still open.
-        """
-        pend = [pk for pk in self.rows
-                if self.pending(groups, *pk) and pk not in self.rejected
-                and (session is None or pk[0] == session)]
-        return sorted(pend, key=lambda pk: -self.confidence(*pk))
+    def review_order(self, session: str = None) -> list[tuple]:
+        """Every predicted pair, most confident first — a judgement never moves a row."""
+        rows = [pk for pk in self.rows if session is None or pk[0] == session]
+        return sorted(rows, key=lambda pk: -self.confidence(*pk))
 
     def taken(self, groups, session: str, ref: int, tgt: int) -> list[str]:
         """Labels of this pair already accepted, in the order the model ranked them.
@@ -171,18 +157,16 @@ class PredictionStore:
         """
         pk = self._pk(session, ref, tgt)
         have = groups.groups_for_pair(*pk)
-        new = [l for l in ([only] if only else self.labels_for(*pk)) if l not in have]
-        if not new:
-            return []
+        # NOTHING is not a label; the marker alone records that the pair was judged
+        new = [l for l in ([only] if only else self.labels_for(*pk))
+               if l not in have and l != NOTHING]
         marker = admitted_group(self.model_name)
         added = [marker] if marker not in have else []   # lands once per pair per model
+        if not new and not added:
+            return []
         for label in new + added:
             groups.add_to_group(label, pk[0], (pk[1], pk[2]))
-        self.rejected.discard(pk)
         return [(l, pk[0], (pk[1], pk[2])) for l in new + added]
-
-    def reject(self, session: str, ref: int, tgt: int):
-        self.rejected.add(self._pk(session, ref, tgt))
 
     def summary(self) -> dict[str, int]:
         """Predicted-pair count per label, for the review dialog's overview."""
@@ -196,8 +180,7 @@ class PredictionStore:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         doc = {'model': self.model_name, 'labels': self.labels,
                'rows': [{'session': s, 'ref': r, 'tgt': t, **row}
-                        for (s, r, t), row in self.rows.items()],
-               'rejected': [list(pk) for pk in sorted(self.rejected)]}
+                        for (s, r, t), row in self.rows.items()]}
         with open(path, 'w') as fh:
             json.dump(doc, fh, indent=1)
 
@@ -210,7 +193,6 @@ class PredictionStore:
             store.add(row['session'], row['ref'], row['tgt'],
                       row['labels'], row['scores'], row.get('type_label', ''),
                       row.get('by'))
-        store.rejected = {(s, int(r), int(t)) for s, r, t in doc.get('rejected', [])}
         return store
 
 

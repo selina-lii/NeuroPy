@@ -8,18 +8,19 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shutil
 
 import numpy as np
 
 from neuropy.analyses.ms_connectivity import CCGConfig, CCGDataset
 
-from neuropy.classifier.dataset import build_multi, loaded_ccg
+from neuropy.classifier.dataset import PairArrays, build_multi, loaded_ccg
 from neuropy.classifier.models import MODELS, BaseModel, decide
-from neuropy.classifier.train import (fit_final, fit_routed, leave_one_rat_out,
+from neuropy.classifier.train import (fit_final, fit_routed, cross_validate,
                                       report, routed_cv)
 from neuropy.classifier.verify import verify_all
 
-DEFAULT_MODEL = 'conv'   # learned local filters + boosted trees; see CCG_CLASSIFIER_RESULTS.md
+DEFAULT_MODEL = 'rule'   # best measured strategy; see CCG_FEATURE_DIAGNOSIS.md
 
 
 def library_dir(cd) -> str:
@@ -31,28 +32,32 @@ def library_dir(cd) -> str:
     return os.path.join(str(cd.data_root), 'classifiers')
 
 
+def classifier_dir(cd, name: str) -> str:
+    """A classifier's own folder — weights, metadata and figures together."""
+    return os.path.join(library_dir(cd), name)
+
+
 def model_path(cd, name: str) -> str:
-    return os.path.join(library_dir(cd), f'{name}.pkl')
+    return os.path.join(classifier_dir(cd, name), 'model.pkl')
 
 
 def list_models(cd) -> list[dict]:
     """Saved classifiers with their training provenance, newest first."""
     out = []
-    for side in sorted(glob.glob(os.path.join(library_dir(cd), '*.json'))):
-        pkl = os.path.splitext(side)[0] + '.pkl'
+    for side in sorted(glob.glob(os.path.join(library_dir(cd), '*', 'model.json'))):
+        pkl = os.path.join(os.path.dirname(side), 'model.pkl')
         if not os.path.isfile(pkl):
             continue
         with open(side) as fh:
             meta = json.load(fh)
-        out.append({'name': os.path.basename(pkl)[:-4], 'path': pkl, **meta})
+        out.append({'name': os.path.basename(os.path.dirname(pkl)),
+                    'path': pkl, **meta})
     return sorted(out, key=lambda m: m.get('saved_at', ''), reverse=True)
 
 
 def delete_model(cd, name: str):
-    """Remove a saved classifier — both the weights and their sidecar."""
-    for path in (model_path(cd, name), model_path(cd, name)[:-4] + '.json'):
-        if os.path.isfile(path):
-            os.remove(path)
+    """Remove a saved classifier — the whole folder, figures included."""
+    shutil.rmtree(classifier_dir(cd, name), ignore_errors=True)
 
 
 def rename_model(cd, old: str, new: str):
@@ -60,12 +65,9 @@ def rename_model(cd, old: str, new: str):
     new = new.strip()
     if not new or new == old:
         return
-    if os.path.isfile(model_path(cd, new)):
+    if os.path.isdir(classifier_dir(cd, new)):
         raise ValueError(f"a classifier named {new!r} already exists")
-    for ext in ('.pkl', '.json'):
-        src = model_path(cd, old)[:-4] + ext
-        if os.path.isfile(src):
-            os.rename(src, model_path(cd, new)[:-4] + ext)
+    os.rename(classifier_dir(cd, old), classifier_dir(cd, new))
 
 
 def open_projects(names: list[str]) -> list:
@@ -81,8 +83,7 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
                   figures: bool = True, save_as: str = None,
                   extra: list = None, highres: bool = True,
                   min_count: int = 20, bias: str = 'balanced',
-                  only_labels: list = None, conn_types: list = None,
-                  min_rats: int = 4) -> dict:
+                  only_labels: list = None, conn_types: list = None) -> dict:
     """Train on saved selections and store the model in the shared library.
 
     Defaults are the widest useful ones: every labeled pair in the loaded
@@ -93,14 +94,15 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
     saved first — a model trained on both resolutions emits a fixed feature
     width and could never score a lowres-only session afterwards.
     """
-    out_dir = out_dir or os.path.join(cd.save_path, 'classifier')
+    saved_as = save_as or cd.conf.name
+    out_dir = out_dir or classifier_dir(cd, saved_as)
     os.makedirs(out_dir, exist_ok=True)
     duration = cd.conf.duration
     datasets = [cd] + list(extra or [])
 
     # The UI queues any missing high-res compute before calling this, so a
     # session still lacking it here is an error rather than something to fix inline.
-    ls = build_multi(datasets, min_count=min_count, min_rats=min_rats,
+    ls = build_multi(datasets, min_count=min_count,
                      highres=highres, only_labels=only_labels,
                      conn_types=conn_types)
     if not ls.label_names:
@@ -118,7 +120,7 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
         cv = routed_cv(per_model, routes, ls.label_names)
         per_strategy = {n: r['scores'] for n, r in per_model.items()}
     else:
-        cv = leave_one_rat_out(ls, names[0], duration=duration, bias=bias)
+        cv = cross_validate(ls, names[0], duration=duration, bias=bias)
         model = fit_final(ls, names[0], duration=duration, bias=bias)
         per_strategy = {names[0]: cv['scores']}
 
@@ -135,15 +137,13 @@ def train_project(cd, model_names: list = None, out_dir: str = None,
     provenance = {'projects': list(getattr(ls, 'sources', [cd.conf.name])),
                   'project': cd.conf.name,
                   'selections_dir': str(cd.selections_dir),
-                  'cross_validation': 'leave-one-rat-out',
+                  'cross_validation': 'pooled 5-fold over pairs',
                   'conn_types': list(conn_types or []),
                   'mean_f1': summary['mean_f1'], 'mean_auc': summary['mean_auc'],
                   'scores': cv['scores'], 'routes': routes,
                   'per_strategy': per_strategy,
                   **ls.provenance()}
-    saved_as = save_as or cd.conf.name
-    model.save(os.path.join(out_dir, f"{'+'.join(names)}.pkl"), provenance)
-    model.save(model_path(cd, saved_as), provenance)
+    model.save(os.path.join(out_dir, 'model.pkl'), provenance)
     summary['saved_as'] = saved_as
     with open(os.path.join(out_dir, 'scores.json'), 'w') as fh:
         json.dump(summary, fh, indent=1)
@@ -271,7 +271,11 @@ def predict_project(cd, model, keys=None) -> list[dict]:
         if hi is not None and hi.ccg is not None:
             X_hi = np.stack([hi.ccg[0][r, t] for r, t in idx]).astype(float)
             N_hi = np.stack([hi.ccg_null[0][r, t] for r, t in idx]).astype(float)
-        proba = model.predict_proba(X, N, X_hi, N_hi)
+        # ACGs are the matrix diagonal; a model trained with them must be scored with them
+        arrays = PairArrays(X, N, X_hi, N_hi,
+                            np.stack([ccg[r, r] for r, _ in idx]).astype(float),
+                            np.stack([ccg[t, t] for _, t in idx]).astype(float))
+        proba = model.predict_proba(X, N, X_hi, N_hi, arrays)
         labels = decide(proba, model.label_names, model.thresholds)
         for (r, t), p, lab in zip(idx, proba, labels):
             # Only the scores that cleared their threshold are kept: storing all

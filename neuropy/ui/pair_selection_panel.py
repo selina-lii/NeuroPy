@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
-from pyqtgraph.Qt.QtCore import Qt, QTimer, QObject, Signal
+from pyqtgraph.Qt.QtCore import Qt, QTimer, QObject, QPoint, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QCheckBox,
@@ -28,6 +28,7 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction, QPainter
 
 from neuropy.ui.ui_common import (
+    area_rgb, cell_areas,
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
     pair_label,
@@ -46,6 +47,7 @@ _ROLE_PAIR = Qt.UserRole        # tuple | None
 _ROLE_TAG  = Qt.UserRole + 1   # 'deleted' | 'header' | 'sep' | None
 _ROLE_HKEY = Qt.UserRole + 2   # str | None  (group key for collapsible headers)
 _ROLE_CHIPS = Qt.UserRole + 3   # list[(display_name, color)] drawn as tag pills
+_ROLE_AREAS = Qt.UserRole + 4   # [(r,g,b), (r,g,b)] brain region of ref and target
 
 
 class TagRowDelegate(QStyledItemDelegate):
@@ -61,13 +63,17 @@ class TagRowDelegate(QStyledItemDelegate):
     def _chip_width(fm, name: str) -> int:
         return fm.horizontalAdvance(name) + 2 * TagChip.PAD
 
+    _DOT_R = 3   # px radius of the ref/tgt brain-region dots
+
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
+        self._paint_areas(painter, option, index)
         chips = index.data(_ROLE_CHIPS)
         if not chips:
             return
         fm = option.fontMetrics
-        x = option.rect.x() + fm.horizontalAdvance(index.data()) + self._TEXT_GAP
+        x = (option.rect.x() + fm.horizontalAdvance(index.data())
+             + self._areas_width(index) + self._TEXT_GAP)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         for name, fill, fg, border in chips:
@@ -82,23 +88,38 @@ class TagRowDelegate(QStyledItemDelegate):
             x += w + TagChip.GAP
         painter.restore()
 
+    def _areas_width(self, index) -> int:
+        """Room the region dots take, so the tag pills start clear of them."""
+        return 0 if not index.data(_ROLE_AREAS) else 4 * self._DOT_R + 6
+
+    def _paint_areas(self, painter, option, index):
+        """Ref and target region as two dots, matching the network's fills."""
+        areas = index.data(_ROLE_AREAS)
+        if not areas:
+            return
+        fm = option.fontMetrics
+        x = option.rect.x() + fm.horizontalAdvance(index.data()) + 6
+        cy = option.rect.center().y() + 1
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for rgb in areas:
+            painter.setBrush(QColor(*rgb))
+            painter.drawEllipse(QPoint(x + self._DOT_R, cy), self._DOT_R, self._DOT_R)
+            x += 2 * self._DOT_R + 2
+        painter.restore()
+
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
         size.setHeight(size.height() + 2)   # breathing room between rows
         chips = index.data(_ROLE_CHIPS)
+        extra = self._areas_width(index)
         if chips:
             fm = option.fontMetrics
-            size.setWidth(size.width() + self._TEXT_GAP
-                          + sum(self._chip_width(fm, n) + TagChip.GAP for n, *_ in chips))
+            extra += self._TEXT_GAP + sum(
+                self._chip_width(fm, n) + TagChip.GAP for n, *_ in chips)
+        size.setWidth(size.width() + extra)
         return size
-
-# Shift remaps the digit row to symbols (Shift+1 → "!"), so event.key() is the symbol,
-# not the digit. Map the shifted symbols back to their digit char (US layout).
-_SHIFT_DIGITS = {
-    Qt.Key_Exclam: '1', Qt.Key_At: '2', Qt.Key_NumberSign: '3', Qt.Key_Dollar: '4',
-    Qt.Key_Percent: '5', Qt.Key_AsciiCircum: '6', Qt.Key_Ampersand: '7',
-    Qt.Key_Asterisk: '8', Qt.Key_ParenLeft: '9', Qt.Key_ParenRight: '0',
-}
 
 _C_GRAY_FG   = QColor('#AAAAAA')
 _C_HDR_FG    = QColor('#444444')
@@ -135,7 +156,7 @@ from neuropy.analyses.pair_selection_data import (
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    TagChip, has_primary_modifier, small_font_pt,
+    TagChip, has_primary_modifier, hotkey_char, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -245,8 +266,7 @@ class Groups(QObject, GroupDataset):
         self.set_group_hotkey(group_name, key_str)
         self.changed.emit()
 
-    def hotkey_handler(self, key_str: str, advance: bool = True,
-                       collect_highlighted=None) -> None:
+    def hotkey_handler(self, key_str: str, collect_highlighted=None) -> None:
         nav   = self.ui
         panel = nav.root.pairs_view.pair_selection
         current_pair = nav.current_pair
@@ -254,69 +274,58 @@ class Groups(QObject, GroupDataset):
             nav.root._show_transient_banner("Select a pair before using a group hotkey")
             return
 
-        print(f"[tag] handler key={key_str!r} advance={advance} "
-              f"registry={[(g.name, g.hotkey) for g in self.registry.values()]}")
-        for grp in self.registry.values():
-            gname, k = grp.name, grp.hotkey
-            if not k or k != key_str:
-                continue
-
-            if not advance:
-                highlighted = [current_pair]
-            else:
-                highlighted = (collect_highlighted(current_pair)
-                               if collect_highlighted else [current_pair])
-
-            changed = set()
-            pair_changes, group_changes = {}, []
-            any_mode = nav.session_any_mode
-
-            for pair in highlighted:
-                old = ('sel' if pair in nav.active_selections.selected
-                       else 'del' if pair in nav.active_selections.deleted
-                       else 'unsel')
-                k = nav.key_for_pair(pair)
-                sess, p2 = k.session, (k.ref, k.tgt)
-                was_in = p2 in self.pairs_in_group(gname, sess)
-                print(f"[tag] key={key_str!r} grp={gname!r} sess={sess!r} p2={p2!r} "
-                      f"was_in={was_in} in_grp={sorted(self.pairs_in_group(gname, sess))[:5]}")
-                group_changes.append((gname, sess, p2, 'remove' if was_in else 'add'))
-                if was_in:
-                    self.discard_from_group(gname, sess, p2)
-                else:
-                    self.add_to_group(gname, sess, p2)
-                print(f"[tag] -> after {'discard' if was_in else 'add'}: "
-                      f"in_grp={sorted(self.pairs_in_group(gname, sess))[:5]}")
-                if any_mode:
-                    changed.add(pair)
-                    continue
-                if not was_in and pair in nav.active_selections.unselected:
-                    nav.active_selections.set_pair_state(pair, 'sel')
-                    pair_changes[pair] = (old, 'sel')
-                    changed.add(pair)
-                elif was_in and pair in nav.active_selections.selected:
-                    has_groups = any(
-                        p2 in self.pairs_in_group(g, sess)
-                        for g in self
-                        if not is_special_group(g)
-                    )
-                    if not has_groups:
-                        nav.active_selections.set_pair_state(pair, 'unsel')
-                        pair_changes[pair] = (old, 'unsel')
-                        changed.add(pair)
-
-            panel.push_undo(SelectionCommand(pair_changes, group_changes))
-            nav.refresh_lists()
-            if advance:
-                next_idx = min(nav.current_pair_idx + 1, len(nav.all_pairs_np) - 1)
-                nav.set_current_pair(next_idx)
-                panel._select_pair_in_list(panel._pair_at_all_inds_idx(next_idx))
-            else:
-                panel._select_pair_in_list(current_pair)
-            nav.root.mainview.request_render()
-            nav.root.neuron_network.draw()
+        gname = self.group_for_hotkey(key_str)
+        if gname is None:
+            nav.root._show_transient_banner(
+                f"'{key_str}' is not assigned to any group hotkey")
             return
-        nav.root._show_transient_banner(f"'{key_str}' is not assigned to any group hotkey")
+        highlighted = (collect_highlighted(current_pair)
+                       if collect_highlighted else [current_pair])
+
+        changed = set()
+        pair_changes, group_changes = {}, []
+        any_mode = nav.session_any_mode
+
+        for pair in highlighted:
+            old = ('sel' if pair in nav.active_selections.selected
+                   else 'del' if pair in nav.active_selections.deleted
+                   else 'unsel')
+            k = nav.key_for_pair(pair)
+            sess, p2 = k.session, (k.ref, k.tgt)
+            was_in = p2 in self.pairs_in_group(gname, sess)
+            group_changes.append((gname, sess, p2, 'remove' if was_in else 'add'))
+            if was_in:
+                self.discard_from_group(gname, sess, p2)
+            else:
+                self.add_to_group(gname, sess, p2)
+            if any_mode:
+                changed.add(pair)
+                continue
+            if not was_in and pair in nav.active_selections.unselected:
+                nav.active_selections.set_pair_state(pair, 'sel')
+                pair_changes[pair] = (old, 'sel')
+                changed.add(pair)
+            elif was_in and pair in nav.active_selections.selected:
+                has_groups = any(
+                    p2 in self.pairs_in_group(g, sess)
+                    for g in self
+                    if not is_special_group(g)
+                )
+                if not has_groups:
+                    nav.active_selections.set_pair_state(pair, 'unsel')
+                    pair_changes[pair] = (old, 'unsel')
+                    changed.add(pair)
+
+        panel.push_undo(SelectionCommand(pair_changes, group_changes))
+        # read order before refresh: a tagged pair may leave the available list
+        last = panel.last_tagged_in_avail(highlighted)
+        nav.refresh_lists()
+        anchor = last if last is not None else current_pair
+        next_idx = min(nav.get_pair_index(anchor) + 1, len(nav.all_pairs_np) - 1)
+        nav.set_current_pair(next_idx)
+        panel._select_pair_in_list(panel._pair_at_all_inds_idx(next_idx))
+        nav.root.mainview.request_render()
+        nav.root.neuron_network.draw()
 
 
 class SelectionDataset(_SelectionDataset):
@@ -626,7 +635,17 @@ class PairSelectionPanel(QWidget, UndoRedo):
         it.setData(_ROLE_CHIPS, [(name, *TagChip.tint(color))
                                  for name, color in
                                  ui.groups.chips_for_pair(k.session, k.ref, k.tgt)])
+        it.setData(_ROLE_AREAS, self._pair_area_rgb(k))
         return it
+
+    def _pair_area_rgb(self, k) -> list:
+        """Region fill for the pair's two neurons, or [] when unlabelled."""
+        areas = cell_areas(getattr(self.ui, 'neurons', None))
+        if areas is None:
+            return []
+        palette = self.ui.root.settings.area_colors
+        return [area_rgb(areas[i], palette) for i in (k.ref, k.tgt)
+                if i is not None and i < len(areas)]
 
     def _populate_avail_list(self, ui, data, should_gray):
         self.avail_list_pairs = []
@@ -907,7 +926,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
         key  = event.key()
         mods = event.modifiers()   # per-event modifiers: reliable on macOS, unlike the global state
         ctrl = has_primary_modifier(mods)   # Cmd on macOS, Ctrl elsewhere
-        shift= bool(mods & Qt.ShiftModifier)
 
         if ctrl and key == Qt.Key_B:
             self._bookmark_toggle_current()
@@ -922,24 +940,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
             self.search_bar.toggle()
             return
 
-        # Group hotkey. Bare digit/letter tags the current pair and advances to the
-        # next; Shift+digit/letter tags without advancing (multi-tag). Shift remaps the
-        # digit row to symbols on macOS (Shift+1 → "!"), so shifted symbols are mapped
-        # back to their digit via _SHIFT_DIGITS.
+        # Group hotkey: tags the highlighted pairs and advances past the last of them.
         if not ctrl:
-            if Qt.Key_A <= key <= Qt.Key_Z:
-                c = chr(key).lower()
-            elif Qt.Key_0 <= key <= Qt.Key_9:
-                c = chr(key)
-            elif key in _SHIFT_DIGITS:
-                c = _SHIFT_DIGITS[key]
-            else:
-                c = None
+            c = hotkey_char(event)
             if c is not None:
-                advance = not shift
                 ui.groups.hotkey_handler(
-                    c, advance=advance,
-                    collect_highlighted=self._collect_highlighted_pairs)
+                    c, collect_highlighted=self._collect_highlighted_pairs)
                 return
 
     def _do_pair_select_update(self):
@@ -1344,6 +1350,15 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 it.setForeground(QBrush(_C_BM_FG))
                 it.setBackground(QBrush(_C_BM_BG))
 
+    def last_tagged_in_avail(self, pairs) -> tuple | None:
+        """The tagged pair sitting lowest in the available list — where a multi-tag ends."""
+        order = {}
+        for row, entry in enumerate(self.avail_list_pairs):
+            if not is_separator_row(entry):
+                order[entry[0]] = row
+        tagged = [p for p in pairs if p in order]
+        return max(tagged, key=lambda p: order[p]) if tagged else None
+
     def _collect_highlighted_pairs(self, current_pair: tuple) -> list:
         """Return pairs highlighted in both listboxes, falling back to current_pair."""
         result = []
@@ -1355,12 +1370,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             inds = self.sel_list_pairs[self.selected_list.row(it)]
             if inds is not None:
                 result.append(inds)
-        out = result or [current_pair]
-        print(f"[tag-collect] any_mode={self.ui.session_any_mode} "
-              f"n_unsel_selected={len(self.unselected_list.selectedItems())} "
-              f"n_sel_selected={len(self.selected_list.selectedItems())} "
-              f"fell_back={not result} out={out}")
-        return out
+        return result or [current_pair]
 
     def _show_hotkeys_dialog(self):
         """Show a dialog listing all keyboard shortcuts."""
@@ -1372,8 +1382,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             "Ctrl+Z    Undo\n"
             "Ctrl+Y    Redo\n"
             "\n"
-            "1..0          Assign group + advance cursor\n"
-            "Shift+1..0    Assign group(s) to current pair (no advance)\n"
+            "1..0          Assign group to the highlighted pairs + advance cursor\n"
             "Ctrl+Delete / Ctrl+Backspace   Move current pair to Deleted"
         )
         QMessageBox.information(None, "Keyboard Shortcuts", hotkeys_text)
@@ -1418,8 +1427,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
             menu.addAction(f"{'✓ ' if all_in else '  '}{display}",
                            lambda g=gname: on_pick(g))
 
-        regular = [g for g in sorted(self.ui.groups) if not is_special_group(g)]
-        special = [g for g in sorted(self.ui.groups) if is_special_group(g)]
+        regular = self.ui.groups.groups   # registry, not _fwd: untagged groups count too
+        special = self.ui.groups.special_groups()
         for gname in regular:
             _add_group_action(parent_menu, gname, gname)
         if special:
@@ -1704,7 +1713,13 @@ class PairSelectionPanelContainer(QWidget, Autosave):
             versions.extend(hist)
         return versions
 
-    def _do_save(self, name: str = ''):
+    def save_quietly(self) -> None:
+        """Persist tags with no dialog, so a session switch cannot drop them."""
+        self._mirror_groups_into_tags()
+        self.ui.sd.save()
+
+    def _mirror_groups_into_tags(self):
+        """Copy the live group memberships onto the buckets that get written out."""
         ui = self.ui
         ui.apply_sel_for_key(ui.key)   # flush current conn-type bucket before write
         for sd in ui.sd.sessions.values():
@@ -1718,6 +1733,10 @@ class PairSelectionPanelContainer(QWidget, Autosave):
                     g = sorted(ui.groups.groups_for_pair(sess, p[0], p[1]))
                     if g:
                         b.tags.setdefault(p, {})['groups'] = g
+
+    def _do_save(self, name: str = ''):
+        ui = self.ui
+        self._mirror_groups_into_tags()
         ui.sd.save()   # persist latest (<session>.json + dataset + groups export)
         latest_path = ui.sd.get_selection_by_session(ui.key).save_path()
         if name:

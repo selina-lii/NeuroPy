@@ -84,12 +84,16 @@ class FieldSchema:
 class FieldMap:
     """A dataset's mapping dict parsed and checked against a schema."""
 
+    EXTRA = 'extra'   # reserved key: columns carried as metadata, under names of the user's choosing
+
     def __init__(self, schema: FieldSchema, mapping: dict, partial: bool = False):
         self.schema = schema
         self.mapping = dict(mapping)
+        self.extra = {name: self._parse(Field(name, OPTIONAL, value_map=True), value)
+                      for name, value in (self.mapping.get(self.EXTRA) or {}).items()}
         self.bindings = {name: self._parse(schema.by_name[name], value)
                          for name, value in self.mapping.items()
-                         if self._known(name)}
+                         if name != self.EXTRA and self._known(name)}
         if not partial:   # an editor holds an unfinished map; call check_required() when done
             self.check_required()
 
@@ -129,7 +133,7 @@ class FieldMap:
 
     def check(self, available: list) -> None:
         """Raise if any bound column is absent from *available* (the dataset's real columns)."""
-        for name, binding in self.bindings.items():
+        for name, binding in {**self.bindings, **self.extra}.items():
             for col in binding.columns:
                 if col not in available:
                     raise ValueError(

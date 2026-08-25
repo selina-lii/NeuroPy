@@ -4,6 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 
+# NP2.0: 4 shanks 250um apart, 2 columns 32um apart; no shank field, so fold it out of x
+SHANK_PITCH_UM = 250
+_X0 = 27
+SHANK_FROM_X = {_X0 + col + SHANK_PITCH_UM * shank: shank
+                for shank in range(4) for col in (0, 32)}
+
 FIELDS = {
     'spike_times':  'spike_times',
     'neuron_type':  {'col': 'cell_type',
@@ -11,9 +17,10 @@ FIELDS = {
                              'Narrow Interneuron': 'inter',
                              'Wide Interneuron': 'inter'}},
     'peak_channel': 'maxWaveformCh',
-    'shank_id':     'x_position_probe',
+    'shank_id':     {'col': 'x_position_probe', 'map': SHANK_FROM_X},
     'position':     ['x_position_probe', 'y_position_probe'],
     'waveforms':    'waveforms',
+    'cell_area':    'cell_area',
 }
 
 def session_name(path: Path) -> str:

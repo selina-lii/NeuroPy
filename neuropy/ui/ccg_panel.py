@@ -284,6 +284,53 @@ class NormSection(CollapsibleSection):
                 btn.blockSignals(False)
 
 
+class ExtendRow(QWidget):
+    """One extend view: enable toggle, window + bin size, and add/delete."""
+
+    changed = Signal()
+    add_requested = Signal()
+    delete_requested = Signal(object)   # self
+
+    def __init__(self, make_spin, deletable: bool, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.extend_check = QCheckBox("Extend:")
+        self.extend_check.clicked.connect(self.changed)
+        self._ms_spin = make_spin((5, 10, 20, 50, 100, 200, 500, 1000), "50")
+        min_bin_ms = _CCG_RESOLUTION['highres'] * 1000
+        bin_opts = sorted({round(min_bin_ms, 4), 0.1, 0.5, 1.0, 2.0,
+                           5.0, 10.0, 20.0, 50.0, 100.0})
+        self._bin_spin = make_spin(bin_opts, "1.0")
+        for spin in (self._ms_spin, self._bin_spin):
+            spin.currentTextChanged.connect(lambda _: self.changed.emit())
+        for w in (self.extend_check, self._ms_spin,
+                  QLabel("ms  resolution:"), self._bin_spin, QLabel("ms")):
+            row.addWidget(w)
+        self.add_btn = chip_button("+")
+        self.add_btn.clicked.connect(self.add_requested)
+        row.addWidget(self.add_btn)
+        if deletable:
+            del_btn = chip_button("−")
+            del_btn.clicked.connect(lambda: self.delete_requested.emit(self))
+            row.addWidget(del_btn)
+        row.addStretch()
+
+    @property
+    def enabled(self) -> bool:
+        return self.extend_check.isChecked()
+
+    @property
+    def extend_ms(self) -> int:
+        try: return int(self._ms_spin.currentText())
+        except ValueError: return 50
+
+    @property
+    def extend_bin_ms(self) -> float:
+        try: return float(self._bin_spin.currentText())
+        except ValueError: return 1.0
+
+
 class CorrelogramSection(CollapsibleSection):
 
     style_changed = Signal()
@@ -299,7 +346,7 @@ class CorrelogramSection(CollapsibleSection):
             self.body_layout.addLayout(row)
         for btn in (self.ccg_btn, self.baseline_btn, self.ref_btn, self.tgt_btn,
                     self.ref_wf_btn, self.autoscale_btn, self.deconv_ref_btn,
-                    self.deconv_tgt_btn, self.extend_check, self.jitter_line_btn):
+                    self.deconv_tgt_btn, self.jitter_line_btn):
             btn.clicked.connect(self.style_changed)
 
     @staticmethod
@@ -347,20 +394,54 @@ class CorrelogramSection(CollapsibleSection):
         row.addStretch()
         return row
 
-    def _row3(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        self.extend_check = QCheckBox("Extend:")
-        self._extend_ms_spin = self.make_spin((5, 10, 20, 50, 100, 200, 500, 1000), "50")
-        self._extend_ms_spin.currentTextChanged.connect(lambda _: self.style_changed.emit())
-        _min_bin_ms = _CCG_RESOLUTION['highres'] * 1000
-        _bin_opts = sorted({round(_min_bin_ms, 4), 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0})
-        self._extend_bin_spin = self.make_spin(_bin_opts, "1.0")
-        self._extend_bin_spin.currentTextChanged.connect(lambda _: self.style_changed.emit())
-        for w in (self.extend_check, self._extend_ms_spin,
-                  QLabel("ms  resolution:"), self._extend_bin_spin, QLabel("ms")):
-            row.addWidget(w)
-        row.addStretch()
+    def _row3(self) -> QVBoxLayout:
+        self._extend_rows: list = []
+        self._extend_box = QVBoxLayout()
+        self._extend_box.setContentsMargins(0, 0, 0, 0)
+        self._add_extend_row()
+        return self._extend_box
+
+    def _add_extend_row(self) -> 'ExtendRow':
+        """First row is permanent, so only later ones offer delete."""
+        row = ExtendRow(self.make_spin, deletable=bool(self._extend_rows))
+        row.changed.connect(self.style_changed)
+        row.add_requested.connect(self._on_add_extend_btn)
+        row.delete_requested.connect(self._on_delete_extend_btn)
+        self._extend_rows.append(row)
+        self._extend_box.addWidget(row)
         return row
+
+    def _on_add_extend_btn(self):
+        self._add_extend_row().extend_check.setChecked(True)
+        self.style_changed.emit()
+
+    def _on_delete_extend_btn(self, row: 'ExtendRow'):
+        self._extend_rows.remove(row)
+        row.setParent(None)
+        row.deleteLater()
+        self.style_changed.emit()
+
+    @property
+    def extend_views(self) -> list:
+        """Enabled extend rows, in display order."""
+        return [r for r in self._extend_rows if r.enabled]
+
+    def extend_state(self) -> list:
+        """Every extend row (enabled or not), for persisting across sessions."""
+        return [{'enabled': r.enabled, 'ms': r.extend_ms, 'bin_ms': r.extend_bin_ms}
+                for r in self._extend_rows]
+
+    def restore_extend_state(self, state: list):
+        if not state:
+            return
+        while len(self._extend_rows) > len(state):
+            self._on_delete_extend_btn(self._extend_rows[-1])
+        while len(self._extend_rows) < len(state):
+            self._add_extend_row()
+        for row, saved in zip(self._extend_rows, state):
+            row._ms_spin.setCurrentText(str(saved['ms']))
+            row._bin_spin.setCurrentText(str(saved['bin_ms']))
+            row.extend_check.setChecked(bool(saved['enabled']))
 
     def _row4(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -379,15 +460,6 @@ class CorrelogramSection(CollapsibleSection):
         w = self._tgt_scale_widget
         return max(0.01, w.value) if w is not None else 1.0
 
-    @property
-    def extend_ms(self) -> int:
-        try: return int(self._extend_ms_spin.currentText())
-        except ValueError: return 50
-
-    @property
-    def extend_bin_ms(self) -> float:
-        try: return float(self._extend_bin_spin.currentText())
-        except ValueError: return 1.0
 
 
 _BASELINE_EXPLANATIONS = {
@@ -971,14 +1043,16 @@ class CCGContextBuilder:
         )
 
     @classmethod
-    def build_extend_context(cls, nav, panel, seg_label=None) -> 'RenderContext | None':
+    def build_extend_context(cls, nav, panel, seg_label=None,
+                             ext_view: 'ExtendRow' = None) -> 'RenderContext | None':
         """Recompute CCG at user-specified window + bin size (extend mode).
 
         seg_label: segment to extend; None = nav.current_segment.
+        ext_view: which extend row's settings to use.
         Result is cached by (key, ref, tgt, seg, extend_ms, bin_ms).
         """
         cor = panel.corr_section
-        if not cor.extend_check.isChecked():
+        if ext_view is None or not ext_view.enabled:
             return None
         if nav.current_pair_inds is None:
             return None
@@ -987,9 +1061,9 @@ class CCGContextBuilder:
         if ref == tgt:
             return None
 
-        extend_ms     = max(5, cor.extend_ms)
+        extend_ms     = max(5, ext_view.extend_ms)
         min_bin_ms    = _CCG_RESOLUTION['highres'] * 1000
-        extend_bin_ms = max(cor.extend_bin_ms, min_bin_ms)
+        extend_bin_ms = max(ext_view.extend_bin_ms, min_bin_ms)
         dur, bs       = extend_ms / 1000.0, extend_bin_ms / 1000.0
 
         seg_label = seg_label or nav.current_segment
@@ -1024,6 +1098,8 @@ class CCGContextBuilder:
             nt_ref=None, nt_tgt=None, sh_ref=None, sh_tgt=None,
             show_tw=False, cor=cor, cs_overlay=False,
             is_significant=False,
+            base_window_ms=(conf.duration or 0.0) * 1000.0,
+            extend_on=True,
         )
         panel._extend_cache.put(cache_key, ctx)
         return ctx
@@ -1037,7 +1113,8 @@ class CCGContextBuilder:
                        acg_ref, acg_tgt,
                        nt_ref, nt_tgt, sh_ref, sh_tgt,
                        show_tw, cor, cs_overlay, is_significant,
-                       cs_annotation_lines=None, ylim_override=None) -> RenderContext:
+                       cs_annotation_lines=None, ylim_override=None,
+                       base_window_ms=None, extend_on=False) -> RenderContext:
         min_lag = conf.min_lag if show_tw else None
         max_lag = conf.max_lag if show_tw else None
         if null is not None:
@@ -1067,7 +1144,7 @@ class CCGContextBuilder:
             wf_peak_ms=None, wf_peak_amp=None,
             cs_baseline_arg=null if (null is not None and cs_overlay) else None,
             norm_info=None,
-            extend_on=cor.extend_check.isChecked(),
+            extend_on=extend_on,
             cs_annotation_lines=cs_annotation_lines or [],
             min_lag_plot=min_lag, max_lag_plot=max_lag,
             neuron_type=(nt_ref, nt_tgt) if (nt_ref or nt_tgt) else None,
@@ -1082,6 +1159,7 @@ class CCGContextBuilder:
             acg_match_ccg=cor.autoscale_btn.isChecked(),
             ylim=_ylim,
             is_significant_pair=is_significant,
+            base_window_ms=base_window_ms,
         )
 
     @staticmethod
@@ -1110,7 +1188,8 @@ class CCGContextBuilder:
         neurons = nav.neurons
         neurons_sub = neurons.neuron_slice(neuron_inds=np.array([ref, tgt]))
         # An appended window carries its own extent (source config); 'full' spans the session.
-        src = nav.cd.source_config(nav.key, seg_label) if seg_label else None
+        src = (nav.cd.source_config(nav.get_key_with_resolution(), seg_label)
+               if seg_label else None)   # sources live per resolution
         kwargs  = dict(
             bin_size=bs, window_size=dur,
             symmetrize=conf.symmetrize_ccg,
@@ -1176,6 +1255,8 @@ class CCGPlotWidget(QWidget):
         self._pval_vbs:     list = []   # list[pg.ViewBox], flat
         self._pval_items_per: list = [] # list[list], flat
         self._acgs:         list = []   # list[[(vb, axis) ref, (vb, axis) tgt]], flat
+        self._ctxs:         list = []   # list[RenderContext|None], flat — for bin readout
+        self._readouts:     list = []   # list[pg.TextItem], flat — hover value labels
 
         self._last_rows: list | None = None
         self._rebuild_subplots([1])
@@ -1214,6 +1295,8 @@ class CCGPlotWidget(QWidget):
         self._pval_vbs.clear()
         self._pval_items_per.clear()
         self._acgs.clear()
+        self._ctxs.clear()
+        self._readouts.clear()
 
         for row_len in row_lengths:
             row_layout = QHBoxLayout()
@@ -1226,7 +1309,11 @@ class CCGPlotWidget(QWidget):
                 pw.showGrid(x=False, y=True, alpha=0.3)
                 pw.setMouseEnabled(x=False, y=False)
                 pw.getViewBox().setMouseEnabled(x=False, y=False)
-                pw.scene().sigMouseClicked.connect(self._on_mouse_click)
+                i = len(self._plot_widgets)   # this plot's slot, bound now to skip a lookup
+                pw.scene().sigMouseClicked.connect(
+                    lambda ev, k=i: self._on_mouse_click(k, ev))
+                pw.scene().sigMouseMoved.connect(
+                    lambda pos, k=i: self._show_bin_readout(self._time_at(k, pos)))
                 p = pw.getPlotItem()
                 vb = pg.ViewBox()
                 vb.setMouseEnabled(x=False, y=False)   # no pinch/wheel/drag zoom on p-val overlay
@@ -1263,12 +1350,61 @@ class CCGPlotWidget(QWidget):
                 self._pval_vbs.append(vb)
                 self._pval_items_per.append([])
                 self._acgs.append(acg)
+                self._ctxs.append(None)
+                # on the ViewBox: p.clear() would drop it from the PlotItem
+                readout = pg.TextItem(anchor=(0, 1))
+                readout.setZValue(p.vb.zValue() + 3)   # above every overlay
+                readout.hide()
+                p.vb.addItem(readout, ignoreBounds=True)
+                self._readouts.append(readout)
             self._plot_grid.addLayout(row_layout)
             self._row_layouts.append(row_layout)
 
-    def _on_mouse_click(self, event):
+    def _on_mouse_click(self, i: int, event):
         if event.button() == Qt.MouseButton.RightButton:
             self.context_menu_requested.emit(event.screenPos().toPoint())
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._show_bin_readout(self._time_at(i, event.scenePos()))
+
+    def _time_at(self, i: int, scene_pos) -> float | None:
+        """Lag in ms under a point in plot *i*'s own scene, or None if off the axes."""
+        p, ctx = self._plots[i], self._ctxs[i]
+        if ctx is None or not p.vb.sceneBoundingRect().contains(scene_pos):
+            return None
+        return p.vb.mapSceneToView(scene_pos).x()
+
+    @staticmethod
+    def _bin_of(ctx, t_ms: float) -> int | None:
+        """Bin holding lag *t_ms*, or None when that lag is off this plot's window."""
+        bs = ctx.bin_size_eff * 1000.0
+        n  = len(np.asarray(ctx.ccg))
+        if not bs or n == 0:
+            return None
+        b = int(round((t_ms + ctx.window_size_eff * 1000.0 / 2) / bs))
+        return b if 0 <= b < n else None
+
+    def _show_bin_readout(self, t_ms: float | None) -> None:
+        """One label per plot: the same lag read on each plot's own bins, so a
+        lo/hi/extend row can be compared at a glance."""
+        for i, ctx in enumerate(self._ctxs):
+            label = self._readouts[i]
+            b = None if (ctx is None or t_ms is None) else self._bin_of(ctx, t_ms)
+            if b is None:
+                label.hide()
+                continue
+            ccg = np.asarray(ctx.ccg, dtype=float)
+            x = -ctx.window_size_eff * 1000.0 / 2 + b * ctx.bin_size_eff * 1000.0
+            lines = [f"time: {x:g} ms", f"count: {ccg[b]:g}"]
+            null = ctx.ccg_null_plot
+            if null is not None and b < len(null):
+                lines.append(f"baseline: {float(null[b]):g}")
+            fg = '#dddddd' if ctx.dark_mode else '#222222'
+            bg = (30, 30, 30, 220) if ctx.dark_mode else (255, 255, 255, 225)
+            label.setText('\n'.join(lines), color=fg)
+            label.fill = pg.mkBrush(*bg)
+            label.setPos(x, ccg[b])
+            label.show()
 
     def render(self, rows) -> None:
         """Draw from rows of RenderContexts: each row is a list of contexts laid
@@ -1292,6 +1428,9 @@ class CCGPlotWidget(QWidget):
         for i in range(len(valid), len(self._plots)):
             self._render_one(self._plots[i], self._pval_vbs[i],
                              self._pval_items_per[i], None, self._acgs[i])
+        self._ctxs = [valid[i] if i < len(valid) else None   # feeds the hover readout
+                      for i in range(len(self._plots))]
+        self._show_bin_readout(None)   # stale labels point at the previous data
         vp = self._plot_scroll.viewport()
         max_row_len = max(row_lengths)
         plot_w = max(320 * max_row_len, vp.width())
@@ -1379,6 +1518,13 @@ class CCGPlotWidget(QWidget):
                 brush=pg.mkBrush(*tw_brush),
                 pen=pg.mkPen(None), movable=False))
 
+        # Extend mode: mark where the un-extended lo-res window ended
+        if ctx.base_window_ms and ctx.base_window_ms < ws:
+            for edge in (-ctx.base_window_ms / 2, ctx.base_window_ms / 2):
+                p.addItem(pg.InfiniteLine(
+                    pos=edge, angle=90,
+                    pen=_pen('#e74c3c', Qt.PenStyle.DashLine)))
+
         # ACGs — each on its own right-hand axis so overlays stay readable
         for (avb, ax), color, data, scale, as_line in (
                 (acg_axes[0], ACG_REF_COLOR, ctx.acg_ref, ctx.acg_yscale_ref, ctx.line_ref),
@@ -1398,6 +1544,8 @@ class CCGPlotWidget(QWidget):
             avb.setYRange(0, top if ctx.acg_match_ccg else top / max(scale, 0.01),
                           padding=0)
             avb.setGeometry(p.vb.sceneBoundingRect())
+            # else the re-added CCG bars cover the ACG
+            avb.setZValue(p.vb.zValue() + 1)
             ax.show()
 
         # Jitter overlay
@@ -1422,6 +1570,7 @@ class CCGPlotWidget(QWidget):
             pval_vb.removeItem(item)
         pval_items.clear()
         pval_vb.setGeometry(p.vb.sceneBoundingRect())
+        pval_vb.setZValue(p.vb.zValue() + 2)   # above the ACG, which is above the CCG
 
         has_pval = ctx.pval is not None or ctx.pval_corrected is not None
         # right axis not used (no linkToView — avoids pyqtgraph recursion bug)
@@ -1525,7 +1674,7 @@ class CorrelogramPanel(QWidget):
         super().__init__(parent)
         self.nav = nav
         self._theme_fn = None
-        self._extend_cache: LRUCache = LRUCache(8)
+        self._extend_cache: LRUCache = LRUCache(32)   # several extend views × segments
         self._same_scale_cache: LRUCache = LRUCache(4)
         self._build()
         self._connect_nav()
@@ -1639,8 +1788,9 @@ class CorrelogramPanel(QWidget):
         # Row axis = view kind (lo / hi / extend); column axis = segment. Transposed: swap.
         builders = ([lambda s, hi=hi: CCGContextBuilder.build_context(nav, self, seg_label=s, hi_res_override=hi)
                      for hi in ([False, True] if nav.resolution == "lo_hi" else [None])]
-                    + ([lambda s: CCGContextBuilder.build_extend_context(nav, self, seg_label=s)]
-                       if cor.extend_check.isChecked() else []))
+                    + [lambda s, v=v: CCGContextBuilder.build_extend_context(
+                           nav, self, seg_label=s, ext_view=v)
+                       for v in cor.extend_views])
         rows = [[build(seg) for seg in segs] for build in builders]
         if nav.stacked_transposed:
             rows = [list(r) for r in zip(*rows)]

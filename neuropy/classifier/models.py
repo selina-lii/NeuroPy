@@ -3,7 +3,7 @@
 Every label is predicted **in parallel** by its own sigmoid output rather than by
 splitting a softmax: half the labeled pairs carry two or more labels ('rhythm'
 and 'good' describe different axes, so they co-occur freely), and a softmax would
-force them to compete. A pair whose every score is low is reported as ``'?'``.
+force them to compete. A pair whose every score is low is reported as NOTHING.
 
 Interface shared by all models::
 
@@ -24,13 +24,14 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
+from neuropy.analyses.utils import NOTHING
 from neuropy.classifier.dataset import loaded_ccg
-from neuropy.classifier.features import (bank_response, kernel_bank, kernel_response,
-                                         learned_bank, residual, shape_features,
-                                         smooth, trace_stack)
-
-UNSURE = '?'
-
+from neuropy.classifier.features import (ACG_FEATURE_NAMES, PEAK_FEATURE_NAMES,
+                                         acg_features, bank_response, deconvolved,
+                                         flank_dip_features, kernel_bank,
+                                         kernel_response, learned_bank,
+                                         peak_features, residual, shape_features,
+                                         smooth, trace_stack, window_features)
 
 BIAS_BETA = {'accurate': 0.5, 'balanced': 1.0, 'discover': 2.0}
 
@@ -81,15 +82,18 @@ class BaseModel:
     uses_highres = False
 
     def _encode(self, ccg: np.ndarray, null: np.ndarray,
-                ccg_hi: np.ndarray = None, null_hi: np.ndarray = None) -> np.ndarray:
+                ccg_hi: np.ndarray = None, null_hi: np.ndarray = None,
+                arrays: 'PairArrays' = None) -> np.ndarray:
         raise NotImplementedError
 
     def fit(self, ccg: np.ndarray, null: np.ndarray, Y: np.ndarray,
-            ccg_hi: np.ndarray = None, null_hi: np.ndarray = None):
+            ccg_hi: np.ndarray = None, null_hi: np.ndarray = None,
+            arrays: 'PairArrays' = None):
         # Pin what was actually trained on: a highres-capable model fitted
         # without it emits narrow features and must be scored the same way.
         self.uses_highres = self.uses_highres and ccg_hi is not None
-        X = self.scaler.fit_transform(self._encode(ccg, null, ccg_hi, null_hi))
+        X = self.scaler.fit_transform(self._encode(ccg, null, ccg_hi, null_hi,
+                                                   arrays))
         self.nets, self.constant = [], []
         for j in range(Y.shape[1]):
             y = Y[:, j]
@@ -142,9 +146,9 @@ class BaseModel:
         return MLPClassifier(**kw)
 
     def predict_proba(self, ccg: np.ndarray, null: np.ndarray,
-                      ccg_hi: np.ndarray = None,
-                      null_hi: np.ndarray = None) -> np.ndarray:
-        X = self._encode(ccg, null, ccg_hi, null_hi)
+                      ccg_hi: np.ndarray = None, null_hi: np.ndarray = None,
+                      arrays: 'PairArrays' = None) -> np.ndarray:
+        X = self._encode(ccg, null, ccg_hi, null_hi, arrays)
         return self._scores(self.scaler.transform(X))
 
     def save(self, path: str, provenance: dict = None):
@@ -216,14 +220,16 @@ class BaseModel:
 
 
 def _n_bins(cd, resolution: str) -> int | None:
-    """Bin count at *resolution*, or None unless every pointer session has it."""
-    widths = set()
+    """Bin count at *resolution*, from the first session that has it.
+
+    One session answers the width; whether a *given* session can be scored is
+    scorable_keys' job, so this must not load the whole project to find out.
+    """
     for key in cd.ptr:
         data = loaded_ccg(cd, key, resolution)
-        if data is None:
-            return None
-        widths.add(int(data.ccg.shape[-1]))
-    return widths.pop() if len(widths) == 1 else None
+        if data is not None:
+            return int(data.ccg.shape[-1])
+    return None
 
 
 class ShapeFeatureNet(BaseModel):
@@ -233,49 +239,16 @@ class ShapeFeatureNet(BaseModel):
     has to beat before its extra capacity is worth anything.
     """
 
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         return shape_features(ccg, null, self.duration)
-
-
-class TraceNet(BaseModel):
-    """MLP over the full residual trace plus its 1st and 2nd derivatives.
-
-    The derivative channels are what let a fixed-width net distinguish a sharp
-    1 ms peak from a broad hump of the same height — the distinction the user's
-    own 'msconn' vs '0rhythm' notes turn on.
-    """
-
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
-        return trace_stack(ccg, null).reshape(len(np.atleast_2d(ccg)), -1)
-
-
-class HybridNet(BaseModel):
-    """Trace + derivatives + the scalar descriptors, concatenated.
-
-    Gives the net both the raw shape and the summary statistics, so it need not
-    re-derive peak SNR or lag from the trace with limited data.
-    """
-
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
-        n = len(np.atleast_2d(ccg))
-        return np.hstack([trace_stack(ccg, null).reshape(n, -1),
-                          shape_features(ccg, null, self.duration)])
 
 
 class DualResNet(BaseModel):
     """Both resolutions, each through its own embedding head before fusion.
 
-    The two traces cover the *same* ±duration/2 window — lowres at 1 ms bins,
-    highres at 1/30 ms — so they are different views of one interval, not
-    different extents. Padding lowres out to the highres length would misalign
-    lag 0 and destroy exactly the information the fine bins exist to carry.
-
-    Each resolution instead gets its own scaler and PCA head, because highres
-    bins hold ~1/30 the counts of lowres bins: one shared scaler over the
-    concatenation would let 601 highres columns swamp 21 lowres ones by sheer
-    count rather than by information. The heads compress each view to a
-    comparable size, and the fused embedding keeps the scalar descriptors from
-    both so peak SNR and lag survive the compression.
+    Same ±duration/2 window at 1 ms and 1/30 ms bins — two views of one interval,
+    so concatenating them would misalign lag 0 and let 601 highres columns swamp
+    21 lowres ones by sheer count. Separate scaler + PCA per resolution instead.
     """
 
     uses_highres = True
@@ -286,7 +259,7 @@ class DualResNet(BaseModel):
         self.head_lo = _EmbedHead(n_components)
         self.head_hi = _EmbedHead(n_components)
 
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         n = len(np.atleast_2d(ccg))
         lo_trace = trace_stack(ccg, null).reshape(n, -1)
         lo_feat = shape_features(ccg, null, self.duration)
@@ -352,7 +325,7 @@ class KernelNet(BaseModel):
             setattr(self, attr, bank)
         return getattr(self, attr)
 
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         ccg = np.atleast_2d(ccg)
         parts = [kernel_response(ccg, null, self.duration,
                                  self._bank('lo', ccg.shape[1])),
@@ -400,7 +373,7 @@ class ConvNet(BaseModel):
                                              min(width, res.shape[1]), self.stride))
         return bank_response(res, getattr(self, attr), self.stride)
 
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         ccg, null = np.atleast_2d(ccg), np.atleast_2d(null)
         res_lo = smooth(residual(ccg, null), 1.0)
         parts = [self._side(res_lo, 'lo', self.width_lo),
@@ -414,33 +387,52 @@ class ConvNet(BaseModel):
         return np.hstack(parts)
 
 
-QUALITY_LABELS = ('best', 'good', 'ok')
+class RuleNet(KernelNet):
+    """Kernel bank plus the multi-peak, ms-window, and ACG descriptors the hand-written rules name."""
 
+    uses_acg = True
 
-class TwoHeadNet(HybridNet):
-    """Hybrid input, but quality and shape are decided by different rules.
+    # Sharp keeps peaks 2 bins apart separable (the 2peakms case); broad sees the
+    # soft flanking scoop and the oscillation without the sharp one's noise.
+    SIGMAS = (0.4, 1.2)
 
-    The two label families behave differently in the ground truth: quality tiers
-    are near mutually exclusive (1427 pairs carry exactly one, 14 carry two)
-    while shape labels co-occur freely (half of all pairs have 2+). So quality
-    gets one softmax head that must choose, and shape keeps its parallel sigmoid
-    heads that may all fire or none.
-    """
+    def fit(self, ccg, null, Y, ccg_hi=None, null_hi=None, arrays=None):
+        # Pinned like uses_highres: a model fitted with the ACG block emits a
+        # wider feature vector and must be scored the same way ever after.
+        self.uses_acg = self.uses_acg and arrays is not None and arrays.has_acg
+        return super().fit(ccg, null, Y, ccg_hi, null_hi, arrays)
 
-    def __init__(self, label_names, duration=0.02, **kw):
-        super().__init__(label_names, duration=duration, **kw)
-        self.quality_idx = [i for i, n in enumerate(self.label_names)
-                            if n in QUALITY_LABELS]
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
+        parts = [super()._encode(ccg, null, ccg_hi, null_hi)]
+        for sigma in self.SIGMAS:
+            parts += [peak_features(ccg, null, self.duration, sigma),
+                      window_features(ccg, null, self.duration, sigma=sigma),
+                      flank_dip_features(ccg, null, self.duration, sigma)]
+            if ccg_hi is not None:
+                parts += [peak_features(ccg_hi, null_hi, self.duration, sigma),
+                          window_features(ccg_hi, null_hi, self.duration,
+                                          sigma=sigma),
+                          flank_dip_features(ccg_hi, null_hi, self.duration,
+                                             sigma)]
+        if self.uses_acg:
+            # zeros, not a narrower vector: the fitted width is pinned
+            if arrays is not None and arrays.has_acg:
+                deconv = deconvolved(ccg, arrays.acg_ref, arrays.acg_tgt)
+                parts += [acg_features(arrays.acg_ref, self.duration),
+                          acg_features(arrays.acg_tgt, self.duration),
+                          shape_features(deconv, null, self.duration),
+                          peak_features(deconv, null, self.duration)]
+            else:
+                parts.append(np.zeros((len(np.atleast_2d(ccg)),
+                                       self._acg_width())))
+        return np.hstack(parts)
 
-    def _scores(self, X):
-        P = super()._scores(X)
-        if self.quality_idx:
-            q = P[:, self.quality_idx]
-            winner = q.max(axis=1, keepdims=True)
-            # Runners-up are zeroed so only one tier can survive; the winner still
-            # faces its own calibrated threshold, so a poor pair gets no tier at all.
-            P[:, self.quality_idx] = np.where(q >= winner, q, 0.0)
-        return P
+    def _acg_width(self) -> int:
+        """Columns the ACG block contributes — two ACG blocks plus a deconvolved pair."""
+        return 2 * len(ACG_FEATURE_NAMES) + 14 + len(PEAK_FEATURE_NAMES)
+
+    def model_key(self) -> str:
+        return 'rule'
 
 
 class RoutedNet(BaseModel):
@@ -485,22 +477,22 @@ class RoutedNet(BaseModel):
         key = self.routes.get(label)
         return key if key in self.subs else next(iter(self.subs))
 
-    def _encode(self, ccg, null, ccg_hi=None, null_hi=None):
+    def _encode(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         raise NotImplementedError("RoutedNet delegates encoding to its sub-models")
 
     def _scores(self, X):
         raise NotImplementedError("RoutedNet scores through its sub-models")
 
-    def fit(self, ccg, null, Y, ccg_hi=None, null_hi=None):
+    def fit(self, ccg, null, Y, ccg_hi=None, null_hi=None, arrays=None):
         for sub in self.subs.values():
-            sub.fit(ccg, null, Y, ccg_hi, null_hi)
+            sub.fit(ccg, null, Y, ccg_hi, null_hi, arrays)
         return self
 
-    def predict_proba(self, ccg, null, ccg_hi=None, null_hi=None):
+    def predict_proba(self, ccg, null, ccg_hi=None, null_hi=None, arrays=None):
         # Only strategies that actually answer a label are run: an unrouted
         # sub-model would encode and score every pair for nothing.
         used = {self._key_for(n) for n in self.label_names}
-        cache = {k: self.subs[k].predict_proba(ccg, null, ccg_hi, null_hi)
+        cache = {k: self.subs[k].predict_proba(ccg, null, ccg_hi, null_hi, arrays)
                  for k in used}
         out = np.zeros((len(np.atleast_2d(ccg)), len(self.label_names)))
         for j, name in enumerate(self.label_names):
@@ -514,13 +506,12 @@ class RoutedNet(BaseModel):
 
 
 MODELS = {'conv': ConvNet, 'kernel': KernelNet, 'dualres': DualResNet,
-          'hybrid': HybridNet, 'shape': ShapeFeatureNet, 'trace': TraceNet,
-          'twohead': TwoHeadNet}
+          'shape': ShapeFeatureNet, 'rule': RuleNet}
 
 
 def decide(proba: np.ndarray, label_names: list[str],
            thresholds: np.ndarray | float = 0.5) -> list[list[str]]:
-    """Per-pair label lists, best score first; a row clearing nothing becomes ``['?']``.
+    """Per-pair label lists, best score first; a row clearing nothing gets ``NOTHING``.
 
     ``thresholds`` is normally a model's calibrated per-label vector, so a common
     label and a rare one are each cut where that label separates best.
@@ -529,5 +520,5 @@ def decide(proba: np.ndarray, label_names: list[str],
     out = []
     for row in proba:
         hits = [label_names[j] for j in np.argsort(-row) if row[j] >= thr[j]]
-        out.append(hits or [UNSURE])
+        out.append(hits or [NOTHING])
     return out

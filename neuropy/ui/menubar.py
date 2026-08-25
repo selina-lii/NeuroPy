@@ -4,21 +4,38 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from pyqtgraph.Qt.QtWidgets import QWidget, QHBoxLayout, QLabel
+from pyqtgraph.Qt.QtCore import QObject, QThread, Signal
+from pyqtgraph.Qt.QtWidgets import QWidget, QHBoxLayout, QLabel, QMessageBox
 from pyqtgraph.Qt.QtGui import QAction
 
-from pathlib import Path as _Path
-
-from neuropy.analyses.ms_connectivity import ProjectConfig
+from neuropy.analyses.ms_connectivity import ProjectConfig, build_project, projects_on_disk
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.ui.app_state import _ALL_SESSION_MARKER
 from neuropy.ui.dialogs import (AddProjectDialog, CreateGroupDialog, ExportOptionsDialog,
                                 SettingsDialog)
 from neuropy.ui.jitter_ui import JitterQueueDialog
-from neuropy.ui.utils import AddableDropdown, chip_button
+from neuropy.ui.utils import AddableDropdown, chip_button, make_button
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
+
+
+class _BuildProjectWorker(QObject):
+    """Runs one blocking build_project off the Qt main thread."""
+    done  = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, header, ccg_conf, compute: bool):
+        super().__init__()
+        self._header, self._ccg_conf, self._compute = header, ccg_conf, compute
+
+    def run(self):
+        try:
+            built = build_project(self._header, self._ccg_conf, compute=self._compute)
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        self.done.emit(built)
 
 
 class IndexBar:
@@ -35,6 +52,9 @@ class IndexBar:
         self.project_combo = AddableDropdown('project', self.add_project, width=120)
         self.project_combo.currentIndexChanged.connect(self._on_project_changed)
         row.addWidget(self.project_combo)
+        self.edit_project_btn = make_button("⚙", self.edit_project, width=26)
+        self.edit_project_btn.setToolTip("Edit this project — rescan the source and remap its fields")
+        row.addWidget(self.edit_project_btn)
         self.populate_project_combo()
 
         row.addWidget(QLabel("Session:"))
@@ -154,14 +174,12 @@ class IndexBar:
 
     def populate_project_combo(self):
         w = self._win
-        root = _Path(str(w.nav.cd.data_root))
-        projects = sorted(d.name for d in root.iterdir()
-                          if d.is_dir() and d.name.startswith('project_')) if root.is_dir() else []
+        projects = [f'project_{n}' for n in projects_on_disk(str(w.nav.cd.data_root))]
         current = getattr(w, '_project_dir', None)
         if current and current not in projects:
             projects = [current] + projects
-        headers = [self._project_header(p) for p in projects]
-        labels = [p if h.built else f"{p}  (draft)" for p, h in zip(projects, headers)]
+        headers = {p: self._project_header(p) for p in projects}
+        labels = [p if headers[p].built else f"{p}  (draft)" for p in projects]
         self.project_combo.blockSignals(True)
         self.project_combo.set_items(labels, data=projects)
         if current:
@@ -169,6 +187,7 @@ class IndexBar:
             if idx >= 0:
                 self.project_combo.setCurrentIndex(idx)
         self.project_combo.blockSignals(False)
+        self.edit_project_btn.setEnabled(bool(current and headers[current].source))
 
     def _on_session_changed(self, idx):
         w = self._win
@@ -222,12 +241,52 @@ class IndexBar:
     def add_project(self, draft: 'ProjectConfig' = None):
         """Build a project via AddProjectDialog — from scratch, or resuming a saved draft."""
         w = self._win
-        built = AddProjectDialog.show(w.nav, parent=w, draft=draft)
-        if built is None:
+        spec = AddProjectDialog.show(w.nav, parent=w, draft=draft)
+        if spec is None:
             return
-        _neurons, cd, _sd = built
-        w._adopt_project(cd)   # sets _project_dir from the new cd
-        self.populate_project_combo()
+        header, ccg_conf, compute = spec
+        editing = draft is not None and draft.built
+        verb, gerund = ("Update", "Updating") if editing else ("Build", "Building")
+
+        thread = QThread(w)
+        worker = _BuildProjectWorker(header, ccg_conf, compute)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        self._build_thread, self._build_worker = thread, worker
+        w.status_bar.start_task(f"{gerund} {header.name}…")
+
+        def _teardown():
+            w.status_bar.end_task()
+            thread.quit()
+            thread.wait()
+            worker.deleteLater()
+            thread.deleteLater()
+            self._build_thread = self._build_worker = None
+
+        def _on_done(built):
+            _teardown()
+            w._adopt_project(built[1])   # sets _project_dir from the new cd
+            self.populate_project_combo()
+
+        def _on_error(msg: str):
+            _teardown()
+            QMessageBox.critical(w, f"{verb} project",
+                                 f"Could not {verb.lower()} '{header.name}':\n{msg}")
+
+        worker.done.connect(_on_done)
+        worker.error.connect(_on_error)
+        thread.start()
+
+    def edit_project(self):
+        """Reopen the builder on the current project — rescans the source, remaps, rebuilds."""
+        header = self._project_header(self._win._project_dir)
+        if not header.source:
+            QMessageBox.information(
+                self._win, "Edit project",
+                f"'{header.name}' is a {header.format} project: it has no source folder "
+                "to rescan, so its fields cannot be remapped here.")
+            return
+        self.add_project(header)
 
     def add_session(self):
         """Add a session to the current project's dataset and to the combo."""

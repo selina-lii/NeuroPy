@@ -676,10 +676,11 @@ is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
 # as a record only: never trained on, never shown as a tag.
 ADMITTED_PREFIX = _SPECIAL_PREFIX + "admitted_"
 
-# Labels naming a saved view or a note rather than a CCG shape. '?' means
-# "unsure pattern": it co-occurs with every other label and marks the labeler's
-# confidence, not a shape.
-_NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', '?'}
+# not a label: kept apart from the hand-applied '?', which is a real shape verdict
+NOTHING = '(nothing predicted)'
+
+# Labels naming a saved view or a note rather than a CCG shape.
+_NON_SHAPE = {'deleted', 'Interesting', 'bad', 'emerging', 'pruning', NOTHING}
 
 
 def is_admitted_group(name: str) -> bool:

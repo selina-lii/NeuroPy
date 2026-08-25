@@ -24,7 +24,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
     QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog,
-    QMessageBox, QTableWidget,
+    QMessageBox, QTableWidget, QTableWidgetItem,
 )
 
 from neuropy.ui.ui_common import qt_dark_mode
@@ -184,6 +184,52 @@ class PairListWidget(QListWidget):
             return
         self._panel._on_list_key(event)
         event.accept()
+
+
+_SHIFT_DIGITS = {
+    Qt.Key_Exclam: '1', Qt.Key_At: '2', Qt.Key_NumberSign: '3', Qt.Key_Dollar: '4',
+    Qt.Key_Percent: '5', Qt.Key_AsciiCircum: '6', Qt.Key_Ampersand: '7',
+    Qt.Key_Asterisk: '8', Qt.Key_ParenLeft: '9', Qt.Key_ParenRight: '0',
+}
+
+
+def hotkey_char(event) -> str | None:
+    """The group-hotkey char an unmodified key event names — shifted digits mapped back."""
+    if has_primary_modifier(event.modifiers()):
+        return None
+    key = event.key()
+    if Qt.Key_A <= key <= Qt.Key_Z:
+        return chr(key).lower()
+    if Qt.Key_0 <= key <= Qt.Key_9:
+        return chr(key)
+    return _SHIFT_DIGITS.get(key)
+
+
+class HotkeyTagFilter(QtCore.QObject):
+    """Pair-list keys for a table standing in for the pair list, which would otherwise swallow them."""
+
+    def __init__(self, table, tag, delete=None, admit=None):
+        super().__init__(table)
+        self._tag = tag          # hotkey char -> True once handled
+        self._delete = delete    # Delete/Backspace, as in PairListWidget
+        self._admit = admit      # Return/Enter, for a table that accepts rows
+        table.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != QtCore.QEvent.Type.KeyPress:
+            return False
+        if (self._admit is not None
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and not has_primary_modifier(event.modifiers())):
+            return bool(self._admit())
+        if (self._delete is not None
+                and event.key() in (Qt.Key_Delete, Qt.Key_Backspace)
+                and not has_primary_modifier(event.modifiers())):
+            return bool(self._delete())
+        char = hotkey_char(event)
+        if char is None:
+            return False
+        return bool(self._tag(char))
 
 
 def chip_button(label: str, checkable: bool = True, checked: bool = False,
@@ -610,26 +656,44 @@ class ValueMapEditor(QDialog):
         current = current or {}
         self._rows = {}
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Blank keeps a value as it is."))
+        if not values:
+            lay.addWidget(QLabel(
+                "This column has no values to map — it holds too many distinct\n"
+                "entries to be a label set, or the dataset has not been scanned yet."))
+        else:
+            lay.addWidget(QLabel(
+                "Rename the values of this column. Left is what the file holds, "
+                "right is what it\nbecomes. Blank keeps a value unchanged."))
         for value in values:
             row = QHBoxLayout()
             row.addWidget(QLabel(value), stretch=1)
-            combo = make_combo([''] + list(targets), 120,
-                               current.get(value, value if value in targets else ''))
-            row.addWidget(combo)
+            # A field with no fixed vocabulary (regions, shank indices) is renamed
+            # freely; only one with declared values offers a choice.
+            if targets:
+                editor = make_combo([''] + list(targets), 120,
+                                    current.get(value, value if value in targets else ''))
+            else:
+                editor = QLineEdit(current.get(value, ''))
+                editor.setPlaceholderText(value)
+                editor.setFixedWidth(120)
+            row.addWidget(editor)
             lay.addLayout(row)
-            self._rows[value] = combo
+            self._rows[value] = editor
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                 QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
+    @staticmethod
+    def _text(editor) -> str:
+        return editor.currentText() if hasattr(editor, 'currentText') else editor.text()
+
     @property
     def value_map(self) -> dict:
         """Only the values that change — an unlisted one is left alone by whoever applies this."""
-        return {v: c.currentText() for v, c in self._rows.items()
-                if c.currentText() and c.currentText() != v}
+        return {v: t for v, e in self._rows.items()
+                for t in (self._text(e).strip(),) if t and t != v}
 
     @classmethod
     def edit(cls, title: str, values: list, targets: list, current: dict = None,
@@ -1199,7 +1263,16 @@ def read_only_table(headers: list[str]) -> QTableWidget:
     t.horizontalHeader().setStretchLastSection(True)
     t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     t.verticalHeader().setVisible(False)
+    # rows, not cells: every action here acts on a pair
+    t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     return t
+
+
+def read_only_cell(text: str) -> QTableWidgetItem:
+    """One non-editable cell — the item form of ``read_only_table``."""
+    item = QTableWidgetItem(text)
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    return item
 
 
 def confirm_overwrite(parent, path: str, what: str = 'file') -> bool:

@@ -10,20 +10,23 @@ import os
 from typing import TYPE_CHECKING
 
 from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
+from pyqtgraph.Qt.QtGui import QBrush, QColor
 from pyqtgraph.Qt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
-from neuropy.analyses.utils import is_shape_label
-from neuropy.classifier.models import MODELS, UNSURE
+from neuropy.analyses.utils import NOTHING, is_shape_label
+from neuropy.classifier.models import MODELS
+from neuropy.ui.cluster_ui import ClusterPanel
 from neuropy.ui.ui_common import SelectionCommand
-from neuropy.ui.utils import (BusyButton, ListPickerButton, TagChip,
-                              confirm_overwrite, read_only_table)
+from neuropy.ui.utils import (BusyButton, HotkeyTagFilter, ListPickerButton, TagChip,
+                              confirm_overwrite, read_only_cell,
+                              read_only_table)
 from neuropy.classifier.predictions import (PredictionStore, by_owner,
-                                            prior_admissions, store_from_rows)
+                                            store_from_rows)
 from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
                                     delete_model, list_models, missing_highres,
                                     model_path, open_projects, predict_project,
@@ -36,12 +39,27 @@ if TYPE_CHECKING:
 # Shapes that differ only in degree are easier to separate from each other than
 # from all thirteen labels at once, so they train as one family. Labels absent
 # from a project are dropped by the support filter, so a family costs nothing.
+MODEL_RANKING = (
+    "Measured mean F1 (n>=200 labels, pooled CV, discover):\n"
+    "  rule     0.572   kernel + the hand-written shape rules\n"
+    "  kernel   0.554   matched filters at named lags\n"
+    "  conv     0.537   learned local filters\n"
+    "  dualres  0.438   whole-trace PCA per resolution\n"
+    "  shape    0.324   14 interpretable descriptors\n\n"
+    "Picking several trains a routed model — measured 0.548, worse than\n"
+    "'rule' alone, because the strategies overlap rather than complement.")
+
 LABEL_FAMILIES = {
     'quality (best/good/ok)': ['best', 'good', 'ok', 'bad'],
     'fast patterns': ['msconn', '2peakms', 'wideMs', 'rift', 'triple', 'leak'],
     'rhythm': ['rhythm', '0rhythm', 'burst', 'bimodal'],
     'inhibition': ['ppinhib', 'inhib2sides', 'Disinhib', 'I-I-flip'],
 }
+
+# This table is a filtered view of the pair list, so it paints a row the same
+# three ways: selected, deleted, or neither.
+_SELECTED_TINT = '#2f4f3f'
+_DELETED_FG = '#AAAAAA'   # the gray the pair panel grays deleted pairs with
 
 
 def _tight(box):
@@ -140,7 +158,7 @@ class _AcceptChip(TagChip):
     """One predicted label, clicked to tag the pair with just that label.
 
     A prediction is often partly right, so each label is its own click target;
-    the extra "all" chip takes the whole row when every label is correct.
+    Enter takes the whole row when every label is correct.
     """
     clicked = Signal(str)
 
@@ -161,7 +179,9 @@ class ClassifierDialog(QDialog):
         self._win = win
         self._thread = self._worker = None
         self._rows: list[tuple] = []
+        self._row_of: dict = {}
         self._key_cache: dict = {}   # (session, type_label) -> nd-key; see _key_of
+        self._mark = 0               # undo depth on open; see mark_session
         self.setWindowTitle("Classify pairs")
         self.resize(620, 520)
         # Non-modal throughout: judging a candidate pair means toggling
@@ -176,6 +196,14 @@ class ClassifierDialog(QDialog):
         QVBoxLayout(self).addWidget(self.body)
         outer = QVBoxLayout(self.body)
         outer.setContentsMargins(0, 0, 0, 0)
+        # Two ways to reach the same tags: a model proposing them one pair at a
+        # time, or a cluster proposing them for a whole shape at once.
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs)
+        heads = QWidget()
+        self.tabs.addTab(heads, "MLP heads")
+        outer = QVBoxLayout(heads)
+        outer.setContentsMargins(0, 0, 0, 0)
         self._splitter = QSplitter(Qt.Vertical)
         outer.addWidget(self._splitter)
         train_box, lay = QWidget(), _tight(QVBoxLayout())
@@ -189,6 +217,7 @@ class ClassifierDialog(QDialog):
         self.model_picker = ListPickerButton(
             "Model", list(MODELS), plural="models",
             select_all_when_empty=False, ordered=True)
+        self.model_picker.setToolTip(MODEL_RANKING)
         self.model_picker.set_selected([DEFAULT_MODEL])
         row.addWidget(self.model_picker)
         self.route_check = QCheckBox("route per label")
@@ -308,31 +337,45 @@ class ClassifierDialog(QDialog):
         lay.addLayout(filt)
 
         # Predicted/accepted are the two halves of an available/selected editor:
-        # a chip click moves one label across, and the row stays until it is empty.
+        # a chip click moves one label across, and the row stays either way.
         self.table = read_only_table(
             ['session', 'pair', 'predicted', 'confidence', 'accepted'])
         self.table.itemSelectionChanged.connect(self._on_table_selection)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_menu)
+        HotkeyTagFilter(self.table, self._tag_by_hotkey, self._delete_selected,
+                        self._admit_selected)
         lay.addWidget(self.table, stretch=1)
 
         act = _tight(QHBoxLayout())
-        self.accept_btn = QPushButton("Accept (tag pair)")
-        self.accept_btn.clicked.connect(self._on_accept_btn)
-        act.addWidget(self.accept_btn)
-        self.reject_btn = QPushButton("Reject")
-        self.reject_btn.clicked.connect(self._on_reject_btn)
-        act.addWidget(self.reject_btn)
+        self.accept_sel_btn = QPushButton("Accept selected")
+        self.accept_sel_btn.setToolTip(
+            "Tag the rows picked out with the mouse — with the filtered label\n"
+            "only, when the label filter names one — then go back to the pair list.")
+        self.accept_sel_btn.clicked.connect(self._on_accept_sel_btn)
+        act.addWidget(self.accept_sel_btn)
         self.accept_all_btn = QPushButton("Accept all shown")
         self.accept_all_btn.setToolTip(
             "Tag every row currently listed — narrow the list with the label\n"
-            "filter and the confidence cutoff first.")
+            "filter and the confidence cutoff first — then go back to the pair list.")
         self.accept_all_btn.clicked.connect(self._on_accept_all_btn)
         act.addWidget(self.accept_all_btn)
         act.addStretch()
         lay.addLayout(act)
 
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.clusters = ClusterPanel(self._win, self)
+        self.tabs.addTab(self.clusters, "Clustering")
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close
+                              | QDialogButtonBox.StandardButton.Save)
         bb.rejected.connect(self._on_close_btn)
-        outer.addWidget(bb)
+        self.save_btn = bb.button(QDialogButtonBox.StandardButton.Save)
+        self.save_btn.setToolTip("Keep the tags accepted here; closing without this undoes them.")
+        bb.accepted.connect(self._on_save_btn)
+        for b in bb.buttons():   # Enter belongs to the table, not the default button
+            b.setAutoDefault(False)
+            b.setDefault(False)
+        self.body.layout().addWidget(bb)   # below the tabs, shared by both
         self._splitter.setStretchFactor(1, 1)   # review pane absorbs resizes
         self.refresh_saved()
         self._reload()
@@ -388,8 +431,6 @@ class ClassifierDialog(QDialog):
 
     def _launch(self, saved: str | None):
         opts = self._options(saved)
-        if saved and not self._confirm_reapply(saved, opts['scope']):
-            return
         if not saved and not all(
                 confirm_overwrite(self, model_path(self._win.cd, n), 'classifier')
                 for n in saved_names(opts)):
@@ -401,24 +442,6 @@ class ClassifierDialog(QDialog):
             self._precompute(missing, opts)
             return
         self._start(opts)
-
-    def _confirm_reapply(self, saved: str, scope: list) -> bool:
-        """Warn when *saved* has already had admissions accepted in this scope.
-
-        Re-running is allowed — a model re-scores pairs whose tags have changed
-        since — but its own past suggestions will come back as predictions, so
-        say how many were already judged rather than letting them look new.
-        """
-        n = prior_admissions(self._win.nav.groups, saved,
-                             {str(k.session) for k in scope})
-        if not n:
-            return True
-        return QMessageBox.question(
-            self, "Already applied",
-            f"'{saved}' has {n} accepted pair(s) in this scope from an earlier run.\n\n"
-            f"Applying it again re-proposes them alongside anything new. "
-            f"Accepted labels are kept either way. Proceed?"
-        ) == QMessageBox.StandardButton.Yes
 
     def _confirm_highres(self, sessions: list[str]) -> bool:
         """High-res compute is minutes and gigabytes — never start it unasked."""
@@ -435,7 +458,9 @@ class ClassifierDialog(QDialog):
         self.train_btn.set_busy(True, f"Computing high-res 0/{len(sessions)}")
         self.apply_btn.setEnabled(False)
         started = self._win.custom_mgr.queue_whole_session(
-            sessions, 'highres', on_done=lambda ok: self._on_precomputed(ok, opts))
+            sessions, 'highres', on_done=lambda ok: self._on_precomputed(ok, opts),
+            on_progress=lambda done, total: self.train_btn.set_busy(
+                True, f"Computing high-res {done}/{total}"))
         if started != len(sessions):
             self.train_btn.set_busy(False)
             self.apply_btn.setEnabled(self.saved_combo.count() > 0)
@@ -526,14 +551,23 @@ class ClassifierDialog(QDialog):
             return None
         return str(self._win.nav.key.session)
 
+    def _filtered_label(self) -> str | None:
+        """The one label the listing is narrowed to, or ``None`` for all of them.
+
+        NOTHING is the model's "cleared no threshold" marker, not a label, so it
+        scopes the listing but can never be tagged onto a pair.
+        """
+        label = self.label_combo.currentText()
+        return None if label in ('all pending', NOTHING) else label
+
     def _visible_pairs(self) -> list[tuple]:
         """Rows the table shows: scope- and label-filtered, above the cutoff."""
         if self._store is None:
             return []
         label = self.label_combo.currentText()
         sess = self._session()
-        one = None if label in ('all pending', UNSURE) else label
-        pairs = (self._store.review_order(self._win.nav.groups, sess)
+        one = self._filtered_label()
+        pairs = (self._store.review_order(sess)
                  if label == 'all pending'
                  else self._store.pairs_for_label(label, sess))
         cutoff = self.cutoff_spin.value()
@@ -542,7 +576,7 @@ class ClassifierDialog(QDialog):
 
     def _sync_labels(self):
         """Refill the label filter from the current store, keeping the choice."""
-        want = ['all pending'] + (self._store.labels if self._store else []) + [UNSURE]
+        want = ['all pending'] + (self._store.labels if self._store else []) + [NOTHING]
         if [self.label_combo.itemText(i)
                 for i in range(self.label_combo.count())] == want:
             return
@@ -556,20 +590,29 @@ class ClassifierDialog(QDialog):
     def _reload(self):
         self._sync_labels()
         pairs = self._visible_pairs()
-        label = self.label_combo.currentText()
-        shown = None if label in ('all pending', UNSURE) else label
+        shown = self._filtered_label()
         self.table.setRowCount(len(pairs))
         self._rows = pairs
+        self._row_of = {pk: i for i, pk in enumerate(pairs)}
         self.accept_all_btn.setText(f"Accept all shown ({len(pairs)})")
         for i, pk in enumerate(pairs):
-            pair = f"{pk[1]}→{pk[2]}"
-            for col, val in ((0, pk[0]),
-                             (1, pair + ('  ✗' if pk in self._store.rejected else '')),
-                             (3, f"{self._store.confidence(*pk, label=shown):.2f}")):
-                self.table.setItem(i, col, _cell(val))
-            self.table.setCellWidget(i, 2, self._chip_cell(pk, taken=False))
-            self.table.setCellWidget(i, 4, self._chip_cell(pk, taken=True))
+            self._paint_row(i, pk, shown)
         self.table.resizeRowsToContents()
+
+    def _paint_row(self, i: int, pk: tuple, shown: str = None):
+        """Draw row *i* for pair *pk* in the pair list's three states."""
+        state = self._pair_state(pk)
+        for col, val in ((0, pk[0]),
+                         (1, f"{pk[1]}→{pk[2]}"),
+                         (3, f"{self._store.confidence(*pk, label=shown):.2f}")):
+            cell = read_only_cell(val)
+            if state == 'sel':
+                cell.setBackground(QBrush(QColor(_SELECTED_TINT)))
+            elif state == 'del':
+                cell.setForeground(QBrush(QColor(_DELETED_FG)))
+            self.table.setItem(i, col, cell)
+        self.table.setCellWidget(i, 2, self._chip_cell(pk, taken=False))
+        self.table.setCellWidget(i, 4, self._chip_cell(pk, taken=True))
 
     def _chip_cell(self, pk: tuple, taken: bool) -> QWidget:
         """One side of the row's editor: accepted labels when *taken*, else pending.
@@ -585,10 +628,8 @@ class ClassifierDialog(QDialog):
         labels = (self._store.taken(groups, *pk) if taken
                   else self._store.pending(groups, *pk))
         # One line per head that proposed something, so a cascade reads
-        # "conv: [best] [refractory] / kernel: [burst]"; 'all' takes the row.
+        # "conv: [best] [refractory] / kernel: [burst]"; Enter takes the row.
         lines = self._store.by_model(*pk, labels)
-        if len(labels) > 1 and not taken:
-            lines = lines + [(None, ['all'])]
         if taken:
             hand = self._store.hand_tags(groups, *pk)
             if hand:
@@ -596,39 +637,50 @@ class ClassifierDialog(QDialog):
         for model, names in lines:
             row = QHBoxLayout()
             row.setSpacing(TagChip.GAP)
-            if model is not None and len(lines) > 1:
+            if len(lines) > 1:
                 tag = QLabel(f"{model}:")
                 tag.setStyleSheet("color: gray;")
                 row.addWidget(tag)
             for label in names:
-                only = '' if model is None else label
-                chip = _AcceptChip(label, self._colour(label, model), only)
+                chip = _AcceptChip(label, self._colour(label), label)
                 chip.clicked.connect(
                     (lambda one, p=pk: self._unaccept_one(p, one)) if taken
                     else (lambda one, p=pk: self._accept_one(p, one)))
                 row.addWidget(chip)
             row.addStretch()
             col.addLayout(row)
+        if taken and self._pair_state(pk) == 'del':
+            col.addLayout(self._deleted_chip_row(pk))
         return cell
 
-    def _colour(self, label: str, model) -> str:
-        """Chip tint for *label*; the 'all' chip carries no group of its own."""
-        if model is None:
-            return ''
+    def _deleted_chip_row(self, pk: tuple) -> QHBoxLayout:
+        """Deleted shown as its own chip, clicked to undelete as a tag is untagged."""
+        row = QHBoxLayout()
+        row.setSpacing(TagChip.GAP)
+        chip = _AcceptChip('deleted', _DELETED_FG, 'deleted')
+        chip.clicked.connect(lambda _, p=pk: self._delete_selected([p]))
+        row.addWidget(chip)
+        row.addStretch()
+        return row
+
+    def _colour(self, label: str) -> str:
+        """Chip tint for *label*, taken from its group."""
         return self._win.nav.groups.get_group_metadata(label).display_color
 
     def _accept(self, pairs: list[tuple], only: str = None):
-        """Accept across *pairs* as one undoable step, then refresh both chip sides."""
+        """Accept across *pairs* as one undoable step, repainting their rows in place."""
         added, promoted = [], {}
         for pk in pairs:
             new = self._store.accept(pk[0], pk[1], pk[2], self._win.nav.groups,
                                      only=only)
             if new:
-                promoted.update(self._promote(pk))
+                promoted.update(self.promote_pair(pk))
             added += new
         if added:
-            self._push_undo([(g, s, p, 'add') for g, s, p in added], promoted)
-        self._after_change()
+            self.push_undo([(g, s, p, 'add') for g, s, p in added], promoted)
+        self.after_change()
+        for pk in pairs:
+            self._redraw_row(pk)
 
     def _key_of(self, pk: tuple):
         """The nd-key a predicted pair belongs to, memoized across a batch.
@@ -642,32 +694,51 @@ class ClassifierDialog(QDialog):
                 ident[0], type_label=ident[1], strict=False)
         return self._key_cache[ident]
 
-    def _promote(self, pk: tuple, add: bool = True) -> dict:
-        """Move a pair between the selected and unselected lists, as tagging does.
+    def _pair_state(self, pk: tuple) -> str | None:
+        """The pair's state in its own key's bucket, or ``None`` if it has no key.
 
-        Tagging a pair selects it and untagging its last shape label puts it back,
-        the same rule the pair panel applies by hand. Returns the state change for
-        undo, keyed by pair — empty unless the pair sits in the key on screen,
-        which is the only bucket SelectionCommand can restore.
+        Deleted is tested for, never inferred: an unpopulated bucket has no state.
         """
-        nav = self._win.nav
         key = self._key_of(pk)
         if key is None:
+            return None
+        bucket = self._win.nav.sd.get_selection_by_session(key).selections[key]
+        pair = (pk[1], pk[2])
+        if pair in bucket.selected:
+            return 'sel'
+        if pair in bucket.deleted:
+            return 'del'
+        return 'unsel' if pair in bucket.unselected else None
+
+    def _set_state(self, pk: tuple, want: str) -> dict:
+        """Move a pair to *want* in its own key's bucket.
+
+        Returns the change for undo, keyed by pair — empty unless the pair sits in
+        the key on screen, which is the only bucket SelectionCommand can restore.
+        """
+        was = self._pair_state(pk)
+        if was is None or was == want:
             return {}
-        pair, want = (pk[1], pk[2]), ('sel' if add else 'unsel')
-        bucket = nav.sd.get_selection_by_session(key).selections[key]
-        was = 'sel' if pair in bucket.selected else (
-            'unsel' if pair in bucket.unselected else 'del')
-        if was == want or was == 'del':
+        key = self._key_of(pk)
+        self._win.nav.sd.get_selection_by_session(key).selections[key].set_pair_state(
+            (pk[1], pk[2]), want)
+        return {(pk[1], pk[2]): (was, want)} if key == self._win.nav.key else {}
+
+    def promote_pair(self, pk: tuple, add: bool = True) -> dict:
+        """Select a pair on tagging, and put it back when its last shape tag goes.
+
+        A deleted pair stays deleted: tagging is not what undeletes it, and the
+        reviewer's delete would otherwise be undone behind their back.
+        """
+        if self._pair_state(pk) == 'del':
             return {}
-        bucket.set_pair_state(pair, want)
-        return {pair: (was, want)} if key == nav.key else {}
+        return self._set_state(pk, 'sel' if add else 'unsel')
 
     def _still_tagged(self, pk: tuple) -> bool:
         """True while the pair carries any shape tag — an admitted marker is not one."""
         return self._win.nav.sd.has_shape_tag(pk[0], (pk[1], pk[2]))
 
-    def _push_undo(self, group_changes: list, pair_changes: dict = None):
+    def push_undo(self, group_changes: list, pair_changes: dict = None):
         """Record group edits on the pair panel's stack so Ctrl+Z reaches them.
 
         Accepting writes real tags — Accept all can write hundreds — so it belongs
@@ -676,9 +747,16 @@ class ClassifierDialog(QDialog):
         self._win.pairs_view.pair_selection.push_undo(
             SelectionCommand(pair_changes or {}, group_changes))
 
-    def _accept_one(self, pk: tuple, only: str):
-        """Tag *pk* with one predicted label (or all of them when only is empty)."""
-        self._accept([pk], only=only or None)
+    def _accept_one(self, pk: tuple, label: str):
+        """Tag *pk* with the one predicted label whose chip was clicked."""
+        self._accept([pk], only=label)
+
+    def _admit_selected(self) -> bool:
+        """Enter: move every predicted label on the picked rows across to accepted."""
+        pairs = self._selected()
+        if pairs:
+            self._accept(pairs)
+        return True
 
     def _unaccept_one(self, pk: tuple, label: str):
         """Send an accepted label back to pending, untagging the pair.
@@ -687,27 +765,66 @@ class ClassifierDialog(QDialog):
         unaccept are symmetric rather than leaving it selected with no tags.
         """
         self._win.nav.groups.discard_from_group(label, pk[0], (pk[1], pk[2]))
-        demoted = {} if self._still_tagged(pk) else self._promote(pk, add=False)
-        self._push_undo([(label, pk[0], (pk[1], pk[2]), 'remove')], demoted)
-        self._after_change()
+        demoted = {} if self._still_tagged(pk) else self.promote_pair(pk, add=False)
+        self.push_undo([(label, pk[0], (pk[1], pk[2]), 'remove')], demoted)
+        self.after_change()
+        self._redraw_row(pk)
+
+    def _tag_by_hotkey(self, char: str) -> bool:
+        """Tag the selected rows with the hotkey's group, toggling as the pair panel does."""
+        groups = self._win.nav.groups
+        gname = groups.group_for_hotkey(char)
+        if gname is None:
+            return False
+        pairs = self._selected()
+        if not pairs:
+            self._win._show_transient_banner("Select a row before using a group hotkey")
+            return True
+        changes = []
+        for pk in pairs:
+            pair = (pk[1], pk[2])
+            if gname in groups.groups_for_pair(*pk):
+                groups.discard_from_group(gname, pk[0], pair)
+                changes.append((gname, pk[0], pair, 'remove'))
+            else:
+                groups.add_to_group(gname, pk[0], pair)
+                changes.append((gname, pk[0], pair, 'add'))
+        if changes:
+            promoted = {}
+            for pk in pairs:
+                promoted.update(self.promote_pair(pk, add=self._still_tagged(pk)))
+            self.push_undo(changes, promoted)
+        self.after_change()
+        for pk in pairs:
+            self._redraw_row(pk)
+        return True
+
+    def _redraw_row(self, pk: tuple):
+        """Repaint one row's chips in place — a rebuild would re-sort under the cursor."""
+        i = self._row_of.get(pk)
+        if i is None:
+            return
+        self._paint_row(i, pk, self._filtered_label())
+        self.table.resizeRowToContents(i)
 
     def _selected(self) -> list[tuple]:
         rows = {i.row() for i in self.table.selectedIndexes()}
         return [self._rows[i] for i in sorted(rows) if i < len(self._rows)]
 
     def _on_table_selection(self):
-        """Show the highlighted pair in the main CCG view so it can be judged.
+        picked = self._selected()
+        if len(picked) == 1:
+            self.goto_pair(*picked[0])
 
-        A prediction may belong to another session or conn type than the one on
+    def goto_pair(self, sess: str, ref: int, tgt: int):
+        """Show a pair in the main CCG view so it can be judged.
+
+        A pair may belong to another session or conn type than the one on
         screen, so navigate there first — otherwise the pair index resolves
         against the wrong list and shows an unrelated CCG.
         """
-        picked = self._selected()
-        if len(picked) != 1:
-            return
-        sess, ref, tgt = picked[0]
         nav = self._win.nav
-        want_type = self._store.type_label_for(sess, ref, tgt)
+        want_type = self._store.type_label_for(sess, ref, tgt) if self._store else None
         if str(nav.key.session) != sess or (want_type
                                             and nav.key.type_label() != want_type):
             target = self._win.cd.find(sess, type_label=want_type, strict=False)
@@ -725,27 +842,71 @@ class ClassifierDialog(QDialog):
             self._win._switch_session(target)
         nav.set_current_pair(nav.get_pair_index((ref, tgt)))
 
-    def _on_accept_btn(self):
-        self._accept(self._selected())
+    def _on_accept_sel_btn(self):
+        self._accept(self._selected(), only=self._filtered_label())
+        self._return_to_pairs()
 
-    def _on_reject_btn(self):
-        for pk in self._selected():
-            self._store.reject(*pk)
-        self._after_change()
+    def _return_to_pairs(self):
+        """Give the left panel back; accepting is a commit, so it survives Close."""
+        self.mark_session()
+        self._win.pairs_view.pair_selection.refresh_lists()
+        self._win.show_pair_selection()
 
     def _on_accept_all_btn(self):
         pairs = self._visible_pairs()
+        only = self._filtered_label()
+        what = f"'{only}'" if only else "their predicted labels"
         if QMessageBox.question(
                 self, "Accept all",
-                f"Tag {len(pairs)} pairs with their predicted labels?\n"
+                f"Tag {len(pairs)} pairs with {what}?\n"
                 "Ctrl+Z undoes this as one step.") \
                 != QMessageBox.StandardButton.Yes:
             return
-        self._accept(pairs)
+        self._accept(pairs, only=only)
+        self._return_to_pairs()
 
-    def _after_change(self):
+    def _on_table_menu(self, pos):
+        """Right-click actions on the picked-out rows."""
+        pairs = self._selected()
+        if not pairs:
+            return
+        menu = QMenu(self.table)
+        n, only = len(pairs), self._filtered_label()
+        menu.addAction(f"Accept {'‘' + only + '’ on ' if only else ''}{n} selected",
+                       lambda: self._accept(pairs, only=only))
+        verb = 'Delete' if self._would_delete(pairs) else 'Undelete'
+        menu.addAction(f"{verb} {n} selected",
+                       lambda: self._delete_selected(pairs))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _would_delete(self, pairs: list[tuple]) -> bool:
+        """True when the toggle should delete rather than undelete.
+
+        Whichever way the pick leans decides the verb, so a mixed selection
+        resolves one way instead of doing half of each.
+        """
+        dead = sum(self._pair_state(pk) == 'del' for pk in pairs)
+        return dead * 2 < len(pairs)
+
+    def _delete_selected(self, pairs: list[tuple] = None) -> bool:
+        """Toggle deleted on the picked rows, as Delete does in the pair list."""
+        pairs = self._selected() if pairs is None else pairs
+        if not pairs:
+            return False
+        want = 'del' if self._would_delete(pairs) else 'unsel'
+        changes = {}
+        for pk in pairs:
+            changes.update(self._set_state(pk, want))
+        if changes:
+            self.push_undo([], changes)
+        self.after_change()
+        for pk in pairs:
+            self._redraw_row(pk)
+        return True
+
+    # shared with the cluster tab, which refreshes its own table
+    def after_change(self):
         self._win.nav.groups.changed.emit()
-        self._reload()
 
     def _on_manage_btn(self):
         ManageModelsDialog(self._win, self).exec()
@@ -777,13 +938,43 @@ class ClassifierDialog(QDialog):
                                  (self.label_picker, self._shape_labels),
                                  (self.extra_picker, self._other_projects)):
             picker.set_items(provider(), keep_selection=True)
+        self.clusters.refresh_scope()
         self.name_edit.setText(self._win.cd.conf.name)
         self.status_label.setText(self._describe_existing())
         self.refresh_saved()
         self._reload()
 
+    @property
+    def _undo_stack(self) -> list:
+        """The pair panel's stack, where every edit this dialog makes is recorded."""
+        return self._win.pairs_view.pair_selection._undo_stack
+
+    def mark_session(self):
+        """Remember the undo depth, so closing can tell this visit's edits apart."""
+        self._mark = len(self._undo_stack)
+
+    def _on_save_btn(self):
+        """Keep this visit's tags: stop treating them as undoable on close."""
+        self.mark_session()
+        self._win._show_transient_banner("Accepted tags kept")
+
     def _on_close_btn(self):
-        """Close means 'give the left panel back' — the run state stays put."""
+        """Close means 'give the left panel back', dropping tags not kept.
+
+        Everything the dialog wrote since it opened is on the pair panel's stack,
+        so unwinding to the opening depth restores the state the reviewer arrived
+        with — one restore, no per-edit bookkeeping.
+        """
+        n = len(self._undo_stack) - self._mark
+        if n and QMessageBox.question(
+                self, "Discard changes",
+                f"Undo {n} change(s) made here?\nSave first to keep them.") \
+                == QMessageBox.StandardButton.Yes:
+            panel = self._win.pairs_view.pair_selection
+            for _ in range(n):
+                panel.undo()
+            self._reload()
+        self.mark_session()
         self._win.show_pair_selection()
 
     @classmethod
@@ -793,6 +984,7 @@ class ClassifierDialog(QDialog):
             win.classifier_dialog = cls(win)
         else:
             win.classifier_dialog.refresh_scope()
+        win.classifier_dialog.mark_session()
         win.show_classifier(win.classifier_dialog.body)
         return win.classifier_dialog
 
@@ -802,18 +994,12 @@ def _score_cells(s: dict) -> list[str]:
             f"{s['f1']:.2f}/{s['auc']:.2f}"]
 
 
-def _cell(val: str) -> QTableWidgetItem:
-    item = QTableWidgetItem(val)
-    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-    return item
-
-
 def _fill_rows(table: QTableWidget, rows: list[list[str]]):
     table.clearContents()   # setRowCount alone leaves stale cell widgets behind
     table.setRowCount(len(rows))
     for i, cells in enumerate(rows):
         for col, val in enumerate(cells):
-            table.setItem(i, col, _cell(val))
+            table.setItem(i, col, read_only_cell(val))
 
 
 class StrategyScoresDialog(QDialog):
