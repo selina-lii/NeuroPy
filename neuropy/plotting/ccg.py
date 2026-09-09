@@ -15,6 +15,19 @@ import neuropy.plotting.probe as probe
 
 ACG_REF_COLOR = '#007434'
 ACG_TGT_COLOR = '#9638AB'
+WF_COLOR      = '#B36B00'
+
+
+def _overlay_axis(ax, offset, color, label):
+    """Colour-coded right-side twin axis, offset past the ones already placed."""
+    twin = ax.twinx()
+    twin.spines['right'].set_position(('axes', 1.0 + offset))
+    twin.set_ylabel(label, color=color, fontsize=8)
+    twin.tick_params(axis='y', colors=color, labelsize=7)
+    twin.spines['right'].set_color(color)
+    for sp in ('top', 'bottom', 'left'):
+        twin.spines[sp].set_visible(False)
+    return twin
 
 
 def test_window_bin_mask(
@@ -182,8 +195,7 @@ def plot_ccg_panel(
         ]:
             if acg_data is None:
                 continue
-            ax_acg = ax.twinx()
-            ax_acg.spines['right'].set_position(('axes', 1.0 + _acg_axis_offset))
+            ax_acg = _overlay_axis(ax, _acg_axis_offset, acg_color, acg_label)
             if acg_line:
                 ax_acg.plot(bins, acg_data, drawstyle='steps-mid', alpha=0.6,
                             color=acg_color, linewidth=1.2, label=acg_label)
@@ -198,12 +210,11 @@ def plot_ccg_panel(
                 raw_max = np.max(acg_data) if np.max(acg_data) > 0 else 1
                 scale = max(acg_scale, 0.01)
                 ax_acg.set_ylim(0, raw_max * 1.1 / scale)
-            ax_acg.set_ylabel(acg_label, color=acg_color, fontsize=8)
-            ax_acg.tick_params(axis='y', colors=acg_color, labelsize=7)
-            ax_acg.spines['right'].set_color(acg_color)
-            for sp in ('top', 'bottom', 'left'):
-                ax_acg.spines[sp].set_visible(False)
             _acg_axis_offset += 0.12
+
+        if wf_peak_ms is not None and wf_peak_amp is not None:
+            ax_wf = _overlay_axis(ax, _acg_axis_offset, WF_COLOR, 'ref wf (µV)')
+            ax_wf.plot(wf_peak_ms, wf_peak_amp, color=WF_COLOR, linewidth=1.2)
 
         # show_test_window=None means legacy: show whenever lags are provided.
         _draw_span = (show_test_window if show_test_window is not None
@@ -719,18 +730,26 @@ class RenderContext:
     base_window_ms: Optional[float] = None   # extend mode: width of the lo-res window it widened
 
 
-def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded):
+def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded,
+                   peak_channel: int = None, channels=None, start=None):
     """Expand a (possibly trimmed) per-neuron waveform to a full (ch_per_shank, T) array."""
     if wf_neuron.ndim == 1:
-        return np.tile(wf_neuron, (ch_per_shank, 1))
+        if peak_channel is None:
+            return np.tile(wf_neuron, (ch_per_shank, 1))
+        clean = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
+        clean[int(peak_channel) % ch_per_shank] = wf_neuron
+        return clean
     sid  = int(shank_id)
     disc = np.asarray(discarded, dtype=int) if discarded is not None else np.empty(0, dtype=int)
-    channel_ids = ch_per_shank * sid + np.arange(ch_per_shank)
+    channel_ids = (np.asarray(channels, dtype=int) if channels is not None
+                   else ch_per_shank * sid + np.arange(ch_per_shank))
     mask   = ~np.isin(channel_ids, disc)
-    start  = int(ch_per_shank * sid - np.sum(disc < ch_per_shank * sid))
+    if start is None:
+        start = int(ch_per_shank * sid - np.sum(disc < ch_per_shank * sid))
     length = int(np.sum(mask))
-    clean  = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
-    clean[mask] = wf_neuron[start:start + length]
+    clean  = np.full((len(channel_ids), wf_neuron.shape[-1]), np.nan)
+    rows = wf_neuron[start:start + length]
+    clean[np.flatnonzero(mask)[:len(rows)]] = rows
     return clean
 
 

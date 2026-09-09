@@ -14,7 +14,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import os
-import shutil
 from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
@@ -34,6 +33,14 @@ class _SelectionData(JsonSavable):
         self.deleted:    set = set()
         self.tags:       dict = {}   # {(ref,tgt): {groups,notes,tags}}
         self.complete:   bool = False  # reviewed exhaustively → untagged pairs are negatives
+        self._dirty:     bool = False
+
+    def __setattr__(self, name: str, value) -> None:
+        # assigning state must dirty the bucket, or a regular save skips it
+        if name in ('selected', 'unselected', 'deleted', 'tags', 'complete') \
+                and getattr(self, name, object()) != value:
+            self._dirty = True
+        object.__setattr__(self, name, value)
 
     def __setstate__(self, state: dict):
         def _to_set(v) -> set:
@@ -61,9 +68,11 @@ class _SelectionData(JsonSavable):
         self.deleted    = _to_set(state.get('deleted', []))
         self.tags       = _to_tuple_key_dict(state.get('tags', {}))
         self.complete   = bool(state.get('complete', False))
+        self._dirty     = False   # just read from disk: nothing to write back
 
     def set_pair_state(self, pair: tuple, state: str):
         pair = tuple(pair)
+        self._dirty = True
         self.selected.discard(pair)
         self.unselected.discard(pair)
         self.deleted.discard(pair)
@@ -126,11 +135,17 @@ class SelectionData(JsonSavable):
                 out[k] = _to_json(v)
         return out
 
+    @property
+    def dirty(self) -> bool:
+        return any(b._dirty for b in self.selections.values())
+
     def save(self, path: str = None, **_):
         if self._nd_key is not None:
             self.session = str(self._nd_key.session)
         self.saved_at = datetime.datetime.now().isoformat()
         JsonSavable.save(self, path=path, **_)
+        for b in self.selections.values():
+            b._dirty = False
 
     @staticmethod
     def as_pair_key(pair, session: str | None = None) -> Key:
@@ -192,9 +207,10 @@ class GroupDataset(JsonSavable, BiIndex):
     _custom_types = {'registry': Group}
 
     def __init__(self, save_dir: str = ''):
-        JsonSavable.__init__(self, ignored_attrs=['ui'])
+        JsonSavable.__init__(self, ignored_attrs=['ui', 'dirty'])
         BiIndex.__init__(self)
         self.registry: dict[str, Group] = {}
+        self.dirty = False
         self.ui = None
         self._save_dir: str = save_dir
 
@@ -228,7 +244,8 @@ class GroupDataset(JsonSavable, BiIndex):
     def group_for_hotkey(self, key_str: str) -> str | None:
         """Group a hotkey tags, or ``None`` when the key is unassigned."""
         return next((g.name for g in self.registry.values()
-                     if g.hotkey and g.hotkey == key_str), None)
+                     if g.hotkey and g.hotkey == key_str
+                     and not is_special_group(g.name)), None)
 
     def get_group_metadata(self, name: str) -> Group:
         if name not in self.registry:
@@ -236,7 +253,7 @@ class GroupDataset(JsonSavable, BiIndex):
         return self.registry[name]
 
     def save_path(self, **_) -> str | None:
-        d = self._save_dir or (self.ui.sd.save_dir if self.ui is not None else '')
+        d = self._save_dir or (groups_dir(self.ui.cd) if self.ui is not None else '')
         return os.path.join(d, 'groups') if d else None
 
     def serialize(self) -> dict:
@@ -252,9 +269,11 @@ class GroupDataset(JsonSavable, BiIndex):
     def add_to_group(self, gname: str, sess: str, pair: tuple) -> None:
         self.add(gname, (sess, int(pair[0]), int(pair[1])))
         self.get_group_metadata(gname)
+        self.dirty = True
 
     def discard_from_group(self, gname: str, sess: str, pair: tuple) -> None:
         self.discard(gname, (sess, int(pair[0]), int(pair[1])))
+        self.dirty = True
 
     def pairs_in_group(self, gname: str, sess: str) -> set:
         return {(r, t) for s, r, t in self.forward(gname) if s == sess}
@@ -323,21 +342,6 @@ def groups_dir(cd) -> str:
     return str(cd.data_root)
 
 
-def adopt_project_groups(cd) -> bool:
-    """Move a pre-sharing project groups.json up to the shared location, once.
-
-    Kept out of ``groups_dir`` so that resolving a path never writes: this runs
-    at project-open time, where the rest of the one-time setup lives.
-    """
-    shared = os.path.join(groups_dir(cd), 'groups.json')
-    local = os.path.join(cd.selections_dir, 'groups.json')
-    if os.path.isfile(shared) or not os.path.isfile(local):
-        return False
-    shutil.copyfile(local, shared)
-    print(f"[Groups] adopted {local} as the shared registry → {shared}")
-    return True
-
-
 class SelectionDataset(JsonSavable, Autosave):
     """Project-level owner of groups + per-session SelectionData.
 
@@ -346,7 +350,7 @@ class SelectionDataset(JsonSavable, Autosave):
     """
 
     def __init__(self, cd, groups_factory=GroupDataset):
-        JsonSavable.__init__(self, ignored_attrs=['cd'])
+        JsonSavable.__init__(self, ignored_attrs=['cd', 'sessions'])
         self.cd = cd
         save_dir = cd.selections_dir
         self.groups = groups_factory()
@@ -358,30 +362,36 @@ class SelectionDataset(JsonSavable, Autosave):
             self.groups.load(self.groups.save_path())
         self.sessions: dict[Key, SelectionData] = {}
         self.save_dir = save_dir
+        self._indexed: set = set()
 
-    def save_path(self, **_) -> str:
-        return os.path.join(self.save_dir, 'selection_dataset')
+    @property
+    def dirty(self) -> bool:
+        return self.groups.dirty or any(sd.dirty for sd in self.sessions.values())
 
-    def __setstate__(self, state: dict):
-        self.save_dir = state.get('save_dir', self.save_dir)
-        # Groups are shared across projects, so their location is never restored
-        # from a saved file: an old one names the project that wrote it.
-        self.groups._save_dir = groups_dir(self.cd)
-        groups_v = state.get('groups', {})
-        if isinstance(groups_v, dict) and '__ref__' in groups_v:
-            self.groups.load(self.groups.save_path())
-        else:
-            self.groups.__setstate__(groups_v)
+    def save(self, path: str = None, **kw):
+        """Each session owns its file; the project has no roster file of its own."""
+        _n = 0
+        for sd in self.sessions.values():
+            if sd.dirty:
+                sd.save()
+                _n += 1
+        print(f"[DBG] save: {_n}/{len(self.sessions)} session files written", flush=True)
+        self.groups.save()
+        self.groups.dirty = False
+
+    def load_sessions(self) -> None:
+        """Read every session file the plan claims; the roster is never stored twice."""
         self.sessions = {}
-        stored = state.get('sessions', {})   # Key-keyed dicts serialize as [[key, value], ...]
-        for key_str, sd_v in (stored.items() if isinstance(stored, dict) else stored):
-            nd = Key.from_str(key_str)
-            sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
-            if isinstance(sd_v, dict) and '__ref__' in sd_v:
-                sd.load(sd_v['__ref__'][:-5])
-            else:
-                sd.__setstate__(sd_v)
-            self.sessions[nd] = sd
+        for sess in self.cd.sessions:
+            path = os.path.join(self.save_dir, sess)
+            if not os.path.isfile(path + '.json'):
+                continue
+            sd = SelectionData(save_dir=self.save_dir)
+            sd.load(path)
+            if not sd.selections:
+                continue
+            sd._nd_key = next(iter(sd.selections)).nd()
+            self.sessions[sd._nd_key] = sd
 
     def get_selection_by_session(self, key: Key) -> SelectionData:
         nd = key.nd()
@@ -418,20 +428,24 @@ class SelectionDataset(JsonSavable, Autosave):
         """
         if not self.save_dir:
             return
-        loaded = {str(k.session) for k in self.sessions}
+        loaded = {str(k.session): v for k, v in self.sessions.items()}
         for sess in sessions:
-            if sess in loaded:
+            if sess in self._indexed:
                 continue
-            path = os.path.join(self.save_dir, sess)
-            if not os.path.exists(path + '.json'):
-                continue
-            sel = SelectionData(save_dir=self.save_dir)
-            sel.load(path)
-            if sel.selections:
+            sel = loaded.get(sess)
+            if sel is None:
+                path = os.path.join(self.save_dir, sess)
+                if not os.path.exists(path + '.json'):
+                    continue
+                sel = SelectionData(save_dir=self.save_dir)
+                sel.load(path)
+                if not sel.selections:
+                    continue
                 # Loading has to leave the bucket writable: without its nd-key a
                 # SelectionData has no save_path and silently never persists.
                 sel._nd_key = next(iter(sel.selections)).nd()
                 self.sessions[sel._nd_key] = sel
+            self._indexed.add(sess)
             for bucket in sel.selections.values():
                 for (ref, tgt), entry in bucket.tags.items():
                     for gname in (entry.get('groups') or []):

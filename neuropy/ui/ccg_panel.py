@@ -17,7 +17,8 @@ from pyqtgraph.Qt.QtGui import QAction, QActionGroup
 from neuropy.analyses.ccg_transforms import NormalizeBy, CCGNorm, ConnectionStrength
 from neuropy.analyses.jitter import compute_jbsi, JitterConfig
 from neuropy.analyses import correlations
-from neuropy.analyses.ms_connectivity import _CCG_RESOLUTION, Key
+from neuropy.analyses.ms_connectivity import (_CCG_RESOLUTION, Key, EranConv,
+                                              _multiple_correction)
 from neuropy.plotting.ccg import (
     RenderContext, JitterOverlay, TitleConfig, PlotStyle,
     test_window_bin_mask, test_window_span_ms, render_ccg_png,
@@ -933,6 +934,33 @@ class CCGContextBuilder:
         dur = conf.duration or 1.0
         return dur / (n_bins - 1) if n_bins > 1 else conf.bin_size
 
+    @staticmethod
+    def _style_key(cor, cs) -> tuple:
+        """Every display toggle a RenderContext carries — the extend cache keys on it."""
+        return (cor.ccg_btn.show, cor.ccg_btn.line,
+                cor.baseline_btn.show, cor.baseline_btn.line,
+                cor.ref_btn.show, cor.ref_btn.line,
+                cor.tgt_btn.show, cor.tgt_btn.line,
+                cor.jitter_line_btn.line,
+                cor.deconv_ref_btn.isChecked(), cor.deconv_tgt_btn.isChecked(),
+                cor.acg_yscale_ref, cor.acg_yscale_tgt,
+                cor.autoscale_btn.isChecked(),
+                cs.p_btn.isChecked(), cs.pc_btn.isChecked(),
+                cs.test_window_btn.isChecked())
+
+    @staticmethod
+    def _refit_conv(ccg, conf, bs: float, excitability: str):
+        """(baseline, pval, pval_corrected) fitted to `ccg` by hollow convolution.
+
+        W is in bins; _conv widens a gaussian W to ~6*sigma and its reflect-padding
+        must fit the array, hence the cap."""
+        W = max(1, int(min(conf.conv_window / bs, (len(ccg) - 1) / 3)))
+        pvals, pred, qvals = EranConv._conv(ccg, W=W, wintype="gauss")
+        p_raw = (qvals if excitability == 'I' else pvals)[0]
+        _, p_corr = _multiple_correction(p_raw, conf.alpha,
+                                         method=conf.multiple_correction)
+        return pred[0], p_raw, p_corr
+
     @classmethod
     def _same_scale_ylim(cls, nav, panel, data, ref: int, tgt: int, neurons):
         """(0, ymax) shared across a pair's segments, or across every pair in the session."""
@@ -1010,6 +1038,19 @@ class CCGContextBuilder:
         # Pair's own session neurons — correct in all-session mode where nav.neurons
         # is the current (possibly different) session.
         pair_neurons = nav.cd.nd.neurons_for(pair_key)
+
+        # before normalization: the ACGs are raw counts, as the deconvolution assumes
+        dc = [x for n, on in ((ref, cor.deconv_ref_btn.isChecked()),
+                              (tgt, cor.deconv_tgt_btn.isChecked())) if on
+              for x in (arr[seg_idx, n, n, :], pair_neurons.n_spikes[n])]
+        if dc:
+            ccg = CCGNorm.deconv_autocorr(ccg, *dc)
+            # the stored null and p-values describe the raw CCG; refit to this one
+            fit_null, fit_p, fit_pc = cls._refit_conv(ccg, conf, bsz,
+                                                      nav.key.excitability)
+            null = fit_null if null is not None else None
+            pval = fit_p if pval is not None else None
+            pvc  = fit_pc if pvc is not None else None
         ccg, null = CCGNorm.apply(
             ccg, null, ref, tgt, nav.active_norms,
             neurons=pair_neurons,
@@ -1066,9 +1107,12 @@ class CCGContextBuilder:
         extend_bin_ms = max(ext_view.extend_bin_ms, min_bin_ms)
         dur, bs       = extend_ms / 1000.0, extend_bin_ms / 1000.0
 
+        cs = panel.cs_section
         seg_label = seg_label or nav.current_segment
+        # every display toggle _make_context reads: a missed one serves a stale context
         cache_key = (str(view), seg_label, extend_ms, extend_bin_ms,
-                     frozenset(nav.active_norms))
+                     frozenset(nav.active_norms), nav.key.excitability,
+                     cls._style_key(cor, cs))
         hit = panel._extend_cache.get(cache_key)
         if hit is not None:
             return hit
@@ -1076,15 +1120,43 @@ class CCGContextBuilder:
         if nav.neurons is None:
             return None
         conf = (nav.ccg_data.conf if nav.ccg_data is not None else nav.cd.conf)
-        ccg_slice = cls._compute_extend_ccg(nav, ref, tgt, dur, bs, conf, seg_label)
-        if ccg_slice is None:
+        full = cls._compute_extend_ccg(nav, ref, tgt, dur, bs, conf, seg_label)
+        if full is None:
             return None
-        ccg_slice, _ = CCGNorm.apply(ccg_slice, None, ref, tgt,
-                                     nav.active_norms - {NormalizeBy.BASELINE},
-                                     neurons=nav.neurons,
-                                     custom_time_hours=cls._time_hours_for_seg(
-                                         nav, nav.segment_index(seg_label)))
+        ccg_slice = full[0, 1, :]
 
+        acg_r = full[0, 0, :] if cor.ref_btn.show else None
+        acg_t = full[1, 1, :] if cor.tgt_btn.show else None
+
+        _time_hrs = cls._time_hours_for_seg(nav, nav.segment_index(seg_label))
+        pair_neurons = nav.neurons
+
+        # before normalization: the ACGs are raw counts, as the deconvolution assumes
+        dc = [x for n, i, on in ((ref, 0, cor.deconv_ref_btn.isChecked()),
+                                 (tgt, 1, cor.deconv_tgt_btn.isChecked())) if on
+              for x in (full[i, i, :], pair_neurons.n_spikes[n])]
+        if dc:
+            ccg_slice = CCGNorm.deconv_autocorr(ccg_slice, *dc)
+
+        # nothing is stored at this window/bin, so fit to whatever the CCG now is
+        pred, p_raw, p_corr = cls._refit_conv(ccg_slice, conf, bs,
+                                              nav.key.excitability)
+        null  = pred if cor.baseline_btn.show else None
+        pval  = p_raw if cs.p_btn.isChecked() else None
+        pvc   = p_corr if cs.pc_btn.isChecked() else None
+        ccg_slice, null = CCGNorm.apply(ccg_slice, null, ref, tgt, nav.active_norms,
+                                        neurons=pair_neurons,
+                                        custom_time_hours=_time_hrs)
+        if acg_r is not None:
+            acg_r, _ = CCGNorm.apply(acg_r, None, ref, ref,
+                                     nav.active_norms - {NormalizeBy.BASELINE},
+                                     neurons=pair_neurons, custom_time_hours=_time_hrs)
+        if acg_t is not None:
+            acg_t, _ = CCGNorm.apply(acg_t, None, tgt, tgt,
+                                     nav.active_norms - {NormalizeBy.BASELINE},
+                                     neurons=pair_neurons, custom_time_hours=_time_hrs)
+
+        nt_ref, nt_tgt, sh_ref, sh_tgt = cls._neuron_meta(pair_neurons, ref, tgt)
         bsz  = dur / (len(ccg_slice) - 1) if len(ccg_slice) > 1 else bs
         dark = cls._dark_mode(panel)
         ctx = cls._make_context(
@@ -1093,9 +1165,9 @@ class CCGContextBuilder:
             seg_display=f'{seg_label} (extend {extend_ms}ms @ {extend_bin_ms:.4f}ms/bin)',
             sess_label=str(nav.key.session or ''),
             jitter=JitterOverlay(), dark=dark,
-            null=None, pval=None, pval_corrected=None,
-            acg_ref=None, acg_tgt=None,
-            nt_ref=None, nt_tgt=None, sh_ref=None, sh_tgt=None,
+            null=null, pval=pval, pval_corrected=pvc,
+            acg_ref=acg_r, acg_tgt=acg_t,
+            nt_ref=nt_ref, nt_tgt=nt_tgt, sh_ref=sh_ref, sh_tgt=sh_tgt,
             show_tw=False, cor=cor, cs_overlay=False,
             is_significant=False,
             base_window_ms=(conf.duration or 0.0) * 1000.0,
@@ -1184,30 +1256,27 @@ class CCGContextBuilder:
 
     @staticmethod
     def _compute_extend_ccg(nav, ref: int, tgt: int, dur: float, bs: float, conf, seg_label: str):
-        """Recompute CCG for ref/tgt at given window/bin. Returns 1-D array or None."""
+        """Recompute the pair at given window/bin. Returns [2,2,bins] (ACGs on the
+        diagonal) or None."""
         neurons = nav.neurons
         neurons_sub = neurons.neuron_slice(neuron_inds=np.array([ref, tgt]))
         # An appended window carries its own extent (source config); 'full' spans the session.
         src = (nav.cd.source_config(nav.get_key_with_resolution(), seg_label)
                if seg_label else None)   # sources live per resolution
         kwargs  = dict(
-            bin_size=bs, window_size=dur,
+            neuron_inds=np.array([0, 1]), bin_size=bs, window_size=dur,
             symmetrize=conf.symmetrize_ccg,
             use_acceleration=conf.use_acceleration,
         )
         try:
             if src is not None and not isinstance(src.t0, str) and not isinstance(src.t1, str):
                 full = correlations.spike_correlations(
-                    neurons_sub, neuron_inds=np.array([0, 1]),
-                    start_end_times=np.array([[float(src.t0)], [float(src.t1)]]), **kwargs)
-                slc = full[0, 0, 1, :]
+                    neurons_sub,
+                    start_end_times=np.array([[float(src.t0)], [float(src.t1)]]), **kwargs)[0]
             else:
-                full = correlations.spike_correlations(
-                    neurons_sub, ref_neuron_inds=np.array([0]),
-                    neuron_inds=np.array([1]), **kwargs)
-                slc = full[0, 0, :]
-            slc = np.asarray(slc, dtype=float)
-            return slc if slc.size > 0 else None
+                full = correlations.spike_correlations(neurons_sub, **kwargs)
+            full = np.asarray(full, dtype=float)
+            return full if full.size > 0 else None
         except Exception as exc:
             print(f"[CCGPanel] extend compute failed: {exc}", flush=True)
             return None
@@ -1315,6 +1384,9 @@ class CCGPlotWidget(QWidget):
                 pw.scene().sigMouseMoved.connect(
                     lambda pos, k=i: self._show_bin_readout(self._time_at(k, pos)))
                 p = pw.getPlotItem()
+                # the title's text width is a layout minimum that would hold the plot
+                # wider than its column; uncapped it overflows onto the next plot
+                p.titleLabel.setMaximumWidth(1)
                 vb = pg.ViewBox()
                 vb.setMouseEnabled(x=False, y=False)   # no pinch/wheel/drag zoom on p-val overlay
                 vb.setMenuEnabled(False)
@@ -1545,7 +1617,7 @@ class CCGPlotWidget(QWidget):
                           padding=0)
             avb.setGeometry(p.vb.sceneBoundingRect())
             # else the re-added CCG bars cover the ACG
-            avb.setZValue(p.vb.zValue() + 1)
+            avb.setZValue(1)   # scene sibling of PlotItem (z=0), which holds the CCG
             ax.show()
 
         # Jitter overlay
@@ -1570,7 +1642,7 @@ class CCGPlotWidget(QWidget):
             pval_vb.removeItem(item)
         pval_items.clear()
         pval_vb.setGeometry(p.vb.sceneBoundingRect())
-        pval_vb.setZValue(p.vb.zValue() + 2)   # above the ACG, which is above the CCG
+        pval_vb.setZValue(2)   # above the ACG, which is above the CCG
 
         has_pval = ctx.pval is not None or ctx.pval_corrected is not None
         # right axis not used (no linkToView — avoids pyqtgraph recursion bug)

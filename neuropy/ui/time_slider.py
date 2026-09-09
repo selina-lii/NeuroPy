@@ -519,11 +519,10 @@ class TimeSliderPanel(QWidget):
         self._main_plot.setVisible(not any_mode)
         self._legend_widget.setVisible(True)
         self._timing_section.setEnabled(True)
-        if any_mode:
-            self._sessions_picker.set_selected(
-                [str(k.session) for k in self.nav.real_nd_keys()])
-        else:
-            self._sessions_picker.set_selected([str(self.nav.key.session)])
+        sessions = [str(k.session) for k in self.nav.real_nd_keys()]
+        self._sessions_picker.set_items(sessions)   # a project switch replaces the roster
+        self._sessions_picker.set_selected(sessions if any_mode
+                                           else [str(self.nav.key.session)])
         themes = (self.nav.cd.nd.get_themes_any() if any_mode
                   else self.nav.cd.nd.get_themes(self.nav.key))
         self._refresh_theme_ui(themes)
@@ -1203,9 +1202,10 @@ class CustomCCGManager(Savable):
             ts._batch_names[bid] = split_names
             ts._batch_meta[bid] = {'spec_name': str(spec.name),
                                    'skipped': skipped, 'rows': []}
-        elif skipped:
+        else:
             self.worker._show_batch_report({'spec_name': str(spec.name),
-                                            'skipped': skipped, 'rows': []})
+                                            'skipped': skipped or [('(all sessions)', 'no session matched the scope')],
+                                            'rows': []})
         return queued
 
 

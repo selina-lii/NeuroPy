@@ -20,7 +20,7 @@ from neuropy.classifier.train import (fit_final, fit_routed, cross_validate,
                                       report, routed_cv)
 from neuropy.classifier.verify import verify_all
 
-DEFAULT_MODEL = 'rule'   # best measured strategy; see CCG_FEATURE_DIAGNOSIS.md
+DEFAULT_MODEL = 'rule'
 
 
 def library_dir(cd) -> str:

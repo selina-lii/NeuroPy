@@ -30,10 +30,10 @@ from pyqtgraph.Qt.QtCore import Qt, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel, QLineEdit,
     QPushButton, QComboBox, QCheckBox, QPlainTextEdit,
-    QScrollArea, QFrame, QMessageBox, QSizePolicy, QColorDialog,
+    QScrollArea, QFrame, QMessageBox, QSizePolicy,
 )
 from pyqtgraph.Qt.QtGui import QColor
-from neuropy.ui.utils import ListPickerButton, make_combo, make_button
+from neuropy.ui.utils import ListPickerButton, make_combo, make_button, ColorLabelButton
 from neuropy.ui.ui_common import qt_dark_mode
 from neuropy.ui.dialogs import VersionSaveDialog, VersionLoadDialog
 from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS
@@ -884,8 +884,8 @@ class StatsRow(QWidget):
 
     # RowConfig field -> (getter reading the widget, setter writing the widget)
     _BIND = {
-        'name':       (lambda r: r._name.text(),                lambda r, v: r._name.setText(v)),
-        'color':      (lambda r: r._color,                      lambda r, v: r._set_color(v)),
+        'name':       (lambda r: r._swatch.name,                lambda r, v: r._swatch.set_name(v)),
+        'color':      (lambda r: r._swatch.color,               lambda r, v: r._swatch.set_color(v)),
         'sessions':   (lambda r: r._pickers['sess'].selected,   lambda r, v: r._pickers['sess'].set_selected(v)),
         'conn_types': (lambda r: r._pickers['ct'].selected,     lambda r, v: r._pickers['ct'].set_selected(v)),
         'segments':   (lambda r: r._pickers['seg'].selected,    lambda r, v: r._pickers['seg'].set_selected(v)),
@@ -901,17 +901,11 @@ class StatsRow(QWidget):
         rw.setContentsMargins(0, 0, 0, 0)
         rw.setSpacing(4)
 
-        self._color = cfg.color if cfg and cfg.color else _BAR_COLORS[idx % len(_BAR_COLORS)]
-        self._color_btn = QPushButton()
-        self._color_btn.setFixedSize(20, 20)
-        self._style_color()
-        self._color_btn.clicked.connect(self._pick_color)
-        rw.addWidget(self._color_btn)
-
-        self._name = QLineEdit(cfg.name if cfg and cfg.name
-                               else (chr(65 + idx) if idx < 26 else f"G{idx+1}"))
-        self._name.setFixedWidth(42)
-        rw.addWidget(self._name)
+        self._swatch = ColorLabelButton(
+            cfg.color if cfg and cfg.color else _BAR_COLORS[idx % len(_BAR_COLORS)],
+            cfg.name if cfg and cfg.name else (chr(65 + idx) if idx < 26 else f"G{idx+1}"),
+            editable=True, name_width=42)
+        rw.addWidget(self._swatch)
 
         self._pickers = {}
         for rkey, label, plural, prov_attr in self._PICKERS:
@@ -961,21 +955,6 @@ class StatsRow(QWidget):
             self._pickers['ct'].set_selected([ct_lbl])
         if len(grp_opts) > 1:
             self._pickers['grp'].set_selected([grp_opts[1]])
-
-    # -- color ---------------------------------------------------------------
-    def _style_color(self):
-        self._color_btn.setStyleSheet(
-            f"background:{self._color}; border:1px solid #888; border-radius:2px;")
-
-    def _set_color(self, v):
-        if v:
-            self._color = v
-            self._style_color()
-
-    def _pick_color(self):
-        c = QColorDialog.getColor(QColor(self._color), self)
-        if c.isValid():
-            self._set_color(c.name())
 
 
 # ─────────────────────────── panel (frontend orchestration) ───────────────────────────

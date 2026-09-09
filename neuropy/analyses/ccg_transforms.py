@@ -26,11 +26,9 @@ class CCGNorm:
         ccg = np.asarray(ccg, dtype=float)
         acg1 = np.asarray(acg1, dtype=float)
         m = ccg.shape[-1]
-        if m % 2 == 0:
-            m -= 1
-            ccg = ccg[..., :m]; acg1 = acg1[..., :m]
-            if acg2 is not None:
-                acg2 = np.asarray(acg2, dtype=float)[..., :m]
+        assert m % 2 == 1, f"deconvolution needs an odd bin count, got {m}"
+        if acg2 is not None:
+            acg2 = np.asarray(acg2, dtype=float)
         hw = (m - 1) // 2
         hidx = np.concatenate([np.arange(hw), np.arange(hw + 1, m)])
 
@@ -40,14 +38,14 @@ class CCGNorm:
                 denom = denom[..., None]
             a = (acg - acg.mean(axis=-1, keepdims=True)) / denom
             a[..., hw] = 1 - a[..., hidx].sum(axis=-1)
-            return a
+            # zero lag sits at hw, but the FFT reads it at index 0
+            return np.fft.ifftshift(a, axes=-1)
 
         den = np.fft.fft(_norm(acg1, nspks1), axis=-1)
         if acg2 is not None:
             den = den * np.fft.fft(_norm(acg2, nspks2), axis=-1)
         den = np.where(np.abs(den) < 1e-10, 1e-10, den)
         dcccg = np.real(np.fft.ifft(np.fft.fft(ccg, axis=-1) / den, axis=-1))
-        dcccg = np.concatenate([dcccg[..., 1:], dcccg[..., :1]], axis=-1)
         return np.where(dcccg < 0, 0.0, dcccg)
 
     @staticmethod
@@ -90,21 +88,6 @@ class CCGNorm:
             ccg_null = np.zeros_like(ccg, dtype=float)
         return ccg, ccg_null
 
-    @staticmethod
-    def deconvolve(ccg_raw, null_raw, acg_ref, nspks_ref, acg_tgt, nspks_tgt,
-                   dref: bool, dtgt: bool):
-        """Apply ACG deconvolution to a CCG + null pair. Returns (ccg_out, null_out)."""
-        if not dref and not dtgt:
-            return ccg_raw, null_raw
-        a1, n1 = (acg_ref, nspks_ref) if dref else (acg_tgt, nspks_tgt)
-        a2, n2 = (acg_tgt, nspks_tgt) if (dref and dtgt) else (None, None)
-
-        def _deconv_1d(x):
-            if x is None:
-                return None
-            return CCGNorm.deconv_autocorr(x.copy().astype(float), a1, n1, a2, n2)
-
-        return _deconv_1d(ccg_raw), _deconv_1d(null_raw)
 
 
 class ConnectionStrength:

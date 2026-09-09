@@ -54,11 +54,17 @@ class NWBFile:
     of this object.  Call .close() when done, or use as a context manager.
     """
 
-    def __init__(self, path: str | Path, fields: dict = None):
+    def __init__(self, path: str | Path, fields=None, drop_absent: bool = False):
         self._path = Path(path)
-        self.fields = FieldMap(UNITS_SCHEMA, fields or NWB_DEFAULT)
         self._io = pynwb.NWBHDF5IO(str(self._path), mode='r', load_namespaces=True)
         self._nwb = self._io.read()
+        mapping = fields.mapping if isinstance(fields, FieldMap) else (fields or NWB_DEFAULT)
+        self.fields = FieldMap(UNITS_SCHEMA, mapping)
+        if drop_absent:   # a mapped-but-absent column would raise on first read
+            columns = set(self.input_fields)
+            for name, binding in list(self.fields.bindings.items()):
+                if any(c not in columns for c in binding.columns):
+                    del self.fields.bindings[name]
 
     def close(self):
         self._io.close()

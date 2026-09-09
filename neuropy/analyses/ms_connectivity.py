@@ -26,8 +26,7 @@ import neuropy.analyses.correlations as correlations
 from neuropy.analyses.utils import (_san_np, _hasvalue, Config, AnalysisDataset, JsonSavable,
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDataset, NeuronsDatasetConfig
-from neuropy.analyses.pair_selection_data import (SelectionDataset,
-                                                  adopt_project_groups)
+from neuropy.analyses.pair_selection_data import SelectionDataset
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
@@ -217,7 +216,7 @@ class ProjectConfig(JsonSavable):
                  dataset: str = None, fields: dict = None, nd_conf: dict = None,
                  sampling_rate: float = None, sampling_rate_inferred: bool = False,
                  sampling_rate_overrides: dict = None, resolution: list = None,
-                 built_at: str = None, n_sessions: int = None, root: str = DATA_ROOT):
+                 built_at: str = None, session_names: list = None, root: str = DATA_ROOT):
         super().__init__()
         self.name = name
         self.source = source
@@ -230,7 +229,7 @@ class ProjectConfig(JsonSavable):
         self.sampling_rate_overrides = sampling_rate_overrides or {}
         self.resolution = resolution
         self.built_at = built_at    # set once the build succeeded; absent means it never finished
-        self.n_sessions = n_sessions
+        self.session_names = session_names or []
         self._root = root
 
     def save_path(self, **_) -> str:
@@ -241,10 +240,10 @@ class ProjectConfig(JsonSavable):
         """Whether a build ever ran to completion — a bare header is a failed attempt."""
         return self.built_at is not None
 
-    def mark_built(self, n_sessions: int) -> None:
+    def mark_built(self, session_names: list) -> None:
         """Stamp the header now that the project loaded; call only after a build succeeds."""
         self.built_at = datetime.datetime.now().isoformat(timespec='seconds')
-        self.n_sessions = n_sessions
+        self.session_names = [str(s) for s in session_names]
         self.save()
 
     @property
@@ -278,7 +277,7 @@ def build_project(header: ProjectConfig, ccg_conf: CCGConfig, compute: bool = Fa
     neurons, cd, sd = open_project(header.name)
     if compute:
         cd.get_ccg()
-    header.mark_built(len(neurons.session_keys()))
+    header.mark_built([k.session for k in neurons.session_keys()])
     return neurons, cd, sd
 
 
@@ -314,13 +313,11 @@ def open_project(name: str = None, sessions: list = None):
             "so open_project(name, sessions) must be given its sessions")
     else:                                      # caller-supplied (ProcessData) -> name them here
         neurons = NeuronsDataset(sessions, nd_conf, naming=header.naming)
-    cd = CCGDataset(conf, neurons)
+    cd = CCGDataset(conf, neurons, header=header)
     cd.missing_sessions()
     cd.load()
-    adopt_project_groups(cd)   # one-time: pre-sharing groups.json moves up to data_root
     sd = SelectionDataset(cd)
-    if os.path.isfile(sd.save_path() + '.json'):   # a project starts with nothing selected
-        sd.load()
+    sd.load_sessions()
     return neurons, cd, sd
 
 
@@ -547,8 +544,8 @@ class CCGData(NpzSavable):
         self.pval = pval
         self.qval = qval
         self.sources = {}
-        self.pval_corrected = None
-        self.qval_corrected = None
+        self._pval_corrected = None
+        self._qval_corrected = None
         self.set_arrays()
 
     def copy(self) -> 'CCGData':
@@ -574,11 +571,21 @@ class CCGData(NpzSavable):
         return self
 
     def refresh_corrected(self):
-        if self.pval is not None: _, self.pval_corrected = _multiple_correction(
-            self.pval, self.conf.alpha, method=self.conf.multiple_correction)
-            
-        if self.qval is not None: _, self.qval_corrected = _multiple_correction(
-            self.qval, self.conf.alpha, method=self.conf.multiple_correction)
+        self._pval_corrected = self._qval_corrected = None
+
+    @property
+    def pval_corrected(self):
+        if self._pval_corrected is None and self.pval is not None:
+            _, self._pval_corrected = _multiple_correction(
+                self.pval, self.conf.alpha, method=self.conf.multiple_correction)
+        return self._pval_corrected
+
+    @property
+    def qval_corrected(self):
+        if self._qval_corrected is None and self.qval is not None:
+            _, self._qval_corrected = _multiple_correction(
+                self.qval, self.conf.alpha, method=self.conf.multiple_correction)
+        return self._qval_corrected
 
     @staticmethod
     def _ensure_4d(a):
@@ -737,10 +744,12 @@ class CCGDataset(AnalysisDataset, Cacheable):
     conf: CCGConfig
     nd: NeuronsDataset
 
-    def __init__(self, conf: CCGConfig, nd=None, src_conf=None, save_path=DATA_ROOT):
+    def __init__(self, conf: CCGConfig, nd=None, src_conf=None, save_path=DATA_ROOT,
+                 header: 'ProjectConfig' = None):
         if conf is None:
             raise ValueError("CCGDataset requires a CCGConfig — conf must not be None")
         super().__init__(conf)
+        self.header = header
         self.conf_meta = {
             'resolution':['lowres', 'highres']
             }
@@ -759,6 +768,11 @@ class CCGDataset(AnalysisDataset, Cacheable):
         if src_conf is not None:
             return
         CCGPointer.load(self.ptr, self.conf, root=self.save_path)
+
+    @property
+    def sessions(self) -> list:
+        """The project's constituents, as its plan declares them."""
+        return self.header.session_names
 
     def ccg_for(self, key: Key):
         """Lazy-load ``CCGData`` for ``key`` (segments on dim0)."""

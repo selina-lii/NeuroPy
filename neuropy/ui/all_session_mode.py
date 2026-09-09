@@ -14,13 +14,15 @@ class AllSessionMode:
     No UI imports. CCGReviewUI delegates enter/exit/rebuild calls here.
     """
 
-    def __init__(self, nav: 'AppState', cd: 'CCGDataset'):
+    def __init__(self, nav: 'AppState'):
         self.nav = nav
-        self.cd = cd
+
+    @property
+    def cd(self) -> 'CCGDataset':
+        return self.nav.cd
 
     def load_groups(self):
-        sessions = [str(nk.session) for nk in self.nav.real_nd_keys()]
-        self.nav.ensure_groups_loaded_for(sessions)
+        self.nav.ensure_groups_loaded_for(self.cd.sessions)
 
     def rebuild_pair_handles(self):
         lbl = self.nav.key.type_label()
@@ -46,6 +48,7 @@ class AllSessionMode:
 
     def rebuild_universe(self):
         """Rebuild the cross-session pair universe for the current conn type."""
+        self.load_groups()   # tags live in the session files; nothing else indexes them
         self.load_deleted_aggregate()
         self.rebuild_pair_handles()
         self.sync_selection_from_universe()

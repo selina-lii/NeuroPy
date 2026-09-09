@@ -4,11 +4,9 @@ from dataclasses import dataclass, field, replace
 from typing import Union, Optional, Dict, Any, Tuple, TypeVar, Type
 from collections import defaultdict
 import hickle as hkl
-import glob as _glob
 import json
 import os
 import re
-import shutil
 
 
 def _san(var, wrap_none=False):
@@ -375,29 +373,6 @@ class Cacheable:
         safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(name).replace(' ', '_'))
         return os.path.join(self.cache_dir, f"{session}__{safe}.{ext}")
 
-    def purge_versioned(self, session: str, name: str, ext: str = 'npz'):
-        """Remove session__name__*.ext legacy timestamped files."""
-        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(name).replace(' ', '_'))
-        for p in _glob.glob(os.path.join(self.cache_dir, f"{session}__{safe}__*.{ext}")):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-
-    def archive_stale(self, pattern: str, is_stale) -> tuple[int, str]:
-        """Move files matching pattern where is_stale(path) is True to _trash/."""
-        trash = os.path.join(self.cache_dir, '_trash')
-        os.makedirs(trash, exist_ok=True)
-        n = 0
-        for p in _glob.glob(pattern):
-            try:
-                if is_stale(p):
-                    shutil.move(p, os.path.join(trash, os.path.basename(p)))
-                    n += 1
-            except Exception:
-                pass
-        return n, trash
-
     def load_json_list(self, path: str) -> list:
         if not os.path.isfile(path):
             return []
@@ -461,8 +436,7 @@ class Config(JsonSavable):
         s = ""
         for key, val in self.__dict__.items():
             s += f"{key}: {val}\n"
-        s += f"config file: {self.filepath}\n"
-        return s
+        return s + f"config file: {self.save_path()}\n"
 
     @staticmethod
     def serialize_value(v):

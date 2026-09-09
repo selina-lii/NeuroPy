@@ -359,7 +359,7 @@ class NetworkPanel:
         self._font_scaled_widgets: list = []   # [(widget, lambda: stylesheet_str), ...]
 
         self._net_arrows:           bool  = True
-        self._net_cur_pair:         bool  = False
+        self._net_cur_pair:         bool  = True
         self._net_hide:             bool  = False
         self._net_hide_same_channel: bool = False
         self._net_hide_same_shank:  bool  = False
@@ -391,6 +391,9 @@ class NetworkPanel:
 
         self._qt_app   = None
         self._plot_win = None
+        self._draw_pending = False
+        self._draw_timer = QTimer(singleShot=True)
+        self._draw_timer.timeout.connect(self._draw_now)
         self._pg_items: list = []
         self._nav_edges: list = []   # visible edges (ref,tgt,key_str) for Up/Down stepping
 
@@ -610,7 +613,7 @@ class NetworkPanel:
         r1_lay.addWidget(cb_on)
         sep1 = QLabel('|'); sep1.setStyleSheet('color: #bbb;')
         r1_lay.addWidget(sep1)
-        cb_cp = chip_button('Current pair', checked=False)
+        cb_cp = chip_button('Current pair', checked=True)
         cb_cp.toggled.connect(lambda v: self._set_bool('_net_cur_pair', v))
         r1_lay.addWidget(cb_cp)
         sep2 = QLabel('|'); sep2.setStyleSheet('color: #bbb;')
@@ -880,10 +883,23 @@ class NetworkPanel:
         self.draw()
 
     def draw(self):
+        """Coalesce the bursts of draw() a session switch fires into one repaint."""
         if self._plot_win is None:
             return
+        self._draw_pending = True
+        if self._plot_win.isVisible():
+            self._draw_timer.start(0)
+
+    def _draw_now(self):
+        if self._plot_win is None or not self._plot_win.isVisible():
+            return
+        self._draw_pending = False
         self._draw_impl()
         self._update_nav_bar()
+
+    def draw_if_pending(self):
+        if self._draw_pending:
+            self.draw()
 
     def _draw_impl(self):
         ui = self.ui
@@ -1301,8 +1317,8 @@ class NetworkPanel:
                     pw.addItem(outline)
                     self._pg_items.append(outline)
 
-        # Standalone current-pair edge — drawn independent of every filter, always on top.
-        if current_pair is not None:
+        # last, so conn-type filters never hide the pair being reviewed
+        if current_pair is not None and self._net_cur_pair:
             cr, ctg = int(current_pair[0]), int(current_pair[1])
             if 0 <= cr < n and 0 <= ctg < n:
                 ox, oy = (0.0, 0.0)
@@ -1498,9 +1514,12 @@ class NetworkPanel:
         self._plot_win.setFocus()
         if points is None or len(points) == 0:
             return
-        nid = points[0].data()
-        if not isinstance(nid, int):
+        # overlapping neurons all land in `points`: cycle through them on repeated clicks
+        ids = [p.data() for p in points if isinstance(p.data(), int)]
+        if not ids:
             return
+        nid = ids[(ids.index(self._focused_neuron) + 1) % len(ids)] \
+            if self._focused_neuron in ids else ids[0]
         self._focused_neuron = nid
         self._focused_pair   = None
         self._focus_entry.setText(str(nid))
@@ -2028,7 +2047,7 @@ class NetworkPanel:
             if hide_shank and shank_ids is not None:
                 if int(shank_ids[ref_i]) == int(shank_ids[tgt_i]):
                     return True
-            elif hide_channel and peak_channels is not None:
+            if hide_channel and peak_channels is not None:
                 if int(peak_channels[ref_i]) == int(peak_channels[tgt_i]):
                     return True
             return False

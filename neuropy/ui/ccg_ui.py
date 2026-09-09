@@ -31,7 +31,6 @@ from neuropy.ui.menubar import ReviewMenuBar, IndexBar
 from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
 from neuropy.analyses.ms_connectivity import CCGDataset, ProjectConfig, open_project
-from neuropy.analyses.pair_selection_data import adopt_project_groups
 from neuropy.ui.all_session_mode import AllSessionMode
 from neuropy.ui.classifier_ui import ClassifierDialog
 from neuropy.analyses.spike_attribution import compute_spike_pairs
@@ -74,6 +73,7 @@ class UISettings(JsonSavable):
     autosave_grp_unit = Tunable('hour')
     # Fewest tagged pairs a label needs before the classifier will train on it.
     classifier_min_count = Tunable(20)
+    jump_to_next_after_select = Tunable(False)
     # Brain region -> [r, g, b] neuron fill; editable so a new dataset's regions
     # can be named without a code change.
     area_colors = Tunable(dict(AREA_RGB))
@@ -230,6 +230,7 @@ class CCGReviewUI(QMainWindow):
     def __init__(self, cd: 'CCGDataset', key=None):
         super().__init__()
         self._loading_thread = self._loading_worker = None   # in-flight lazy-load (see _ensure_loaded)
+        self._queued_load = None
         self.ui_states = UIStates()   # one snapshot for everything
         try:
             self.ui_states.load()
@@ -264,7 +265,7 @@ class CCGReviewUI(QMainWindow):
         self.jitter_mgr.failed.connect(self._on_jitter_failed)
 
         self.custom_mgr = CustomCCGManager(self)
-        self.all_sess_mgr = AllSessionMode(self.nav, self.cd)
+        self.all_sess_mgr = AllSessionMode(self.nav)
         self.nav.pair_changed.connect(self._on_pair_changed)
         self.nav.segment_changed.connect(self._on_segment_changed)
         self.nav.key_changed.connect(self._on_key_changed)
@@ -407,7 +408,15 @@ class CCGReviewUI(QMainWindow):
         self.stats_panel.setWindowTitle("Stats Tests")
         self.stats_panel.resize(1100, 750)
 
+    def _offer_save_before_switch(self) -> bool:
+        """Save unsaved selections before they leave scope; False cancels the switch."""
+        if not self.nav.sd.dirty:
+            return True
+        return bool(QuickSaveDialog.show(self.pairs_view, self))
+
     def _switch_project(self, project_dir: str):
+        if not self._offer_save_before_switch():
+            return
         config_name = project_dir[len('project_'):]
         header = ProjectConfig(name=config_name)
         if os.path.isfile(header.save_path() + '.json'):
@@ -418,9 +427,8 @@ class CCGReviewUI(QMainWindow):
             _neurons, cd, _sd = open_project(config_name)
         else:
             nd = self._nd_by_project.get(project_dir)
-            cd = CCGDataset(self.cd.conf.copy(name=config_name), nd)
+            cd = CCGDataset(self.cd.conf.copy(name=config_name), nd, header=header)
             cd.load()
-            adopt_project_groups(cd)   # open_project does this on the other branch
         self._adopt_project(cd)
         print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
               flush=True)
@@ -428,6 +436,7 @@ class CCGReviewUI(QMainWindow):
     def _adopt_project(self, new_cd: 'CCGDataset'):
         """Point every panel at *new_cd* and reload the current session through it."""
         self.nav.set_cd(new_cd)   # self.cd is a read-only property → nav.cd
+        self.nav.set_cross_session_handles([])   # they name the old project's sessions
         self._project_dir = _Path(new_cd.save_path).name   # cd owns the path; combo reads this
         self._nd_by_project[self._project_dir] = new_cd.nd
         self.jitter_mgr.cd = new_cd
@@ -442,6 +451,8 @@ class CCGReviewUI(QMainWindow):
 
         self.nav.reset_selection_for_project(new_cd)
         os.makedirs(new_cd.custom_dir, exist_ok=True)
+        self.ui_states.project = self._project_dir
+        self.ui_states.save()
 
         if tk is not None:
             self._ensure_loaded(tk.nd(), 'lowres', lambda: self._switch_session(tk))
@@ -450,6 +461,8 @@ class CCGReviewUI(QMainWindow):
 
         self.pairs_view._autoload_session_latest(restore_groups=True)
         self.nav.apply_sel_for_key(self.nav.key)
+        if self.nav.session_any_mode:   # handles were cleared: they named the old project
+            self.all_sess_mgr.rebuild_universe()
 
         self.pairs_view.pair_selection.refresh_lists()
         self.prediction_store = None   # predictions name pairs of the project that made them
@@ -493,6 +506,8 @@ class CCGReviewUI(QMainWindow):
         act = self._panel_actions.get(attr)
         if act:
             act.setChecked(visible)
+        if visible and attr == 'neuron_network':
+            self.neuron_network.draw_if_pending()
 
     def _show_stats_panel(self):
         self.stats_panel.show()
@@ -629,6 +644,8 @@ class CCGReviewUI(QMainWindow):
     def _initial_draw(self):
         print(f"[CCGReviewUI] ccg_ui={__file__}", flush=True)
         try:
+            for attr in list(self.ui_states.collapsed_panels):
+                self._set_panel_visible(attr, False)
             self.pairs_view._autoload_session_latest(restore_groups=True)
             self.nav.apply_sel_for_key(self.nav.key)
             self.pairs_view.pair_selection.refresh_lists()
@@ -649,8 +666,6 @@ class CCGReviewUI(QMainWindow):
             self.mainview.corr_section.restore_extend_state(s.extend_rows)
             if s.splitter_sizes:
                 self._splitter.setSizes(s.splitter_sizes)
-            for attr in list(s.collapsed_panels):
-                self._set_panel_visible(attr, False)
             self.mainview.request_render()
             # Restore all-session mode after the single-session baseline is set up
             # (_enter_all_session_mode preserves the current key's type_label).
@@ -729,7 +744,6 @@ class CCGReviewUI(QMainWindow):
         prev_lbl = self.nav.key.type_label()
         type_labels = [k.type_label() for k in type_keys]
         new_key = type_keys[type_labels.index(prev_lbl)] if prev_lbl in type_labels else type_keys[0]
-        self.all_sess_mgr.load_groups()
         self._ensure_loaded(new_key.nd(), 'lowres', lambda: self._switch_session(new_key))
         self.nav.set_session_any_mode(True)
         self.index_bar.sync()
@@ -769,9 +783,8 @@ class CCGReviewUI(QMainWindow):
         if self._ccg_ready(nd_key, resolution):
             on_loaded()
             return
-        # Reentrancy guard: a load already in flight → ignore (avoids overlapping cd mutation
-        # from rapid session switches).
         if self._loading_thread is not None:
+            self._queued_load = (nd_key, resolution, on_loaded)
             return
         # Busy dialog kept hidden; a 2s single-shot reveals it only if the load outlasts 2s.
         dlg = QProgressDialog("Loading…", None, 0, 0, self)
@@ -797,13 +810,20 @@ class CCGReviewUI(QMainWindow):
             thread.deleteLater()
             self._loading_thread = self._loading_worker = None
 
+        def _run_queued():
+            q, self._queued_load = self._queued_load, None
+            if q is not None:
+                self._ensure_loaded(*q)
+
         def _on_done():
             _teardown()
             on_loaded()
+            _run_queued()
 
         def _on_error(msg: str):
             _teardown()
             QMessageBox.critical(self, "Load failed", f"Could not load CCG data:\n{msg}")
+            _run_queued()
 
         worker.done.connect(_on_done)
         worker.error.connect(_on_error)

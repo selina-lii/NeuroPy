@@ -4,8 +4,8 @@
 session — 26 s across dandi001695, on every single load. Files we write already state
 the rate outright; this does the same for files that arrived from upstream without one.
 
-    python notebooks/stamp_sampling_rate.py <dir>            # report only
-    python notebooks/stamp_sampling_rate.py <dir> --apply    # write in place
+    python notebooks/fix/stamp_sampling_rate.py <dir>            # report only
+    python notebooks/fix/stamp_sampling_rate.py <dir> --apply    # write in place
 """
 import argparse
 import uuid

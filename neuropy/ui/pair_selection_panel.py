@@ -282,50 +282,17 @@ class Groups(QObject, GroupDataset):
         highlighted = (collect_highlighted(current_pair)
                        if collect_highlighted else [current_pair])
 
-        changed = set()
-        pair_changes, group_changes = {}, []
-        any_mode = nav.session_any_mode
+        # read before the rebuild: tagging moves the pair out of the row it occupies
+        neighbour = panel.row_below_cursor()
+        changes, group_changes = panel.apply_group_toggle(highlighted, gname)
 
-        for pair in highlighted:
-            old = ('sel' if pair in nav.active_selections.selected
-                   else 'del' if pair in nav.active_selections.deleted
-                   else 'unsel')
-            k = nav.key_for_pair(pair)
-            sess, p2 = k.session, (k.ref, k.tgt)
-            was_in = p2 in self.pairs_in_group(gname, sess)
-            group_changes.append((gname, sess, p2, 'remove' if was_in else 'add'))
-            if was_in:
-                self.discard_from_group(gname, sess, p2)
-            else:
-                self.add_to_group(gname, sess, p2)
-            if any_mode:
-                changed.add(pair)
-                continue
-            if not was_in and pair in nav.active_selections.unselected:
-                nav.active_selections.set_pair_state(pair, 'sel')
-                pair_changes[pair] = (old, 'sel')
-                changed.add(pair)
-            elif was_in and pair in nav.active_selections.selected:
-                has_groups = any(
-                    p2 in self.pairs_in_group(g, sess)
-                    for g in self
-                    if not is_special_group(g)
-                )
-                if not has_groups:
-                    nav.active_selections.set_pair_state(pair, 'unsel')
-                    pair_changes[pair] = (old, 'unsel')
-                    changed.add(pair)
-
-        panel.push_undo(SelectionCommand(pair_changes, group_changes))
-        # read order before refresh: a tagged pair may leave the available list
-        last = panel.last_tagged_in_avail(highlighted)
-        nav.refresh_lists()
-        anchor = last if last is not None else current_pair
-        next_idx = min(nav.get_pair_index(anchor) + 1, len(nav.all_pairs_np) - 1)
-        nav.set_current_pair(next_idx)
-        panel._select_pair_in_list(panel._pair_at_all_inds_idx(next_idx))
-        nav.root.mainview.request_render()
-        nav.root.neuron_network.draw()
+        # jumping mid-highlight would break the batch; the release lands it
+        held = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        if held and panel._deferred_jump is None:
+            # first tag of the batch fixes the landing row; later ones must not move it
+            panel._deferred_jump = neighbour
+        panel._transition_many(changes, group_changes, anchor=current_pair,
+                               nxt=None if held else neighbour)
 
 
 class SelectionDataset(_SelectionDataset):
@@ -479,6 +446,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._select_timer.setSingleShot(True)
         self._select_timer.timeout.connect(self._do_pair_select_update)
         self._next_focus_pair: tuple | None = None
+        self._deferred_jump: tuple | None = None
+        self._areas_cache: dict = {}
         self.__init_undo__()
 
         self._build(ui_state_cache)
@@ -566,7 +535,9 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._next_focus_pair = None
 
     def _mark_next_focus_pair(self, inds: tuple) -> None:
-        self._next_focus_pair = tuple(int(x) for x in inds)
+        # all-session handles are (Key, ref, tgt); the lists key on (ref, tgt) only
+        self._next_focus_pair = (None if self.ui.session_any_mode
+                                 else tuple(int(x) for x in inds))
 
     def _apply_acted_highlight(self, widget: PairListWidget, item: QListWidgetItem):
         item.setBackground(QBrush(_C_ACTED_BG))
@@ -640,7 +611,10 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def _pair_area_rgb(self, k) -> list:
         """Region fill for the pair's two neurons, or [] when unlabelled."""
-        areas = cell_areas(getattr(self.ui, 'neurons', None))
+        nd_key = k.nd()
+        if nd_key not in self._areas_cache:
+            self._areas_cache[nd_key] = cell_areas(self.ui.cd.nd.neurons_for(nd_key))
+        areas = self._areas_cache[nd_key]
         if areas is None:
             return []
         palette = self.ui.root.settings.area_colors
@@ -706,7 +680,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         for nd_key, hs in by_nd.items():
             ccgd = ui.cd.ccg_for(nd_key.change(resolution=res))
             has  = ccgd is not None and ccgd.ccg is not None
-            seg  = ccgd.ccg.shape[0] if has else 0
+            seg  = min(ui.segment_index(ui.current_segment),
+                       ccgd.ccg.shape[0] - 1) if has else 0
             for h in hs:
                 out[h] = (worst if not has else
                           ccgd.mean_ccg(int(h[1]), int(h[2]), seg) if kind == 'mean'
@@ -783,6 +758,10 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 buckets = _defaultdict(list)
                 for trip, tags in sorted(pair_tags.items()):
                     buckets[tuple(sorted(tags))].append(trip)
+                for h in sel_handles:   # tagged but in no group: still listed, sorted last
+                    trip = (str(h[0].session), int(h[1]), int(h[2]))
+                    if trip not in pair_tags and trip not in dead:
+                        buckets[()].append(trip)
                 for combo in sorted(buckets.keys(), key=self._COMBO_SORT_KEY):
                     hdr_text = ', '.join(combo) if combo else '(untagged)'
                     trips    = buckets[combo]
@@ -835,6 +814,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
     def refresh_lists(self):
         ui, data = self.ui, self.data
         unsel_frac, sel_frac = self._save_scroll_positions()
+        self._areas_cache.clear()
         self.unselected_list.clear()
         self.selected_list.clear()
 
@@ -876,6 +856,24 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._select_timer.stop()
         self._select_timer.start(180)
 
+    def header_keys(self) -> list:
+        """Collapse keys of the headers the selected list is showing, in any sort mode."""
+        return [k for k in self.sel_list_header_keys if k is not None]
+
+    def set_all_collapsed(self, collapsed: bool) -> None:
+        """Collapse or expand every header currently rendered."""
+        if collapsed:
+            self._collapsed_groups.collapse_all(self.header_keys())
+        else:
+            self._collapsed_groups.expand_all()
+        self._refresh_keeping_scroll()
+
+    def _refresh_keeping_scroll(self) -> None:
+        """Rebuild the lists without losing the selected list's scroll position."""
+        _, sel_frac = self._save_scroll_positions()
+        self.refresh_lists()
+        self._restore_scroll_positions(0.0, sel_frac)
+
     def _on_item_double_clicked(self, widget: PairListWidget, item: QListWidgetItem):
         """Double click: shuttle pair or toggle header collapse."""
         tag  = item.data(_ROLE_TAG)
@@ -892,9 +890,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
                     ui.groups.toggle_any_avail(hkey)
             else:
                 self._collapsed_groups.toggle(hkey)
-                _, sel_frac = self._save_scroll_positions()
-                self.refresh_lists()
-                self._restore_scroll_positions(0.0, sel_frac)
+                self._refresh_keeping_scroll()
             return
 
         if widget is self.unselected_list:
@@ -979,20 +975,31 @@ class PairSelectionPanel(QWidget, UndoRedo):
                                           ui.current_session_str, inds)
                 self.refresh_lists()
             return
-        self.push_undo(SelectionCommand({inds: ('unsel', 'sel')}, []))
-        ui.active_selections.set_pair_state(inds, 'sel')
+        nxt = self.row_below_cursor()
         if pred_group is not None:
-            ui.groups.add_to_group(pred_group,
-                                      ui.current_session_str, inds)
-        self._after_move(inds)
+            ui.groups.add_to_group(pred_group, ui.current_session_str, inds)
+        self._transition_many({inds: ('unsel', 'sel')}, anchor=inds, nxt=nxt)
 
-    def _after_move(self, inds) -> None:
+    def advance_cursor(self, inds, nxt=None) -> None:
+        """Sole gateway for landing the cursor after a pair changes.
+
+        `nxt` is the row that sat below the cursor before the mutation; the
+        cursor goes there, else it stays on `inds`."""
         ui = self.ui
-        self._mark_next_focus_pair(inds)
+        dest = nxt if (nxt is not None
+                       and ui.root.settings.jump_to_next_after_select) else inds
+        self._mark_next_focus_pair(dest)
         self.refresh_lists()
-        ui.set_current_pair(ui.get_pair_index(inds))
+        self._focus_next_pair(move_cursor=self._list_cursor_follows_action())
+        ui.set_current_pair(ui.get_pair_index(dest))
         ui.root.mainview.request_render()
         ui.root.neuron_network.draw()
+
+    def _on_shift_released(self) -> None:
+        """Land the jump shift-held tagging deferred; plain range-selects have none."""
+        nxt, self._deferred_jump = self._deferred_jump, None
+        if nxt is not None:
+            self.advance_cursor(nxt)
 
     def move_to_unselected(self, item: QListWidgetItem = None):
         ui = self.ui
@@ -1018,9 +1025,20 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if ui.session_any_mode:
             return
 
-        self.push_undo(SelectionCommand({inds: ('sel', 'unsel')}, []))
-        ui.active_selections.set_pair_state(inds, 'unsel')
-        self._after_move(inds)
+        self._transition(inds, 'unsel')
+
+    def _sync_state_to_tags(self, pair) -> None:
+        """Tagged pairs belong in selected, untagged ones in available."""
+        if self.ui.session_any_mode:
+            return
+        k = self.ui.key_for_pair(pair)
+        sel = self.ui.active_selections
+        if any(not is_special_group(g)
+               for g in self.ui.groups.groups_for_pair(k.session, k.ref, k.tgt)):
+            if pair in sel.unselected:
+                sel.set_pair_state(pair, 'sel')
+        elif pair in sel.selected:
+            sel.set_pair_state(pair, 'unsel')
 
     def _select_pair_in_list(self, inds):
         if inds is None:
@@ -1096,57 +1114,29 @@ class PairSelectionPanel(QWidget, UndoRedo):
         row = ui.all_pairs_np[idx]
         return tuple(int(x) for x in row)
 
-    def _next_inds_after(self, idx: int, pred) -> int | None:
-        inds = self.ui.all_pairs_np
-        n = len(inds)
-        for i in range(idx + 1, n):
-            if pred(tuple(inds[i])):
-                return i
-        for i in range(idx):
-            if pred(tuple(inds[i])):
-                return i
-        return None
-
     def _pair_state(self, pair) -> str:
         sel = self.ui.active_selections
         return ('sel' if pair in sel.selected else
                 'del' if pair in sel.deleted else 'unsel')
 
-    def _transition(self, pair, new_state: str, *,
-                    goto_next_pred=None,
-                    scroll_save: tuple = (True, True)) -> None:
-        """Set pair state, optionally advance cursor, then redraw."""
-        ui = self.ui
-        old = self._pair_state(pair)
-        unsel_frac, sel_frac = self._save_scroll_positions()
-        self.push_undo(SelectionCommand({pair: (old, new_state)}, []))
-        ui.active_selections.set_pair_state(pair, new_state)
-        next_idx = (self._next_inds_after(ui.current_pair_idx, goto_next_pred)
-                    if goto_next_pred else None)
-        if next_idx is not None:
-            ui.set_current_pair(next_idx)
-        self.refresh_lists()
-        self._restore_scroll_positions(
-            unsel_frac if scroll_save[0] else 0.0,
-            sel_frac   if scroll_save[1] else 0.0)
-        focus = (self._pair_at_all_inds_idx(next_idx)
-                 if next_idx is not None else pair)
-        self._select_pair_in_list(focus)
-        ui.root.neuron_network.draw()
-        ui.root.mainview.request_render()
+    def _transition(self, pair, new_state: str) -> None:
+        """One pair changes state; the cursor lands on the row that was below it."""
+        nxt = self.row_below_cursor()
+        self._transition_many({pair: (self._pair_state(pair), new_state)},
+                              anchor=pair, nxt=nxt)
 
-    def _transition_many(self, changes: dict) -> None:
-        """Bulk state change: {pair: (old, new)}. No cursor jump."""
-        if not changes:
+    def _transition_many(self, changes: dict, group_changes: list = (),
+                         *, anchor=None, nxt=None) -> None:
+        """Bulk state change: {pair: (old, new)}, then advance the cursor."""
+        if not changes and not group_changes:
             return
         ui = self.ui
         unsel_frac, sel_frac = self._save_scroll_positions()
-        self.push_undo(SelectionCommand(changes, []))
+        self.push_undo(SelectionCommand(changes, list(group_changes)))
         for p, (_, new) in changes.items():
             ui.active_selections.set_pair_state(p, new)
-        self.refresh_lists()
+        self.advance_cursor(anchor if anchor is not None else ui.current_pair, nxt)
         self._restore_scroll_positions(unsel_frac, sel_frac)
-        ui.root.neuron_network.draw()
 
     def _ctx_menu(self, pos, widget: PairListWidget, action: str):
         ui         = self.ui
@@ -1173,28 +1163,28 @@ class PairSelectionPanel(QWidget, UndoRedo):
         menu  = QMenu(widget)
         _lbl  = lambda label, count: f"{label} ({count})" if count > 1 else label
 
+        def _move(pp, new):
+            # neighbour read here, not at menu build: the lists are still untouched
+            self._transition_many({p: (self._pair_state(p), new) for p in pp
+                                   if self._pair_state(p) != new},
+                                  nxt=self.row_below_cursor())
+
         if action == 'add' and not _any:
             if pairs:
                 menu.addAction(_lbl("Move to Selected", n),
-                               lambda pp=pairs: self._transition_many(
-                                   {p: (self._pair_state(p), 'sel') for p in pp
-                                    if self._pair_state(p) != 'sel'}))
+                               lambda pp=pairs: _move(pp, 'sel'))
                 menu.addAction(_lbl("Move to Deleted", n),
-                               lambda pp=pairs: self._transition_many(
-                                   {p: ('unsel', 'del') for p in pp}))
+                               lambda pp=pairs: _move(pp, 'del'))
             if deleted_pairs:
                 menu.addAction(_lbl("Restore to Available", nd),
-                               lambda pp=deleted_pairs: self._transition_many(
-                                   {p: ('del', 'unsel') for p in pp}))
+                               lambda pp=deleted_pairs: _move(pp, 'unsel'))
         elif action != 'add':
             if not _any:
                 menu.addAction(_lbl("Move to Available", n),
-                               lambda pp=pairs: self._transition_many(
-                                   {p: ('sel', 'unsel') for p in pp}))
+                               lambda pp=pairs: _move(pp, 'unsel'))
             if not _any or pairs:
                 menu.addAction(_lbl("Move to Deleted", n),
-                               lambda pp=pairs: self._transition_many(
-                                   {p: ('sel', 'del') for p in pp}))
+                               lambda pp=pairs: _move(pp, 'del'))
 
         menu.addSeparator()
 
@@ -1242,7 +1232,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
                     else:
                         sd.tags.pop(pair, None)
                     self.refresh_lists()
-                    ui.notify_selection_changed()
+                    ui.selection_changed.emit()
             menu.addAction(f"{'✓ ' if has_tags else ''}Pair tags…", _open_pair_tags)
 
         menu.addSeparator()
@@ -1258,15 +1248,10 @@ class PairSelectionPanel(QWidget, UndoRedo):
             menu.addAction("Expand all groups",
                            lambda: (ui.any_expanded_group_tags.update(all_names),
                                     self.refresh_lists()))
-        elif self._sort_selected.get() or self._sort_by_tag.get():
-            all_names = [g for g in ui.groups if not g.startswith('__')]
+        elif self.header_keys():
             menu.addSeparator()
-            menu.addAction("Collapse all groups",
-                           lambda: (self._collapsed_groups.collapse_all(all_names),
-                                    self.refresh_lists()))
-            menu.addAction("Expand all groups",
-                           lambda: (self._collapsed_groups.expand_all(),
-                                    self.refresh_lists()))
+            menu.addAction("Collapse all groups", lambda: self.set_all_collapsed(True))
+            menu.addAction("Expand all groups", lambda: self.set_all_collapsed(False))
 
         menu.exec_(global_pos)
 
@@ -1286,32 +1271,16 @@ class PairSelectionPanel(QWidget, UndoRedo):
         trip = self._pair_at_all_inds_idx(ui.current_pair_idx)
         if trip is None or trip not in ui.active_selections.selected:
             return
-        hl_old = list(ui.cross_session_handles or ())
-        next_trip = next(
-            ((str(ck.session), int(r), int(t))
-             for i, (ck, r, t) in enumerate(hl_old)
-             if i != ui.current_pair_idx
-             and (str(ck.session), int(r), int(t)) in ui.active_selections.selected),
-            None)
-        self._transition(trip, 'del', scroll_save=(False, True))
-        if next_trip is not None:
-            ui.set_current_pair(ui.get_pair_index(next_trip))
-        elif ui.all_pairs_np.size:
-            ui.set_current_pair(min(ui.current_pair_idx, len(ui.all_pairs_np) - 1))
+        self._transition(trip, 'del')
 
     def _on_delete_pair_single(self):
         inds = tuple(int(x) for x in self.ui.all_pairs_np[self.ui.current_pair_idx])
-        self._transition(inds, 'del',
-                         goto_next_pred=lambda p: p in self.ui.active_selections.selected,
-                         scroll_save=(False, True))
+        self._transition(inds, 'del')
 
     def _on_toggle_deleted(self):
         ui = self.ui
         inds = tuple(int(x) for x in ui.all_pairs_np[ui.current_pair_idx])
-        going_del = inds not in ui.active_selections.deleted
-        self._transition(inds, 'del' if going_del else 'unsel',
-                         goto_next_pred=(lambda p: p in ui.active_selections.unselected) if going_del else None,
-                         scroll_save=(True, False))
+        self._transition(inds, 'unsel' if inds in ui.active_selections.deleted else 'del')
 
     def _bookmark_toggle_current(self, event=None):
         ui = self.ui
@@ -1339,8 +1308,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if not bm:
             return
         ui = self.ui
-        for i, (raw, _) in enumerate(self.avail_list_pairs):
-            if not is_separator_row(raw) and ui.key_for_pair(raw) in bm:
+        for i, entry in enumerate(self.avail_list_pairs):
+            if not is_separator_row(entry) and ui.key_for_pair(entry[0]) in bm:
                 it = self.unselected_list.item(i)
                 it.setForeground(QBrush(_C_BM_FG))
                 it.setBackground(QBrush(_C_BM_BG))
@@ -1350,14 +1319,14 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 it.setForeground(QBrush(_C_BM_FG))
                 it.setBackground(QBrush(_C_BM_BG))
 
-    def last_tagged_in_avail(self, pairs) -> tuple | None:
-        """The tagged pair sitting lowest in the available list — where a multi-tag ends."""
-        order = {}
-        for row, entry in enumerate(self.avail_list_pairs):
-            if not is_separator_row(entry):
-                order[entry[0]] = row
-        tagged = [p for p in pairs if p in order]
-        return max(tagged, key=lambda p: order[p]) if tagged else None
+    def row_below_cursor(self):
+        """The pair shown directly under the cursor's row, in the list it sits in."""
+        lb = self.unselected_list if self.unselected_list.hasFocus() else self.selected_list
+        for i in range(lb.currentRow() + 1, lb.count()):
+            pair = lb.item(i).data(_ROLE_PAIR)
+            if pair is not None and not is_separator_row(pair):
+                return pair
+        return None
 
     def _collect_highlighted_pairs(self, current_pair: tuple) -> list:
         """Return pairs highlighted in both listboxes, falling back to current_pair."""
@@ -1392,6 +1361,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def apply_command(self, cmd: 'SelectionCommand', reverse: bool = False) -> None:
         ui = self.ui
+        print(f"[DBG] apply_command reverse={reverse} pairs={len(cmd.pair_changes)} "
+              f"groups={len(cmd.group_changes)}", flush=True)
         for pair, (old, new) in cmd.pair_changes.items():
             target = old if reverse else new
             if target is None:
@@ -1405,8 +1376,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 grps.add_to_group(g, s, p)
             else:
                 grps.discard_from_group(g, s, p)
-        changed = set(cmd.pair_changes.keys())
-        if changed:
+        if cmd.pair_changes or cmd.group_changes:
             ui.refresh_lists()
         ui.root.mainview.request_render()
         ui.root.neuron_network.draw()
@@ -1440,21 +1410,36 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def _add_bookmarked_pairs_to_group(self, group_name):
         ui = self.ui
-        for k in ui.bookmarked_pairs:
-            ui.groups.add_to_group(group_name, k.session, (k.ref, k.tgt))
-        self.refresh_lists()
+        pairs = [(k.session, k.ref, k.tgt) if ui.session_any_mode else (k.ref, k.tgt)
+                 for k in ui.bookmarked_pairs]
+        print(f"[DBG] bm n={len(pairs)} undo_before={len(self._undo_stack)}", flush=True)
+        self._toggle_pairs_group(pairs, group_name, remove=False)
+        print(f"[DBG] bm undo_after={len(self._undo_stack)}", flush=True)
 
-    def _toggle_pairs_group(self, pairs, group_name):
+    def apply_group_toggle(self, pairs, group_name, *, remove=None) -> tuple[dict, list]:
+        """Add or drop one group across pairs, syncing selection; returns undo records."""
         ui = self.ui
-        all_in = all((k.ref, k.tgt) in ui.groups.pairs_in_group(group_name, k.session)
-                     for p in pairs for k in (ui.key_for_pair(p),))
+        all_in = remove if remove is not None else all(
+            (k.ref, k.tgt) in ui.groups.pairs_in_group(group_name, k.session)
+            for p in pairs for k in (ui.key_for_pair(p),))
+        changes, group_changes = {}, []
         for p in pairs:
             k = ui.key_for_pair(p)
             (ui.groups.discard_from_group if all_in else ui.groups.add_to_group)(
                 group_name, k.session, (k.ref, k.tgt))
-        unsel_frac, sel_frac = self._save_scroll_positions()
-        self.refresh_lists()
-        self._restore_scroll_positions(unsel_frac, sel_frac)
+            group_changes.append((group_name, k.session, (k.ref, k.tgt),
+                                  'remove' if all_in else 'add'))
+            old = self._pair_state(p)
+            self._sync_state_to_tags(p)
+            if self._pair_state(p) != old:
+                changes[p] = (old, self._pair_state(p))
+        return changes, group_changes
+
+    def _toggle_pairs_group(self, pairs, group_name, *, remove=None):
+        nxt = self.row_below_cursor()
+        changes, group_changes = self.apply_group_toggle(pairs, group_name, remove=remove)
+        self._transition_many(changes, group_changes,
+                              anchor=self.ui.current_pair, nxt=nxt)
 
 
 class SpikePairsPanel(QWidget):
@@ -1727,12 +1712,14 @@ class PairSelectionPanelContainer(QWidget, Autosave):
                 continue
             sess = str(sd._nd_key.session)
             for b in sd.selections.values():
-                for e in b.tags.values():
-                    e.pop('groups', None)
                 for p in b.all_pairs:
+                    if len(p) != 2:   # all-session mode stores (sess, ref, tgt) in this bucket
+                        continue
                     g = sorted(ui.groups.groups_for_pair(sess, p[0], p[1]))
                     if g:
                         b.tags.setdefault(p, {})['groups'] = g
+                    elif p in b.tags:   # every group removed: drop the key, don't leave the old list
+                        b.tags[p].pop('groups', None)
 
     def _do_save(self, name: str = ''):
         ui = self.ui

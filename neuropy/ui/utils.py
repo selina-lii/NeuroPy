@@ -18,7 +18,7 @@ from pyqtgraph.Qt.QtCore import Qt
 from pyqtgraph.Qt.QtGui import QColor, QBrush, QFont
 from pyqtgraph.Qt.QtCore import Signal
 from pyqtgraph.Qt.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
+    QApplication, QAbstractItemView, QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
     QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QSizePolicy, QSlider,
@@ -184,6 +184,11 @@ class PairListWidget(QListWidget):
             return
         self._panel._on_list_key(event)
         event.accept()
+
+    def keyReleaseEvent(self, event):
+        super().keyReleaseEvent(event)
+        if event.key() == Qt.Key_Shift:
+            self._panel._on_shift_released()
 
 
 _SHIFT_DIGITS = {
@@ -871,6 +876,70 @@ class CycleButton(QPushButton):
 
 
 
+def pick_color(initial, parent=None, title: str = "Colour") -> QColor | None:
+    """Modal colour picker; None if cancelled. Instance API: the static one aborts shiboken."""
+    dlg = QColorDialog(QColor(*initial) if isinstance(initial, tuple) else QColor(initial), parent)
+    dlg.setWindowTitle(title)
+    return dlg.currentColor() if dlg.exec() == QDialog.Accepted else None
+
+
+class ColorLabelButton(QWidget):
+    """A colour swatch beside its name; the name is editable when `editable`."""
+
+    color_changed = Signal(str)
+    name_changed = Signal(str)
+
+    def __init__(self, color, name: str = "", editable: bool = False,
+                 title: str = "Colour", swatch: int = 20, name_width: int = 0, parent=None):
+        super().__init__(parent)
+        self._title = title
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+
+        self._btn = QPushButton()
+        self._btn.setFixedSize(swatch, swatch)
+        self._btn.clicked.connect(self._on_swatch_btn)
+        row.addWidget(self._btn)
+
+        self._label = QLineEdit(name) if editable else QLabel(name)
+        if name_width:
+            self._label.setFixedWidth(name_width)
+        if editable:
+            self._label.textChanged.connect(self.name_changed)
+        row.addWidget(self._label)
+
+        self.set_color(color)
+
+    @property
+    def color(self) -> str:
+        return self._color.name()
+
+    @property
+    def rgb(self) -> tuple:
+        return self._color.red(), self._color.green(), self._color.blue()
+
+    @property
+    def name(self) -> str:
+        return self._label.text()
+
+    def set_name(self, name: str) -> None:
+        self._label.setText(name)
+
+    def set_color(self, color) -> None:
+        if not color:   # an unset config field must not repaint the swatch black
+            return
+        self._color = QColor(*color) if isinstance(color, tuple) else QColor(color)
+        self._btn.setStyleSheet(
+            f"background:{self._color.name()}; border:1px solid #888; border-radius:2px;")
+
+    def _on_swatch_btn(self) -> None:
+        c = pick_color(self._color, self, self._title)
+        if c is not None:
+            self.set_color(c)
+            self.color_changed.emit(c.name())
+
+
 class FlowLayout(QtWidgets.QLayout):
     """Left-to-right wrapping layout — chip buttons wrap to next row when full."""
 
@@ -962,6 +1031,8 @@ class SideNavPanel(QWidget):
         self.splitter.setChildrenCollapsible(False)
         self.nav_list = QListWidget()
         self.nav_list.setMinimumWidth(min_width)
+        # the horizontal scrollbar sits over the viewport: without the pad it covers the last row
+        self.nav_list.setViewportMargins(0, 0, 0, self.nav_list.horizontalScrollBar().sizeHint().height())
         self.stack = QStackedWidget()
         self.splitter.addWidget(self.nav_list)
         self.splitter.addWidget(self.stack)
@@ -1159,9 +1230,8 @@ class GroupHotkeysBar(QWidget):
         win = self._ui
         nav = win.nav
         gr = nav.groups
-        hk_map = {g.hotkey: name
-                  for name in gr.defined_groups
-                  for g in [gr.get_group_metadata(name)] if g.hotkey}
+        hk_map = {k: name for k in self._SLOT_ORDER
+                  for name in [gr.group_for_hotkey(k)] if name}
         chips: list = []
         for key_str in self._SLOT_ORDER:
             if key_str not in hk_map:

@@ -4,7 +4,7 @@ Source `~/Documents/ms_synchrony/hiro` (4.9 GB, 33 `.mat` files) →
 `~/Documents/ms_synchrony/hiro_nwb` (2.6 GB, 27 `.nwb`, one per session).
 
 Reader `neuropy/io/datasets/hiro/reader.py`, writer `neuropy/io/nwbwriter.py`,
-driver `notebooks/convert_hiro.py`.
+driver `notebooks/fix/convert_hiro.py`.
 
 **The dataset is NOT completely translated.** Spikes, epochs, brain states,
 events, behaviour and spectrograms are converted and verified. 14 files of

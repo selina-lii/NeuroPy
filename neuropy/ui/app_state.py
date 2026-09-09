@@ -116,6 +116,7 @@ class AppState(QObject):
         self._resolution = "lo"
         self._session_any_mode = False
         self._cross_session_handles = []
+        self._all_pairs_np = np.empty((0, 2), dtype=int)
         self.set_sd(SelectionDataset(cd))
         self._active_sig_threshold = cd.conf.alpha
         self._active_norms = set()
@@ -151,14 +152,11 @@ class AppState(QObject):
     def all_pairs_np(self) -> np.ndarray:
         """All (ref, tgt) pairs currently visible, as Nx2 int array."""
         if self.session_any_mode:
-            hl = self.cross_session_handles
-            if not hl:
-                return np.empty((0, 2), dtype=int)
-            return np.array([[int(r), int(t)] for _, r, t in hl], dtype=int)
+            return self._all_pairs_np
 
         b = self.active_selections
         combined = b.unselected | b.selected | b.deleted
-        base = sorted(p for p in combined if p[0] != p[1])
+        base = sorted(p for p in combined if len(p) == 2 and p[0] != p[1])
         return np.array(base, dtype=int) if base else np.empty((0, 2), dtype=int)
 
     @property
@@ -261,15 +259,18 @@ class AppState(QObject):
         type(self).session_any_mode.set(self, value, self.session_mode_changed)
 
     def set_cross_session_handles(self, handles: list):
+        if handles:
+            self._all_pairs_np = np.array([[int(r), int(t)] for _, r, t in handles], dtype=int)
+        else:
+            self._all_pairs_np = np.empty((0, 2), dtype=int)
         type(self).cross_session_handles.set(self, handles, self.cross_session_handles_changed)
 
-    def notify_selection_changed(self):
-        self.selection_changed.emit()
-
     def reset_selection_for_project(self, cd) -> None:
-        """Replace selection state with a fresh dataset when switching projects."""
-        self.set_sd(SelectionDataset(cd))
-        self.notify_selection_changed()
+        """Replace selection state with the new project's own, read from its file."""
+        sd = SelectionDataset(cd)
+        sd.load_sessions()
+        self.set_sd(sd)
+        self.selection_changed.emit()
 
     def set_active_sig_threshold(self, alpha: float):
         type(self).active_sig_threshold.set(self, alpha, self.sig_threshold_changed)

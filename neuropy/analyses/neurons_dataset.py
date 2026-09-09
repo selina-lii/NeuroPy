@@ -334,12 +334,12 @@ class NeuronsDataset(AnalysisDataset):
         t1 = self.resolve_time(key, t1)
         if t1 <= t0:
             return None, None
-        acc = None
-        for th in filter_state:
+        acc = [(t0, t1)]   # no filter → the whole window is active
+        for th in filter_state or ():
             iv, _ = self._theme_intervals(key, th.get('name', 'segments'), th.get('labels'), t0, t1)
             if not iv:
-                return [], 0.0 
-            acc = iv if acc is None else IntervalOp.intersect(acc, iv)
+                return [], 0.0
+            acc = IntervalOp.intersect(acc, iv)
             if not acc:
                 return [], 0.0
         return acc, IntervalOp.duration(acc)

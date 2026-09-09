@@ -6,8 +6,8 @@ A plan freezes the field map it was built with, so a correction in
 ``shank_id`` entry of matching plans to whatever that module now says, leaving
 every other field alone.
 
-    python notebooks/fix_shank_map.py            # report only
-    python notebooks/fix_shank_map.py --apply    # write, backing up first
+    python notebooks/fix/fix_shank_map.py            # report only
+    python notebooks/fix/fix_shank_map.py --apply    # write, backing up first
 """
 from __future__ import annotations
 import argparse
@@ -17,7 +17,7 @@ from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parent.parent / 'data'
+DATA = Path(__file__).resolve().parents[2] / 'data'
 
 
 def dataset_fields(name: str) -> dict | None:

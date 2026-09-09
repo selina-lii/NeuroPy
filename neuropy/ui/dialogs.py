@@ -19,7 +19,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QListWidget, QListWidgetItem,
     QPushButton, QTabWidget, QWidget, QMessageBox, QMenu, QApplication,
     QScrollArea, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
-    QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog, QColorDialog,
+    QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
 from neuropy.ui.ui_common import area_rgb, cell_areas, _SPECIAL_PREFIX
@@ -31,8 +31,8 @@ from neuropy.io.fieldmap import Field, FieldMap, OPTIONAL
 from neuropy.io.nwbio import NWB_DEFAULT, UNITS_SCHEMA, NWBFile
 
 from neuropy.ui.utils import (ConfigOptionsWidget, FlowLayout, MetricInput, SideNavPanel,
-                              ValueMapEditor, chip_button, make_button, regular_font_pt,
-                              small_font_pt)
+                              ValueMapEditor, chip_button, make_button, ColorLabelButton,
+                              regular_font_pt, small_font_pt)
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -223,22 +223,15 @@ class ManageGroupsDialog(QDialog):
 
             set_hk.clicked.connect(_set_hk)
             hk_row.addWidget(set_hk)
-            hk_row.addWidget(QLabel("Colour:"))
             meta = gr.get_group_metadata(gname)
-            swatch = QPushButton()
-            swatch.setFixedWidth(40)
-            swatch.setStyleSheet(f"background: {meta.display_color};")
+            swatch = ColorLabelButton(meta.display_color, "Colour:", title="Tag colour")
 
-            def _pick(_checked=False, g=gname, sw=swatch):
-                m = gr.get_group_metadata(g)
-                c = QColorDialog.getColor(QColor(m.display_color), self, "Tag colour")
-                if c.isValid():
-                    m.ui_color = c.name()
-                    sw.setStyleSheet(f"background: {c.name()};")
-                    gr.changed.emit()
-                    gr.ui.refresh_lists()
+            def _on_colour_btn(c, g=gname):
+                gr.get_group_metadata(g).ui_color = c
+                gr.changed.emit()
+                gr.ui.refresh_lists()
 
-            swatch.clicked.connect(_pick)
+            swatch.color_changed.connect(_on_colour_btn)
             hk_row.addWidget(swatch)
             hk_row.addStretch()
             lay.addLayout(hk_row)
@@ -286,9 +279,20 @@ class ManageGroupsDialog(QDialog):
         if is_special:
             conv_btn = QPushButton("Convert to group")
             def _conv(_checked=False, g=gname, d=display):
+                key = gr.get_group_metadata(g).hotkey
+                # the key was released when this became special: it may be someone else's now
+                while key and gr.group_for_hotkey(key) is not None:
+                    key, ok = QInputDialog.getText(
+                        self, "Hotkey taken",
+                        f"Hotkey '{key}' is no longer available — "
+                        "enter another hotkey, or leave blank.", text=key)
+                    if not ok:
+                        return
+                    key = key.strip().lower()
                 try:
                     self._autosave_notes()
                     gr.rename_group(g, d)
+                    gr.set_group_hotkey(d, key)
                     gr.changed.emit()
                     gr.ui.refresh_lists()
                     self._rebuild()
@@ -538,8 +542,8 @@ class QuickSaveDialog(QDialog):
         self._group_mgr._do_save(name)
 
     @classmethod
-    def show(cls, group_mgr: 'PairSelectionPanel', parent=None):
-        cls(group_mgr, parent).exec()
+    def show(cls, group_mgr: 'PairSelectionPanel', parent=None) -> int:
+        return cls(group_mgr, parent).exec()
 
 
 class LoadSelectionDialog(QDialog):
@@ -1189,6 +1193,13 @@ class SettingsTabs:
         self._appliers.append(lambda: setattr(obj, attr, spin.value()))
         return spin
 
+    def _check_row(self, layout, label, obj, attr):
+        cb = QCheckBox(label)
+        cb.setChecked(getattr(obj, attr))
+        layout.addWidget(cb)
+        self._appliers.append(lambda: setattr(obj, attr, cb.isChecked()))
+        return cb
+
     def _area_colors_row(self, layout, ui):
         """One swatch per brain region, from the palette plus this session's own."""
         colors = dict(ui.settings.area_colors)
@@ -1199,24 +1210,11 @@ class SettingsTabs:
         layout.addWidget(QLabel("Brain region colors:"))
         grid = QWidget()
         flow = FlowLayout(grid, spacing=6)
-        def paint(btn, name):
-            r, g, b = colors[name]
-            fg = '#fff' if (r * 299 + g * 587 + b * 114) / 1000 < 140 else '#222'
-            btn.setStyleSheet(f'background: rgb({r},{g},{b}); color: {fg}; '
-                              f'border: 1px solid #888; padding: 1px 8px;')
-
-        def pick(btn, name):
-            c = QColorDialog.getColor(QColor(*colors[name]), self, f'Colour for {name}')
-            if c.isValid():
-                colors[name] = [c.red(), c.green(), c.blue()]
-                paint(btn, name)
-
         for name in sorted(colors):
-            btn = QPushButton(name)
-            btn.setFixedHeight(22)
-            paint(btn, name)
-            btn.clicked.connect(lambda _=False, b=btn, n=name: pick(b, n))
-            flow.addWidget(btn)
+            sw = ColorLabelButton(tuple(colors[name]), name, title=f'Colour for {name}')
+            sw.color_changed.connect(
+                lambda _c, w=sw, n=name: colors.__setitem__(n, list(w.rgb)))
+            flow.addWidget(sw)
         layout.addWidget(grid)
         self._appliers.append(lambda: setattr(ui.settings, 'area_colors', colors))
 
@@ -1236,6 +1234,16 @@ class SettingsTabs:
         self._area_colors_row(dl, ui)
         dl.addStretch()
         nav.add_page("Display", disp)
+
+        pairs = QWidget()
+        pl = QVBoxLayout(pairs)
+        pl.setSpacing(8)
+        self._check_row(pl, "Jump to next pair after selection",
+                        ui.settings, 'jump_to_next_after_select')
+        self._check_row(pl, "List cursor follows action",
+                        ui.settings, 'list_cursor_follows_action')
+        pl.addStretch()
+        nav.add_page("Pair selection", pairs)
 
         cache = QWidget()
         cl = QVBoxLayout(cache)
@@ -1291,6 +1299,8 @@ class SettingsTabs:
         (ui.settings.autosave_grp_interval,
          ui.settings.autosave_grp_unit) = self._autosave_grp_metric.value()
         ui.settings.save_ui_on_close = self._save_ui_cb.isChecked()
+        ui.pairs_view.pair_selection.refresh_lists()
+        ui.neuron_network.draw()
 
     def _on_clear_autosave(self):
         ui = self._ui
@@ -1728,7 +1738,7 @@ class AddProjectDialog(QDialog):
         if existing.built and name != self._editing:
             QMessageBox.information(self, f"{self._verb} project",
                                     f"Project '{name}' already exists "
-                                    f"({existing.n_sessions} sessions, built {existing.built_at}).")
+                                    f"({len(existing.session_names)} sessions, built {existing.built_at}).")
             return
         try:
             field_map = FieldMap(UNITS_SCHEMA, self._map_widget.mapping())

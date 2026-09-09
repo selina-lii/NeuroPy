@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Convert the Hiro MATLAB export to one .nwb per session.
 
-    python notebooks/convert_hiro.py                       # everything
-    python notebooks/convert_hiro.py --no-lfp              # skip spectrograms
-    python notebooks/convert_hiro.py --session RoyMaze1    # just one
+    python notebooks/fix/convert_hiro.py                       # everything
+    python notebooks/fix/convert_hiro.py --no-lfp              # skip spectrograms
+    python notebooks/fix/convert_hiro.py --session RoyMaze1    # just one
 
 Conversion is one-time: the export is organised by data type, so reading a single
 session means opening a multi-hundred-MB file either way. Afterwards nothing in

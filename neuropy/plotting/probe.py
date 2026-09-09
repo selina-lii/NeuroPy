@@ -109,7 +109,7 @@ def plot_waveform_on_channel(
     eletrode_size_x = 11 - 5
     eletrode_size_y = 15
     tip_length = 50
-    waveform_amp_limit=interchannel_y*3
+    waveform_amp_limit = eletrode_size_y + interchannel_y
 
     # Function description
     # draw a vertical_eletrode_span * shank_width box, but remove the lower left corner by covering with a white triange, 
@@ -198,9 +198,15 @@ def plot_waveform_on_channel(
 
     # waveforms
     window = ref_waveform.shape[1]
-    y_scale = 8  # scaling factor for waveform amplitude
     x_scale = 2  # scaling factor for waveform plotting width
     x_offset = shank_width / 2 + 15  # horizontal distance from shank
+
+    def _scale(wf):
+        ptp = np.nanmax(wf) - np.nanmin(wf) if np.any(np.isfinite(wf)) else 0.0
+        return waveform_amp_limit / ptp if ptp > 0 else 1.0
+
+    y_scale = _scale(ref_waveform)
+    y_scale_tgt = _scale(target_waveform) if target_waveform is not None else 1.0
 
     for ch in range(n_channels_per_side * 2):
         if ch < n_channels_per_side:
@@ -237,7 +243,7 @@ def plot_waveform_on_channel(
 
         if target_waveform is not None:
             # Scale waveform for display
-            wf2 = target_waveform[ch] * y_scale
+            wf2 = target_waveform[ch] * y_scale_tgt
             if amplitude_limit:
                 amp=wf2.max()-wf2.min()
                 if amp>waveform_amp_limit: wf2=wf2/amp*waveform_amp_limit
