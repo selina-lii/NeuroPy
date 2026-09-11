@@ -14,7 +14,7 @@ from neuropy.analyses.ms_connectivity import CCGSourceConfig, Key, open_project
 
 def backfill(project: str, dry_run: bool = False) -> None:
     nd, cd, _sd = open_project(project)
-    live = {str(k.session) for k in nd.session_keys()}
+    live = {str(k.session) for k in nd.session_keys}
     filled = skipped = 0
 
     for path in sorted(glob.glob(os.path.join(cd.save_path, 'custom_ccg', 'config', '*.json'))):
