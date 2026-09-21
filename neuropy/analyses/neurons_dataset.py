@@ -13,6 +13,7 @@ from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, JsonS
 from neuropy.core.neurons import Neurons
 from neuropy.core.probe import ProbeGroup
 from neuropy.core.epoch import Epoch
+from neuropy.analyses.neuron_tags import check_labels, confirm, resolve_labels, resolve_values
 
 
 @dataclass(eq=False)
@@ -188,6 +189,21 @@ class Key(JsonSavable):
         return cls(**fields)
 
 
+def _confirm_overwrite(name: str, overwrite) -> bool:
+    """Whether an existing tag file may be replaced; None asks on stdin."""
+    if overwrite is not None:
+        return overwrite
+    return input(f"tag {name!r} already saved — overwrite? [y/N] "
+                 ).strip().lower().startswith('y')
+
+
+def _gather(source, take: list) -> np.ndarray:
+    """Reindex *source* by *take*, filling None where a position is missing."""
+    if source is None:
+        return np.full(len(take), None, dtype=object)
+    return np.array([None if p is None else source[p] for p in take], dtype=object)
+
+
 class NeuronsDatasetConfig(Config):
     """NeuronsDataset build config.
 
@@ -279,7 +295,7 @@ class NeuronsDataset(AnalysisDataset):
     def get_themes_any(self) -> dict:
         """Union of theme Epochs across all sessions (all-session mode); concatenated per name."""
         frames: dict[str, list] = {}
-        for k in self.session_keys():
+        for k in self.session_keys:
             for name, ep in self.get_themes(k).items():
                 frames.setdefault(name, []).append(ep.to_dataframe()[['start', 'stop', 'label']])
         return {name: Epoch(pd.concat(dfs, ignore_index=True))
@@ -361,8 +377,133 @@ class NeuronsDataset(AnalysisDataset):
         """Drop the transient windowed-Neurons memo (call when a compute batch finishes)."""
         self._slice_cache.clear()
 
+    @property
     def session_keys(self) -> list:
+        """Every session Key this dataset holds."""
         return list(self._neurons.keys())
+
+    def tag_neurons(self, name: str, labels: dict, values: dict = None,
+                    strict: bool = True, replace: bool = True) -> None:
+        """Store {Key: index list | mask | categorical list} as Neurons.tags[name].
+
+        replace=False leaves sessions absent from *labels* as they were, so one
+        session can be re-tagged without blanking the rest.
+        """
+        problems = check_labels(self, labels, values)
+        if problems and strict and not confirm(problems):
+            raise ValueError(f"tagging {name!r} cancelled: {len(problems)} problem(s)")
+
+        by_key = {k.nd(): v for k, v in labels.items()}
+        vals_by_key = {k.nd(): v for k, v in (values or {}).items()}
+        for key in self.session_keys:
+            neurons = self.neurons_for(key)
+            n = neurons.n_neurons
+            if key in by_key:
+                resolved = resolve_labels(by_key[key], n)
+                paired = resolve_values(vals_by_key.get(key), resolved)
+            elif replace or name not in neurons.tags:
+                resolved = np.full(n, None, dtype=object)
+                paired = np.full(n, None, dtype=object)
+            else:
+                continue
+            neurons.tags[name] = resolved
+            neurons.tag_values[name] = paired
+
+    def drop_tag(self, name: str, project_dir=None) -> None:
+        """Remove a labelling from every session, and from disk when given a project."""
+        for key in self.session_keys:
+            neurons = self.neurons_for(key)
+            neurons.tags.pop(name, None)
+            neurons.tag_values.pop(name, None)
+        if project_dir is not None:
+            self.tags_path(project_dir, name).unlink(missing_ok=True)
+
+    @property
+    def tag_names(self) -> list:
+        """Every tag name present in any session."""
+        found = []
+        for key in self.session_keys:
+            for name in self.neurons_for(key).tag_names:
+                if name not in found:
+                    found.append(name)
+        return found
+
+    def tag_table(self, name: str) -> pd.DataFrame:
+        """One row per labelled neuron: session, neuron_id, label, value."""
+        rows = []
+        for key in self.session_keys:
+            neurons = self.neurons_for(key)
+            if name not in neurons.tags:
+                continue
+            values = neurons.tag_values.get(name)
+            for i in np.flatnonzero(neurons.tagged(name)):
+                rows.append({'session': str(key.session),
+                             'neuron_id': neurons.neuron_ids[i],
+                             'label': neurons.tags[name][i],
+                             'value': None if values is None else values[i]})
+        return pd.DataFrame(rows, columns=['session', 'neuron_id', 'label', 'value'])
+
+    def neuron_dir(self, project_dir) -> Path:
+        """Everything per-neuron for this project, given cd.save_path."""
+        return Path(project_dir) / 'neuron'
+
+    def tags_dir(self, project_dir) -> Path:
+        """Where this project's neuron tags live, one file per tag."""
+        return self.neuron_dir(project_dir) / 'tags'
+
+    def tags_path(self, project_dir, name: str) -> Path:
+        """The file holding one tag; a name is not a path, so slashes are escaped."""
+        return self.tags_dir(project_dir) / f"{name.replace('/', '_')}.npy"
+
+    def saved_tag_names(self, project_dir) -> list:
+        """Tag names already on disk for this project."""
+        return sorted(p.stem for p in self.tags_dir(project_dir).glob('*.npy'))
+
+    def save_tags(self, project_dir, names=None, overwrite=None) -> list:
+        """Write one file per tag, so saving one never erases another.
+
+        overwrite None asks before replacing a tag already on disk.
+        """
+        written = []
+        for name in (self.tag_names if names is None else names):
+            path = self.tags_path(project_dir, name)
+            if path.is_file() and not _confirm_overwrite(name, overwrite):
+                continue
+            payload = {}
+            for key in self.session_keys:
+                neurons = self.neurons_for(key)
+                if name in neurons.tags:
+                    payload[str(key.session)] = {
+                        'neuron_ids': np.asarray(neurons.neuron_ids),
+                        'labels': neurons.tags[name],
+                        'values': neurons.tag_values.get(name)}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, payload, allow_pickle=True)
+            written.append(name)
+        return written
+
+    def load_tags(self, project_dir, names=None, missing_ok: bool = False) -> list:
+        """Restore saved tags, realigned by neuron id; returns the names restored."""
+        wanted = list(names) if names is not None else self.saved_tag_names(project_dir)
+        restored = []
+        for name in wanted:
+            path = self.tags_path(project_dir, name)
+            if not path.is_file():
+                if missing_ok:
+                    continue
+                raise FileNotFoundError(f"no saved neuron tag at {path}")
+            payload = np.load(path, allow_pickle=True).item()
+            for key in self.session_keys:
+                saved = payload.get(str(key.session))
+                if saved is None:
+                    continue
+                neurons = self.neurons_for(key)
+                position = {nid: i for i, nid in enumerate(saved['neuron_ids'])}
+                take = [position.get(nid) for nid in neurons.neuron_ids]
+                neurons.tags[name] = _gather(saved['labels'], take)
+                neurons.tag_values[name] = _gather(saved['values'], take)
+            restored.append(name)
+        return restored
 
     def _prep(self, sessions):
         """

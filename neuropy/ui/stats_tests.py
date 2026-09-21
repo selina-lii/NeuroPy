@@ -12,6 +12,7 @@ import datetime
 import json
 import pathlib
 from dataclasses import dataclass, field, fields
+from itertools import product
 from typing import TYPE_CHECKING, Literal
 from scipy import stats as _sp
 
@@ -33,10 +34,12 @@ from pyqtgraph.Qt.QtWidgets import (
     QScrollArea, QFrame, QMessageBox, QSizePolicy,
 )
 from pyqtgraph.Qt.QtGui import QColor
-from neuropy.ui.utils import ListPickerButton, make_combo, make_button, ColorLabelButton
+from neuropy.ui.utils import (ListPickerButton, make_combo, make_button, ColorLabelButton,
+                              sync_follow_column)
 from neuropy.ui.ui_common import qt_dark_mode
 from neuropy.ui.dialogs import VersionSaveDialog, VersionLoadDialog
-from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS
+from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS, DisplayConfig
+from neuropy.ui.ccg_panel import NormSection, BaselineCSSection
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.ccg_transforms import ConnStrengthConfig
 from neuropy.ui.pair_selection_panel import SelectionData
@@ -74,6 +77,7 @@ class RowConfig(JsonSavable):
     resolution: list = field(default_factory=list)
     groups: list = field(default_factory=list)
     data_type: str = ''
+    follows: list = field(default_factory=list)   # picker keys mirroring the row above
 
 
 @dataclass
@@ -125,6 +129,7 @@ class StatsResult(JsonSavable):
     is_one_sample: bool = False
     outliers: dict = field(default_factory=dict)      # group index → outlier value indices
     orig_groups: list | None = None                   # pre-removal groups the indices refer to
+    display: DisplayConfig | None = None              # settings this result was computed under
 
     @property
     def flagged_groups(self) -> list:
@@ -135,6 +140,11 @@ class StatsResult(JsonSavable):
         JsonSavable.__setstate__(self, state)
         _restore_group_pairs(self.groups)
         _restore_group_pairs(self.plot_groups)
+        # int keys survive as pair lists; an empty dict stays a dict
+        self.outliers = {int(k): v for k, v in (self.outliers.items()
+                         if isinstance(self.outliers, dict) else self.outliers)}
+        self.display = DisplayConfig()
+        self.display.__setstate__(state['display'])
 
 
 # ─────────────────────────── metrics (Qt-free) ───────────────────────────
@@ -189,6 +199,7 @@ class StatsPanelBackend:
     def __init__(self, nav: 'AppState'):
         self.nav = nav
         self.test_config: StatsTestConfig | None = None
+        self.missing_segments: dict[str, set] = {}   # segment → sessions it was never computed for
 
     @staticmethod
     def maybe_log_transform(x, log: bool) -> np.ndarray:
@@ -272,6 +283,7 @@ class StatsPanelBackend:
 
     def run(self, rows: list[RowConfig]) -> list[StatsResult]:
         dtype = rows[0].data_type
+        self.missing_segments = {}
         all_sessions = self.sessions_for(rows)
         self.nav.ensure_groups_loaded_for(all_sessions)
 
@@ -306,7 +318,8 @@ class StatsPanelBackend:
                                     groups[0]['pairs'], groups[1]['pairs'],
                                     tt, cfg.alternative, nonparam, log)
             sr = StatsResult(resolution=resolution, groups=groups, res=res,
-                             outliers=outliers, orig_groups=orig_groups)
+                             outliers=outliers, orig_groups=orig_groups,
+                             display=self.nav.get_display_config())
             self.finalize_plot_groups(sr, dtype)
             results.append(sr)
         return results
@@ -314,48 +327,57 @@ class StatsPanelBackend:
     # -- collection ----------------------------------------------------------
     def collect_group(self, cfg: RowConfig, resolution: str) -> dict:
         sessions  = cfg.sessions or self.nav.available_sessions()
-        conn_type = cfg.conn_types[0] if cfg.conn_types else ''
+        conn_types = cfg.conn_types or ['']
         seg_names = cfg.segments or [_ALL_SEGS]
         grp_names = cfg.groups or [ALL_PAIRS]
         dtype     = cfg.data_type
         m = METRICS[dtype]
         merged: dict[Key, float] = {}
         used_sessions: set[str] = set()
-        for grp_name in grp_names:
-            for seg_name in seg_names:
-                ei, ct = self.nav.cd.conf.parse_conn_type_label(conn_type)
-                for sess in sessions:
-                    ptr_key = Key(session=sess, excitability=ei, conn_type=ct)
-                    if ptr_key not in self.nav.cd.ptr:
+        seg_configs: list[str] = []
+        for grp_name, seg_name, conn_type in product(grp_names, seg_names, conn_types):
+            ei, ct = self.nav.cd.conf.parse_conn_type_label(conn_type)
+            for sess in sessions:
+                ptr_key = Key(session=sess, excitability=ei, conn_type=ct)
+                if ptr_key not in self.nav.cd.ptr:
+                    continue
+                if not m.enabled:
+                    vals_map = {}
+                elif m.source == "conn_strength":
+                    try:
+                        vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name, grp_name)
+                    except FileNotFoundError:
+                        self.missing_segments.setdefault(seg_name, set()).add(sess)
                         continue
-                    if not m.enabled:
-                        vals_map = {}
-                    elif m.source == "conn_strength":
-                        try:
-                            vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name, grp_name)
-                        except FileNotFoundError:
-                            continue
-                    elif m.source in ("ref_firing_rate", "tgt_firing_rate"):
-                        try:
-                            vals_map = self.get_fr_for_sess(ptr_key, grp_name,
-                                                            0 if m.source == "ref_firing_rate" else 1)
-                        except FileNotFoundError:
-                            continue
-                    elif m.source == "baseline":
-                        try:
-                            vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, grp_name)
-                        except FileNotFoundError:
-                            continue
-                    if vals_map:
-                        used_sessions.add(sess)
-                    for k, v in vals_map.items():
-                        merged.setdefault(k, v)
+                elif m.source in ("ref_firing_rate", "tgt_firing_rate"):
+                    try:
+                        vals_map = self.get_fr_for_sess(ptr_key, grp_name,
+                                                        0 if m.source == "ref_firing_rate" else 1)
+                    except FileNotFoundError:
+                        continue
+                elif m.source == "baseline":
+                    try:
+                        vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, grp_name)
+                    except FileNotFoundError:
+                        self.missing_segments.setdefault(seg_name, set()).add(sess)
+                        continue
+                data = self.nav.cd._ccg.get(
+                    ptr_key.change(resolution=resolution, segment=seg_name).cd())
+                src = data.sources.get(seg_name) if data is not None else None
+                seg_configs.append(
+                    f"{sess} {seg_name}: " + (f"t0={src.t0} t1={src.t1} "
+                    f"dur={src.active_duration} filter={src.filter_state}"
+                    if src is not None else "whole session") + f" ({len(vals_map)} pairs)")
+                if vals_map:
+                    used_sessions.add(sess)
+                for k, v in vals_map.items():
+                    merged.setdefault(k, v)
 
         sess_str = sessions[0] if len(sessions) == 1 else ','.join(sessions)
-        return dict(name=cfg.name, session=sess_str, conn_type=conn_type,
-                    segment=seg_names[0], group=grp_names[0], data_type=dtype,
+        return dict(name=cfg.name, session=sess_str, conn_type=','.join(conn_types),
+                    segment=seg_names[0], group=','.join(grp_names), data_type=dtype,
                     pairs=list(merged), vals=list(merged.values()), color=cfg.color,
-                    sessions_used=sorted(used_sessions))
+                    sessions_used=sorted(used_sessions), seg_configs=seg_configs)
 
     def _pair_value_dict(self, ptr_key, group_name, value_fn) -> dict[Key, float]:
         """{Key.pair(session,ref,tgt): value_fn(ref,tgt)} over a group's valid pairs."""
@@ -370,8 +392,9 @@ class StatsPanelBackend:
         data = nav.cd.ccg_for(data_key)
         if data is None or data.ccg is None:
             return {}
+        c = nav.cd.conf.at(resolution)   # the bins must match the array being measured
         cfg = ConnStrengthConfig(nav.baseline_method, nav.cs_metric,
-                                nav.cd.conf.min_lag_bin, nav.cd.conf.max_lag_bin)
+                                 c.min_lag_bin, c.max_lag_bin)
         grid = nav.cd.get_conn_strength_for(data_key, nav.active_norms, cfg)
         return self._pair_value_dict(ptr_key, group_name,
                                      lambda r, t: grid[r, t])
@@ -614,6 +637,13 @@ class StatsPanelBackend:
         for sr in results:
             out.append(f"   {_res_lbl.get(sr.resolution, sr.resolution)}:")
             out += _fmt_res(sr.res, sr.groups)
+        out.append("── Segments ──")
+        for sr in results:
+            for g in sr.groups:
+                for line in sorted(g.get('seg_configs') or [],
+                                   key=lambda s: s.split(':')[0].split(' ')[::-1]):
+                    out.append(f"   {_res_lbl.get(sr.resolution, sr.resolution)} "
+                               f"{g.get('name','?')} | {line}")
         for sr in results:
             label = f" [{_res_lbl.get(sr.resolution, sr.resolution).capitalize()}]" if multi else ""
             out += self.outlier_lines(label, sr, self.test_config.remove_outliers)
@@ -874,6 +904,7 @@ class StatsRow(QWidget):
     Owns its widgets and maps them to/from a RowConfig."""
 
     deleted = Signal(object)
+    follow_toggled = Signal()
 
     # each tuple: (picker key, button label, RowConfig field, AppState method for options)
     _PICKERS = (('sess', "Session", "sessions", 'available_sessions'),
@@ -892,6 +923,9 @@ class StatsRow(QWidget):
         'resolution': (lambda r: r._pickers['res'].selected,    lambda r, v: r._pickers['res'].set_selected(v)),
         'groups':     (lambda r: r._pickers['grp'].selected,    lambda r, v: r._pickers['grp'].set_selected(v)),
         'data_type':  (lambda r: r._dtype.currentText(),        lambda r, v: r._dtype.setCurrentText(v)),
+        'follows':    (lambda r: [k for k, p in r._pickers.items() if p.following],
+                       lambda r, v: [p.set_following(k in (v or []))
+                                     for k, p in r._pickers.items()]),
     }
 
     def __init__(self, nav: 'AppState', cfg: RowConfig | None = None, idx: int = 0, parent=None):
@@ -910,7 +944,11 @@ class StatsRow(QWidget):
         self._pickers = {}
         for rkey, label, plural, prov_attr in self._PICKERS:
             prov = getattr(nav, prov_attr)
-            p = ListPickerButton(label, prov(), plural=plural, refresh_provider=prov)
+            if rkey == 'seg':
+                prov = (lambda base=prov: sorted(base()))
+            p = ListPickerButton(label, prov(), plural=plural, refresh_provider=prov,
+                                 followable=True)
+            p.follow_toggled.connect(self.follow_toggled)
             rw.addWidget(p)
             self._pickers[rkey] = p
 
@@ -976,6 +1014,7 @@ class StatsTestPanel(QWidget):
         super().__init__(parent, Qt.WindowType.Window)
         self.nav = nav
         self.backend = StatsPanelBackend(nav)
+        self._mute_missing_warning = False   # per-GUI-instance, never persisted
         self._rows: list[StatsRow] = []
         self.test_config: StatsTestConfig | None = None
         self.results: list[StatsResult] = []
@@ -1040,6 +1079,14 @@ class StatsTestPanel(QWidget):
         add_btn.setFixedWidth(100)
         root.addWidget(add_btn)
 
+        # same classes as the CCG panel, on the same nav: both copies track each other
+        mirror = QHBoxLayout()
+        self._norm_mirror = NormSection(self.nav, expanded=False)
+        self._cs_mirror = BaselineCSSection(self.nav, expanded=False)
+        for sec in (self._norm_mirror, self._cs_mirror):
+            mirror.addWidget(sec)
+        root.addLayout(mirror)
+
         res_frame = QFrame()
         res_frame.setFrameShape(QFrame.Shape.StyledPanel)
         res_root = QVBoxLayout(res_frame)
@@ -1083,13 +1130,21 @@ class StatsTestPanel(QWidget):
     def _add_row(self, cfg: RowConfig | None = None):
         row = StatsRow(self.nav, cfg, idx=len(self._rows))
         row.deleted.connect(self._del_row)
+        row.follow_toggled.connect(self._sync_follows)
         self._rows.append(row)
         self._rows_area.addWidget(row)
+        self._sync_follows()
 
     def _del_row(self, row: StatsRow):
         if row in self._rows:
             self._rows.remove(row)
         row.deleteLater()
+        self._sync_follows()
+
+    def _sync_follows(self):
+        """Re-bind every picker column; row order is the follow order."""
+        for rkey, *_ in StatsRow._PICKERS:
+            sync_follow_column([r._pickers[rkey] for r in self._rows])
 
     def _refresh_rows(self):
         for r in self._rows:
@@ -1139,9 +1194,25 @@ class StatsTestPanel(QWidget):
         for res in self.nav.available_resolutions():
             self.nav.root._ensure_sessions_loaded(nd_keys, res)
         self.results = self.backend.run(rows_configs)
+        self._warn_missing_segments()
         self._show_result('\n'.join(self.backend.build_result_lines(self.results)))
         self._plot.render(self.results)
         self._export_btn.setEnabled(True)
+
+    def _warn_missing_segments(self):
+        """A segment never computed for a session silently shrinks the run to the sessions that have it."""
+        missing = self.backend.missing_segments
+        if not missing or self._mute_missing_warning:
+            return
+        body = '\n'.join(f"{seg}: {', '.join(sorted(s))}" for seg, s in sorted(missing.items()))
+        box = QMessageBox(QMessageBox.Icon.Warning, "Segment missing for some sessions",
+                          f"These sessions have no CCG for the selected segment and were "
+                          f"left out of the run:\n\n{body}", parent=self)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        mute = box.addButton("Don't show again", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is mute:
+            self._mute_missing_warning = True
 
     def apply_theme(self):
         self._plot.apply_theme()
@@ -1155,9 +1226,13 @@ class StatsTestPanel(QWidget):
             test=self.get_test_config().serialize(),
             view=self._plot.get_view_config().serialize(),
             splitter_sizes=list(self._splitter.sizes()),
+            display=self.nav.get_display_config().serialize(),
             rows=[r.config.serialize() for r in self._rows])
 
     def _apply_bundle(self, d: dict):
+        if d.get('display'):
+            dc = DisplayConfig(); dc.__setstate__(d['display'])
+            self.nav.apply_display_config(dc)
         for r in list(self._rows):
             self._del_row(r)
         for rd in d.get('rows') or []:

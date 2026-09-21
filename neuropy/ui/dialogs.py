@@ -22,6 +22,10 @@ from pyqtgraph.Qt.QtWidgets import (
     QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog,
 )
 from pyqtgraph.Qt.QtGui import QFont, QColor
+from neuropy.analyses.view_spec import NEURON_VIEW
+from neuropy.ui.group_manager import GroupManagerPage
+from neuropy.ui.neuron_tag_ui import NeuronTagPage
+from neuropy.ui.neuron_tags_frontend import NeuronTagsPanel
 from neuropy.ui.ui_common import area_rgb, cell_areas, _SPECIAL_PREFIX
 from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig
 from neuropy.analyses.neurons_dataset import Key, NeuronsDatasetConfig
@@ -142,6 +146,7 @@ class ManageGroupsDialog(QDialog):
         self._groups = group_mgr.ui.groups
         self._pairs_by_ct = pairs_by_conn_type_fn
         self._notes_widgets: dict[str, QPlainTextEdit] = {}
+        self._neuron_groups_page = None
         self.setWindowTitle("Manage Groups")
         self.resize(600, 520)
         self._build()
@@ -152,21 +157,30 @@ class ManageGroupsDialog(QDialog):
         lay.setSpacing(4)
 
         gr = self._groups
-        regular = gr.groups
-        special = gr.special_groups()
-
+        app = gr.ui
         nav = SideNavPanel(min_width=100, nav_width=160)
-        for gname in regular:
-            nav.add_page(gname, self._make_group_tab(gname, is_special=False))
 
-        if special:
-            sp_tabs = QTabWidget()
-            sp_tabs.setTabPosition(QTabWidget.TabPosition.North)
-            for gname in special:
-                display = gr.get_group_metadata(gname).display_name
-                sp_tabs.addTab(self._make_group_tab(gname, is_special=True), display)
-            sp_tabs.currentChanged.connect(self._autosave_notes)
-            nav.add_page("Special", sp_tabs)
+        if app.view.name == NEURON_VIEW:
+            self._neuron_groups_page = GroupManagerPage(
+                app.root.neuron_groups, member_label=lambda m: f"neuron {m[0]}",
+                session_of=lambda: app.current_session_str, parent=self)
+            nav.add_page("Neuron Groups", self._neuron_groups_page)
+            nav.add_page("Neuron Tags",
+                         NeuronTagPage(app.root.neuron_tags, app, parent=self))
+            nav.add_page("Assign Tags",
+                         NeuronTagsPanel(app.root.neuron_tags, app, parent=self))
+        else:
+            for gname in gr.groups:
+                nav.add_page(gname, self._make_group_tab(gname, is_special=False))
+            special = gr.special_groups()
+            if special:
+                sp_tabs = QTabWidget()
+                sp_tabs.setTabPosition(QTabWidget.TabPosition.North)
+                for gname in special:
+                    display = gr.get_group_metadata(gname).display_name
+                    sp_tabs.addTab(self._make_group_tab(gname, is_special=True), display)
+                sp_tabs.currentChanged.connect(self._autosave_notes)
+                nav.add_page("Special", sp_tabs)
 
         nav.currentChanged.connect(self._autosave_notes)
         lay.addWidget(nav, stretch=1)
@@ -175,165 +189,167 @@ class ManageGroupsDialog(QDialog):
         close_btn.clicked.connect(self._autosave_and_close)
         lay.addWidget(close_btn)
 
+    def _apply_group_change(self, what: str, change) -> None:
+        """Save notes, run one group mutation, then refresh every view of it."""
+        groups = self._groups
+        try:
+            self._autosave_notes()
+            change()
+        except ValueError as exc:
+            QMessageBox.warning(self, what, str(exc))
+            return
+        groups.changed.emit()
+        groups.ui.refresh_lists()
+        self._rebuild()
+
     def _make_group_tab(self, gname: str, is_special: bool) -> QWidget:
-        sd = self.sel_data
-        gr = self._groups
-        display = gr.get_group_metadata(gname).display_name
+        display = self._groups.get_group_metadata(gname).display_name
 
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setSpacing(6)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(6)
+        layout.addLayout(self._name_row(gname, is_special, display))
+        if not is_special:
+            layout.addLayout(self._hotkey_row(gname))
+        layout.addWidget(self._notes_and_pairs(gname), stretch=1)
+        layout.addLayout(self._group_button_row(gname, is_special, display))
+        return tab
 
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Group name:"))
+    def _name_row(self, gname: str, is_special: bool, display: str) -> QHBoxLayout:
         name_edit = QLineEdit(display)
-        name_row.addWidget(name_edit, stretch=1)
         rename_btn = QPushButton("Rename")
 
-        def _rename(_checked=False, old=gname, sp=is_special, ne=name_edit):
-            new = ne.text().strip()
-            if sp:
-                new = _SPECIAL_PREFIX + new
-            try:
-                self._autosave_notes()
-                gr.rename_group(old, new)
-                gr.changed.emit()
-                gr.ui.refresh_lists()
-                self._rebuild()
-            except ValueError as e:
-                QMessageBox.warning(self, "Rename", str(e))
+        def rename():
+            new_name = name_edit.text().strip()
+            if is_special:
+                new_name = _SPECIAL_PREFIX + new_name
+            self._apply_group_change(
+                "Rename", lambda: self._groups.rename_group(gname, new_name))
 
-        rename_btn.clicked.connect(_rename)
-        name_row.addWidget(rename_btn)
-        lay.addLayout(name_row)
+        rename_btn.clicked.connect(rename)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Group name:"))
+        row.addWidget(name_edit, stretch=1)
+        row.addWidget(rename_btn)
+        return row
 
-        if not is_special:
-            hk_row = QHBoxLayout()
-            hk_row.addWidget(QLabel("Hotkey (0-9/a-z):"))
-            hk_edit = QLineEdit(gr.get_group_metadata(gname).hotkey)
-            hk_edit.setMaximumWidth(60)
-            hk_row.addWidget(hk_edit)
-            set_hk = QPushButton("Set")
+    def _hotkey_row(self, gname: str) -> QHBoxLayout:
+        groups = self._groups
+        meta = groups.get_group_metadata(gname)
+        hotkey_edit = QLineEdit(meta.hotkey)
+        hotkey_edit.setMaximumWidth(60)
+        set_btn = QPushButton("Set")
 
-            def _set_hk(_checked=False, g=gname, he=hk_edit):
-                try:
-                    gr.set_hotkey_ui(g, he.text())
-                except Exception as e:
-                    QMessageBox.warning(self, "Hotkey", str(e))
+        def set_colour(colour):
+            groups.get_group_metadata(gname).ui_color = colour
+            groups.changed.emit()
+            groups.ui.refresh_lists()
 
-            set_hk.clicked.connect(_set_hk)
-            hk_row.addWidget(set_hk)
-            meta = gr.get_group_metadata(gname)
-            swatch = ColorLabelButton(meta.display_color, "Colour:", title="Tag colour")
+        set_btn.clicked.connect(
+            lambda: groups.set_hotkey_ui(gname, hotkey_edit.text()))
+        swatch = ColorLabelButton(meta.display_color, "Colour:", title="Tag colour")
+        swatch.color_changed.connect(set_colour)
 
-            def _on_colour_btn(c, g=gname):
-                gr.get_group_metadata(g).ui_color = c
-                gr.changed.emit()
-                gr.ui.refresh_lists()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Hotkey (0-9/a-z):"))
+        row.addWidget(hotkey_edit)
+        row.addWidget(set_btn)
+        row.addWidget(swatch)
+        row.addStretch()
+        return row
 
-            swatch.color_changed.connect(_on_colour_btn)
-            hk_row.addWidget(swatch)
-            hk_row.addStretch()
-            lay.addLayout(hk_row)
+    def _notes_and_pairs(self, gname: str) -> QSplitter:
+        notes_edit = QPlainTextEdit()
+        notes_edit.setPlainText(self._groups.get_group_metadata(gname).notes)
+        self._notes_widgets[gname] = notes_edit
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self._labelled_box("Notes:", notes_edit))
+        splitter.addWidget(self._labelled_box("Pairs in group:",
+                                              self._session_pair_tabs(gname)))
+        splitter.setSizes([160, 200])
+        return splitter
 
-        notes_host = QWidget()
-        notes_lay = QVBoxLayout(notes_host)
-        notes_lay.setContentsMargins(0, 0, 0, 0)
-        notes_lay.setSpacing(2)
-        notes_lay.addWidget(QLabel("Notes:"))
-        notes_edit = QPlainTextEdit()
-        notes_edit.setPlainText(gr.get_group_metadata(gname).notes)
-        notes_lay.addWidget(notes_edit)
-        self._notes_widgets[gname] = notes_edit
-        splitter.addWidget(notes_host)
+    @staticmethod
+    def _labelled_box(label: str, widget: QWidget) -> QWidget:
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(QLabel(label))
+        layout.addWidget(widget)
+        return host
 
-        pairs_host = QWidget()
-        pairs_lay = QVBoxLayout(pairs_host)
-        pairs_lay.setContentsMargins(0, 0, 0, 0)
-        pairs_lay.setSpacing(2)
-        pairs_lay.addWidget(QLabel("Pairs in group:"))
-
-        sess_tabs = QTabWidget()
-        sess_tabs.setTabPosition(QTabWidget.TabPosition.North)
-        sessions = sorted(gr.sessions_for_group(gname))
-        if sessions:
-            for sess in sessions:
-                pairs = sorted(gr.pairs_in_group(gname, sess))
-                pair_list = QListWidget()
-                for r, t in pairs:
-                    pair_list.addItem(f"[{r} {t}]")
-                sess_tabs.addTab(pair_list, sess)
-        else:
+    def _session_pair_tabs(self, gname: str) -> QTabWidget:
+        """One tab of pair indices per session the group touches."""
+        tabs = QTabWidget()
+        tabs.setTabPosition(QTabWidget.TabPosition.North)
+        sessions = sorted(self._groups.sessions_for_group(gname))
+        if not sessions:
             empty = QLabel("(no pairs in this group)")
             empty.setStyleSheet("color: #888; padding: 8px;")
-            sess_tabs.addTab(empty, "—")
-        pairs_lay.addWidget(sess_tabs)
-        splitter.addWidget(pairs_host)
+            tabs.addTab(empty, "—")
+            return tabs
+        for session in sessions:
+            pair_list = QListWidget()
+            for ref, tgt in sorted(self._groups.pairs_in_group(gname, session)):
+                pair_list.addItem(f"[{ref} {tgt}]")
+            tabs.addTab(pair_list, session)
+        return tabs
 
-        splitter.setSizes([160, 200])
-        lay.addWidget(splitter, stretch=1)
-
-        btn_row = QHBoxLayout()
+    def _group_button_row(self, gname: str, is_special: bool,
+                          display: str) -> QHBoxLayout:
+        convert_btn = QPushButton("Convert to group" if is_special
+                                  else "Convert to special group")
         if is_special:
-            conv_btn = QPushButton("Convert to group")
-            def _conv(_checked=False, g=gname, d=display):
-                key = gr.get_group_metadata(g).hotkey
-                # the key was released when this became special: it may be someone else's now
-                while key and gr.group_for_hotkey(key) is not None:
-                    key, ok = QInputDialog.getText(
-                        self, "Hotkey taken",
-                        f"Hotkey '{key}' is no longer available — "
-                        "enter another hotkey, or leave blank.", text=key)
-                    if not ok:
-                        return
-                    key = key.strip().lower()
-                try:
-                    self._autosave_notes()
-                    gr.rename_group(g, d)
-                    gr.set_group_hotkey(d, key)
-                    gr.changed.emit()
-                    gr.ui.refresh_lists()
-                    self._rebuild()
-                except ValueError as e:
-                    QMessageBox.warning(self, "Convert", str(e))
+            convert_btn.clicked.connect(lambda: self._convert_to_group(gname, display))
         else:
-            conv_btn = QPushButton("Convert to special group")
-            def _conv(_checked=False, g=gname, d=display):
-                try:
-                    self._autosave_notes()
-                    gr.rename_group(g, _SPECIAL_PREFIX + d)
-                    gr.changed.emit()
-                    gr.ui.refresh_lists()
-                    self._rebuild()
-                except ValueError as e:
-                    QMessageBox.warning(self, "Convert", str(e))
-        conv_btn.clicked.connect(_conv)
-        btn_row.addWidget(conv_btn)
+            convert_btn.clicked.connect(lambda: self._apply_group_change(
+                "Convert",
+                lambda: self._groups.rename_group(gname, _SPECIAL_PREFIX + display)))
 
-        del_btn = QPushButton(f"Delete group '{display}'")
-        def _del(_checked=False, g=gname):
-            if QMessageBox.question(self, "Delete group",
-                                    f"Delete group '{g}'?") != QMessageBox.StandardButton.Yes:
+        delete_btn = QPushButton(f"Delete group '{display}'")
+        delete_btn.clicked.connect(lambda: self._delete_group(gname))
+
+        row = QHBoxLayout()
+        row.addWidget(convert_btn)
+        row.addWidget(delete_btn)
+        row.addStretch()
+        return row
+
+    def _convert_to_group(self, gname: str, display: str) -> None:
+        """Un-special a group, reclaiming its hotkey — which someone else may now hold."""
+        groups = self._groups
+        hotkey = groups.get_group_metadata(gname).hotkey
+        while hotkey and groups.group_for_hotkey(hotkey) is not None:
+            hotkey, accepted = QInputDialog.getText(
+                self, "Hotkey taken",
+                f"Hotkey '{hotkey}' is no longer available — "
+                "enter another hotkey, or leave blank.", text=hotkey)
+            if not accepted:
                 return
-            self._autosave_notes()
-            gr.delete_group(g)
-            gr.changed.emit()
-            gr.ui.refresh_lists()
-            self._rebuild()
-        del_btn.clicked.connect(_del)
-        btn_row.addWidget(del_btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
+            hotkey = hotkey.strip().lower()
 
-        return w
+        def convert():
+            groups.rename_group(gname, display)
+            groups.set_group_hotkey(display, hotkey)
+
+        self._apply_group_change("Convert", convert)
+
+    def _delete_group(self, gname: str) -> None:
+        if QMessageBox.question(self, "Delete group",
+                                f"Delete group '{gname}'?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._apply_group_change("Delete", lambda: self._groups.delete_group(gname))
 
     def _autosave_notes(self, *_):
         gr = self._groups
         for gname, widget in self._notes_widgets.items():
             gr.get_group_metadata(gname).notes = widget.toPlainText()
         gr.save()
+        if self._neuron_groups_page is not None:
+            self._neuron_groups_page.save_notes()   # its own registry, same trigger
 
     def _autosave_and_close(self):
         self._autosave_notes()
@@ -354,7 +370,7 @@ class ManageGroupsDialog(QDialog):
     def show(cls, sel_data: 'SelectionData', group_mgr: 'PairSelectionPanel',
              pairs_by_conn_type_fn=None, parent=None):
         gr = group_mgr.ui.groups
-        if not gr.registry and not gr:
+        if gr.ui.view.name != NEURON_VIEW and not gr.registry and not gr:
             QMessageBox.information(parent, "Manage groups",
                                     "No groups yet. Create one first.")
             return
@@ -418,6 +434,7 @@ class VersionLoadDialog(QDialog):
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("Select a version to load (double-click to rename):"))
         lst = QListWidget()
+        lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
         def _fill():
             lst.clear()
@@ -438,7 +455,7 @@ class VersionLoadDialog(QDialog):
 
         def _do_load():
             row, ver = _selected()
-            if ver is None:
+            if ver is None or len(lst.selectedIndexes()) > 1:   # multi-select is for delete
                 return
             name, path, saved_at, is_valid, is_history = ver
             if not is_valid:
@@ -449,7 +466,7 @@ class VersionLoadDialog(QDialog):
 
         def _do_rename():
             row, ver = _selected()
-            if ver is None:
+            if ver is None or len(lst.selectedIndexes()) > 1:
                 return
             name, path, saved_at, is_valid, is_history = ver
             new, ok = QInputDialog.getText(dlg, "Rename", "New name:", text=name)
@@ -470,18 +487,20 @@ class VersionLoadDialog(QDialog):
             lst.setCurrentRow(row)
 
         def _do_delete():
-            row, ver = _selected()
-            if ver is None:
+            rows = sorted((i.row() for i in lst.selectedIndexes()), reverse=True)
+            if not rows:
                 return
-            name, path, *_ = ver
-            if QMessageBox.question(dlg, "Delete", f"Delete '{name}'?") != QMessageBox.StandardButton.Yes:
+            names = [versions[r][0] for r in reversed(rows)]
+            what = f"'{names[0]}'" if len(names) == 1 else f"{len(names)} versions"
+            if QMessageBox.question(dlg, "Delete", f"Delete {what}?") != QMessageBox.StandardButton.Yes:
                 return
-            try:
-                os.remove(path)
-            except OSError as exc:
-                QMessageBox.warning(dlg, "Delete", f"Delete failed:\n{exc}")
-                return
-            versions.pop(row)
+            for row in rows:   # back to front: earlier rows keep their index
+                try:
+                    os.remove(versions[row][1])
+                except OSError as exc:
+                    QMessageBox.warning(dlg, "Delete", f"Delete failed:\n{exc}")
+                    continue
+                versions.pop(row)
             _fill()
             if not versions:
                 dlg.reject()
@@ -777,18 +796,18 @@ class CustomCCGManageDialog(QDialog):
             return
         # Each entry is a distinct (session, name); delete exactly those, not the whole name.
         targets = sorted({(e['session'], e['name']) for e in entries})
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Delete custom CCG")
-        box.setText(f"Are you sure you want to delete {len(targets)} custom CCG(s)?")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        if box.exec() != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+                self, "Delete custom CCG",
+                f"Are you sure you want to delete {len(targets)} custom CCG(s)?"
+        ) != QMessageBox.StandardButton.Yes:
             return
-        cd = self._mgr._ui.nav.cd
-        cd.delete_segment([Key(session=s, segment=n) for s, n in targets])
-        self._refresh_list()
         nav = self._mgr._ui.nav
+        for sess, name in targets:
+            base = os.path.join(nav.cd.custom_dir, f"{name}.{sess}")
+            for p in glob.glob(base + '.*'):
+                shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+            nav.cd.drop_segment([Key(session=sess, segment=name)])
+        self._refresh_list()
         nav.clamp_segment()
         nav.custom_segs_changed.emit()
 
@@ -896,73 +915,95 @@ class ExportOptionsDialog(QDialog):
 
 
     def _sv(self, key, default='') -> QLineEdit:
-        e = QLineEdit(str(self._defs.get(key) or default))
-        return e
+        """A text field holding this option's saved default."""
+        return QLineEdit(str(self._defs.get(key) or default))
 
-    def _bv(self, key, default=True) -> QCheckBox:
-        cb = QCheckBox()
-        cb.setChecked(bool(self._defs.get(key, default)))
-        return cb
+    def _bv(self, key, default=True, label: str = '') -> QCheckBox:
+        """A checkbox holding this option's saved default."""
+        checkbox = QCheckBox(label)
+        checkbox.setChecked(bool(self._defs.get(key, default)))
+        return checkbox
 
+    @staticmethod
+    def _field_box(title: str, fields: list, extra: list = None) -> QGroupBox:
+        """A group box of label/field rows, with any extra widgets stacked below."""
+        box = QGroupBox(title)
+        layout = QVBoxLayout(box)
+        for label, field in fields:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label), 1)
+            row.addWidget(field, 2)
+            layout.addLayout(row)
+        for widget in extra or []:
+            layout.addWidget(widget)
+        return box
+
+    @staticmethod
+    def _checkbox_box(title: str, checkboxes: list) -> QGroupBox:
+        """A group box holding one row of checkboxes."""
+        box = QGroupBox(title)
+        layout = QHBoxLayout(box)
+        for checkbox in checkboxes:
+            layout.addWidget(checkbox)
+        return box
+
+
+    def _preview_column(self, all_groups: list) -> QVBoxLayout:
+        """The right column: live preview, export scope buttons, save and cancel."""
+        self._preview_plot = pg.PlotWidget()
+        self._preview_plot.setMinimumHeight(220)
+        self._preview_plot.setBackground('w')
+
+        column = QVBoxLayout()
+        column.addWidget(QLabel("Preview (current segment):"))
+        column.addWidget(self._preview_plot, stretch=1)
+        column.addStretch()
+        column.addWidget(self._scope_box(all_groups))
+
+        save_btn = QPushButton("Save as defaults")
+        save_btn.clicked.connect(self._save_defaults)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        buttons = QHBoxLayout()
+        buttons.addWidget(save_btn)
+        buttons.addWidget(cancel_btn)
+        column.addLayout(buttons)
+        return column
+
+    def _scope_box(self, all_groups: list) -> QGroupBox:
+        """One button per export scope that currently has anything to export."""
+        scopes = [('current', f"Export current as {self._fmt.upper()}")]
+        if len(self._selected_pairs) > 1:
+            scopes.append(('all', f"Export all selected ({len(self._selected_pairs)})…"))
+        bookmarked = len(self.nav.bookmarked_pairs)
+        if bookmarked:
+            scopes.append(('bookmarked', f"Export bookmarked ({bookmarked})…"))
+        if all_groups:
+            scopes.append(('groups', "Export selected group(s)…"))
+
+        box = QGroupBox("Export scope")
+        layout = QVBoxLayout(box)
+        for action, label in scopes:
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, a=action: self._done(a))
+            layout.addWidget(button)
+        return box
 
     def _build(self):
         root = QHBoxLayout(self)
 
+        options_widget = QWidget()
+        opt_lay = QVBoxLayout(options_widget)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumWidth(480)
-        options_widget = QWidget()
-        opt_lay = QVBoxLayout(options_widget)
         scroll.setWidget(options_widget)
         root.addWidget(scroll, stretch=3)
 
-        right_col = QVBoxLayout()
-        root.addLayout(right_col, stretch=2)
+        all_groups = sorted(g for g in self._groups.defined_groups
+                            if g and not str(g).startswith('__'))
+        root.addLayout(self._preview_column(all_groups), stretch=2)
 
-        # Preview plot
-        self._preview_plot = pg.PlotWidget()
-        self._preview_plot.setMinimumHeight(220)
-        self._preview_plot.setBackground('w')
-        right_col.addWidget(QLabel("Preview (current segment):"))
-        right_col.addWidget(self._preview_plot, stretch=1)
-
-        right_col.addStretch()
-
-        # Scope buttons
-        scope_box = QGroupBox("Export scope")
-        scope_lay = QVBoxLayout(scope_box)
-        scope_lay.addWidget(QPushButton(
-            f"Export current as {self._fmt.upper()}",
-            clicked=lambda: self._done('current')))
-        if len(self._selected_pairs) > 1:
-            scope_lay.addWidget(QPushButton(
-                f"Export all selected ({len(self._selected_pairs)})…",
-                clicked=lambda: self._done('all')))
-        n_bm = len(self.nav.bookmarked_pairs)
-        if n_bm > 0:
-            scope_lay.addWidget(QPushButton(
-                f"Export bookmarked ({n_bm})…",
-                clicked=lambda: self._done('bookmarked')))
-        all_groups = sorted(
-            g for g in self._groups.defined_groups
-            if g and not str(g).startswith('__'))
-        if all_groups:
-            scope_lay.addWidget(QPushButton(
-                "Export selected group(s)…",
-                clicked=lambda: self._done('groups')))
-        right_col.addWidget(scope_box)
-
-        save_btn = QPushButton("Save as defaults")
-        cancel_btn = QPushButton("Cancel")
-        save_btn.clicked.connect(self._save_defaults)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(save_btn)
-        btn_row.addWidget(cancel_btn)
-        right_col.addLayout(btn_row)
-
-        color_box = QGroupBox("Colors (name or #hex, blank = default)")
-        cl = QVBoxLayout(color_box)
         self._ccg_color    = self._sv('ccg_color')
         self._base_color   = self._sv('baseline_color')
         self._tw_color     = self._sv('test_window_color')
@@ -970,63 +1011,43 @@ class ExportOptionsDialog(QDialog):
         self._pval_color   = self._sv('pval_line_color')
         self._alpha_color  = self._sv('alpha_line_color')
         self._cs_shade_col = self._sv('cs_shade_color')
-        for lbl, w in [
-            ("CCG:", self._ccg_color), ("Baseline:", self._base_color),
-            ("Test window:", self._tw_color), ("TW alpha:", self._tw_alpha),
-            ("P-value line:", self._pval_color), ("Alpha line:", self._alpha_color),
-            ("CS shade:", self._cs_shade_col),
-        ]:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(lbl), 1)
-            row.addWidget(w, 2)
-            cl.addLayout(row)
-        opt_lay.addWidget(color_box)
+        opt_lay.addWidget(self._field_box(
+            "Colors (name or #hex, blank = default)",
+            [("CCG:", self._ccg_color), ("Baseline:", self._base_color),
+             ("Test window:", self._tw_color), ("TW alpha:", self._tw_alpha),
+             ("P-value line:", self._pval_color), ("Alpha line:", self._alpha_color),
+             ("CS shade:", self._cs_shade_col)]))
 
-        misc_box = QGroupBox("Appearance")
-        ml = QVBoxLayout(misc_box)
-        self._ccg_alpha  = self._sv('ccg_alpha',  '0.5')
+        self._ccg_alpha  = self._sv('ccg_alpha', '0.5')
         self._base_alpha = self._sv('baseline_alpha', '0.3')
         self._min_text   = self._sv('min_text_size', '8')
         self._xticks     = self._sv('xticks_raw')
-        self._mirror_cb  = self._bv('mirror_xticks', True)
-        self._legend_cb  = self._bv('show_legend', True)
-        self._mirror_cb.setText("Mirror x-ticks to negative")
-        self._legend_cb.setText("Show legend")
-        for lbl, w in [
-            ("CCG alpha:", self._ccg_alpha), ("Baseline alpha:", self._base_alpha),
-            ("Min text size (pt):", self._min_text),
-            ("X-ticks (ms, comma-sep):", self._xticks),
-        ]:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(lbl), 1)
-            row.addWidget(w, 2)
-            ml.addLayout(row)
-        ml.addWidget(self._mirror_cb)
-        ml.addWidget(self._legend_cb)
-        opt_lay.addWidget(misc_box)
+        self._mirror_cb  = self._bv('mirror_xticks', True, "Mirror x-ticks to negative")
+        self._legend_cb  = self._bv('show_legend', True, "Show legend")
+        opt_lay.addWidget(self._field_box(
+            "Appearance",
+            [("CCG alpha:", self._ccg_alpha), ("Baseline alpha:", self._base_alpha),
+             ("Min text size (pt):", self._min_text),
+             ("X-ticks (ms, comma-sep):", self._xticks)],
+            extra=[self._mirror_cb, self._legend_cb]))
 
-        title_box = QGroupBox("Title")
-        tl = QHBoxLayout(title_box)
-        self._t_shanks = self._bv('title_show_shanks', True);   self._t_shanks.setText("Shanks")
-        self._t_inds   = self._bv('title_show_inds',   True);   self._t_inds.setText("Inds")
-        self._t_type   = self._bv('title_show_type',   True);   self._t_type.setText("Type")
-        self._t_seg    = self._bv('title_show_seg',    True);   self._t_seg.setText("Segment")
-        self._t_norm   = self._bv('title_show_norm_details', True); self._t_norm.setText("Norm")
-        self._t_sess   = self._bv('title_show_session', False);  self._t_sess.setText("Session")
-        for cb in (self._t_shanks, self._t_inds, self._t_type,
-                   self._t_seg, self._t_norm, self._t_sess):
-            tl.addWidget(cb)
-        opt_lay.addWidget(title_box)
+        self._t_shanks = self._bv('title_show_shanks', True, "Shanks")
+        self._t_inds   = self._bv('title_show_inds', True, "Inds")
+        self._t_type   = self._bv('title_show_type', True, "Type")
+        self._t_seg    = self._bv('title_show_seg', True, "Segment")
+        self._t_norm   = self._bv('title_show_norm_details', True, "Norm")
+        self._t_sess   = self._bv('title_show_session', False, "Session")
+        opt_lay.addWidget(self._checkbox_box(
+            "Title", [self._t_shanks, self._t_inds, self._t_type,
+                      self._t_seg, self._t_norm, self._t_sess]))
 
-        res_box = QGroupBox("Resolution & CS")
-        rl = QHBoxLayout(res_box)
-        self._lo_res  = self._bv('export_lores', True);  self._lo_res.setText("Lo-res")
-        self._hi_res  = self._bv('export_hires', False); self._hi_res.setText("Hi-res")
-        self._stg_cb  = self._bv('print_cs_stg',  False); self._stg_cb.setText("Print STG")
-        self._jbsi_cb = self._bv('print_cs_jbsi', False); self._jbsi_cb.setText("Print JBSI")
-        for cb in (self._lo_res, self._hi_res, self._stg_cb, self._jbsi_cb):
-            rl.addWidget(cb)
-        opt_lay.addWidget(res_box)
+        self._lo_res  = self._bv('export_lores', True, "Lo-res")
+        self._hi_res  = self._bv('export_hires', False, "Hi-res")
+        self._stg_cb  = self._bv('print_cs_stg', False, "Print STG")
+        self._jbsi_cb = self._bv('print_cs_jbsi', False, "Print JBSI")
+        opt_lay.addWidget(self._checkbox_box(
+            "Resolution & CS",
+            [self._lo_res, self._hi_res, self._stg_cb, self._jbsi_cb]))
 
         seg_default = list(self._defs.get('export_segments') or ['Current'])
         _, _, self._selected_segments = _dual_list(
@@ -1056,47 +1077,49 @@ class ExportOptionsDialog(QDialog):
 
 
     def _refresh_preview(self):
-        """Draw a quick pyqtgraph preview of the current pair's CCG."""
+        """Draw the current pair's whole-session CCG in the preview plot."""
         if self._preview_plot is None or self._preview_pair is None:
             return
+        ref, tgt = int(self._preview_pair[0]), int(self._preview_pair[1])
+        key = self.nav.get_complete_key().change(segment=0, ref=ref, tgt=tgt)
+        slices = self.nav.cd.pair_slices(key)
+        if slices is None:
+            return
+        ccg = slices[0].astype(float)
+        baseline = slices[1].astype(float) if slices[1] is not None else None
+
+        conf = self.nav.cd.ccg_for(key).conf
+        bin_ms = conf.bin_size * 1000.0
+        half = conf.duration * 1000.0 / 2
+        xs = np.linspace(-half, half, len(ccg))
+
+        plot = self._preview_plot
+        plot.clear()
+        plot.addItem(pg.BarGraphItem(
+            x=xs, height=ccg, width=bin_ms * 0.85, pen=None,
+            brush=self._ccg_color.text().strip() or '#4a7fd4'))
+        if baseline is not None:
+            plot.plot(xs, baseline, pen=pg.mkPen(
+                self._base_color.text().strip() or '#e88', width=1.5))
+        plot.setLabel('bottom', 'Lag (ms)')
+
+
+    @staticmethod
+    def _text_or_none(field) -> str | None:
+        return field.text().strip() or None
+
+    @staticmethod
+    def _float_or(field, default: float) -> float:
+        """The field's value, or `default` when it doesn't parse as a number."""
         try:
-            ref, tgt = int(self._preview_pair[0]), int(self._preview_pair[1])
-            nav = self.nav
-            key = nav.get_complete_key().change(segment=0, ref=ref, tgt=tgt)  # seg 0 = whole session
-            slices = nav.cd.pair_slices(key)
-            if slices is None:
-                return
-            ccg_raw, null_raw = slices[0].astype(float), slices[1]
-            null_raw = null_raw.astype(float) if null_raw is not None else None
-
-            cd_data = nav.cd.ccg_for(key)
-            n  = len(ccg_raw)
-            bs = cd_data.conf.bin_size * 1000.0
-            ws = cd_data.conf.duration * 1000.0
-            xs = np.linspace(-ws / 2, ws / 2, n)
-
-            p = self._preview_plot
-            p.clear()
-            color = (self._ccg_color.text().strip() or '#4a7fd4')
-            try:
-                alpha = float(self._ccg_alpha.text() or 0.5)
-            except ValueError:
-                alpha = 0.5
-            p.addItem(pg.BarGraphItem(x=xs, height=ccg_raw,
-                                      width=bs * 0.85, brush=color, pen=None))
-            if null_raw is not None:
-                bc = (self._base_color.text().strip() or '#e88')
-                p.plot(xs, null_raw, pen=pg.mkPen(bc, width=1.5))
-            p.setLabel('bottom', 'Lag (ms)')
-        except Exception:
-            pass
-
+            return float(field.text())
+        except ValueError:
+            return default
 
     def _collect(self) -> dict:
-        def _s(w): return w.text().strip() or None
-        def _f(w, default):
-            try: return float(w.text())
-            except Exception: return default
+        """Every option the dialog holds, as the dict the exporter consumes."""
+        _s = self._text_or_none
+        _f = self._float_or
         o: dict = {
             'ccg_color':          _s(self._ccg_color),
             'baseline_color':     _s(self._base_color),
@@ -1124,22 +1147,26 @@ class ExportOptionsDialog(QDialog):
             'export_segments':    list(self._selected_segments) or ['Current'],
             'subfolder_by':       list(self._selected_subfolders),
         }
-        raw = o['xticks_raw']
-        if raw:
-            try:
-                o['xticks_ms'] = [float(x.strip()) for x in raw.split(',') if x.strip()]
-            except Exception:
-                o['xticks_ms'] = None
-        else:
-            o['xticks_ms'] = None
+        o['xticks_ms'] = self._parse_xticks(o['xticks_raw'])
         return o
+
+    @staticmethod
+    def _parse_xticks(raw: str) -> list | None:
+        """Comma-separated tick positions in ms; None when blank or malformed."""
+        if not raw:
+            return None
+        try:
+            return [float(x.strip()) for x in raw.split(',') if x.strip()]
+        except ValueError:
+            return None
 
     def _save_defaults(self):
         self._ui_state['export_defaults'] = self._collect()
         try:
             self._group_mgr._save_all_state(selection_name=None, silent=True)
-        except Exception:
-            pass
+        except OSError as exc:
+            QMessageBox.warning(self, "Save defaults",
+                                f"Could not write settings: {exc}")
 
     def _done(self, action: str):
         self._action = action

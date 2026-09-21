@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import os
 from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
     JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
-    ADMITTED_PREFIX, is_shape_label, is_admitted_group,
+    ADMITTED_PREFIX, is_shape_label, is_admitted_group, NOTHING,
 )
+from neuropy.utils.data_storage_util import atomic_write_json
 from neuropy.analyses.neurons_dataset import Key
 
 
@@ -236,7 +238,8 @@ class GroupDataset(JsonSavable, BiIndex):
     def groups(self) -> list[str]:
         """Tags a user can apply — machine markers are not offered as choices."""
         return sorted(g for g in self.defined_groups
-                      if not is_special_group(g) and not is_admitted_group(g))
+                      if g != NOTHING
+                      and not is_special_group(g) and not is_admitted_group(g))
 
     def special_groups(self) -> list[str]:
         return sorted(g for g in self.defined_groups if is_special_group(g))
@@ -266,31 +269,66 @@ class GroupDataset(JsonSavable, BiIndex):
         self.saved_at = datetime.datetime.now().isoformat()
         JsonSavable.save(self, path=path, **_)
 
-    def add_to_group(self, gname: str, sess: str, pair: tuple) -> None:
-        self.add(gname, (sess, int(pair[0]), int(pair[1])))
+    @staticmethod
+    def member(key: Key) -> tuple:
+        """A Key as its stored member tuple; tgt is dropped when the Key has none."""
+        ids = (key.ref,) if key.tgt is None else (key.ref, key.tgt)
+        return (str(key.session), *(int(i) for i in ids))
+
+    def add_member(self, gname: str, key: Key) -> None:
+        self.add(gname, self.member(key))
         self.get_group_metadata(gname)
         self.dirty = True
 
-    def discard_from_group(self, gname: str, sess: str, pair: tuple) -> None:
-        self.discard(gname, (sess, int(pair[0]), int(pair[1])))
+    def discard_member(self, gname: str, key: Key) -> None:
+        self.discard(gname, self.member(key))
         self.dirty = True
 
-    def pairs_in_group(self, gname: str, sess: str) -> set:
-        return {(r, t) for s, r, t in self.forward(gname) if s == sess}
+    def members_in_group(self, gname: str, sess: str) -> set:
+        """Id tuples tagged by *gname* in one session, without the session itself."""
+        return {tuple(rest) for s, *rest in self.forward(gname) if s == sess}
 
-    def groups_for_pair(self, sess: str, ref: int, tgt: int) -> set:
-        return self.inverse((sess, int(ref), int(tgt)))
+    def members_in_groups(self, gnames, sess: str) -> set:
+        """Union over several groups; a member tagged twice counts once."""
+        return set().union(*(self.members_in_group(g, sess) for g in gnames)) \
+            if gnames else set()
 
-    def chips_for_pair(self, sess: str, ref: int, tgt: int) -> list:
-        """(display_name, display_color) per group tagging this pair, sorted by name.
+    def keys_in_group(self, gname: str, sess: str) -> set:
+        """Keys tagged by *gname* in one session — what a view indexes by."""
+        return {Key(session=sess, ref=m[0], tgt=m[1] if len(m) > 1 else None)
+                for m in self.members_in_group(gname, sess)}
+
+    def groups_for_member(self, key: Key) -> set:
+        return self.inverse(self.member(key))
+
+    def chips_for_member(self, key: Key) -> list:
+        """(display_name, display_color) per group tagging this member, sorted by name.
 
         Admitted markers are bookkeeping — which model proposed the pair — so they
-        are kept on the pair but never shown as a tag.
+        are kept on the member but never shown as a tag.
         """
         metas = [self.get_group_metadata(g)
-                 for g in sorted(self.groups_for_pair(sess, ref, tgt))
+                 for g in sorted(self.groups_for_member(key))
                  if not is_admitted_group(g)]
         return [(m.display_name, m.display_color) for m in metas]
+
+    def add_to_group(self, gname: str, sess: str, pair: tuple) -> None:
+        self.add_member(gname, Key.pair(sess, pair[0], pair[1]))
+
+    def discard_from_group(self, gname: str, sess: str, pair: tuple) -> None:
+        self.discard_member(gname, Key.pair(sess, pair[0], pair[1]))
+
+    def pairs_in_group(self, gname: str, sess: str) -> set:
+        return self.members_in_group(gname, sess)
+
+    def pairs_in_groups(self, gnames, sess: str) -> set:
+        return self.members_in_groups(gnames, sess)
+
+    def groups_for_pair(self, sess: str, ref: int, tgt: int) -> set:
+        return self.groups_for_member(Key.pair(sess, ref, tgt))
+
+    def chips_for_pair(self, sess: str, ref: int, tgt: int) -> list:
+        return self.chips_for_member(Key.pair(sess, ref, tgt))
 
     def sessions_for_group(self, gname: str) -> set:
         return {s for s, *_ in self.forward(gname)}
@@ -317,6 +355,19 @@ class GroupDataset(JsonSavable, BiIndex):
         self.delete_key(name)
         self.registry.pop(name)
 
+    @staticmethod
+    def valid_hotkey(key_str: str) -> str:
+        """A hotkey normalised to lowercase; empty clears it.
+
+        Raises ValueError on anything but a digit 1-9/0 or a single letter.
+        """
+        key_str = key_str.strip().lower()
+        digits = [str(i) for i in range(1, 10)] + ['0']
+        if key_str and key_str not in digits and not (
+                len(key_str) == 1 and key_str.isalpha()):
+            raise ValueError("Enter a digit 1–9/0 or a single letter a–z.")
+        return key_str
+
     def set_group_hotkey(self, name: str, key_str: str) -> None:
         for grp in self.registry.values():
             if grp.hotkey == key_str and grp.name != name:
@@ -340,6 +391,35 @@ def groups_dir(cd) -> str:
     classifiers in ``data_root``.
     """
     return str(cd.data_root)
+
+
+class NeuronGroups(GroupDataset):
+    """Neuron groups, stored per project: a neuron id only means something in its session.
+
+    Membership is written here, unlike pair groups, whose index is rebuilt from the
+    per-session selection files.
+    """
+
+    def __init__(self, cd=None):
+        GroupDataset.__init__(self)
+        if cd is not None:
+            self._save_dir = str(cd.nd.neuron_dir(cd.save_path))
+
+    def save_path(self, **_) -> str | None:
+        return os.path.join(self._save_dir, 'neuron_groups') if self._save_dir else None
+
+    def serialize(self) -> dict:
+        state = GroupDataset.serialize(self)
+        state['members'] = {g: sorted(list(m) for m in self.forward(g))
+                            for g in self.defined_groups if self.forward(g)}
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        members = state.pop('members', {})
+        GroupDataset.__setstate__(self, state)
+        for gname, entries in members.items():
+            for member in entries:
+                self.add(gname, (str(member[0]), *(int(i) for i in member[1:])))
 
 
 class SelectionDataset(JsonSavable, Autosave):
@@ -369,25 +449,40 @@ class SelectionDataset(JsonSavable, Autosave):
         return self.groups.dirty or any(sd.dirty for sd in self.sessions.values())
 
     def save(self, path: str = None, **kw):
-        """Each session owns its file; the project has no roster file of its own."""
-        _n = 0
+        """Each session owns its file; the roster indexes whichever ones exist."""
         for sd in self.sessions.values():
             if sd.dirty:
                 sd.save()
-                _n += 1
-        print(f"[DBG] save: {_n}/{len(self.sessions)} session files written", flush=True)
         self.groups.save()
         self.groups.dirty = False
+        self.save_roster()
+
+    def saved_sessions(self) -> list:
+        """Plan sessions that have a selection file on disk — the roster, scanned."""
+        return [s for s in self.cd.sessions
+                if os.path.isfile(os.path.join(self.save_dir, s) + '.json')]
+
+    def roster_path(self) -> str:
+        return os.path.join(self.save_dir, 'selection_dataset.json')
+
+    def save_roster(self) -> None:
+        """Rewrite the roster index only when the set of session files changed."""
+        roster = {'groups': self.groups.save_path() + '.json',
+                  'save_dir': self.save_dir,
+                  'sessions': self.saved_sessions()}
+        path = self.roster_path()
+        if os.path.isfile(path):
+            with open(path) as fh:
+                if json.load(fh).get('sessions') == roster['sessions']:
+                    return
+        atomic_write_json(path, roster)
 
     def load_sessions(self) -> None:
-        """Read every session file the plan claims; the roster is never stored twice."""
+        """Read every session file the plan claims; the roster is never the authority."""
         self.sessions = {}
-        for sess in self.cd.sessions:
-            path = os.path.join(self.save_dir, sess)
-            if not os.path.isfile(path + '.json'):
-                continue
+        for sess in self.saved_sessions():
             sd = SelectionData(save_dir=self.save_dir)
-            sd.load(path)
+            sd.load(os.path.join(self.save_dir, sess))
             if not sd.selections:
                 continue
             sd._nd_key = next(iter(sd.selections)).nd()
@@ -445,9 +540,9 @@ class SelectionDataset(JsonSavable, Autosave):
                 # SelectionData has no save_path and silently never persists.
                 sel._nd_key = next(iter(sel.selections)).nd()
                 self.sessions[sel._nd_key] = sel
-            self._indexed.add(sess)
             for bucket in sel.selections.values():
                 for (ref, tgt), entry in bucket.tags.items():
                     for gname in (entry.get('groups') or []):
                         if isinstance(gname, str) and gname:
                             self.groups.add_to_group(gname, sess, (ref, tgt))
+            self._indexed.add(sess)   # only once synced: a partial pass must retry

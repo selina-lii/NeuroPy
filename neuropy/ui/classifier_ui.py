@@ -966,14 +966,19 @@ class ClassifierDialog(QDialog):
         with — one restore, no per-edit bookkeeping.
         """
         n = len(self._undo_stack) - self._mark
-        if n and QMessageBox.question(
+        if n:
+            sb = QMessageBox.StandardButton
+            answer = QMessageBox.question(
                 self, "Discard changes",
-                f"Undo {n} change(s) made here?\nSave first to keep them.") \
-                == QMessageBox.StandardButton.Yes:
-            panel = self._win.pairs_view.pair_selection
-            for _ in range(n):
-                panel.undo()
-            self._reload()
+                f"Undo {n} change(s) made here?\nSave first to keep them.",
+                sb.Yes | sb.No | sb.Cancel)
+            if answer == sb.Cancel:   # stay put, so Save is still reachable
+                return
+            if answer == sb.Yes:
+                panel = self._win.pairs_view.pair_selection
+                for _ in range(n):
+                    panel.undo()
+                self._reload()
         self.mark_session()
         self._win.show_pair_selection()
 

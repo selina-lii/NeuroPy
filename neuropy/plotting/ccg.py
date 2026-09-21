@@ -12,6 +12,8 @@ import seaborn as sns
 from matplotlib.figure import Figure
 
 import neuropy.plotting.probe as probe
+from neuropy.analyses.ccg_transforms import (  # noqa: F401 (_fill_waveform re-export)
+    _fill_waveform, lag_window_bins, load_peak_waveform)
 
 ACG_REF_COLOR = '#007434'
 ACG_TGT_COLOR = '#9638AB'
@@ -36,11 +38,10 @@ def test_window_bin_mask(
     max_lag_s: float,
     bin_w_ms: float,
 ) -> np.ndarray:
-    """True for bin centers whose bar body overlaps [min_lag, max_lag] (seconds)."""
-    lo_ms = min_lag_s * 1000.0
-    hi_ms = max_lag_s * 1000.0
-    return ((bins_ms > lo_ms - bin_w_ms / 2 - 1e-9)
-            & (bins_ms < hi_ms + bin_w_ms / 2 + 1e-9))
+    """True for bins the test window covers — same rule as lag_window_bins, in ms."""
+    lo, hi = lag_window_bins(min_lag_s * 1000.0, max_lag_s * 1000.0, bin_w_ms,
+                             center_bin=0)
+    return (bins_ms >= lo * bin_w_ms - 1e-9) & (bins_ms < hi * bin_w_ms - 1e-9)
 
 
 def test_window_span_ms(
@@ -48,10 +49,10 @@ def test_window_span_ms(
     max_lag_s: float,
     bin_w_ms: float,
 ) -> tuple[float, float]:
-    """Span edges in ms — matches test_window_bin_mask bar geometry."""
-    lo_ms = min_lag_s * 1000.0
-    hi_ms = max_lag_s * 1000.0
-    return lo_ms - bin_w_ms / 2, hi_ms + bin_w_ms / 2
+    """Span edges in ms — the outer edges of the bins test_window_bin_mask selects."""
+    lo, hi = lag_window_bins(min_lag_s * 1000.0, max_lag_s * 1000.0, bin_w_ms,
+                             center_bin=0)
+    return lo * bin_w_ms - bin_w_ms / 2, hi * bin_w_ms - bin_w_ms / 2
 
 
 def plot_ccg_panel(
@@ -701,6 +702,7 @@ class RenderContext:
     wf_peak_ms:      Optional[np.ndarray]
     wf_peak_amp:     Optional[np.ndarray]
     cs_baseline_arg: Optional[np.ndarray]
+    cs_value:        Optional[float]   # CS at this view's own window/bin
     window_size_eff: float
     bin_size_eff:    float
     alpha:           float
@@ -708,6 +710,7 @@ class RenderContext:
     seg_id_display:  str
     min_lag_plot:    Optional[float]
     max_lag_plot:    Optional[float]
+    tail_plot:       Optional[list]    # [(start, end)] seconds; None edge = window edge
     extend_on:       bool
     cs_annotation_lines: list
     inds:                tuple
@@ -728,53 +731,8 @@ class RenderContext:
     title:  TitleConfig
     dark_mode: bool = False
     base_window_ms: Optional[float] = None   # extend mode: width of the lo-res window it widened
-
-
-def _fill_waveform(wf_neuron, shank_id: int, ch_per_shank: int, discarded,
-                   peak_channel: int = None, channels=None, start=None):
-    """Expand a (possibly trimmed) per-neuron waveform to a full (ch_per_shank, T) array."""
-    if wf_neuron.ndim == 1:
-        if peak_channel is None:
-            return np.tile(wf_neuron, (ch_per_shank, 1))
-        clean = np.full((ch_per_shank, wf_neuron.shape[-1]), np.nan)
-        clean[int(peak_channel) % ch_per_shank] = wf_neuron
-        return clean
-    sid  = int(shank_id)
-    disc = np.asarray(discarded, dtype=int) if discarded is not None else np.empty(0, dtype=int)
-    channel_ids = (np.asarray(channels, dtype=int) if channels is not None
-                   else ch_per_shank * sid + np.arange(ch_per_shank))
-    mask   = ~np.isin(channel_ids, disc)
-    if start is None:
-        start = int(ch_per_shank * sid - np.sum(disc < ch_per_shank * sid))
-    length = int(np.sum(mask))
-    clean  = np.full((len(channel_ids), wf_neuron.shape[-1]), np.nan)
-    rows = wf_neuron[start:start + length]
-    clean[np.flatnonzero(mask)[:len(rows)]] = rows
-    return clean
-
-
-def load_peak_waveform(ref: int, waveforms, peak_channels, shank_ids,
-                       ch_per_shank: int, discarded):
-    """Extract (t_ms, amp) for neuron *ref*'s peak-channel waveform. Returns (None, None) on failure."""
-    if waveforms is None or peak_channels is None or shank_ids is None:
-        return None, None
-    try:
-        peak_ch = int(peak_channels[ref])
-        rs      = int(shank_ids[ref])
-    except (IndexError, TypeError, ValueError):
-        return None, None
-    discarded_arr = None if discarded is None else np.asarray(discarded, dtype=int)
-    if discarded_arr is not None and discarded_arr.size and np.isin(peak_ch, discarded_arr):
-        return None, None
-    local_idx = peak_ch - ch_per_shank * rs
-    if not (0 <= local_idx < ch_per_shank):
-        return None, None
-    ref_full = _fill_waveform(waveforms[ref], rs, ch_per_shank, discarded_arr)
-    tr = ref_full[local_idx]
-    if not np.any(np.isfinite(tr)):
-        return None, None
-    n = int(tr.shape[0])
-    return np.arange(n, dtype=float) - n // 2, np.asarray(tr, dtype=float)
+    wf_y_pad: float = 0.05
+    cs_window: Optional[tuple] = None   # CS shades this window even when it is not drawn
 
 
 def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:

@@ -11,7 +11,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QApplication,
     QProgressBar, QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton,
-    QScrollArea,
+    QScrollArea, QFrame,
     QStackedWidget,
 )
 from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
@@ -30,6 +30,9 @@ from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanel
 from neuropy.ui.menubar import ReviewMenuBar, IndexBar
 from neuropy.ui.ccg_panel import CorrelogramPanel
 from neuropy.ui.neuron_network import NetworkPanel
+from neuropy.ui.neuron_tag_install import install as install_neuron_tags
+from neuropy.ui.neuron_view import NeuronViewPanel
+from neuropy.analyses.view_spec import NEURON_VIEW, PAIR_VIEW
 from neuropy.analyses.ms_connectivity import CCGDataset, ProjectConfig, open_project
 from neuropy.ui.all_session_mode import AllSessionMode
 from neuropy.ui.classifier_ui import ClassifierDialog
@@ -134,10 +137,19 @@ class UIStates(JsonSavable):
 class BottomStatusBar:
     """Owns the stats QLabel in the window status bar. Refreshes on nav signals."""
 
-    def __init__(self, nav: 'AppState', status_bar):
+    def __init__(self, nav: 'AppState', status_bar, ui: 'CCGReviewUI' = None):
         self.nav = nav
+        self.ui = ui
         self.label = QLabel("")
-        status_bar.addWidget(self.label)
+        # stacked segments make this line arbitrarily long: scroll rather than elide
+        self._label_scroll = QScrollArea()
+        self._label_scroll.setWidget(self.label)
+        self._label_scroll.setWidgetResizable(True)
+        self._label_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._label_scroll.setFixedHeight(self.label.sizeHint().height() + 2)
+        self._label_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._label_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        status_bar.addWidget(self._label_scroll, 1)
         self._pair_info_label = QLabel("")
         status_bar.addPermanentWidget(self._pair_info_label)
         # Right-aligned and hidden until something long-running claims it.
@@ -179,6 +191,14 @@ class BottomStatusBar:
         return (f"  {ref_t}: {n_ref}" if ref_t == tgt_t
                 else f"  ref({ref_t}): {n_ref}  tgt({tgt_t}): {n_tgt}")
     
+    def _highlight_str(self) -> str:
+        """What a group hotkey would act on right now, when that is more than the cursor."""
+        panel = self.ui.pairs_view.pair_selection if self.ui else None
+        if panel is None:
+            return ''
+        n = len(panel._collect_highlighted_pairs(None))
+        return f"  |  Highlighted: {n} pairs" if n > 1 else ''
+
     def _sig_str(self, n_poss: int, n_sig: int, n_sel: int) -> str:
         if n_poss:
             return f"Significant: {n_sig}/{n_poss} Selected: {n_sel}/{n_poss}"
@@ -186,6 +206,24 @@ class BottomStatusBar:
 
     def _frate_str(self, frates, ref, tgt) -> str:
         return f"  |  FR: ref={frates[ref]:.1f}Hz  tgt={frates[tgt]:.1f}Hz"
+
+    def _seg_frates(self, seg_label, ref: int, tgt: int):
+        """A segment's own rates when it declares them, else the session's."""
+        nav = self.nav
+        src = nav.cd.source_config(nav.get_key_with_resolution(), seg_label)
+        rates = src.firing_rates if src is not None else None
+        return nav.neurons.firing_rate if rates is None else rates
+
+    def _frates_str(self, ref: int, tgt: int) -> str:
+        """One FR field per stacked segment; the session's rates when none are stacked."""
+        segments = list(self.nav.stacked_segments)
+        if not segments:
+            return self._frate_str(self.nav.neurons.firing_rate, ref, tgt)
+        parts = []
+        for seg in segments:
+            rates = self._seg_frates(seg, ref, tgt)
+            parts.append(f"FR {seg}: ref={rates[ref]:.1f}Hz tgt={rates[tgt]:.1f}Hz")
+        return "  |  " + "   ".join(parts)
 
     def _str(self) -> str:
         nav = self.nav
@@ -213,11 +251,8 @@ class BottomStatusBar:
         inds = nav.current_pair_inds
         if inds is not None:
             ref, tgt = int(inds[0]), int(inds[1])
-            try:
-                s += self._frate_str(nav.neurons.firing_rate, ref, tgt)
-            except Exception:
-                pass
-        return s
+            s += self._frates_str(ref, tgt)
+        return s + self._highlight_str()
 
 class CCGReviewUI(QMainWindow):
     """Qt root window for CCG Manual Review.
@@ -277,6 +312,7 @@ class CCGReviewUI(QMainWindow):
         self.nav.groups_rewired.connect(self._on_groups_rewired)
 
         self._build_layout()
+        install_neuron_tags(self)
         self._bind_shortcuts()
 
         QTimer.singleShot(100, self._initial_draw)
@@ -367,10 +403,12 @@ class CCGReviewUI(QMainWindow):
         self.mainview._theme_fn = lambda: self.theme
         self.jitter_mgr.status_changed.connect(
             lambda text: self.mainview.jitter_section.set_running(bool(text)))
+        self.center_stack = QStackedWidget()
+        self.center_stack.addWidget(self.mainview)
         center_scroll = QScrollArea()
         center_scroll.setWidgetResizable(True)
         center_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        center_scroll.setWidget(self.mainview)
+        center_scroll.setWidget(self.center_stack)
         splitter.addWidget(center_scroll)
 
         # Right: probe network
@@ -396,14 +434,14 @@ class CCGReviewUI(QMainWindow):
         self._splitter = splitter
         self._panel_splitter_map = {
             'pairs_view':    (splitter, 0, left_frame),
-            'mainview':     (splitter, 1, self.mainview),
+            'mainview':     (splitter, 1, self.center_stack),
             'neuron_network': (splitter, 2, self.right_frame),
             'time_slider':   (v_splitter, 0, self.time_slider),
             'hotkeys_bar':   (None, None, self.hotkeys_bar),
         }
 
         ReviewMenuBar(self).build()
-        self.status_bar = BottomStatusBar(self.nav, self.statusBar())
+        self.status_bar = BottomStatusBar(self.nav, self.statusBar(), self)
         self.stats_panel = StatsTestPanel(self.nav)
         self.stats_panel.setWindowTitle("Stats Tests")
         self.stats_panel.resize(1100, 750)
@@ -526,6 +564,24 @@ class CCGReviewUI(QMainWindow):
     def show_pair_selection(self) -> None:
         self.left_stack.setCurrentWidget(self.pairs_view)
         self.left_title.setText("Pair Selection")
+
+    def set_view(self, name: str) -> None:
+        """Swap which view owns the left and centre columns; nothing is rebuilt."""
+        self.nav.set_view(name)
+        if name == NEURON_VIEW and not hasattr(self, 'neuron_view'):
+            self.neuron_view = NeuronViewPanel(self.nav)
+            self.left_stack.addWidget(self.neuron_view.list_panel)
+            self.center_stack.addWidget(self.neuron_view.plot_panel)
+        if name == NEURON_VIEW:
+            self.left_stack.setCurrentWidget(self.neuron_view.list_panel)
+            self.center_stack.setCurrentWidget(self.neuron_view.plot_panel)
+            self.left_title.setText("Neurons")
+            self.neuron_view.rebuild()
+        else:
+            self.left_stack.setCurrentWidget(self.pairs_view)
+            self.center_stack.setCurrentWidget(self.mainview)
+            self.left_title.setText("Pair Selection")
+        self.hotkeys_bar.refresh()
 
     def _apply_min_font_size(self, size: int) -> None:
         app = QApplication.instance()
@@ -682,12 +738,13 @@ class CCGReviewUI(QMainWindow):
             self.nav.set_resolution("lo")
 
     def _toggle_waveforms(self):
-        btn = self.mainview.corr_section.ref_wf_btn
-        btn.setChecked(not btn.isChecked())
+        """Show or hide the waveform panel; the overlay has its own button."""
+        panel = self.mainview._wf_panel
+        panel.setVisible(not panel.isVisible())
         act = self._panel_actions.get('_waveforms_panel')
         if act:
-            act.setChecked(btn.isChecked())
-        if btn.isChecked():
+            act.setChecked(panel.isVisible())
+        if panel.isVisible():
             self.mainview.request_render()
 
     def _on_queue_ccg(self, spec: 'CCGBatchRequest'):
@@ -703,15 +760,16 @@ class CCGReviewUI(QMainWindow):
                 self.time_slider._status_lbl.setText("Nothing queued (check scope/session)")
 
     def _manage_groups(self):
+        self.cd.nd.load_tags(self.cd.save_path, missing_ok=True)
         ManageGroupsDialog.show(
             self.nav.sel_data, self.pairs_view.pair_selection,
             pairs_by_conn_type_fn=self.nav._pairs_by_conn_type, parent=self)
 
     def _undo(self):
-        self.pairs_view.pair_selection.undo()
+        self.nav.view.list_panel(self).undo()
 
     def _redo(self):
-        self.pairs_view.pair_selection.redo()
+        self.nav.view.list_panel(self).redo()
 
     def _save_ui_state(self):
         # Refresh the nav-derived fields on ui_states from live state, then persist the whole thing.

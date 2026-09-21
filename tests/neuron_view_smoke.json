@@ -1,0 +1,21 @@
+{
+ "after_undo": 0,
+ "all_session_items": 1285,
+ "bin_1s_items": 1,
+ "center_widget": "CorrelogramPanel",
+ "default_items": 1,
+ "list_rows": 140,
+ "pair_restored": true,
+ "rate_hidden_items": 0,
+ "rate_line_items": 1,
+ "rate_solid_items": 1,
+ "row_0": "0  inter",
+ "row_last": "241  pyr",
+ "selected_neuron": 15,
+ "selected_neurons": [
+  15
+ ],
+ "single_session_items": 140,
+ "tagged": 1,
+ "waveform_axes": 1
+}

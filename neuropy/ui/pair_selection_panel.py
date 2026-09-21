@@ -28,7 +28,7 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction, QPainter
 
 from neuropy.ui.ui_common import (
-    area_rgb, cell_areas,
+    area_rgb, cell_areas, row_dots,
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
     pair_label,
@@ -90,7 +90,8 @@ class TagRowDelegate(QStyledItemDelegate):
 
     def _areas_width(self, index) -> int:
         """Room the region dots take, so the tag pills start clear of them."""
-        return 0 if not index.data(_ROLE_AREAS) else 4 * self._DOT_R + 6
+        dots = index.data(_ROLE_AREAS)
+        return 0 if not dots else len(dots) * (2 * self._DOT_R + 2) + 4
 
     def _paint_areas(self, painter, option, index):
         """Ref and target region as two dots, matching the network's fills."""
@@ -156,7 +157,8 @@ from neuropy.analyses.pair_selection_data import (
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    TagChip, has_primary_modifier, hotkey_char, small_font_pt,
+    TagChip, all_groups_dropdown, has_primary_modifier, hotkey_char,
+    row_chips, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -257,16 +259,16 @@ class Groups(QObject, GroupDataset):
         _chain(0)
 
     def set_hotkey_ui(self, group_name: str, key_str: str) -> None:
-        key_str = key_str.strip().lower()
-        valid_digits = [str(i) for i in range(1, 10)] + ['0']
-        if key_str and key_str not in valid_digits and not (len(key_str) == 1 and key_str.isalpha()):
-            QMessageBox.warning(None, "Hotkey",
-                                "Enter a digit 1–9/0 or a single letter a–z.")
+        try:
+            key_str = self.valid_hotkey(key_str)
+        except ValueError as exc:
+            QMessageBox.warning(None, "Hotkey", str(exc))
             return
         self.set_group_hotkey(group_name, key_str)
         self.changed.emit()
 
-    def hotkey_handler(self, key_str: str, collect_highlighted=None) -> None:
+    def hotkey_handler(self, key_str: str, collect_highlighted=None,
+                       held: bool = False) -> None:
         nav   = self.ui
         panel = nav.root.pairs_view.pair_selection
         current_pair = nav.current_pair
@@ -286,13 +288,12 @@ class Groups(QObject, GroupDataset):
         neighbour = panel.row_below_cursor()
         changes, group_changes = panel.apply_group_toggle(highlighted, gname)
 
-        # jumping mid-highlight would break the batch; the release lands it
-        held = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
-        if held and panel._deferred_jump is None:
+        # shift-held tagging is one action: the lists reorder once, on release
+        if held and not panel._batch_held:
             # first tag of the batch fixes the landing row; later ones must not move it
-            panel._deferred_jump = neighbour
+            panel._deferred_jump, panel._batch_held = neighbour, True
         panel._transition_many(changes, group_changes, anchor=current_pair,
-                               nxt=None if held else neighbour)
+                               nxt=None if held else neighbour, held=held)
 
 
 class SelectionDataset(_SelectionDataset):
@@ -447,6 +448,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._select_timer.timeout.connect(self._do_pair_select_update)
         self._next_focus_pair: tuple | None = None
         self._deferred_jump: tuple | None = None
+        self._batch_held: bool = False   # a pinned row of None is still a pending batch
         self._areas_cache: dict = {}
         self.__init_undo__()
 
@@ -520,6 +522,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
             (self.unselected_list, 'add',    self.selected_list),
             (self.selected_list,   'remove', self.unselected_list),
         ):
+            lst.itemSelectionChanged.connect(   # built after this panel, so resolved on emit
+                lambda: self.ui.root.status_bar.refresh())
             lst.itemClicked.connect(
                 lambda it, w=lst: self._on_item_clicked(w, it))
             lst.itemDoubleClicked.connect(
@@ -601,25 +605,19 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if should_gray(inds):
             it.setForeground(QBrush(_C_GRAY_FG))
         it.setData(_ROLE_PAIR, inds)
-        # Pre-tint here (once per populate) so the delegate's per-repaint paint
-        # never reconstructs QColors or hashes a name.
-        it.setData(_ROLE_CHIPS, [(name, *TagChip.tint(color))
-                                 for name, color in
-                                 ui.groups.chips_for_pair(k.session, k.ref, k.tgt)])
+        it.setData(_ROLE_CHIPS, row_chips(ui.groups, k))
         it.setData(_ROLE_AREAS, self._pair_area_rgb(k))
         return it
 
     def _pair_area_rgb(self, k) -> list:
-        """Region fill for the pair's two neurons, or [] when unlabelled."""
+        """Region fill for the pair's two neurons, then any gradient tag dots."""
         nd_key = k.nd()
         if nd_key not in self._areas_cache:
             self._areas_cache[nd_key] = cell_areas(self.ui.cd.nd.neurons_for(nd_key))
-        areas = self._areas_cache[nd_key]
-        if areas is None:
-            return []
-        palette = self.ui.root.settings.area_colors
-        return [area_rgb(areas[i], palette) for i in (k.ref, k.tgt)
-                if i is not None and i < len(areas)]
+        return row_dots(self._areas_cache[nd_key], k,
+                        [i for i in (k.ref, k.tgt) if i is not None],
+                        self.ui.root.settings.area_colors,
+                        self.ui.root.neuron_tags)
 
     def _populate_avail_list(self, ui, data, should_gray):
         self.avail_list_pairs = []
@@ -941,7 +939,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
             c = hotkey_char(event)
             if c is not None:
                 ui.groups.hotkey_handler(
-                    c, collect_highlighted=self._collect_highlighted_pairs)
+                    c, collect_highlighted=self._collect_highlighted_pairs,
+                    held=bool(mods & Qt.ShiftModifier))
                 return
 
     def _do_pair_select_update(self):
@@ -980,26 +979,29 @@ class PairSelectionPanel(QWidget, UndoRedo):
             ui.groups.add_to_group(pred_group, ui.current_session_str, inds)
         self._transition_many({inds: ('unsel', 'sel')}, anchor=inds, nxt=nxt)
 
-    def advance_cursor(self, inds, nxt=None) -> None:
+    def advance_cursor(self, inds, nxt=None, *, held: bool = False) -> None:
         """Sole gateway for landing the cursor after a pair changes.
 
         `nxt` is the row that sat below the cursor before the mutation; the
-        cursor goes there, else it stays on `inds`."""
+        cursor goes there, else it stays on `inds`. While shift is held the
+        batch is one action: the lists resort once, when it is released."""
         ui = self.ui
         dest = nxt if (nxt is not None
                        and ui.root.settings.jump_to_next_after_select) else inds
         self._mark_next_focus_pair(dest)
-        self.refresh_lists()
-        self._focus_next_pair(move_cursor=self._list_cursor_follows_action())
+        if not held:
+            self.refresh_lists()
+            self._focus_next_pair(move_cursor=self._list_cursor_follows_action())
         ui.set_current_pair(ui.get_pair_index(dest))
         ui.root.mainview.request_render()
         ui.root.neuron_network.draw()
 
     def _on_shift_released(self) -> None:
-        """Land the jump shift-held tagging deferred; plain range-selects have none."""
-        nxt, self._deferred_jump = self._deferred_jump, None
-        if nxt is not None:
-            self.advance_cursor(nxt)
+        """Sort and land the batch shift-held tagging deferred; plain selects have none."""
+        if not self._batch_held:
+            return
+        nxt, self._deferred_jump, self._batch_held = self._deferred_jump, None, False
+        self.advance_cursor(nxt if nxt is not None else self.ui.current_pair)
 
     def move_to_unselected(self, item: QListWidgetItem = None):
         ui = self.ui
@@ -1126,7 +1128,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
                               anchor=pair, nxt=nxt)
 
     def _transition_many(self, changes: dict, group_changes: list = (),
-                         *, anchor=None, nxt=None) -> None:
+                         *, anchor=None, nxt=None, held: bool = False) -> None:
         """Bulk state change: {pair: (old, new)}, then advance the cursor."""
         if not changes and not group_changes:
             return
@@ -1135,7 +1137,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self.push_undo(SelectionCommand(changes, list(group_changes)))
         for p, (_, new) in changes.items():
             ui.active_selections.set_pair_state(p, new)
-        self.advance_cursor(anchor if anchor is not None else ui.current_pair, nxt)
+        self.advance_cursor(anchor if anchor is not None else ui.current_pair, nxt,
+                            held=held)
         self._restore_scroll_positions(unsel_frac, sel_frac)
 
     def _ctx_menu(self, pos, widget: PairListWidget, action: str):
@@ -1195,11 +1198,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
             def _checkmark(gname):
                 return all((k.ref, k.tgt) in ui.groups.pairs_in_group(gname, k.session)
                            for p in pairs for k in (ui.key_for_pair(p),))
-            self.all_groups_dropdown(grp_menu, _checkmark,
+            all_groups_dropdown(self.ui.groups, grp_menu, _checkmark,
                                       lambda g, pp=pairs: self._toggle_pairs_group(pp, g))
         grp_menu.addSeparator()
         bm_menu = QMenu("Add bookmarked pairs to group", grp_menu)
-        self.all_groups_dropdown(bm_menu, lambda g: False, self._add_bookmarked_pairs_to_group)
+        all_groups_dropdown(self.ui.groups, bm_menu, lambda g: False,
+                            self._add_bookmarked_pairs_to_group)
         grp_menu.addMenu(bm_menu)
         menu.addMenu(grp_menu)
 
@@ -1320,8 +1324,10 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 it.setBackground(QBrush(_C_BM_BG))
 
     def row_below_cursor(self):
-        """The pair shown directly under the cursor's row, in the list it sits in."""
-        lb = self.unselected_list if self.unselected_list.hasFocus() else self.selected_list
+        """The pair shown directly under the cursor's row, in the list holding it."""
+        pair = self.ui.current_pair
+        in_sel = pair is not None and pair in self.ui.active_selections.selected
+        lb = self.selected_list if in_sel else self.unselected_list
         for i in range(lb.currentRow() + 1, lb.count()):
             pair = lb.item(i).data(_ROLE_PAIR)
             if pair is not None and not is_separator_row(pair):
@@ -1361,8 +1367,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
 
     def apply_command(self, cmd: 'SelectionCommand', reverse: bool = False) -> None:
         ui = self.ui
-        print(f"[DBG] apply_command reverse={reverse} pairs={len(cmd.pair_changes)} "
-              f"groups={len(cmd.group_changes)}", flush=True)
         for pair, (old, new) in cmd.pair_changes.items():
             target = old if reverse else new
             if target is None:
@@ -1390,31 +1394,12 @@ class PairSelectionPanel(QWidget, UndoRedo):
                     it.setBackground(QBrush())
                     it.setForeground(QBrush())
 
-    def all_groups_dropdown(self, parent_menu, checkmark, on_pick):
-        """Populate parent_menu with all groups; special groups nest under a 'Special' submenu."""
-        def _add_group_action(menu, gname, display):
-            all_in = checkmark(gname)
-            menu.addAction(f"{'✓ ' if all_in else '  '}{display}",
-                           lambda g=gname: on_pick(g))
-
-        regular = self.ui.groups.groups   # registry, not _fwd: untagged groups count too
-        special = self.ui.groups.special_groups()
-        for gname in regular:
-            _add_group_action(parent_menu, gname, gname)
-        if special:
-            special_menu = QMenu("Special", parent_menu)
-            for gname in special:
-                _add_group_action(special_menu, gname,
-                                  self.ui.groups.get_group_metadata(gname).display_name)
-            parent_menu.addMenu(special_menu)
 
     def _add_bookmarked_pairs_to_group(self, group_name):
         ui = self.ui
         pairs = [(k.session, k.ref, k.tgt) if ui.session_any_mode else (k.ref, k.tgt)
                  for k in ui.bookmarked_pairs]
-        print(f"[DBG] bm n={len(pairs)} undo_before={len(self._undo_stack)}", flush=True)
         self._toggle_pairs_group(pairs, group_name, remove=False)
-        print(f"[DBG] bm undo_after={len(self._undo_stack)}", flush=True)
 
     def apply_group_toggle(self, pairs, group_name, *, remove=None) -> tuple[dict, list]:
         """Add or drop one group across pairs, syncing selection; returns undo records."""

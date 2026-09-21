@@ -349,6 +349,8 @@ class TimeSliderPanel(QWidget):
     queue_ccg_requested = Signal(object)   # CCGSourceConfig
     save_requested        = Signal()
     load_requested        = Signal()
+    window_changed        = Signal(float, float)
+    theme_changed         = Signal()
 
     def __init__(self, nav: 'AppState', cd: 'CCGDataset', parent=None):
         super().__init__(parent)
@@ -376,6 +378,17 @@ class TimeSliderPanel(QWidget):
     def reload_themes(self):
         """Theme combo and bounds only (no timeline reset)."""
         self._discover_themes(self.nav.cd.nd.get_themes(self.nav.key))
+
+    @property
+    def active_bounds(self) -> list:
+        """(start, stop, label) of the current theme's epochs whose label is toggled on."""
+        return [b for b in self._epoch_bounds
+                if self._legend_toggles.get(b[2], True)]
+
+    @property
+    def theme_names(self) -> list:
+        """Themes the slider has discovered, 'segments' first."""
+        return ['segments'] + sorted(self._all_theme_bounds)
 
     def _refresh_theme_ui(self, themes: dict):
         """Refresh combo, bounds, timeline, and legend."""
@@ -426,9 +439,13 @@ class TimeSliderPanel(QWidget):
         self._snap_check = QCheckBox("Snap")
         self._snap_check.setChecked(True); self._snap_check.toggled.connect(self._on_snap_toggle)
         row1.addWidget(self._snap_check)
-        self._reset_zoom_btn = QPushButton("Reset")
+        row1.addWidget(QLabel("Reset:"))
+        self._reset_zoom_btn = QPushButton("scale")
         self._reset_zoom_btn.setFixedWidth(50); self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
         row1.addWidget(self._reset_zoom_btn)
+        self._reset_pins_btn = QPushButton("pins")
+        self._reset_pins_btn.setFixedWidth(50); self._reset_pins_btn.clicked.connect(self._reset_handles)
+        row1.addWidget(self._reset_pins_btn)
         row1_widget = QWidget(); row1_widget.setLayout(row1)
         root.addWidget(row1_widget)
 
@@ -447,6 +464,7 @@ class TimeSliderPanel(QWidget):
 
         self._main_plot = EpochPlotWidget()
         self._main_plot.handle_moved.connect(self._on_main_handle_moved)
+        self._main_plot.handle_moved.connect(self.window_changed)
         root.addWidget(self._main_plot)
         self._on_snap_toggle(self._snap_check.isChecked())
 
@@ -568,7 +586,6 @@ class TimeSliderPanel(QWidget):
         self._filter_check.setChecked(self._filter_checks.get(theme, False))
         self._filter_check.blockSignals(False)
         self._update_legend()
-        self._reset_handles()
 
     def _reset_handles(self):
         self._main_plot.clear_selection()
@@ -630,6 +647,7 @@ class TimeSliderPanel(QWidget):
         state[label] = active
         self._sync_name_to_labels()
         self._redraw_main()
+        self.theme_changed.emit()
 
     def _sync_name_to_labels(self):
         """Name mirrors a lone selected label; clears when that stops holding (typed names kept)."""
@@ -660,10 +678,8 @@ class TimeSliderPanel(QWidget):
             return
         if not self._epoch_bounds:
             return
-        cmap = self._label_color_map()
-        visible = [b for b in self._epoch_bounds
-                   if self._legend_toggles.get(b[2], True)]
-        self._main_plot.update_epochs(visible, cmap, 0.0, self._total_sec)
+        self._main_plot.update_epochs(self.active_bounds, self._label_color_map(),
+                                      0.0, self._total_sec)
 
     def add_theme(self):
         """Add an epoch theme: pick source + format, attach to the session, add to the combo."""
@@ -681,6 +697,7 @@ class TimeSliderPanel(QWidget):
         self._filter_check.blockSignals(True)
         self._filter_check.setChecked(self._filter_checks.get(theme, False))
         self._filter_check.blockSignals(False)
+        self.theme_changed.emit()
 
     def _on_label_reset(self):
         self._per_theme_label_state.pop(self._current_theme, None)
@@ -767,14 +784,13 @@ class TimeSliderPanel(QWidget):
 
     def _on_set(self):
         any_mode = self.nav.session_any_mode
-        if not any_mode and not self._main_plot.has_full_selection():
-            return
         if (self._name_entry.text().strip() or 'custom').lower() == _FULL_SEG:
             QMessageBox.warning(None, "Custom CCG",
                                 f"'{_FULL_SEG}' is a reserved name — choose another.")
             return
         timing = self._read_timing(any_mode)
         if timing is None:
+            self._status_lbl.setText("Check the start/end times — end must follow start")
             return
         t0_spec, t1_spec, n_splits, overlap_raw, overlap_unit = timing
         request = CCGBatchRequest(

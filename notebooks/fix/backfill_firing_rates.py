@@ -17,7 +17,7 @@ def backfill(project: str, dry_run: bool = False) -> None:
     live = {str(k.session) for k in nd.session_keys}
     filled = skipped = 0
 
-    for path in sorted(glob.glob(os.path.join(cd.save_path, 'custom_ccg', 'config', '*.json'))):
+    for path in sorted(glob.glob(os.path.join(cd.custom_dir, '*.json'))):
         segment, session = os.path.basename(path)[:-len('.json')].split('.')
         if session not in live:
             skipped += 1

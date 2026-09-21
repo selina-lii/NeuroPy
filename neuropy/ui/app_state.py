@@ -14,8 +14,11 @@ from collections import defaultdict as _defaultdict
 import numpy as np
 from pyqtgraph.Qt.QtCore import QObject, Signal, QTimer
 import json
+from dataclasses import dataclass, field
+from neuropy.analyses.ccg_transforms import NormalizeBy
 from neuropy.analyses.neurons_dataset import Key
-from neuropy.analyses.utils import _compact_json_str
+from neuropy.analyses.utils import _compact_json_str, JsonSavable
+from neuropy.analyses.view_spec import NEURON_VIEW, PAIR_VIEW, NeuronView, PairView, ViewSpec
 from neuropy.ui.ui_common import is_special_group
 from neuropy.ui.pair_selection_panel import SelectionDataset
 from neuropy.ui.utils import Tunable
@@ -61,6 +64,31 @@ class NavField:
         signal.emit(value)
 
 
+@dataclass
+class DisplayConfig(JsonSavable):
+    """What the CCG panel shows and the stats backend computes from."""
+    _FLAGS = ('cs_nonneg', 'show_test_window', 'show_tail_window', 'show_p', 'show_pc')
+
+    norms: list = field(default_factory=list)
+    same_scale_mode: str | None = None
+    baseline_method: str = 'conv'
+    cs_metric: str = 'STG'
+    test_window: list = field(default_factory=lambda: [1e-3, 3e-3])
+    tail_window: list = field(default_factory=lambda: [[None, -1e-3], [3e-3, None]])
+    tail_source: str = 'bins'
+    cs_nonneg: bool = False
+    show_test_window: bool = True
+    show_tail_window: bool = False
+    show_p: bool = True
+    show_pc: bool = True
+
+    def __setstate__(self, state: dict) -> None:
+        super().__setstate__(state)
+        if self.tail_window and not isinstance(self.tail_window[0], (list, tuple)):
+            begin, end = self.tail_window   # a flat pair meant the flanks outside it
+            self.tail_window = [[None, begin], [end, None]]
+
+
 class AppState(QObject):
     """Cross-panel shared state.  Single write path via set_* methods.
     Signals fire only when the value actually changes.
@@ -79,6 +107,7 @@ class AppState(QObject):
     stacked_segments_changed = Signal(object)
     cs_params_changed        = Signal(str, str)
     cs_overlay_changed       = Signal(bool)
+    display_changed          = Signal(object)   # CS/baseline toggles and lag windows
     custom_segs_changed      = Signal()
     groups_rewired           = Signal()   # sd.groups replaced → reconnect groups.changed
     themes_changed           = Signal(dict)   # {attr: Epoch} for current session
@@ -98,9 +127,14 @@ class AppState(QObject):
     baseline_method      = NavField("baseline_method")
     cs_metric            = NavField("cs_metric")
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
+    cs_nonneg            = NavField("cs_nonneg", coerce=bool)
+    show_test_window     = NavField("show_test_window", coerce=bool)
+    show_tail_window     = NavField("show_tail_window", coerce=bool)
+    show_p               = NavField("show_p", coerce=bool)
+    show_pc              = NavField("show_pc", coerce=bool)
 
     max_together_pairs = Tunable(5)
-    max_ccg_queue = Tunable(50, on_change=lambda nav, v: setattr(
+    max_ccg_queue = Tunable(200, on_change=lambda nav, v: setattr(
         nav.root.custom_mgr.worker._runner, '_max_queue', v))
     max_jitter_queue = Tunable(50, on_change=lambda nav, v: setattr(
         nav.root.jitter_mgr.jitter_worker._runner, '_max_queue', v))
@@ -126,7 +160,14 @@ class AppState(QObject):
         self._baseline_method = 'conv'
         self._cs_metric = 'STG'
         self._cs_overlay_active = False
+        self._cs_nonneg = False
+        self._show_test_window = True
+        self._show_tail_window = False
+        self._show_p = self._show_pc = True
         self.root = None  # set by CCGReviewUI after construction
+        self._views = {v.name: v(self) for v in (PairView, NeuronView)}
+        self._view = PAIR_VIEW
+        self._view_rows: dict = {}   # each view keeps its own row across switches
         self.together_pairs: list = []
         self.bookmarked_pairs: set = set()
         self.any_expanded_group_tags: set = set()
@@ -248,6 +289,28 @@ class AppState(QObject):
     def set_current_pair(self, idx: int, *, source=None):
         type(self).current_pair_idx.set(self, idx, self.pair_changed)
 
+    @property
+    def view(self) -> 'ViewSpec':
+        """The active view; views are exclusive, so there is one at a time."""
+        return self._views[self._view]
+
+    def set_view(self, name: str) -> None:
+        """Switch views, each keeping the row it was on."""
+        if name not in self._views:
+            raise ValueError(f"unknown view {name!r}; have {sorted(self._views)}")
+        if name == self._view:
+            return
+        self._view_rows[self._view] = self.current_pair_idx
+        self._view = name
+        self.set_current_pair(self._view_rows.get(name, 0))
+
+    @property
+    def current_item(self):
+        """What the active view has selected, or None when its list is empty."""
+        items = self.view.items(self.key)
+        idx = self.current_pair_idx
+        return items[idx] if 0 <= idx < len(items) else None
+
     def set_current_segment(self, name: str, *, source=None):
         type(self).current_segment.set(self, name, self.segment_changed)
 
@@ -283,6 +346,30 @@ class AppState(QObject):
 
     def set_cs_overlay(self, active: bool):
         type(self).cs_overlay_active.set(self, bool(active), self.cs_overlay_changed)
+
+    def set_display_flag(self, name: str, value: bool):
+        getattr(type(self), name).set(self, bool(value), self.display_changed)
+
+    def get_display_config(self) -> 'DisplayConfig':
+        c = self.cd.conf
+        return DisplayConfig(
+            norms=sorted(n.name for n in self.active_norms),
+            same_scale_mode=self.same_scale_mode,
+            baseline_method=self.baseline_method, cs_metric=self.cs_metric,
+            test_window=[c.min_lag, c.max_lag],
+            tail_window=[list(iv) for iv in c.tail_intervals], tail_source=c.tail_source,
+            **{f: getattr(self, f) for f in DisplayConfig._FLAGS})
+
+    def apply_display_config(self, cfg: 'DisplayConfig'):
+        """Drive every panel from one saved snapshot; panels follow their signals."""
+        self.set_active_norms({NormalizeBy[n.rsplit('.', 1)[-1]] for n in cfg.norms})
+        self.set_same_scale_mode(cfg.same_scale_mode)
+        self.set_cs_params(cfg.baseline_method, cfg.cs_metric)
+        self.cd.set_significance_window(*cfg.test_window)
+        self.cd.set_tail_window(cfg.tail_window, cfg.tail_source)
+        for f in DisplayConfig._FLAGS:
+            getattr(type(self), f).set(self, bool(getattr(cfg, f)), self.display_changed)
+        self.display_changed.emit(None)
 
     def set_cs_params(self, baseline_method: str, cs_metric: str):
         if (baseline_method == self.baseline_method
@@ -443,7 +530,7 @@ class AppState(QObject):
         under an old naming convention are stale data, not sessions — they have no Neurons.
         """
         seen, keys = set(), []
-        for k in self.cd.nd.session_keys():
+        for k in self.cd.nd.session_keys:
             nd = k.nd()
             sess = str(nd.session)
             if sess not in seen:

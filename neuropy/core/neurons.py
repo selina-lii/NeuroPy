@@ -13,6 +13,14 @@ from typing import Self, Union
 from neuropy.core.intervals import IntervalOp
 
 
+NO_TAG = 'none'   # in the labelling, but unlabelled; absent from it entirely is None
+
+
+def is_labelled(label) -> bool:
+    """True when a stored tag label actually tags its neuron."""
+    return label is not None and label is not False and label != NO_TAG
+
+
 class Neurons(DataWriter):
     """Class to hold a group of spiketrains and their labels, ids etc."""
 
@@ -32,6 +40,8 @@ class Neurons(DataWriter):
         clu_q=None,
         shank_ids=None,
         metadata=None,
+        tags=None,
+        tag_values=None,
     ) -> None:
         """Initializes the Neurons instance
 
@@ -57,6 +67,8 @@ class Neurons(DataWriter):
             peak channel for waveform, by default None
         shank_ids : array of int, optional
             which shank of the probe each spiketrain was recorded from, by default None
+        tags : dict, optional
+            name -> per-neuron label array, aligned to neuron_ids, by default None
         metadata : dict, optional
             any additional metadata, by default None
         """
@@ -94,6 +106,8 @@ class Neurons(DataWriter):
         self.t_start = t_start
         self.t_stop = t_stop
         self.clu_q = clu_q
+        self.tags = dict(tags) if tags else {}
+        self.tag_values = dict(tag_values) if tag_values else {}
 
     @staticmethod
     def load(file):
@@ -141,8 +155,31 @@ class Neurons(DataWriter):
             waveforms_amplitude=waveforms_amplitude,
             peak_channels=peak_channels,
             shank_ids=shank_ids,
-            metadata=self.metadata
+            metadata=self.metadata,
+            tags={name: labels[i] for name, labels in self.tags.items()},
+            tag_values={name: vals[i] for name, vals in self.tag_values.items()},
         )
+
+    @property
+    def tag_names(self) -> list:
+        """Every tag name carried by these neurons."""
+        return list(self.tags.keys())
+
+    def tagged(self, name: str) -> np.ndarray:
+        """Boolean mask of neurons labelled under *name*; None and NO_TAG both read False."""
+        if name not in self.tags:
+            raise ValueError(f"no such tag: {name!r}; have {self.tag_names}")
+        return np.array([is_labelled(lab) for lab in self.tags[name]])
+
+    def by_tag(self, name: str, label=None) -> Self:
+        """Neurons whose *name* label is non-null, or equal to *label* when given."""
+        if name not in self.tags:
+            raise ValueError(f"no such tag: {name!r}; have {self.tag_names}")
+        if label is None:
+            keep = self.tagged(name)
+        else:
+            keep = np.array([lab == label for lab in self.tags[name]])
+        return self[np.flatnonzero(keep)]
 
     def add_metadata(self,data:dict):
         if self.metadata is None:
@@ -644,6 +681,13 @@ class Neurons(DataWriter):
         similarity = np.corrcoef(waveforms)
         np.fill_diagonal(similarity, 0)
         return similarity
+
+    def binned_counts(self, index: int, bin_size=0.25):
+        """One neuron's spike counts and bin start times; binning every train to plot one is waste."""
+        n_bins = np.floor((self.t_stop - self.t_start) / bin_size)
+        edges = np.arange(n_bins + 1) * bin_size + self.t_start
+        counts = np.histogram(self.spiketrains[index], bins=edges)[0].astype(float)
+        return counts, edges[:-1]
 
     def get_binned_spiketrains(self, bin_size=0.25, ignore_epochs: Epoch = None):
         """Get binned spike counts

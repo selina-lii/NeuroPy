@@ -80,6 +80,20 @@ def cell_areas(neurons):
     """Per-neuron region labels, or None when the dataset names no regions."""
     return (neurons.metadata or {}).get('cell_area') if neurons is not None else None
 
+
+def row_dots(areas, key, neuron_ids, palette, tags=None) -> list:
+    """Region colour then gradient-tag colours, for each of *neuron_ids*.
+
+    One rule for every view: a list row shows its item's neurons, so a pair gets
+    two of each and a single neuron one. *areas* comes from `cell_areas`.
+    """
+    dots = [] if areas is None else [area_rgb(areas[i], palette)
+                                     for i in neuron_ids if i < len(areas)]
+    if tags is not None:
+        for neuron in neuron_ids:
+            dots.extend(tags.neuron_rgb(key, int(neuron)))
+    return dots
+
 from neuropy.analyses.utils import _SPECIAL_PREFIX, is_special_group  # noqa: F401
 
 

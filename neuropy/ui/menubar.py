@@ -68,6 +68,12 @@ class IndexBar:
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         row.addWidget(self.type_combo)
 
+        row.addWidget(QLabel("View by:"))
+        self.view_combo = AddableDropdown('view', width=90)
+        self.view_combo.set_items(['pair', 'neuron'])
+        self.view_combo.currentTextChanged.connect(self._win.set_view)
+        row.addWidget(self.view_combo)
+
         row.addWidget(QLabel("Labels:"))
         self.complete_chip = chip_button("incomplete")
         self.complete_chip.setToolTip(

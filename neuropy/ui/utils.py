@@ -20,11 +20,12 @@ from pyqtgraph.Qt.QtCore import Signal
 from pyqtgraph.Qt.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
     QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
     QSizePolicy, QSlider,
     QToolButton, QVBoxLayout, QWidget, QFrame,
     QSplitter, QStackedWidget, QComboBox, QCompleter, QInputDialog,
     QMessageBox, QTableWidget, QTableWidgetItem,
+    QButtonGroup, QRadioButton,
 )
 
 from neuropy.ui.ui_common import qt_dark_mode
@@ -189,6 +190,11 @@ class PairListWidget(QListWidget):
         super().keyReleaseEvent(event)
         if event.key() == Qt.Key_Shift:
             self._panel._on_shift_released()
+
+    def focusOutEvent(self, event):
+        # a release delivered elsewhere would leave the held batch unsorted
+        super().focusOutEvent(event)
+        self._panel._on_shift_released()
 
 
 _SHIFT_DIGITS = {
@@ -380,14 +386,38 @@ def make_button(text: str, slot, width: int = None) -> 'QPushButton':
     return b
 
 
+def sync_follow_column(pickers: list) -> None:
+    """Each following picker mirrors the nearest one above it that is not following.
+
+    The top picker is freed if locked: all following would leave no one to follow."""
+    if pickers and pickers[0].following:
+        pickers[0].set_following(False)
+    for i, p in enumerate(pickers):
+        p.set_leader(next((q for q in reversed(pickers[:i]) if not q.following), None)
+                     if p.following else None)
+
+
 class ListPickerButton(QPushButton):
     """Button that opens a multi-select dialog. Text auto-summarizes selection."""
     selection_changed = Signal(list)
+    follow_toggled = Signal()
 
     def __init__(self, title: str, items: list[str] = (), plural: str = "items",
                  refresh_provider=None, select_all_when_empty: bool = True,
-                 add_name: str = None, ordered: bool = False, parent=None):
+                 add_name: str = None, ordered: bool = False, followable: bool = False,
+                 parent=None):
         super().__init__(parent)
+        self._leader = None
+        self._follow_btn = None
+        if followable:
+            lay = QHBoxLayout(self)
+            lay.setContentsMargins(0, 0, 2, 0)
+            lay.addStretch(1)
+            self._follow_btn = chip_button('⇪', parent=self)
+            self._follow_btn.setFixedSize(18, 16)
+            self._follow_btn.setToolTip('Follow the nearest row above that is not following')
+            self._follow_btn.toggled.connect(lambda _: self.follow_toggled.emit())
+            lay.addWidget(self._follow_btn)
         self._title  = title
         self._plural = plural
         self._items: list[str] = list(items)
@@ -426,7 +456,36 @@ class ListPickerButton(QPushButton):
     def selected(self) -> list[str]:
         return list(self._selected)
 
+    @property
+    def following(self) -> bool:
+        return self._follow_btn is not None and self._follow_btn.isChecked()
+
+    def set_following(self, value: bool) -> None:
+        if self._follow_btn is not None:
+            self._follow_btn.blockSignals(True)
+            self._follow_btn.setChecked(bool(value))
+            self._follow_btn.blockSignals(False)
+
+    def set_leader(self, leader: 'ListPickerButton | None') -> None:
+        """Mirror *leader*'s selection while it is set; None frees this picker."""
+        if leader is not self._leader:
+            if self._leader is not None:
+                self._leader.selection_changed.disconnect(self._on_leader_changed)
+            self._leader = leader
+            if leader is not None:
+                leader.selection_changed.connect(self._on_leader_changed)
+        # not setEnabled: the follow chip is a child, and disabling it would trap the row
+        self.setStyleSheet('' if leader is None else 'color: #999;')
+        if leader is not None:
+            self._on_leader_changed(leader.selected)
+
+    def _on_leader_changed(self, selected: list) -> None:
+        self.set_selected(selected)
+        self.selection_changed.emit(self._selected)   # a follower of this one chains on
+
     def _open_dialog(self):
+        if self._leader is not None:   # a follower's selection is its leader's to set
+            return
         dlg = QDialog(self)
         dlg.setWindowTitle(self._title)
         dlg.resize(260, 320)
@@ -810,6 +869,54 @@ class ExclusiveButtonSet:
 
 
 
+def set_checked_quietly(button, checked: bool) -> None:
+    """Reflect state on a button without re-emitting back at whoever just set it."""
+    button.blockSignals(True)
+    button.setChecked(checked)
+    button.blockSignals(False)
+
+
+def widget_row(*widgets, stretch: bool = True, spacing: int = None) -> 'QHBoxLayout':
+    """A horizontal row of widgets, trailing stretch unless stretch=False.
+
+    A str item becomes a QLabel and None becomes a vertical separator, so a row
+    reads as the thing it draws.
+    """
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    if spacing is not None:
+        row.setSpacing(spacing)
+    for item in widgets:
+        if item is None:
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.VLine)
+            row.addWidget(separator)
+        elif isinstance(item, str):
+            row.addWidget(QLabel(item))
+        elif isinstance(item, QtWidgets.QLayout):
+            row.addLayout(item)
+        else:
+            row.addWidget(item)
+    if stretch:
+        row.addStretch()
+    return row
+
+
+def radio_group(options: 'list[tuple[str, str]]', selected: str, parent=None,
+                on_click=None) -> 'tuple[QButtonGroup, dict[str, QRadioButton]]':
+    """Exclusive radio buttons from (key, label) pairs, keyed by their key."""
+    group = QButtonGroup(parent)
+    buttons = {}
+    for key, label in options:
+        button = QRadioButton(label)
+        button.setChecked(key == selected)
+        group.addButton(button)
+        buttons[key] = button
+    if on_click is not None:
+        group.buttonClicked.connect(on_click)
+    return group, buttons
+
+
 def collapsible(title: str, parent=None) -> 'tuple[QGroupBox, QVBoxLayout]':
     """Checkable QGroupBox that shows/hides its children on toggle."""
     box = QGroupBox(title, parent)
@@ -828,6 +935,74 @@ def collapsible(title: str, parent=None) -> 'tuple[QGroupBox, QVBoxLayout]':
     box.toggled.connect(_toggle)
     return box, layout
 
+
+
+def all_groups_dropdown(groups, parent_menu, checkmark, on_pick) -> None:
+    """Populate parent_menu with every group; special ones nest under a 'Special' submenu."""
+    def _add(menu, gname, display):
+        menu.addAction(f"{'✓ ' if checkmark(gname) else '  '}{display}",
+                       lambda g=gname: on_pick(g))
+
+    for gname in groups.groups:   # registry, not _fwd: untagged groups count too
+        _add(parent_menu, gname, gname)
+    special = groups.special_groups()
+    if special:
+        special_menu = QMenu("Special", parent_menu)
+        for gname in special:
+            _add(special_menu, gname, groups.get_group_metadata(gname).display_name)
+        parent_menu.addMenu(special_menu)
+
+
+def row_chips(groups, key) -> list:
+    """Tag pills for one list row, pre-tinted so the delegate never rebuilds colours."""
+    return [(name, *TagChip.tint(color))
+            for name, color in groups.chips_for_member(key)]
+
+
+TRACE_COLOR = '#4a7fd4'        # the main series, light theme
+TRACE_COLOR_DARK = '#7aafff'
+
+LINE_W = 2   # pen width for every line-mode overlay
+
+
+def plot_pen(color, style=None):
+    """Overlay pen at LINE_W. Round cap/join keeps dashes even on horizontal runs."""
+    pen = pg.mkPen(color, width=LINE_W)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    if style is not None:
+        pen.setStyle(style)
+    return pen
+
+
+FLAT_ASPECT = 3000.0   # x:y for a time-series plot that reads flat but not collapsed
+
+
+def apply_flat_aspect(p, x_span: float, y_max: float,
+                      ratio: float = FLAT_ASPECT) -> None:
+    """Give y at least x_span/ratio, so a quiet trace stays flat instead of filling the plot.
+
+    Not setAspectLocked: that fixes the view box, which over a seconds-long axis
+    collapses the trace rather than flattening it. Tall data still wins.
+    """
+    view = p.getViewBox()
+    view.enableAutoRange(axis='y', enable=False)
+    view.setYRange(0, max(y_max, x_span / ratio), padding=0.05)
+
+
+def apply_plot_chrome(p, dark: bool) -> None:
+    """Grid, axis and title colours for one PlotItem, in either theme."""
+    fg = '#dddddd' if dark else '#333333'
+    muted = '#888888' if dark else '#666666'
+    p.showGrid(x=False, y=True, alpha=0.25 if dark else 0.3)
+    for axis_name in ('bottom', 'left'):
+        axis = p.getAxis(axis_name)
+        if axis is not None:
+            axis.setPen(pg.mkPen(muted))
+            axis.setTextPen(pg.mkPen(fg))
+    # a plain QGraphicsTextItem title has no setAttr; only LabelItem's does
+    if hasattr(p.titleLabel.item, 'setAttr'):
+        p.titleLabel.item.setAttr('color', fg)
 
 
 class CycleButton(QPushButton):
@@ -1229,7 +1404,7 @@ class GroupHotkeysBar(QWidget):
         import random
         win = self._ui
         nav = win.nav
-        gr = nav.groups
+        gr = nav.view.groups_of(win)
         hk_map = {k: name for k in self._SLOT_ORDER
                   for name in [gr.group_for_hotkey(k)] if name}
         chips: list = []
@@ -1240,22 +1415,18 @@ class GroupHotkeysBar(QWidget):
             meta = gr.get_group_metadata(gname)
             chip = TagChip(f'{key_str}: {meta.display_name}', meta.display_color)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
-            def _select(_, g=gname):
-                pairs = gr.pairs_in_group(g, nav.current_session_str)
-                if pairs:
-                    nav.set_current_pair(nav.get_pair_index(sorted(pairs)[0]))
-                    win.mainview.request_render()
-            chip.mousePressEvent = _select
 
-            def _dbl(_, g=gname):
-                pairs = gr.pairs_in_group(g, nav.current_session_str)
-                if not pairs:
+            def _jump(g, pick):
+                """Move the cursor to one member of *g*; pick chooses which."""
+                keys = sorted(gr.keys_in_group(g, nav.current_session_str))
+                if not keys:
                     return
-                nav.set_current_pair(nav.get_pair_index(random.choice(sorted(pairs))))
-                win.mainview.request_render()
-                win.neuron_network.draw()
+                nav.set_current_pair(nav.view.row_of(pick(keys)))
+                nav.view.render(win)
 
-            chip.mouseDoubleClickEvent = _dbl
+            chip.mousePressEvent = lambda _e, g=gname: _jump(g, lambda m: m[0])
+            chip.mouseDoubleClickEvent = lambda _e, g=gname: (
+                _jump(g, random.choice), nav.view.redraw_network(win))
             chips.append(chip)
         self._bar.set_widgets(chips)
 

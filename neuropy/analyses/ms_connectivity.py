@@ -12,10 +12,6 @@ from pathlib import Path as _Path
 import numpy as np
 import pandas as pd
 import hickle as hkl
-from scipy.signal import windows
-from scipy.stats import poisson
-from scipy import ndimage
-from statsmodels.stats.multitest import multipletests
 
 try:
     import cupy as cp
@@ -31,18 +27,15 @@ from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
 from neuropy.analyses.ccg_transforms import (
-    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig)
+    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig, lag_window_bins,
+    hollow_conv, multiple_correction)
 from neuropy.utils.data_storage_util import atomic_write_json
+from neuropy.utils.data_management import (bin_token as _bin_token, read_meta,
+                                           split_unit_name, is_complete, meta_name)
 from collections import defaultdict
 
 _REPO_ROOT = _Path(__file__).resolve().parents[2]
 DATA_ROOT = str(_REPO_ROOT / "data")
-
-_CCG_RESOLUTION = {
-    'lowres':  1e-3,    # 1 ms   — default, fast
-    'highres': 1/3*1e-4,  # 0.1 ms — finer temporal resolution (must exceed 1/sample_rate)
-}
-
 
 def _san(v) -> str:
     """Sanitize for dir names ('.' → '-')."""
@@ -52,10 +45,12 @@ def _san(v) -> str:
 class CCGConfig(Config):
     """CCG compute config (`key` → recompute; `derived` → EranConv only)."""
 
+    RESOLUTIONS = {'lowres': 1e-3, 'highres': 0.1e-3/3}
+
     _groups = {
         'key': ['name', 'resolution', 'bin_size', 'duration', 'conv_window',
                 'conn_types', 'use_acceleration', 'symmetrize_ccg'],
-        'derived': ['alpha', 'alpha2', 'min_lag', 'max_lag',
+        'derived': ['alpha', 'alpha2', 'min_lag', 'max_lag', 'tail_intervals', 'tail_source',
                     'min_spkcount', 'spkcnt_scope', 'multiple_correction'],
     }
 
@@ -69,6 +64,7 @@ class CCGConfig(Config):
         'alpha2':              ('float', None),
         'min_lag':             ('metric', ['ms', 's']),
         'max_lag':             ('metric', ['ms', 's']),
+        'tail_source':         ('choice', ['bins', 'conv', 'jitter']),
         'min_spkcount':        ('float', None),
         'spkcount_scope':      ('metric', ['ms', 's']),
         'multiple_correction': ('choice', ['bonferroni', 'fdr_bh']),
@@ -83,11 +79,14 @@ class CCGConfig(Config):
         duration: float = 20e-3,
         bin_size: float = None,
         resolution: str = 'lowres',
+        resolutions: dict = None,
         conv_window: float = 5e-3,
         alpha: float = 0.05,
         alpha2: float = 0.1,
         min_lag: float = 1e-3,
         max_lag: float = 3e-3,
+        tail_intervals: list = None,   # [(start, end)] in seconds; None edge = window edge
+        tail_source: str = 'bins',     # 'bins' | 'conv' | 'jitter'
         min_spkcount=2.5,
         spkcount_scope=12e-3,
         multiple_correction: str = 'bonferroni',  # 'bonferroni' or 'fdr_bh'
@@ -104,10 +103,11 @@ class CCGConfig(Config):
         self.resolution = resolution
         self._root = DATA_ROOT
 
-        # bin_size: explicit value takes priority; otherwise use resolution preset
+        self.resolutions = dict(resolutions or self.RESOLUTIONS)
         if bin_size is None:
-            bin_size = _CCG_RESOLUTION.get(resolution, 1e-3)
+            bin_size = self.resolutions.get(resolution, 1e-3)
         self.bin_size = bin_size
+        self.resolutions[resolution] = bin_size
 
         self.conn_types = conn_types
         self.duration = duration
@@ -117,6 +117,10 @@ class CCGConfig(Config):
         self.multiple_correction = multiple_correction
         self.min_lag = min_lag
         self.max_lag = max_lag
+        self.tail_intervals = [tuple(iv) for iv in (
+            tail_intervals if tail_intervals is not None
+            else [(None, -min_lag), (max_lag, None)])]
+        self.tail_source = tail_source
         self.min_spkcount = min_spkcount
         self.spkcnt_scope = spkcount_scope
         self.use_acceleration = use_acceleration
@@ -160,7 +164,7 @@ class CCGConfig(Config):
     def at(self, resolution: str) -> 'CCGConfig':
         """This conf at another resolution — bin_size and every derived lag bin follow."""
         return self if resolution == self.resolution else self.copy(
-            bin_size=_CCG_RESOLUTION[resolution], resolution=resolution)
+            bin_size=self.resolutions[resolution], resolution=resolution)
 
     @property
     def center_bin(self) -> int:
@@ -176,11 +180,13 @@ class CCGConfig(Config):
 
     @property
     def min_lag_bin(self) -> int:
-        return self.center_bin + int(self.min_lag / self.bin_size)
+        return lag_window_bins(self.min_lag, self.max_lag,
+                               self.bin_size, self.center_bin)[0]
 
     @property
     def max_lag_bin(self) -> int:
-        return self.center_bin + int(self.max_lag / self.bin_size) + 1
+        return lag_window_bins(self.min_lag, self.max_lag,
+                               self.bin_size, self.center_bin)[1]
 
     @property
     def min_spkcnt_bin(self) -> int:
@@ -277,7 +283,7 @@ def build_project(header: ProjectConfig, ccg_conf: CCGConfig, compute: bool = Fa
     neurons, cd, sd = open_project(header.name)
     if compute:
         cd.get_ccg()
-    header.mark_built([k.session for k in neurons.session_keys()])
+    header.mark_built([k.session for k in neurons.session_keys])
     return neurons, cd, sd
 
 
@@ -410,12 +416,19 @@ class CCGSourceConfig(Config):
     def _stem(self) -> str:
         return f"{_san(self.key.segment)}.{_san(self.key.session)}"
 
-    def data_dir(self, resolution) -> str:
-        return os.path.join(self._root, 'custom_ccg', 'ccgdata', f"{self._stem()}.{_san(resolution)}")
+    def data_dir(self, resolution, bin_size=None) -> str:
+        token = _bin_token(bin_size) if bin_size else _san(resolution)
+        return os.path.join(self._root, 'custom_ccg', f"{self._stem()}.{token}")
 
     def save_path(self) -> str:
-        """Res-independent meta json path (``.json`` appended on save)."""
-        return os.path.join(self._root, 'custom_ccg', 'config', self._stem())
+        """Res-independent meta json, beside the unit dirs it describes."""
+        return os.path.join(self._root, 'custom_ccg', self._stem())
+
+    def erase(self) -> None:
+        """Remove everything on disk named for this segment: the config json and every unit dir."""
+        base = self.save_path()
+        for d in glob.glob(base + '.*'):
+            shutil.rmtree(d, ignore_errors=True) if os.path.isdir(d) else os.remove(d)
 
     @staticmethod
     def stem_to_key(stem: str) -> 'Key':
@@ -517,7 +530,8 @@ class CCGPointer(HklSavable):
 
 
 class _CCGData(NpzSavable):
-    def __init__(self, key, ccg=None, ccg_null=None, pval=None, qval=None, root=DATA_ROOT):
+    def __init__(self, key, ccg=None, ccg_null=None, pval=None, qval=None, root=DATA_ROOT,
+                 bin_size=None, segment=None):
         super().__init__()
         self.key = key
         self._root = root  # caller-supplied npy target dir
@@ -525,9 +539,16 @@ class _CCGData(NpzSavable):
         self.ccg_null = ccg_null
         self.pval = pval
         self.qval = qval
+        self.bin_size = bin_size
+        self.segment = segment
 
     def save(self):
-        super().save(path=self._root)  # writes npy into caller-supplied dir (meta saved by CCGData)
+        super().save(path=self._root)
+        atomic_write_json(os.path.join(self._root, meta_name(self._root)), {
+            'session': str(self.key.session), 'segment': self.segment,
+            'bin_size': self.bin_size, 'n_bins': int(self.ccg.shape[-1]),
+        })
+
 
 
 class CCGData(NpzSavable):
@@ -644,7 +665,8 @@ class CCGData(NpzSavable):
                 ccg_null=self.ccg_null[0] if self.ccg_null is not None else None,
                 pval=self.pval[0] if self.pval is not None else None,
                 qval=self.qval[0] if self.qval is not None else None,
-                root =self.save_path()
+                root =self.save_path(),
+                bin_size=self.conf.bin_size, segment='full'
         ).save()
 
     def save_segment(self, seg_name: str):
@@ -655,7 +677,8 @@ class CCGData(NpzSavable):
                 ccg_null=self.ccg_null[seg_idx] if self.ccg_null is not None else None,
                 pval=self.pval[seg_idx] if self.pval is not None else None,
                 qval=self.qval[seg_idx] if self.qval is not None else None,
-                root=src.data_dir(self.key.resolution)
+                root=src.data_dir(self.key.resolution, self.conf.bin_size),
+                bin_size=self.conf.bin_size, segment=seg_name
         ).save()
         src.save()
 
@@ -677,16 +700,13 @@ class CCGData(NpzSavable):
         src._root = str(self._root)
         if seg_name in self.sources:
             self.drop_segment(seg_name)
-        for res in _CCG_RESOLUTION:
-            shutil.rmtree(src.data_dir(res), ignore_errors=True)
-        _Path(src.save_path() + '.json').unlink(missing_ok=True)
+        src.erase()
 
     def load_segment(self, seg_name: str):
-        print("[load_segment]", str(self.key))
         src = CCGSourceConfig(key=self.key.change(segment=seg_name))
         src._root = str(self._root)
         src.load()
-        d = src.data_dir(self.key.resolution)
+        d = src.data_dir(self.key.resolution, self.conf.bin_size)
         seg = _CCGData(key=self.key, root=str(d))
         seg.load(path=d)
         self.attach_segment(src, seg, save=False)
@@ -697,12 +717,14 @@ class CCGData(NpzSavable):
                 f"resolution={getattr(self.key,'resolution','?')}, shape={shape})")
 
     def to_save_name(self):
-        return f"{_san(self.key.session)}.{_san(self.key.resolution)}"
+        return f"{_san(self.key.session)}.{_bin_token(self.conf.bin_size)}"
 
     @staticmethod
-    def from_save_name(name):
-        session, resolution = name.split('.')
-        return Key(session=session, resolution=resolution)
+    def from_save_name(name, resolutions=None):
+        session, token = split_unit_name(name)
+        labels = {_bin_token(bs): lb
+                  for lb, bs in (resolutions or CCGConfig.RESOLUTIONS).items()}
+        return Key(session=session, resolution=labels.get(token, token))
 
     def save_path(self) -> str:
         return self._root / 'ccg' / 'ccgdata' / self.to_save_name()
@@ -781,6 +803,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
         if data is None:
             self.get_ccg(sk)
             data = self._ccg.get(sk)
+            if data is None:   # a cached load that didn't carry this session
+                return None
         if not data.has_segment(key.segment):
             self._load_segment(key)
         return data
@@ -817,11 +841,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
         pass
 
     def _list_dir(self, dir, decode):
-        out = []
-        for d in glob.glob(os.path.join(dir, '*')):
-            if os.path.isdir(d):
-                out.append(decode(os.path.basename(d)))
-        return out
+        return [decode(os.path.basename(d)) for d in glob.glob(os.path.join(dir, '*'))
+                if os.path.isdir(d) and is_complete(d)]
 
     @property
     def data_root(self):
@@ -840,20 +861,14 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def custom_dir(self):
         return os.path.join(self.save_path, "custom_ccg")
 
-    @property
-    def custom_config_dir(self):
-        return os.path.join(self.custom_dir, "config")
-
-    @property
-    def custom_data_dir(self):
-        return os.path.join(self.custom_dir, "ccgdata")
-
     def saved_sessions(self):
-        return self._list_dir(self.ccg_dir, CCGData.from_save_name)
+        return self._list_dir(
+            self.ccg_dir,
+            lambda n: CCGData.from_save_name(n, self.conf.resolutions))
 
     def saved_customs(self):
         """Custom segment keys from on-disk meta json."""
-        stems = [_Path(f).stem for f in glob.glob(os.path.join(self.custom_config_dir, '*.json'))]
+        stems = [_Path(f).stem for f in glob.glob(os.path.join(self.custom_dir, '*.json'))]
         return [CCGSourceConfig.stem_to_key(s) for s in stems]
         
     def by_session(self, session) -> dict:
@@ -927,22 +942,51 @@ class CCGDataset(AnalysisDataset, Cacheable):
             data.ccg, data.ccg_null = out.apply_ccg_transform_for(key, active_norms)
         return out
 
+    def set_significance_window(self, start: float, end: float) -> tuple[int, int]:
+        """Move the test window to lags *start*..*end* (seconds); returns its bin range.
+
+        Every consumer reads conf.min_lag/max_lag or the bins derived from them, so
+        this is the single place the window changes — no stored result is rewritten,
+        because significance and connection strength are both recomputed on read.
+        """
+        if end < start:
+            raise ValueError(f"window end {end} precedes start {start}")
+        self.conf.min_lag = float(start)
+        self.conf.max_lag = float(end)
+        for data in self._ccg.values():
+            data.conf.min_lag = float(start)
+            data.conf.max_lag = float(end)
+        return self.conf.min_lag_bin, self.conf.max_lag_bin
+
+    @property
+    def significance_window(self) -> tuple[float, float]:
+        """The test window in seconds."""
+        return float(self.conf.min_lag), float(self.conf.max_lag)
+
+    def set_tail_window(self, intervals: list, source: str = None) -> None:
+        """Replace the tail intervals (seconds, None = window edge) everywhere they are read."""
+        for conf in [self.conf] + [d.conf for d in self._ccg.values()]:
+            conf.tail_intervals = [tuple(iv) for iv in intervals]
+            if source is not None:
+                conf.tail_source = source
+
     def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig) -> np.ndarray:
         """Connection-strength grid ``[seg, ref, tgt]`` after norms — batch call of the per-pair chain."""
         data = self.ccg_for(key)
         refs, tgts = data._ref_tgt_grid()
         seg = self.segment_index(key, key.segment)
-        return ConnectionStrength.compute(
+        return ConnectionStrength.conn_strength(
             data.ccg[seg], data.ccg_null[seg], refs, tgts, data.conf,
             metric=cfg.cs_metric, method=cfg.baseline_method, active_norms=active_norms,
+            lo=cfg.min_lag_bin, hi=cfg.max_lag_bin,
             neurons=self.nd.neurons_for(key),
             custom_time_hours=self.time_hours_for(key, key.segment),
             excitability=key.excitability)
 
     def available_segments(self, key=None):
         """Computed segment labels on disk (ccgdata); ``key=None`` → project-wide, else that session."""
-        keys = self._list_dir(self.custom_data_dir,
-                              lambda b: CCGSourceConfig.stem_to_key(b.rsplit('.', 1)[0]))
+        keys = self._list_dir(self.custom_dir,
+                              lambda b: CCGSourceConfig.stem_to_key(split_unit_name(b)[0]))
         names = ['all']
         for sk in keys:
             nm = str(sk.segment)
@@ -993,7 +1037,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def _request_sessions(self, spec: 'CCGBatchRequest') -> list:
         """Sessions targeted by ``spec``: the explicit picker list, else ``scope``."""
         # every session nd knows (not just those already on disk — missing ones lazy-compute)
-        all_sess = sorted(str(k.session) for k in self.nd.session_keys())
+        all_sess = sorted(str(k.session) for k in self.nd.session_keys)
         want = {str(s) for s in (spec.sessions or []) if str(s).lower() != 'all'}
         if want:
             return [s for s in all_sess if s in want]
@@ -1046,7 +1090,9 @@ class CCGDataset(AnalysisDataset, Cacheable):
         data.attach_segment(src, seg)
 
     def _drop_segment(self, key) -> None:
-        self.ccg_for(key.cd()).drop_segment(key.segment)   # base array; drop_segment no-ops if absent
+        data = self._ccg.get(key.cd())   # dropping from memory must never load it
+        if data is not None:
+            data.drop_segment(key.segment)
 
     def drop_segment(self, keys, resolutions=None) -> None:
         for key in keys:
@@ -1071,7 +1117,13 @@ class CCGDataset(AnalysisDataset, Cacheable):
                 self._load_segment(key.change(resolution=res))
 
     def _delete_segment(self, key) -> None:
-        self.ccg_for(key).delete_segment(key.segment)
+        data = self._ccg.get(key.cd())   # files, not arrays: never load a session to delete from it
+        if data is not None:
+            data.delete_segment(key.segment)
+            return
+        src = CCGSourceConfig(key=key)
+        src._root = self.save_path
+        src.erase()
 
     def delete_segment(self, keys, resolutions=None) -> None:
         """Remove segment on disk across resolutions (main thread)."""
@@ -1138,7 +1190,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         conf = self.conf.at(resolution)
         conv = EranConv(self.conf)
         et = None
-        keys = [key] if key is not None else self.nd.session_keys()
+        keys = [key] if key is not None else self.nd.session_keys
 
         if not highres and self._try_load_cached(conv, key=key):
             return
@@ -1172,7 +1224,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """First ``Key`` matching ``query`` session; ``type_label`` pins conn type; ``strict=False`` returns None instead of raising."""
         if query is None:                             # only saved-restore passes None
             return None
-        live = {str(k.session) for k in self.nd.session_keys()}   # nd owns session identity
+        live = {str(k.session) for k in self.nd.session_keys}   # nd owns session identity
         if not (matches := [                          # '' matches every session → first key
                 k for k in self.ptr.keys()
                 if k.session and str(k.session) in live
@@ -1326,7 +1378,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def load(self, key: Key = None) -> str:
         """Load from disk; returns ``loaded`` | ``missing`` | ``stale``."""
         resolution = key.resolution if key is not None else 'lowres'
-        keys = [key] if key is not None else self.nd.session_keys()
+        keys = [key] if key is not None else self.nd.session_keys
         if not keys:
             return 'missing'
         loaded = 0
@@ -1335,7 +1387,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
             cd = CCGData(key=load_key, conf=self.conf.at(resolution),
                          ccg=None, ccg_null=None, pval=None, qval=None,
                          root=self.save_path)
-            if not os.path.isdir(cd.save_path()):     # unit dir of memmapped .npy
+            if not is_complete(cd.save_path()):       # a torn unit recomputes, never loads
                 continue
             try:
                 cd.load()
@@ -1349,18 +1401,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         return 'loaded' if loaded == len(keys) else ('stale' if loaded else 'missing')
 
 
-def _multiple_correction(pvals: np.ndarray, alpha: float, method: str = 'bonferroni') -> tuple:
-    """Multiple-test correction over lag bins; returns ``(sig, p_correct)``."""
-    if method == 'bonferroni':
-        corrected = np.minimum(pvals * pvals.shape[-1], 1.0)
-        return corrected <= alpha, corrected
-    significance = np.zeros_like(pvals, dtype=bool)
-    p_correct = np.ones_like(pvals, dtype=float)
-    for idx in np.ndindex(pvals.shape[:-1]):
-        s, pc, _, _ = multipletests(pvals[idx], alpha=alpha, method=method)
-        significance[idx] = s
-        p_correct[idx] = pc
-    return significance, p_correct
+_multiple_correction = multiple_correction   # lives in ccg_transforms with the CCG maths
 
 
 class EranConv:
@@ -1375,48 +1416,7 @@ class EranConv:
     @staticmethod
     def _conv(ccg, W=5, wintype="gauss", hollow_frac=None):
         """Hollow convolution baseline; returns ``pvals``, ``pred``, ``qvals``."""
-        if len(ccg.shape) == 1:
-            ccg = ccg[np.newaxis, ...]
-
-        assert wintype in ["gauss", "rect", "triang"]
-        assert W <= ccg.shape[-1]
-
-        # Auto-assign appropriate hollow fraction if not specified
-        # generate window
-        # get center indices of window
-        if wintype == "gauss":
-            hollow_frac = hollow_frac or 0.6
-            sigma = W / 2
-            W = int(6 * sigma + (2 if W % 2 else 1))
-            center = int(3 * sigma + (0.5 if W % 2 else 0))
-            window = windows.gaussian(W, std=sigma) / (2 * np.pi * sigma)
-        elif wintype == "rect":
-            hollow_frac = hollow_frac or 0.42
-            if W % 2 == 0:
-                W += 1
-            center = W // 2
-            window = windows.boxcar(W)
-        elif wintype == "triang":
-            hollow_frac = hollow_frac or 0.63
-            W = 2 * W + (-1 if W % 2 else 1)
-            center = W // 2
-            window = windows.triang(W)
-
-        # hollow and normalize window
-        window[center] *= (1 - hollow_frac)
-        window /= np.sum(window)
-        # padding
-        ccg_pad = np.concatenate(
-            [ccg[..., :W][..., ::-1], ccg, ccg[..., -W:][..., ::-1]], axis=-1)
-
-        # convolve window with ccg
-        pred = ndimage.convolve1d(ccg_pad, window, axis=-1)
-        pred = pred[..., W:-W]
-
-        # mid-p Poisson test: P( val<=pred ) + half of P ( val==pred )
-        pvals = 1 - poisson.cdf(ccg - 1, pred) - poisson.pmf(ccg, pred) * 0.5
-        qvals = 1 - pvals
-        return pvals, pred, qvals
+        return hollow_conv(ccg, W=W, wintype=wintype, hollow_frac=hollow_frac)
 
     def spkcount_mask(self, ccg):
         min_bin = self.conf.min_spkcnt_bin

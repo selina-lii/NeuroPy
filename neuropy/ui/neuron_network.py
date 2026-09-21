@@ -19,7 +19,8 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtCore import Qt, QTimer
 from neuropy.ui.ui_common import LRUCache, area_rgb, cell_areas, _SPECIAL_PREFIX
 from neuropy.ui.app_state import _ALL_SEGS
-from neuropy.ui.utils import chip_button, FlowLayout, SliderWithInput, small_font_pt
+from neuropy.ui.utils import (chip_button, FlowLayout, SliderWithInput,
+                              small_font_pt, widget_row)
 from neuropy.analyses.neurons_dataset import Key
 
 def _UI_FS() -> str:
@@ -210,94 +211,6 @@ class SameChannelArcItem(pg.GraphicsObject):
             ev.accept()
 
 
-class _FlowLayout(QtWidgets.QLayout):
-    """Simple left-to-right wrapping layout for group buttons."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._items: list = []
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def addWidget(self, widget):
-        self.addItem(QtWidgets.QWidgetItem(widget))
-        if self.parentWidget() is not None:
-            widget.setParent(self.parentWidget())
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, idx):
-        return self._items[idx] if 0 <= idx < len(self._items) else None
-
-    def takeAt(self, idx):
-        if 0 <= idx < len(self._items):
-            return self._items.pop(idx)
-        return None
-
-    def expandingDirections(self):
-        return QtCore.Qt.Orientations(0)
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._do_layout(QtCore.QRect(0, 0, width, 0), test=True)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do_layout(rect, test=False)
-
-    def sizeHint(self):
-        return self.minimumSize()
-
-    def minimumSize(self):
-        size = QtCore.QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        size += QtCore.QSize(2 * self.contentsMargins().left(),
-                             2 * self.contentsMargins().top())
-        return size
-
-    def clear_widgets(self):
-        """Remove all widgets without destroying the layout container."""
-        while self._items:
-            item = self._items.pop()
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-
-    def _do_layout(self, rect, test: bool) -> int:
-        alive = []
-        for item in self._items:
-            w = item.widget()
-            if w is None:
-                continue
-            alive.append(item)
-        self._items = alive
-        x = rect.x() + self.contentsMargins().left()
-        y = rect.y() + self.contentsMargins().top()
-        line_h = 0
-        for item in self._items:
-            w = item.widget()
-            if w is None:
-                continue
-            sh = item.sizeHint()
-            next_x = x + sh.width() + 2
-            if next_x > rect.right() and line_h > 0:
-                x = rect.x() + self.contentsMargins().left()
-                y += line_h + 2
-                next_x = x + sh.width() + 2
-                line_h = 0
-            if not test and w:
-                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), sh))
-            x = next_x
-            line_h = max(line_h, sh.height())
-        return y + line_h - rect.y() + self.contentsMargins().bottom()
-
-
-
 @dataclass
 class ProbeNetworkData:
     nd_key:       object
@@ -321,6 +234,63 @@ class ProbeNetworkData:
     current_pair: tuple | None = None
 
 
+@dataclass
+class NetworkView:
+    """Everything one draw needs beyond the data: geometry, filters and highlights.
+
+    Resolved once in _render from widget state, then passed whole so the draw
+    methods take one argument instead of fifteen.
+    """
+    x: np.ndarray                 # neuron x, zoomed and spread
+    y: np.ndarray                 # neuron y, zoomed
+    slot_of: list                 # neuron -> slot on its channel, drives grayscale
+    h_scale: float
+    v_scale: float
+    line_alpha: float
+    hidden_shanks: frozenset
+    enabled_cts: frozenset | None  # None means every connection type
+    current_pair: tuple | None
+    focused_neuron: int | None
+    focused_pair: tuple | None
+    selected_inds: set
+    deleted_inds: set
+    group_pairs: set
+    group_filter_active: bool
+    hide_same_channel: bool
+    hide_same_shank: bool
+    dark: bool
+    fg_muted: str
+
+    @property
+    def focused_pair_neurons(self) -> set:
+        return set(self.focused_pair) if self.focused_pair is not None else set()
+
+    def hides_shank_of(self, shank_ids, ref: int, tgt: int) -> bool:
+        """True when either endpoint sits on a shank the user switched off."""
+        if not self.hidden_shanks or shank_ids is None:
+            return False
+        if ref >= len(shank_ids) or tgt >= len(shank_ids):
+            return False
+        return (int(shank_ids[ref]) in self.hidden_shanks
+                or int(shank_ids[tgt]) in self.hidden_shanks)
+
+    def same_shank(self, shank_ids, ref: int, tgt: int) -> bool:
+        if shank_ids is None or ref >= len(shank_ids) or tgt >= len(shank_ids):
+            return False
+        return int(shank_ids[ref]) == int(shank_ids[tgt])
+
+    def excluded_by_focus(self, ref: int, tgt: int) -> bool:
+        """True when a neuron or pair focus is active and this pair is not in it."""
+        if self.focused_neuron is not None and ref != self.focused_neuron \
+                and tgt != self.focused_neuron:
+            return True
+        if self.focused_pair is not None:
+            neurons = self.focused_pair_neurons
+            if ref not in neurons and tgt not in neurons:
+                return True
+        return False
+
+
 class _NavPlotWidget(pg.PlotWidget):
     """PlotWidget that forwards Up/Down to a callback for edge-to-edge navigation."""
 
@@ -329,9 +299,11 @@ class _NavPlotWidget(pg.PlotWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._nav_key_cb = None
 
+    _NAV_KEYS = (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter)
+
     def keyPressEvent(self, ev):
         if (self._nav_key_cb is not None
-                and ev.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                and ev.key() in self._NAV_KEYS
                 and self._nav_key_cb(ev.key())):
             ev.accept()
             return
@@ -558,6 +530,11 @@ class NetworkPanel:
         n_clr = chip_button('✕', checkable=False)
         n_clr.setFixedWidth(28)
         n_lay.addWidget(n_clr)
+        self._same_ch_btn = chip_button('Next on ch', checkable=False)
+        self._same_ch_btn.setToolTip(
+            'Focus the next neuron sharing this one\'s peak channel (Enter on the network)')
+        self._same_ch_btn.clicked.connect(lambda: self.focus_next_on_channel())
+        n_lay.addWidget(self._same_ch_btn)
         n_lay.addStretch()
         body_lay.addWidget(n_row)
 
@@ -599,56 +576,51 @@ class NetworkPanel:
         self._focus_pair_entry.returnPressed.connect(self._on_pair_focus)
         p_clr.clicked.connect(self._on_pair_focus_clear)
 
-    def _setup_toggles_and_groups(self, layout):
-        ui = self.ui
+    @staticmethod
+    def _row_widget(row_layout) -> QWidget:
+        """Wrap a row layout in a widget, for layouts that take widgets only."""
+        holder = QWidget()
+        holder.setLayout(row_layout)
+        return holder
 
+    @staticmethod
+    def _pipe() -> QLabel:
+        """The thin gray '|' this panel uses between chip clusters."""
+        sep = QLabel('|')
+        sep.setStyleSheet('color: #bbb;')
+        return sep
+
+    def _toggle_chip(self, label: str, attr: str, checked: bool,
+                     also=None) -> QPushButton:
+        """A chip that writes one bool onto the panel and redraws."""
+        chip = chip_button(label, checked=checked)
+        if also is None:
+            chip.toggled.connect(lambda v: self._set_bool(attr, v))
+        else:
+            chip.toggled.connect(lambda v: (self._set_bool(attr, v), also()))
+        return chip
+
+    def _setup_toggles_and_groups(self, layout):
         _, _, lines_body, lines_lay, _ = self._make_section(layout, 'Lines')
 
-        row1 = QWidget()
-        r1_lay = QHBoxLayout(row1)
-        r1_lay.setContentsMargins(0, 0, 0, 0)
-        r1_lay.setSpacing(4)
-        cb_on = chip_button('ON/OFF', checked=True)
-        cb_on.toggled.connect(lambda v: self._set_bool('_net_arrows', v))
-        r1_lay.addWidget(cb_on)
-        sep1 = QLabel('|'); sep1.setStyleSheet('color: #bbb;')
-        r1_lay.addWidget(sep1)
-        cb_cp = chip_button('Current pair', checked=True)
-        cb_cp.toggled.connect(lambda v: self._set_bool('_net_cur_pair', v))
-        r1_lay.addWidget(cb_cp)
-        sep2 = QLabel('|'); sep2.setStyleSheet('color: #bbb;')
-        r1_lay.addWidget(sep2)
-        ct_lbl = QLabel('Conn type:')
-        self._scale_font(ct_lbl, _UI_FS)
-        r1_lay.addWidget(ct_lbl)
+        conn_type_label = QLabel('Conn type:')
+        self._scale_font(conn_type_label, _UI_FS)
         self._net_ct_frame = QWidget()
         self._net_ct_frame_lay = QHBoxLayout(self._net_ct_frame)
         self._net_ct_frame_lay.setContentsMargins(0, 0, 0, 0)
         self._net_ct_frame_lay.setSpacing(2)
-        r1_lay.addWidget(self._net_ct_frame)
-        r1_lay.addStretch()
-        lines_lay.addWidget(row1)
+        lines_lay.addWidget(self._row_widget(widget_row(
+            self._toggle_chip('ON/OFF', '_net_arrows', True), self._pipe(),
+            self._toggle_chip('Current pair', '_net_cur_pair', True), self._pipe(),
+            conn_type_label, self._net_ct_frame, spacing=4)))
         self.refresh_ct_buttons()
 
-        row2 = QWidget()
-        r2_lay = QHBoxLayout(row2)
-        r2_lay.setContentsMargins(0, 0, 0, 0)
-        r2_lay.setSpacing(4)
-        cb_hide = chip_button('Hide', checked=False)
-        cb_hide.toggled.connect(lambda v: self._set_bool('_net_hide', v))
-        r2_lay.addWidget(cb_hide)
-        sep3 = QLabel('|'); sep3.setStyleSheet('color: #bbb;')
-        r2_lay.addWidget(sep3)
-        cb_sch = chip_button('Same channel', checked=False)
-        cb_sch.toggled.connect(lambda v: (self._set_bool('_net_hide_same_channel', v),
-                                          self._on_toggle_hide_same_channel()))
-        r2_lay.addWidget(cb_sch)
-        cb_ssh = chip_button('Same shank', checked=False)
-        cb_ssh.toggled.connect(lambda v: (self._set_bool('_net_hide_same_shank', v),
-                                          self._on_toggle_hide_same_shank()))
-        r2_lay.addWidget(cb_ssh)
-        r2_lay.addStretch()
-        lines_lay.addWidget(row2)
+        lines_lay.addWidget(self._row_widget(widget_row(
+            self._toggle_chip('Hide', '_net_hide', False), self._pipe(),
+            self._toggle_chip('Same channel', '_net_hide_same_channel', False,
+                              self._on_toggle_hide_same_channel),
+            self._toggle_chip('Same shank', '_net_hide_same_shank', False,
+                              self._on_toggle_hide_same_shank), spacing=4)))
 
         _, _, grp_body, grp_lay, grp_hdr_lay = self._make_section(layout, 'Groups')
         cb_counts = QCheckBox('Show counts')
@@ -656,6 +628,11 @@ class NetworkPanel:
         cb_counts.toggled.connect(lambda v: (self._set_bool('_net_grp_counts', v),
                                              self.refresh_group_buttons()))
         grp_hdr_lay.addWidget(cb_counts)
+        btn_grp_sync = _outline_button('Sync', 48)
+        btn_grp_sync.clicked.connect(
+            lambda: (self.ui.ensure_groups_loaded_for([str(self.ui.key.session)]),
+                     self.refresh_group_buttons(), self.draw()))
+        grp_hdr_lay.addWidget(btn_grp_sync)
         btn_grp_clr = _outline_button('Clear all', 72)
         btn_grp_clr.clicked.connect(self._on_group_clear)
         grp_hdr_lay.addWidget(btn_grp_clr)
@@ -666,79 +643,67 @@ class NetworkPanel:
         _, _, ann_body, ann_lay, _ = self._make_section(layout, 'Annotations')
 
         # Probe shanks
-        prb_row = QWidget()
-        prb_r_lay = QHBoxLayout(prb_row)
-        prb_r_lay.setContentsMargins(0, 0, 0, 0)
-        prb_r_lay.setSpacing(2)
-        prb_lbl = QLabel('Probe shanks')
-        self._scale_font(prb_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
-        prb_r_lay.addWidget(prb_lbl)
-        prb_r_lay.addStretch()
         btn_none = _outline_button('None', 48)
         btn_none.clicked.connect(lambda: self._probe_all_shanks(False))
-        prb_r_lay.addWidget(btn_none)
         btn_all = _outline_button('All', 40)
         btn_all.clicked.connect(lambda: self._probe_all_shanks(True))
-        prb_r_lay.addWidget(btn_all)
-        ann_lay.addWidget(prb_row)
+        ann_lay.addWidget(self._row_widget(widget_row(
+            self._heading('Probe shanks'), btn_none, btn_all, spacing=2)))
 
         self._net_probe_flow = QWidget()
         self._net_probe_flow_lay = FlowLayout(self._net_probe_flow, spacing=4)
         ann_lay.addWidget(self._net_probe_flow)
 
-        # Separator
-        sep_line = QFrame()
-        sep_line.setFrameShape(QFrame.HLine)
-        sep_line.setStyleSheet('color: #ccc;')
-        ann_lay.addWidget(sep_line)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet('color: #ccc;')
+        ann_lay.addWidget(separator)
 
-        # Zoom + appearance sliders — compact 2-per-row grid instead of 4 stacked rows.
-        zoom_lbl = QLabel('Zoom / Appearance')
-        self._scale_font(zoom_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
-        ann_lay.addWidget(zoom_lbl)
-        zoom_grid_w = QWidget()
-        zoom_grid = QGridLayout(zoom_grid_w)
-        zoom_grid.setContentsMargins(0, 0, 0, 0)
-        zoom_grid.setHorizontalSpacing(8)
-        zoom_grid.setVerticalSpacing(2)
-        for i, (lbl_text, attr, lo, hi, init, scale) in enumerate([
-            ('H:',      '_net_hzoom',      20,  1500, 100, 0.01),
-            ('V:',      '_net_vzoom',      20,  1500, 100, 0.01),
-            ('α:',      '_net_line_alpha',  5,   100, 100, 0.01),
-            ('spread:', '_net_spread',      0,  1500, 100, 0.01),
-        ]):
-            row, col = divmod(i, 2)
-            lbl = QLabel(lbl_text); self._scale_font(lbl, _UI_FS)
-            sw = SliderWithInput(lo, hi, init, scale=scale)
-            sw.value_changed.connect(lambda v, a=attr: (setattr(self, a, v), self._on_zoom()))
-            zoom_grid.addWidget(lbl, row, col * 2)
-            zoom_grid.addWidget(sw,  row, col * 2 + 1)
-        ann_lay.addWidget(zoom_grid_w)
+        ann_lay.addWidget(self._heading('Zoom / Appearance'))
+        ann_lay.addWidget(self._zoom_grid())
 
-        # Annotation checkboxes
-        ann_chip_lbl = QLabel('Annotations')
-        self._scale_font(ann_chip_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
-        ann_lay.addWidget(ann_chip_lbl)
-        ann_chip_row = QWidget()
-        ac_lay = QHBoxLayout(ann_chip_row)
-        ac_lay.setContentsMargins(0, 0, 0, 0)
-        for text, attr in [('channel ids', '_net_show_chid'),
-                            ('neuron ids',  '_net_show_nid'),
-                            ('pair inds',   '_net_show_pair_ind')]:
-            cb = chip_button(text, checked=getattr(self, attr, False))
-            cb.toggled.connect(lambda v, a=attr: self._set_bool(a, v))
-            ac_lay.addWidget(cb)
-        ac_lay.addStretch()
-        ann_lay.addWidget(ann_chip_row)
+        ann_lay.addWidget(self._heading('Annotations'))
+        ann_lay.addWidget(self._row_widget(widget_row(*(
+            self._toggle_chip(text, attr, getattr(self, attr, False))
+            for text, attr in (('channel ids', '_net_show_chid'),
+                               ('neuron ids', '_net_show_nid'),
+                               ('pair inds', '_net_show_pair_ind'))))))
 
-        # Neuron style: each toggle sits beside the key it switches on.
-        style_lbl = QLabel('Neuron style')
-        self._scale_font(style_lbl, lambda: f'font-weight: bold; {_UI_FS()}')
-        ann_lay.addWidget(style_lbl)
+        # each style toggle sits beside the key it switches on
+        ann_lay.addWidget(self._heading('Neuron style'))
         self._net_style_row = QWidget()
         self._net_style_lay = FlowLayout(self._net_style_row, spacing=6)
         ann_lay.addWidget(self._net_style_row)
         self.refresh_style_row()
+
+    def _heading(self, text: str) -> QLabel:
+        """A bold section heading that tracks the UI font size."""
+        label = QLabel(text)
+        self._scale_font(label, lambda: f'font-weight: bold; {_UI_FS()}')
+        return label
+
+    _ZOOM_SLIDERS = (('H:', '_net_hzoom', 20, 1500, 100, 0.01),
+                     ('V:', '_net_vzoom', 20, 1500, 100, 0.01),
+                     ('α:', '_net_line_alpha', 5, 100, 100, 0.01),
+                     ('spread:', '_net_spread', 0, 1500, 100, 0.01))
+
+    def _zoom_grid(self) -> QWidget:
+        """The zoom and appearance sliders, two per row."""
+        holder = QWidget()
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+        for i, (text, attr, lo, hi, init, scale) in enumerate(self._ZOOM_SLIDERS):
+            row, col = divmod(i, 2)
+            label = QLabel(text)
+            self._scale_font(label, _UI_FS)
+            slider = SliderWithInput(lo, hi, init, scale=scale)
+            slider.value_changed.connect(
+                lambda v, a=attr: (setattr(self, a, v), self._on_zoom()))
+            grid.addWidget(label, row, col * 2)
+            grid.addWidget(slider, row, col * 2 + 1)
+        return holder
 
     _STYLE_TOGGLES = (('color',    '_net_style_color',    '_area_legend_html'),
                       ('shape',    '_net_style_shape',    '_shape_legend_html'),
@@ -1025,83 +990,29 @@ class NetworkPanel:
         pw.clear()
         self._pg_items.clear()
 
-        ui          = self.ui
-        theme       = getattr(ui, 'theme', None)
+        ui = self.ui
+        theme = getattr(ui, 'theme', None)
         if theme is not None:
             pw.setBackground(theme.plot_bg)
         self._plot_theme = theme
-        h_scale     = self._net_hzoom
-        v_scale     = self._net_vzoom
-        x_pos       = data.pos[:, 0] * h_scale
-        y_pos       = data.pos[:, 1] * v_scale
-        line_alpha  = max(0.05, min(1.0, self._net_line_alpha))
-        hidden_shanks = frozenset(
-            s for s, v in self._net_shank_vars.items() if not v)
 
-        # Populate/refresh shank chips from the data actually being drawn (authoritative;
-        # probe df / neuron shank_ids are guaranteed populated here, unlike at panel build).
+        # authoritative here: probe df and neuron shank_ids are populated by now,
+        # unlike at panel build time
         self._sync_shank_chips(self._shanks_from_data(data))
 
-        # Live current pair (not in cache). In any-session mode the current pair belongs to
-        # one session (its cross-session handle); highlight it only on that session's plot.
-        if any_mode:
-            handle = ui.current_pair   # (ckey, ref, tgt) | None
-            current_pair = None
-            if handle is not None:
-                ckey, cr, ct = handle
-                if str(ckey.session) == str(getattr(sess_nk, 'session', sess_nk)):
-                    current_pair = (int(cr), int(ct))
-        else:
-            current_pair = (tuple(ui.all_pairs_np[ui.current_pair_idx])
-                            if ui.current_pair_idx < len(ui.all_pairs_np) else None)
+        view = self._resolve_view(data, any_mode, sess_nk)
+        x_pos = data.pos[:, 0] * view.h_scale
+        y_pos = data.pos[:, 1] * view.v_scale
 
-        # Group filter
-        fp            = self._focused_pair
-        active_groups = {g for g, v in self._net_group_filter_vars.items() if v}
-        if active_groups and fp is None:
-            _gp_sess = (str(getattr(data.nd_key, 'session', data.nd_key))
-                        if any_mode
-                        else ui.current_session_str)
-            group_pairs: set = set()
-            for g in active_groups:
-                group_pairs |= ui.groups.pairs_in_group(g, _gp_sess)
-            gf_active = True
-        else:
-            group_pairs, gf_active = set(), False
-
-        b             = ui.active_selections if ui.sel_data is not None else None
-        selected_inds = set(b.selected) if b is not None else set()
-        deleted_inds  = set(b.deleted)  if b is not None else set()
-
-        enabled_cts = frozenset(ct for ct, v in self._net_ct_vars.items() if v)
-        if len(enabled_cts) == len(self._net_ct_vars):
-            enabled_cts = None   # all enabled
-
-        fn         = self._focused_neuron
-        fp_neurons = set(fp) if fp is not None else set()
-
-        # Spread once, share between neuron dots and connection endpoints so arrows
-        # terminate on the actual (spread) neuron positions, not the channel column.
-        x_spread, slot_of = self._compute_spread(data, x_pos)
-
-        self._draw_probe_bg(data, x_pos, y_pos, h_scale, v_scale, hidden_shanks)
+        self._draw_probe_bg(data, x_pos, y_pos, view)
 
         if self._net_arrows:
-            self._draw_connections(
-                data, x_spread, y_pos, current_pair,
-                selected_inds, deleted_inds, enabled_cts,
-                hidden_shanks, gf_active, group_pairs,
-                self._net_hide_same_channel,
-                self._net_hide_same_shank,
-                fn, fp, fp_neurons, line_alpha,
-            )
+            self._draw_connections(data, view)
         else:
             self._nav_edges = []
 
-        self._draw_neurons(data, x_spread, y_pos, slot_of,
-                           fn, fp, fp_neurons, hidden_shanks)
-
-        self._draw_legend(data, enabled_cts)
+        self._draw_neurons(data, view)
+        self._draw_legend(data, view.enabled_cts)
 
         if data.session_label:
             lbl_color = (getattr(self._plot_theme, 'fg_muted', None)
@@ -1112,8 +1023,69 @@ class NetworkPanel:
             pw.addItem(ti)
             self._pg_items.append(ti)
 
-    def _draw_probe_bg(self, data, x_pos, y_pos,
-                       h_scale, v_scale, hidden_shanks):
+    def _resolve_view(self, data, any_mode: bool, sess_nk) -> NetworkView:
+        """Read the panel's widget state into the NetworkView one draw runs on."""
+        ui = self.ui
+        h_scale, v_scale = self._net_hzoom, self._net_vzoom
+        x_pos = data.pos[:, 0] * h_scale
+        # spread once: arrows must land on the spread neuron, not the channel column
+        x_spread, slot_of = self._compute_spread(data, x_pos)
+
+        enabled_cts = frozenset(ct for ct, v in self._net_ct_vars.items() if v)
+        if len(enabled_cts) == len(self._net_ct_vars):
+            enabled_cts = None
+
+        focused_pair = self._focused_pair
+        group_pairs, group_filter_active = self._resolve_group_filter(
+            data, any_mode, focused_pair)
+        selections = ui.active_selections if ui.sel_data is not None else None
+
+        return NetworkView(
+            x=x_spread, y=data.pos[:, 1] * v_scale, slot_of=slot_of,
+            h_scale=h_scale, v_scale=v_scale,
+            line_alpha=max(0.05, min(1.0, self._net_line_alpha)),
+            hidden_shanks=frozenset(s for s, v in self._net_shank_vars.items() if not v),
+            enabled_cts=enabled_cts,
+            current_pair=self._resolve_current_pair(any_mode, sess_nk),
+            focused_neuron=self._focused_neuron, focused_pair=focused_pair,
+            selected_inds=set(selections.selected) if selections else set(),
+            deleted_inds=set(selections.deleted) if selections else set(),
+            group_pairs=group_pairs, group_filter_active=group_filter_active,
+            hide_same_channel=self._net_hide_same_channel,
+            hide_same_shank=self._net_hide_same_shank,
+            dark=bool(getattr(self._plot_theme, 'dark', False)),
+            fg_muted=getattr(self._plot_theme, 'fg_muted', '#555'),
+        )
+
+    def _resolve_current_pair(self, any_mode: bool, sess_nk) -> tuple | None:
+        """The pair under review, or None. Live state, so never cached with the data."""
+        ui = self.ui
+        if not any_mode:
+            if ui.current_pair_idx >= len(ui.all_pairs_np):
+                return None
+            return tuple(ui.all_pairs_np[ui.current_pair_idx])
+        # all-session mode: highlight it only on the session that owns it
+        handle = ui.current_pair
+        if handle is None:
+            return None
+        key, ref, tgt = handle
+        if str(key.session) != str(getattr(sess_nk, 'session', sess_nk)):
+            return None
+        return (int(ref), int(tgt))
+
+    def _resolve_group_filter(self, data, any_mode: bool, focused_pair):
+        """(pairs, active) for the checked groups; a pair focus overrides the filter."""
+        active_groups = {g for g, v in self._net_group_filter_vars.items() if v}
+        if not active_groups or focused_pair is not None:
+            return set(), False
+        session = (str(getattr(data.nd_key, 'session', data.nd_key)) if any_mode
+                   else self.ui.current_session_str)
+        pairs = set()
+        for group in active_groups:
+            pairs |= self.ui.groups.pairs_in_group(group, session)
+        return pairs, True
+
+    def _draw_probe_bg(self, data, x_pos, y_pos, view: NetworkView):
         pw      = self._plot_win
         pg_info = data.pg_info
         if pg_info is None:
@@ -1123,27 +1095,16 @@ class NetworkPanel:
         except Exception:
             return
 
-        # Identify bad/skipped channels
-        ui = self.ui
-        try:
-            nd_conf  = getattr(getattr(ui.cd, 'nd', None), '_conf', None)
-            recinfo  = getattr(nd_conf, 'recinfo', None) if nd_conf else None
-            skipped  = set(getattr(recinfo, 'skipped_channels', None) or [])
-            discarded = set(getattr(recinfo, 'discarded_channels', None) or [])
-            skipped = skipped | discarded
-        except Exception:
-            skipped = set()
-
+        skipped = self._skipped_channels()
         show_chid = self._net_show_chid
-        dark = bool(getattr(self._plot_theme, 'dark', False))
-        ch_brush = (140, 140, 140, 160) if dark else (180, 180, 180, 160)
+        ch_brush = (140, 140, 140, 160) if view.dark else (180, 180, 180, 160)
         lbl_muted = getattr(self._plot_theme, 'fg_muted', '#888888')
         for shank_id in df['shank_id'].unique():
-            if int(shank_id) in hidden_shanks:
+            if int(shank_id) in view.hidden_shanks:
                 continue
             sub    = df[df['shank_id'] == shank_id]
-            xs     = sub['x'].to_numpy(dtype=float) * h_scale
-            ys     = sub['y'].to_numpy(dtype=float) * v_scale
+            xs     = sub['x'].to_numpy(dtype=float) * view.h_scale
+            ys     = sub['y'].to_numpy(dtype=float) * view.v_scale
             ch_ids = sub['channel_id'].to_numpy()
 
             # Normal channels
@@ -1179,6 +1140,13 @@ class NetworkPanel:
                     pw.addItem(t)
                     self._pg_items.append(t)
 
+    def _skipped_channels(self) -> set:
+        """Channels the recording marked bad or discarded; drawn with a red ring."""
+        nd_conf = getattr(getattr(self.ui.cd, 'nd', None), '_conf', None)
+        recinfo = getattr(nd_conf, 'recinfo', None) if nd_conf else None
+        return (set(getattr(recinfo, 'skipped_channels', None) or [])
+                | set(getattr(recinfo, 'discarded_channels', None) or []))
+
     def _compute_spread(self, data, x_pos):
         """Per-channel horizontal fan-out so same-channel neurons don't overlap.
         Returns (x_spread, slot_of); slot_of[i] is neuron i's slot on its channel
@@ -1196,279 +1164,248 @@ class NetworkPanel:
                 x_spread[ni] += offsets[slot]
         return x_spread, slot_of
 
-    def _draw_connections(self, data, x_pos, y_pos, current_pair,
-                          selected_inds, deleted_inds, enabled_cts,
-                          hidden_shanks, gf_active, group_pairs,
-                          hide_same_ch, hide_same_shk,
-                          fn, fp, fp_neurons, line_alpha):
-        pw           = self._plot_win
-        n            = data.n_neurons
-        all_pairs    = set(data.pair_entries.keys())
-        same_ch_map: dict = {}
-        nav_edges: list = []   # (ref,tgt,key_str) for each edge actually drawn
-        show_pair_ind = self._net_show_pair_ind
-        dark = bool(getattr(self._plot_theme, 'dark', False))
-        muted_gray = (120, 120, 120, 255) if dark else (204, 204, 204, 255)
-        text_muted = getattr(self._plot_theme, 'fg_muted', '#555')
-        outline_rgba = (255, 255, 255, 255) if dark else (0, 0, 0, 255)
+    def _draw_connections(self, data, view: NetworkView):
+        """Draw every visible edge, then the current pair, arcs and deleted pairs."""
+        nav_edges: list = []
+        same_channel: dict = {}   # channel -> arcs to fan out around it
 
         for (ref, tgt), entries in data.pair_entries.items():
-            if not (0 <= ref < n and 0 <= tgt < n):
+            if self._skip_pair(data, view, ref, tgt):
                 continue
-            # Current pair is drawn separately as a standalone highlight edge (after the loop),
-            # independent of every filter — skip it here to avoid a double draw.
-            if current_pair is not None and (ref, tgt) == current_pair:
-                continue
-            if fn is not None and ref != fn and tgt != fn:
-                continue
-            if fp is not None and ref not in fp_neurons and tgt not in fp_neurons:
-                continue
-            if gf_active and (ref, tgt) not in group_pairs:
-                continue
-            if (hidden_shanks and data.shank_ids is not None
-                    and ref < len(data.shank_ids) and tgt < len(data.shank_ids)
-                    and (int(data.shank_ids[ref]) in hidden_shanks
-                         or int(data.shank_ids[tgt]) in hidden_shanks)):
-                continue
-
             for entry in entries:
-                ct = entry['conn_type']
-                if enabled_cts is not None and ct not in enabled_cts:
-                    continue
-                if (hide_same_shk and data.shank_ids is not None
-                        and ref < len(data.shank_ids) and tgt < len(data.shank_ids)
-                        and int(data.shank_ids[ref]) == int(data.shank_ids[tgt])):
-                    continue
+                self._draw_one_entry(data, view, ref, tgt, entry,
+                                     nav_edges, same_channel)
 
-                is_same_ch = (data.peak_channels is not None
-                              and data.peak_channels[ref] == data.peak_channels[tgt])
-                if hide_same_ch and is_same_ch:
-                    continue
+        self._draw_current_pair(data, view, nav_edges)
+        self._draw_same_channel_arcs(view, same_channel, nav_edges)
+        self._draw_deleted_pairs(data, view)
 
-                is_cur   = entry['is_current']
-                in_filt  = entry['in_filter']
-                is_sel   = (ref, tgt) in selected_inds
-                is_fp    = (fp is not None and (ref, tgt) == fp)
-                is_cpair = is_cur and (ref, tgt) == current_pair
+        # one entry per pair, ordered, for Up/Down stepping; deleted are excluded
+        first_key: dict = {}
+        for ref, tgt, key in nav_edges:
+            first_key.setdefault((ref, tgt), key)
+        self._nav_edges = [(ref, tgt, key)
+                           for (ref, tgt), key in sorted(first_key.items())]
 
-                rgba = _ct_rgba(ct, entry.get('ei', 'E'))
+    def _skip_pair(self, data, view: NetworkView, ref: int, tgt: int) -> bool:
+        """Filters that reject a whole pair before any of its entries are styled."""
+        if not (0 <= ref < data.n_neurons and 0 <= tgt < data.n_neurons):
+            return True
+        # the current pair gets its own highlight edge past every filter, so
+        # skipping it here just avoids drawing it twice
+        if view.current_pair is not None and (ref, tgt) == view.current_pair:
+            return True
+        if view.excluded_by_focus(ref, tgt):
+            return True
+        if view.group_filter_active and (ref, tgt) not in view.group_pairs:
+            return True
+        return view.hides_shank_of(data.shank_ids, ref, tgt)
 
-                # Arrow style: uniform shaft (cosmetic px width, constant at any H/V zoom);
-                # alpha varies by focus/selection state only.
-                lw = 2.6
-                if is_cpair:
-                    alpha = 1.00
-                elif is_fp:
-                    alpha = 1.00
-                elif fp is not None:
-                    alpha, rgba = 0.12, muted_gray
-                elif not in_filt:
-                    alpha, rgba = 0.20, muted_gray
-                elif not is_cur and is_sel:
-                    alpha = 0.70
-                elif not is_cur:
-                    alpha = 0.35
-                elif is_sel:
-                    alpha = 0.90
-                else:
-                    alpha = 0.55
+    def _entry_style(self, view: NetworkView, entry, ref: int, tgt: int,
+                     is_current_pair: bool) -> tuple:
+        """(rgba, alpha) for one edge: colour by type, alpha by focus and selection."""
+        muted_gray = (120, 120, 120, 255) if view.dark else (204, 204, 204, 255)
+        rgba = _ct_rgba(entry['conn_type'], entry.get('ei', 'E'))
+        focused_pair = view.focused_pair
+        is_selected = (ref, tgt) in view.selected_inds
+        is_current = entry['is_current']
 
-                final_rgba = _with_alpha(rgba, alpha * line_alpha)
+        if is_current_pair or (focused_pair is not None and (ref, tgt) == focused_pair):
+            return rgba, 1.00
+        if focused_pair is not None:
+            return muted_gray, 0.12
+        if not entry['in_filter']:
+            return muted_gray, 0.20
+        if not is_current:
+            return rgba, 0.70 if is_selected else 0.35
+        return rgba, 0.90 if is_selected else 0.55
 
-                if is_same_ch:
-                    ch = int(data.peak_channels[ref])
-                    same_ch_map.setdefault(ch, []).append(
-                        (ref, tgt, entry, is_cpair, final_rgba, lw))
-                    continue
+    def _pair_offset(self, view: NetworkView, pairs, ref: int, tgt: int) -> tuple:
+        """Perpendicular nudge so a reciprocal pair's two arrows don't overlap."""
+        if (tgt, ref) not in pairs:
+            return 0.0, 0.0
+        return _perp_offset(view.x[ref], view.y[ref], view.x[tgt], view.y[tgt], d=3.0)
 
-                ox, oy = (0.0, 0.0)
-                if (tgt, ref) in all_pairs:
-                    ox, oy = _perp_offset(
-                        x_pos[ref], y_pos[ref], x_pos[tgt], y_pos[tgt], d=3.0)
+    def _draw_one_entry(self, data, view: NetworkView, ref: int, tgt: int, entry,
+                        nav_edges: list, same_channel: dict) -> None:
+        if view.enabled_cts is not None and entry['conn_type'] not in view.enabled_cts:
+            return
+        if view.hide_same_shank and view.same_shank(data.shank_ids, ref, tgt):
+            return
+        is_same_channel = (data.peak_channels is not None
+                           and data.peak_channels[ref] == data.peak_channels[tgt])
+        if view.hide_same_channel and is_same_channel:
+            return
 
-                gid  = f'{ref}_{tgt}_{entry["key"]}'
-                item = ProbeConnectionItem(
-                    x_pos[ref] + ox, y_pos[ref] + oy,
-                    x_pos[tgt] + ox, y_pos[tgt] + oy,
-                    final_rgba, lw, gid)
-                item.setZValue(3)
-                item.sigClicked.connect(self._on_arrow_click)
-                pw.addItem(item)
-                self._pg_items.append(item)
-                nav_edges.append((ref, tgt, str(entry['key'])))
+        is_current_pair = entry['is_current'] and (ref, tgt) == view.current_pair
+        rgba, alpha = self._entry_style(view, entry, ref, tgt, is_current_pair)
+        rgba = _with_alpha(rgba, alpha * view.line_alpha)
+        width = 2.6   # cosmetic px, so the shaft stays constant at any zoom
 
-                if show_pair_ind and entry.get('is_current'):
-                    mx = (x_pos[ref] + ox + x_pos[tgt] + ox) / 2
-                    my = (y_pos[ref] + oy + y_pos[tgt] + oy) / 2
-                    t  = pg.TextItem(f'{ref},{tgt}', color=text_muted,
-                                     anchor=(0.5, 1.0))
-                    t.setPos(mx, my)
-                    t.setFont(QtGui.QFont('Arial', 6))
-                    pw.addItem(t)
-                    self._pg_items.append(t)
+        if is_same_channel:
+            channel = int(data.peak_channels[ref])
+            same_channel.setdefault(channel, []).append(
+                (ref, tgt, entry, is_current_pair, rgba, width))
+            return
 
-                if is_cpair:
-                    outline = ProbeConnectionItem(
-                        x_pos[ref] + ox, y_pos[ref] + oy,
-                        x_pos[tgt] + ox, y_pos[tgt] + oy,
-                        _with_alpha(outline_rgba, alpha * line_alpha),
-                        lw + 1.5, '')
-                    outline.setZValue(2)
-                    pw.addItem(outline)
-                    self._pg_items.append(outline)
+        ox, oy = self._pair_offset(view, data.pair_entries, ref, tgt)
+        self._add_arrow(view, ref, tgt, ox, oy, rgba, width,
+                        f'{ref}_{tgt}_{entry["key"]}', z=3)
+        nav_edges.append((ref, tgt, str(entry['key'])))
 
-        # last, so conn-type filters never hide the pair being reviewed
-        if current_pair is not None and self._net_cur_pair:
-            cr, ctg = int(current_pair[0]), int(current_pair[1])
-            if 0 <= cr < n and 0 <= ctg < n:
-                ox, oy = (0.0, 0.0)
-                if (ctg, cr) in all_pairs:
-                    ox, oy = _perp_offset(x_pos[cr], y_pos[cr], x_pos[ctg], y_pos[ctg], d=3.0)
-                cur_item = ProbeConnectionItem(
-                    x_pos[cr] + ox, y_pos[cr] + oy,
-                    x_pos[ctg] + ox, y_pos[ctg] + oy,
-                    (255, 20, 147, 255), 4.4, f'{cr}_{ctg}_cur')
-                cur_item.setZValue(20)
-                cur_item.sigClicked.connect(self._on_arrow_click)
-                pw.addItem(cur_item)
-                self._pg_items.append(cur_item)
-                nav_edges.append((cr, ctg, None))   # already current type → no switch
+        if self._net_show_pair_ind and entry['is_current']:
+            self._add_pair_label(view, ref, tgt, ox, oy)
+        if is_current_pair:
+            outline_rgba = (255, 255, 255, 255) if view.dark else (0, 0, 0, 255)
+            self._add_arrow(view, ref, tgt, ox, oy,
+                            _with_alpha(outline_rgba, alpha * view.line_alpha),
+                            width + 1.5, '', z=2, clickable=False)
 
-                if show_pair_ind:
-                    mx = (x_pos[cr] + ox + x_pos[ctg] + ox) / 2
-                    my = (y_pos[cr] + oy + y_pos[ctg] + oy) / 2
-                    t  = pg.TextItem(f'{cr},{ctg}', color=text_muted, anchor=(0.5, 1.0))
-                    t.setPos(mx, my)
-                    t.setFont(QtGui.QFont('Arial', 6))
-                    pw.addItem(t)
-                    self._pg_items.append(t)
+    def _add_arrow(self, view: NetworkView, ref: int, tgt: int,
+                   ox: float, oy: float, rgba, width: float, gid: str,
+                   z: int, clickable: bool = True) -> None:
+        item = ProbeConnectionItem(view.x[ref] + ox, view.y[ref] + oy,
+                                   view.x[tgt] + ox, view.y[tgt] + oy,
+                                   rgba, width, gid)
+        item.setZValue(z)
+        if clickable:
+            item.sigClicked.connect(self._on_arrow_click)
+        self._plot_win.addItem(item)
+        self._pg_items.append(item)
 
-        # Same-channel arcs
-        BASE_R, R_STEP, GAP = 7, 5, 11
-        for ch, ch_ents in same_ch_map.items():
-            ref0 = ch_ents[0][0]
-            cx   = float(x_pos[ref0]) + GAP
-            cy   = float(y_pos[ref0])
-            for k, (ref, tgt, entry, is_cpair, rgba, lw) in enumerate(ch_ents):
-                r   = BASE_R + k * R_STEP
-                gid = f'{ref}_{tgt}_{entry["key"]}'
-                arc = SameChannelArcItem(cx, cy, r, rgba,
-                                         lw=(2.0 if is_cpair else 1.0), gid=gid)
+    def _add_pair_label(self, view: NetworkView, ref: int, tgt: int,
+                        ox: float, oy: float) -> None:
+        label = pg.TextItem(f'{ref},{tgt}', color=view.fg_muted, anchor=(0.5, 1.0))
+        label.setPos((view.x[ref] + view.x[tgt]) / 2 + ox,
+                     (view.y[ref] + view.y[tgt]) / 2 + oy)
+        label.setFont(QtGui.QFont('Arial', 6))
+        self._plot_win.addItem(label)
+        self._pg_items.append(label)
+
+    def _draw_current_pair(self, data, view: NetworkView, nav_edges: list) -> None:
+        """Drawn last and unfiltered, so no conn-type filter can hide the pair under review."""
+        if view.current_pair is None or not self._net_cur_pair:
+            return
+        ref, tgt = int(view.current_pair[0]), int(view.current_pair[1])
+        if not (0 <= ref < data.n_neurons and 0 <= tgt < data.n_neurons):
+            return
+        ox, oy = self._pair_offset(view, data.pair_entries, ref, tgt)
+        self._add_arrow(view, ref, tgt, ox, oy, (255, 20, 147, 255), 4.4,
+                        f'{ref}_{tgt}_cur', z=20)
+        nav_edges.append((ref, tgt, None))   # already the current type, no switch needed
+        if self._net_show_pair_ind:
+            self._add_pair_label(view, ref, tgt, ox, oy)
+
+    def _draw_same_channel_arcs(self, view: NetworkView, same_channel: dict,
+                                nav_edges: list) -> None:
+        """Same-channel pairs have no length, so they become nested arcs instead."""
+        base_radius, radius_step, gap = 7, 5, 11
+        for arcs in same_channel.values():
+            anchor = arcs[0][0]
+            cx, cy = float(view.x[anchor]) + gap, float(view.y[anchor])
+            for i, (ref, tgt, entry, is_current_pair, rgba, _w) in enumerate(arcs):
+                arc = SameChannelArcItem(cx, cy, base_radius + i * radius_step, rgba,
+                                         lw=(2.0 if is_current_pair else 1.0),
+                                         gid=f'{ref}_{tgt}_{entry["key"]}')
                 arc.setZValue(4)
                 arc.sigClicked.connect(self._on_arrow_click)
-                pw.addItem(arc)
+                self._plot_win.addItem(arc)
                 self._pg_items.append(arc)
                 nav_edges.append((ref, tgt, str(entry['key'])))
 
-        # Deleted pairs — faded gray
-        for (ref, tgt) in deleted_inds:
+    def _draw_deleted_pairs(self, data, view: NetworkView) -> None:
+        """Deleted pairs still show, faded, unless they also exist as a live pair."""
+        gray = (180, 180, 180, 255) if view.dark else (51, 51, 51, 255)
+        rgba = _with_alpha(gray, 0.20 * view.line_alpha)
+        for ref, tgt in view.deleted_inds:
             if (ref, tgt) in data.pair_entries:
                 continue
-            if not (0 <= ref < n and 0 <= tgt < n):
+            if not (0 <= ref < data.n_neurons and 0 <= tgt < data.n_neurons):
                 continue
-            if fn is not None and ref != fn and tgt != fn:
+            if view.focused_neuron is not None \
+                    and ref != view.focused_neuron and tgt != view.focused_neuron:
                 continue
-            ox, oy = (0.0, 0.0)
-            if (tgt, ref) in deleted_inds:
-                ox, oy = _perp_offset(
-                    x_pos[ref], y_pos[ref], x_pos[tgt], y_pos[tgt], d=3.0)
-            del_gray = (180, 180, 180, 255) if dark else (51, 51, 51, 255)
-            rgba = _with_alpha(del_gray, 0.20 * line_alpha)
-            item = ProbeConnectionItem(
-                x_pos[ref] + ox, y_pos[ref] + oy,
-                x_pos[tgt] + ox, y_pos[tgt] + oy,
-                rgba, 1.0, f'{ref}_{tgt}_deleted')
-            item.setZValue(1)
-            item.sigClicked.connect(self._on_arrow_click)
-            pw.addItem(item)
-            self._pg_items.append(item)
+            ox, oy = self._pair_offset(view, view.deleted_inds, ref, tgt)
+            self._add_arrow(view, ref, tgt, ox, oy, rgba, 1.0,
+                            f'{ref}_{tgt}_deleted', z=1)
 
-        # Ordered unique visible edges for Up/Down stepping (deleted excluded above).
-        seen: dict = {}
-        for r, t, k in nav_edges:
-            seen.setdefault((r, t), k)
-        self._nav_edges = [(r, t, k) for (r, t), k in sorted(seen.items())]
+    # pxMode markers: fixed pixels, so icons stay round at any H/V zoom
+    _NEURON_SIZE, _NEURON_SIZE_HL = 9, 13
 
-    def _draw_neurons(self, data, x_spread, y_pos, slot_of,
-                      fn, fp, fp_neurons, hidden_shanks):
-        pw      = self._plot_win
-        cluster_neurons = {n for r, t in data.pair_entries for n in (r, t)}
+    def _draw_neurons(self, data, view: NetworkView):
+        """One scatter for every neuron, plus larger markers for the focused ones."""
+        spots = self._plain_neuron_spots(data, view)
+        spots += self._highlight_neuron_spots(data, view)
 
-        # Per-channel grayscale (white→60% gray in dark mode); spread already applied.
-        theme = getattr(self, '_plot_theme', None)
-        _GRAYS = self._grays()
-        nid_color = getattr(theme, 'fg_muted', '#555')
-        highlight_pen = 'white' if getattr(theme, 'dark', False) else 'black'
-        _palette = self._area_palette()   # resolved once, not per neuron
-        neuron_rgb = [self._neuron_rgb(data, i, slot_of, _GRAYS, _palette)
-                      for i in range(data.n_neurons)]
-        # Fixed-pixel marker sizes (pxMode=True below) → round 1:1 icons at any H/V zoom.
-        _NSIZE, _NSIZE_HL = 9, 13
+        scatter = pg.ScatterPlotItem(pxMode=True)
+        scatter.addPoints(spots)
+        scatter.sigClicked.connect(self._on_neuron_scatter_click)
+        scatter.setZValue(5)
+        self._plot_win.addItem(scatter)
+        self._pg_items.append(scatter)
 
-        show_nid = self._net_show_nid
-        hide_unc  = self._net_hide
-        spots: list = []
+    def _plain_neuron_spots(self, data, view: NetworkView) -> list:
+        """Spots for every neuron that is neither focused nor hidden; labels drawn here."""
+        connected = {n for pair in data.pair_entries for n in pair}
+        palette = self._area_palette()      # resolved once, not per neuron
+        grays = self._grays()
+        focused = view.focused_pair_neurons | (
+            {view.focused_neuron} if view.focused_neuron is not None else set())
 
+        spots = []
         for idx in range(data.n_neurons):
-            if idx == fn or idx in fp_neurons:
+            if idx in focused:
                 continue
-            if (hidden_shanks and data.shank_ids is not None
+            if (view.hidden_shanks and data.shank_ids is not None
                     and idx < len(data.shank_ids)
-                    and int(data.shank_ids[idx]) in hidden_shanks):
+                    and int(data.shank_ids[idx]) in view.hidden_shanks):
                 continue
-            in_any = idx in cluster_neurons
-            if hide_unc and not in_any:
+            is_connected = idx in connected
+            if self._net_hide and not is_connected:
                 continue
-            ntype  = (data.neuron_type[idx]
-                      if data.neuron_type is not None
-                      and idx < len(data.neuron_type) else None)
-            symbol = self._symbol_for(ntype)
-            a      = 200 if in_any else 64
-            r, g, b = neuron_rgb[idx]
-            xi, yi  = float(x_spread[idx]), float(y_pos[idx])
+            red, green, blue = self._neuron_rgb(data, idx, view.slot_of, grays, palette)
+            x, y = float(view.x[idx]), float(view.y[idx])
             spots.append({
-                'pos': (xi, yi), 'size': _NSIZE, 'symbol': symbol,
-                'pen': None, 'brush': pg.mkBrush(r, g, b, a), 'data': idx,
+                'pos': (x, y), 'size': self._NEURON_SIZE,
+                'symbol': self._symbol_for(self._neuron_type_of(data, idx)),
+                'pen': None, 'data': idx,
+                'brush': pg.mkBrush(red, green, blue, 200 if is_connected else 64),
             })
-            if show_nid:
-                t = pg.TextItem(str(idx), color=nid_color, anchor=(0.0, 1.0))
-                t.setPos(xi + 4, yi)
-                t.setFont(QtGui.QFont('Arial', 6))
-                pw.addItem(t)
-                self._pg_items.append(t)
+            if self._net_show_nid:
+                label = pg.TextItem(str(idx), color=view.fg_muted, anchor=(0.0, 1.0))
+                label.setPos(x + 4, y)
+                label.setFont(QtGui.QFont('Arial', 6))
+                self._plot_win.addItem(label)
+                self._pg_items.append(label)
+        return spots
 
-        if fn is not None and 0 <= fn < data.n_neurons:
-            ntype  = (data.neuron_type[fn]
-                      if data.neuron_type is not None else None)
-            symbol = self._symbol_for(ntype)
+    def _highlight_neuron_spots(self, data, view: NetworkView) -> list:
+        """Larger outlined spots: orange for a focused neuron, orange/blue for a pair."""
+        highlights = []
+        if view.focused_neuron is not None:
+            highlights.append((view.focused_neuron, (255, 111, 0)))
+        if view.focused_pair is not None:
+            highlights.append((view.focused_pair[0], (255, 111, 0)))
+            highlights.append((view.focused_pair[1], (30, 136, 229)))
+
+        pen = pg.mkPen('white' if view.dark else 'black', width=2)
+        spots = []
+        for idx, rgb in highlights:
+            if not (0 <= idx < data.n_neurons):
+                continue
             spots.append({
-                'pos': (float(x_spread[fn]), float(y_pos[fn])),
-                'size': _NSIZE_HL, 'symbol': symbol,
-                'pen': pg.mkPen(highlight_pen, width=2),
-                'brush': pg.mkBrush(255, 111, 0, 255),
-                'data': fn,
+                'pos': (float(view.x[idx]), float(view.y[idx])),
+                'size': self._NEURON_SIZE_HL,
+                'symbol': self._symbol_for(self._neuron_type_of(data, idx)),
+                'pen': pen, 'brush': pg.mkBrush(*rgb, 255), 'data': idx,
             })
+        return spots
 
-        for nid, rgb in ([(fp[0], (255,111,0)), (fp[1], (30,136,229))]
-                         if fp is not None else []):
-            if 0 <= nid < data.n_neurons:
-                ntype  = (data.neuron_type[nid]
-                          if data.neuron_type is not None else None)
-                symbol = self._symbol_for(ntype)
-                spots.append({
-                    'pos': (float(x_spread[nid]), float(y_pos[nid])),
-                    'size': _NSIZE_HL, 'symbol': symbol,
-                    'pen': pg.mkPen(highlight_pen, width=2),
-                    'brush': pg.mkBrush(*rgb, 255),
-                    'data': nid,
-                })
-
-        sc = pg.ScatterPlotItem(pxMode=True)
-        sc.addPoints(spots)
-        sc.sigClicked.connect(self._on_neuron_scatter_click)
-        sc.setZValue(5)
-        pw.addItem(sc)
-        self._pg_items.append(sc)
+    @staticmethod
+    def _neuron_type_of(data, idx: int):
+        if data.neuron_type is None or idx >= len(data.neuron_type):
+            return None
+        return data.neuron_type[idx]
 
     def _draw_legend(self, data, enabled_cts):
         shown: set = set()
@@ -1569,9 +1506,32 @@ class NetworkPanel:
         self.draw()
         ui.root.mainview.request_render()
 
+    def neurons_on_channel(self, nid: int) -> list:
+        """Every neuron sharing *nid*'s peak channel, ascending; empty without channels."""
+        neurons = self.ui.neurons
+        channels = getattr(neurons, 'peak_channels', None) if neurons is not None else None
+        if channels is None or nid >= len(channels):
+            return []
+        return [i for i, ch in enumerate(channels) if int(ch) == int(channels[nid])]
+
+    def focus_next_on_channel(self) -> bool:
+        """Move the neuron focus to the next neuron on the same peak channel."""
+        nid = self._focused_neuron
+        if nid is None:
+            return False
+        peers = self.neurons_on_channel(nid)
+        if len(peers) < 2:
+            return False
+        self._focus_entry.setText(str(peers[(peers.index(nid) + 1) % len(peers)]))
+        self._on_neuron_focus()
+        return True
+
     def _on_plot_nav_key(self, key) -> bool:
         """Up/Down step through the visible edges (as drawn), navigating each in turn.
-        Position is derived from the current pair, so it survives the redraw."""
+        Position is derived from the current pair, so it survives the redraw.
+        Enter cycles the focused neuron's channel-mates instead."""
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return self.focus_next_on_channel()
         edges = self._nav_edges
         if not edges:
             return False
@@ -1721,9 +1681,8 @@ class NetworkPanel:
             w = item.widget() if item else None
             if w is not None:
                 inner = w.layout()
-                if isinstance(inner, (FlowLayout, _FlowLayout)):
-                    if hasattr(inner, 'clear_widgets'):
-                        inner.clear_widgets()
+                if isinstance(inner, FlowLayout):
+                    inner.clear_widgets()
                 w.setParent(None)
         self._net_grp_flow = None
         self._net_grp_flow_lay = None
@@ -1772,9 +1731,8 @@ class NetworkPanel:
             toggle_btn = QPushButton(f'{arrow_lbl} Special:')
             toggle_btn.setFlat(True)
             toggle_btn.setStyleSheet(f'color: #666; font-size: {small_font_pt()}pt; text-align: left;')
-            def _toggle_special(_btn=toggle_btn):
+            def _toggle_special(_checked=False):   # clicked() passes checked; the rebuild relabels
                 self._net_special_collapsed = not self._net_special_collapsed
-                _btn.setText(('▸' if self._net_special_collapsed else '▾') + ' Special:')
                 self.refresh_group_buttons()
             toggle_btn.clicked.connect(_toggle_special)
             flow_lay.addWidget(toggle_btn)
@@ -1949,6 +1907,7 @@ class NetworkPanel:
         self._focus_info_label.setText('')
         self._update_pair_focus_info(pair, pair_exists)
         ui.refresh_lists()
+        ui.root.pairs_view.pair_selection._select_pair_in_list(pair)
         self.draw()
         ui.root.mainview.request_render()
 
@@ -2004,13 +1963,11 @@ class NetworkPanel:
         return np.stack([x, y], axis=1), peak_ch
 
     def _shank_label(self, idx: int) -> str:
+        """The neuron's shank number, falling back to its index when unknown."""
         shank_ids = getattr(self.ui.neurons, 'shank_ids', None)
-        if shank_ids is not None:
-            try:
-                return str(int(shank_ids[idx]))
-            except Exception:
-                pass
-        return str(idx)
+        if shank_ids is None or idx >= len(shank_ids):
+            return str(idx)
+        return str(int(shank_ids[idx]))
 
     def _pair_label(self, inds) -> str:
         return f'{self._shank_label(inds[0])}→{self._shank_label(inds[1])}'

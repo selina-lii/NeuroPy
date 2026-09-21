@@ -1,0 +1,42 @@
+{
+ "ch0_sh0": {
+  "items": 985,
+  "n_entries_total": 960,
+  "n_neurons": 140,
+  "n_pair_entries": 960,
+  "nav_edges": 960,
+  "peak_channels_sum": 15667,
+  "pos_sum": 161187.5,
+  "session_label": ""
+ },
+ "ch0_sh1": {
+  "items": 807,
+  "n_entries_total": 960,
+  "n_neurons": 140,
+  "n_pair_entries": 960,
+  "nav_edges": 782,
+  "peak_channels_sum": 15667,
+  "pos_sum": 161187.5,
+  "session_label": ""
+ },
+ "ch1_sh0": {
+  "items": 965,
+  "n_entries_total": 960,
+  "n_neurons": 140,
+  "n_pair_entries": 960,
+  "nav_edges": 940,
+  "peak_channels_sum": 15667,
+  "pos_sum": 161187.5,
+  "session_label": ""
+ },
+ "ch1_sh1": {
+  "items": 807,
+  "n_entries_total": 960,
+  "n_neurons": 140,
+  "n_pair_entries": 960,
+  "nav_edges": 782,
+  "peak_channels_sum": 15667,
+  "pos_sum": 161187.5,
+  "session_label": ""
+ }
+}
