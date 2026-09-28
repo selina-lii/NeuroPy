@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+import re
 
 import numpy as np
+import pandas as pd
 
 from neuropy.analyses.utils import JsonSavable
+from neuropy.core.intervals import IntervalOp
 from neuropy.core.neurons import NO_TAG, is_labelled
 
 SCOPE_ALL = 'all'
@@ -15,10 +18,24 @@ NORMALIZERS = ('', 'zscore', 'log10', 'rank')
 
 FIRING_RATE = 'firing_rate'   # not a metadata column: derived from the spike trains
 
+STABLE_TAG = 'stable'         # read from the recording at load, never saved
 TAG_VALUE_PREFIX = 'tag:'     # source 'tag:<name>' reads Neurons.tag_values[<name>]
+
 
 CUT_QUANTILE = 'quantile'     # cuts follow percentiles of the data
 CUT_ABSOLUTE = 'absolute'     # cuts are the values themselves, edited on the slider
+
+
+ACTIVITY_PREFIX = 'activity:'   # 'activity:<fn>:(seg,…),(seg,…)'; a segment is a custom CCG or an epoch label
+
+
+def activity_source(fn: str, groups: list) -> str:
+    return f"{ACTIVITY_PREFIX}{fn}:" + ','.join(f"({','.join(g)})" for g in groups)
+
+
+def parse_activity(source: str) -> tuple:
+    fn, groups = source[len(ACTIVITY_PREFIX):].split(':', 1)
+    return fn, [[s.strip() for s in g.split(',') if s.strip()] for g in re.findall(r'\(([^)]*)\)', groups)]
 
 
 def tag_value_source(name: str) -> str:
@@ -153,11 +170,13 @@ class NeuronTagSpec(JsonSavable):
                  quantiles: list = None, labels: list = None,
                  base_rgb: tuple = (33, 89, 180), enabled: bool = True,
                  enabled_labels: dict = None, cached_edges: list = None,
-                 cut_mode: str = CUT_QUANTILE, cutoffs: list = None):
+                 cut_mode: str = CUT_QUANTILE, cutoffs: list = None, cell_type: str = '',
+                 label_colors: dict = None, log_axis: bool = False):
         JsonSavable.__init__(self)
         self.prefix = prefix
         self.source = source
         self.segment = segment          # '' = whole session; else a custom segment's rates
+        self.cell_type = cell_type
         self.normalization = normalization
         self.scope = scope
         self.quantiles = list(quantiles or [0.5])
@@ -168,6 +187,8 @@ class NeuronTagSpec(JsonSavable):
         self.enabled = enabled
         self.enabled_labels = dict(enabled_labels or {})
         self.cached_edges = list(cached_edges) if cached_edges else []
+        self.label_colors = dict(label_colors or {})   # user-picked; unpicked labels follow the ramp
+        self.log_axis = log_axis
 
     @property
     def tag_names(self) -> list:
@@ -179,7 +200,8 @@ class NeuronTagSpec(JsonSavable):
     def colors(self) -> dict:
         """Label -> rgb, darkest first, lifting toward white across the bins."""
         n = len(self.labels)
-        return {label: _ramp(self.base_rgb, i, n) for i, label in enumerate(self.labels)}
+        return {label: tuple(self.label_colors.get(label, _ramp(self.base_rgb, i, n)))
+                for i, label in enumerate(self.labels)}
 
     @property
     def is_absolute(self) -> bool:
@@ -188,7 +210,7 @@ class NeuronTagSpec(JsonSavable):
 
     def definition_key(self) -> tuple:
         """What the cached edges depend on — a change here invalidates them."""
-        return (self.source, self.segment, self.normalization, self.scope,
+        return (self.source, self.segment, self.cell_type, self.normalization, self.scope,
                 self.cut_mode, tuple(self.quantiles), tuple(self.cutoffs))
 
 
@@ -209,6 +231,8 @@ class NeuronTagSet(JsonSavable):
         self.cd = None
         self._save_dir = save_dir
         self._assign_cache: dict = {}
+        self._values_cache: dict = {}
+        self._missing: dict = {}   # segment -> sessions lacking it, since the last take_missing()
 
     def bind(self, cd) -> None:
         self.cd = cd
@@ -230,19 +254,6 @@ class NeuronTagSet(JsonSavable):
 
     # ── values ──────────────────────────────────────────────────────────
 
-    def available_sources(self, key) -> list:
-        """Numeric per-neuron columns a tag can read for *key*'s session."""
-        neurons = self.cd.nd.neurons_for(key.nd())
-        found = [FIRING_RATE]
-        for name, values in (neurons.metadata or {}).items():
-            arr = np.asarray(values)
-            if arr.ndim == 1 and arr.dtype.kind in 'iuf' and len(arr) == neurons.n_neurons:
-                found.append(name)
-        for name in neurons.tag_values:
-            if self.tag_values_numeric(name, key) is not None:
-                found.append(tag_value_source(name))
-        return found
-
     def tag_values_numeric(self, name: str, key) -> np.ndarray | None:
         """One tag's stored values as floats, or None when they are not scalar numbers."""
         neurons = self.cd.nd.neurons_for(key.nd())
@@ -257,7 +268,19 @@ class NeuronTagSet(JsonSavable):
         return None if np.all(np.isnan(out)) else out
 
     def values_for(self, spec: NeuronTagSpec, key) -> np.ndarray | None:
-        """The raw per-neuron values *spec* reads, or None when this session lacks them."""
+        """The raw per-neuron values *spec* reads, NaN outside its cell type; None when this session lacks them."""
+        ck = (spec.source, spec.segment, key.nd())
+        if ck not in self._values_cache:
+            self._values_cache[ck] = self._source_values(spec, key)
+        values = self._values_cache[ck]
+        if values is None or not spec.cell_type:
+            return values
+        types = np.asarray(self.cd.nd.neurons_for(key.nd()).neuron_type)
+        return np.where(types == spec.cell_type, values, np.nan)
+
+    def _source_values(self, spec: NeuronTagSpec, key) -> np.ndarray | None:
+        if spec.source.startswith(ACTIVITY_PREFIX):
+            return self.activity_level(spec.source, key)
         neurons = self.cd.nd.neurons_for(key.nd())
         if spec.source.startswith(TAG_VALUE_PREFIX):
             return self.tag_values_numeric(spec.source[len(TAG_VALUE_PREFIX):], key)
@@ -272,6 +295,44 @@ class NeuronTagSet(JsonSavable):
             return None
         arr = np.asarray(values)
         return arr.astype(float) if arr.dtype.kind in 'iuf' else None
+
+    def activity_level(self, source: str, key) -> np.ndarray | None:
+        """Per-neuron rate in one segment group (frate_during), or group A's rate over group B's (frate_ratio)."""
+        fn, groups = parse_activity(source)
+        found = {i: self._group_intervals(key, g) for i, g in enumerate(groups) if g != ['none']}
+        if any(iv is None for iv in found.values()):
+            return None
+        others = IntervalOp.merge([iv for ivs in found.values() for iv in ivs])
+        rates = [self._rate(key, found[i] if i in found else
+                            IntervalOp.complement(others, *self.cd.nd.session_bounds(key.nd())))
+                 for i in range(len(groups))]
+        if fn == 'frate_during':
+            return rates[0]
+        return np.divide(rates[0], rates[1], out=np.full(len(rates[0]), np.nan), where=rates[1] > 0)
+
+    def _group_intervals(self, key, names: list) -> list | None:
+        out = []
+        for name in names:
+            iv = self.cd.segment_intervals(key, name)
+            if iv is None:
+                self._missing.setdefault(name, set()).add(str(key.session))
+                return None
+            out += iv
+        return IntervalOp.merge(out)
+
+    def _rate(self, key, intervals: list) -> np.ndarray:
+        trains = self.cd.nd.neurons_for(key.nd()).spiketrains
+        dur = sum(b - a for a, b in intervals)
+        if dur <= 0:
+            return np.full(len(trains), np.nan)
+        starts, stops = np.array(intervals, dtype=float).T
+        return np.array([np.sum(np.searchsorted(st, stops) - np.searchsorted(st, starts))
+                         for st in trains], dtype=float) / dur
+
+    def take_missing(self) -> dict:
+        """Segments some session lacked while computing values, then forget them."""
+        missing, self._missing = self._missing, {}
+        return missing
 
     def pooled_values(self, spec: NeuronTagSpec, key=None) -> np.ndarray:
         """Values for *spec*: one session when *key* is given, else every session pooled.
@@ -315,6 +376,10 @@ class NeuronTagSet(JsonSavable):
         assigned = labels_from_cutoffs(values, self.edges_for(spec, key), spec.labels)
         return [int(np.sum(assigned == label)) for label in spec.labels]
 
+    def clear_values(self) -> None:
+        self._values_cache.clear()
+        self._assign_cache.clear()
+
     def invalidate(self, spec: NeuronTagSpec) -> None:
         """Drop cached edges and assignments — call after any change to the spec."""
         spec.cached_edges = []
@@ -323,11 +388,12 @@ class NeuronTagSet(JsonSavable):
     # ── assignment ──────────────────────────────────────────────────────
 
     def assign(self, spec: NeuronTagSpec, key) -> dict:
-        """neuron index -> label, or {} when this session cannot supply the source."""
+        """neuron id -> label, or {} when this session cannot supply the source."""
         labels = self.assign_array(spec, key)
         if labels is None:
             return {}
-        return {i: label for i, label in enumerate(labels) if is_labelled(label)}
+        ids = self.cd.nd.neurons_for(key.nd()).neuron_ids   # ids are not positions
+        return {int(nid): label for nid, label in zip(ids, labels) if is_labelled(label)}
 
     def assign_array(self, spec: NeuronTagSpec, key) -> np.ndarray | None:
         """One session's labels as a per-neuron array, or None when the source is missing."""
@@ -341,25 +407,35 @@ class NeuronTagSet(JsonSavable):
     def apply(self, spec: NeuronTagSpec, key=None) -> int:
         """Write *spec*'s labels into Neurons.tags; one session when *key* is given.
 
-        Returns the number of sessions written.
+        Returns the sessions written.
         """
         keys = [key] if key is not None else self.cd.nd.session_keys
-        labels = {}
+        labels, values = {}, {}
         for nd_key in keys:
             assigned = self.assign_array(spec, nd_key)
             if assigned is not None:
                 labels[nd_key] = list(assigned)
+                values[nd_key] = self.values_for(spec, nd_key).tolist()
         if labels:
-            self.cd.nd.tag_neurons(spec.prefix, labels, strict=False,
+            own = tag_value_source(spec.prefix)
+            self._values_cache = {k: v for k, v in self._values_cache.items() if k[0] != own}
+            self.cd.nd.tag_neurons(spec.prefix, labels, values, strict=False,
                                    replace=key is None)
-        return len(labels)
+        return [str(k.session) for k in labels]
 
-    def neuron_rgb(self, key, neuron: int) -> list:
-        """Gradient dots for one neuron: one per enabled tag that covers it.
+    def preview(self, spec: NeuronTagSpec, key=None) -> pd.DataFrame:
+        """What apply would write, as tag_table rows, without writing."""
+        rows = []
+        for nd_key in ([key] if key is not None else self.cd.nd.session_keys):
+            labels = self.assign_array(spec, nd_key)
+            if labels is not None:
+                rows += [(str(nd_key.session), int(nid), lab, val) for nid, lab, val in
+                         zip(self.cd.nd.neurons_for(nd_key).neuron_ids, labels,
+                             self.values_for(spec, nd_key)) if is_labelled(lab)]
+        return pd.DataFrame(rows, columns=['session', 'neuron_id', 'label', 'value'])
 
-        Memoized per (spec definition, session): a list rebuild asks this once per
-        row, and each assign is a whole-session computation.
-        """
+    def neuron_labels(self, key, neuron: int) -> list:
+        """``[(spec, label)]`` of every enabled tag covering one neuron, memoized per spec and session."""
         out = []
         for spec in self.specs.values():
             if not spec.enabled:
@@ -369,8 +445,17 @@ class NeuronTagSet(JsonSavable):
                 self._assign_cache[ck] = self.assign(spec, key)
             label = self._assign_cache[ck].get(neuron)
             if label is not None and spec.label_enabled(label):
-                out.append(spec.colors()[label])
+                out.append((spec, label))
         return out
+
+    def neuron_rgb(self, key, neuron: int) -> list:
+        """Gradient dots for one neuron: one per enabled tag that covers it."""
+        return [spec.colors()[label] for spec, label in self.neuron_labels(key, neuron)]
+
+    def neuron_words(self, key, neuron: int) -> list:
+        """``[(word, rgb)]`` naming each enabled tag covering one neuron, e.g. ``NREM_active``."""
+        return [(f"{spec.prefix}_{label}", spec.colors()[label])
+                for spec, label in self.neuron_labels(key, neuron)]
 
     def counts(self, spec: NeuronTagSpec, key) -> dict:
         """How many neurons fall in each label — what the manage page reports."""

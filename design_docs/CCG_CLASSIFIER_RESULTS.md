@@ -1,6 +1,6 @@
 # CCG classifier — first pass results (2026-08-16)
 
-Built per `CCG_CLASSIFIER_ML.md`. Code in `neuropy/classifier/`, UI at
+Code in `neuropy/classifier/`, UI at
 Modules ▸ Classify ▸ Run classifier.
 
 ## Data

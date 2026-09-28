@@ -11,7 +11,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QApplication,
     QProgressBar, QProgressDialog, QMessageBox, QFileDialog, QTabWidget, QPushButton,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QInputDialog,
     QStackedWidget,
 )
 from pyqtgraph.Qt.QtGui import QKeySequence, QCloseEvent, QAction, QShortcut
@@ -22,9 +22,9 @@ from neuropy.ui.pair_selection_panel import PairSelectionPanelContainer
 from neuropy.ui.ui_common import AREA_RGB, UITheme, qt_dark_mode
 from neuropy.ui.utils import GroupHotkeysBar, Tunable
 from neuropy.ui.dialogs import (
-    QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog,
+    QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog, ExtendSaveDialog,
 )
-from neuropy.ui.stats_tests import StatsTestPanel
+from neuropy.ui.stats_tests_frontend import StatsTestPanel
 from neuropy.ui.jitter_ui import JitterManager
 from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanel
 from neuropy.ui.menubar import ReviewMenuBar, IndexBar
@@ -112,6 +112,8 @@ class UIStates(JsonSavable):
         self.stacked_transposed = False
         self.sig_chips: dict = {}         # BaselineCSSection chip name -> checked
         self.extend_rows: list = []       # CorrelogramSection extend views
+        self.active_extend = ''           # stored extend set the rows read from
+        self.slider_filters: dict = {}    # TimeSliderBackend filter_checks + per_theme_label_state
 
     def __setstate__(self, state: dict) -> None:
         """settings is one nested object, not a dict of them — rebuild it here."""
@@ -278,11 +280,6 @@ class CCGReviewUI(QMainWindow):
         else:
             key = cd.find(key if isinstance(key, str) else key.session)
 
-        # Bootstrap: nav (hence self.cd) doesn't exist yet, so probe the local cd directly.
-        check = cd.ccg_for(key)
-        if check is None or check.ccg is None or check.ccg.ndim < 4:
-            cd.get_ccg(key)
-
         self.theme = UITheme.from_dark(qt_dark_mode())
 
         self.nav = AppState(cd, key)
@@ -315,6 +312,8 @@ class CCGReviewUI(QMainWindow):
         install_neuron_tags(self)
         self._bind_shortcuts()
 
+        for attr in list(self.ui_states.collapsed_panels):
+            self._set_panel_visible(attr, False)
         QTimer.singleShot(100, self._initial_draw)
 
     @property
@@ -360,7 +359,6 @@ class CCGReviewUI(QMainWindow):
 
         # Time slider (above main panel per spec)
         self.time_slider = TimeSliderPanel(self.nav, self.cd)
-        self.time_slider.save_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, parent=self))
         self.time_slider.load_requested.connect(lambda: CustomCCGManageDialog.show(self.custom_mgr, self.time_slider, select_mode=True, parent=self))
         self.time_slider.queue_ccg_requested.connect(self._on_queue_ccg)
         time_slider_scroll = QScrollArea()
@@ -401,6 +399,8 @@ class CCGReviewUI(QMainWindow):
         self.mainview = CorrelogramPanel(self.nav)
         self.mainview.set_jitter_mgr(self.jitter_mgr)
         self.mainview._theme_fn = lambda: self.theme
+        self.mainview.corr_section.extend_save_requested.connect(self._on_extend_save)
+        self.mainview.corr_section.extend_load_requested.connect(self._on_extend_load)
         self.jitter_mgr.status_changed.connect(
             lambda text: self.mainview.jitter_section.set_running(bool(text)))
         self.center_stack = QStackedWidget()
@@ -466,7 +466,6 @@ class CCGReviewUI(QMainWindow):
         else:
             nd = self._nd_by_project.get(project_dir)
             cd = CCGDataset(self.cd.conf.copy(name=config_name), nd, header=header)
-            cd.load()
         self._adopt_project(cd)
         print(f"[CCGReviewUI] project → {project_dir} (config={config_name})",
               flush=True)
@@ -488,6 +487,7 @@ class CCGReviewUI(QMainWindow):
             self.nav.set_key(tk)   # before any refresh: the old key names no session in new_cd
 
         self.nav.reset_selection_for_project(new_cd)
+        install_neuron_tags(self)
         os.makedirs(new_cd.custom_dir, exist_ok=True)
         self.ui_states.project = self._project_dir
         self.ui_states.save()
@@ -581,6 +581,7 @@ class CCGReviewUI(QMainWindow):
             self.left_stack.setCurrentWidget(self.pairs_view)
             self.center_stack.setCurrentWidget(self.mainview)
             self.left_title.setText("Pair Selection")
+            self.pairs_view.pair_selection.refresh_lists()   # neuron selection edits gray pairs
         self.hotkeys_bar.refresh()
 
     def _apply_min_font_size(self, size: int) -> None:
@@ -700,8 +701,6 @@ class CCGReviewUI(QMainWindow):
     def _initial_draw(self):
         print(f"[CCGReviewUI] ccg_ui={__file__}", flush=True)
         try:
-            for attr in list(self.ui_states.collapsed_panels):
-                self._set_panel_visible(attr, False)
             self.pairs_view._autoload_session_latest(restore_groups=True)
             self.nav.apply_sel_for_key(self.nav.key)
             self.pairs_view.pair_selection.refresh_lists()
@@ -720,6 +719,9 @@ class CCGReviewUI(QMainWindow):
                 self.nav.toggle_stacked_transposed()
             self.mainview.cs_section.restore_chip_state(s.sig_chips)
             self.mainview.corr_section.restore_extend_state(s.extend_rows)
+            self.nav.active_extend = getattr(s, 'active_extend', '')
+            self.mainview.corr_section.set_extend_source(self.nav.active_extend)
+            self.time_slider.restore_filters(s.slider_filters)
             if s.splitter_sizes:
                 self._splitter.setSizes(s.splitter_sizes)
             self.mainview.request_render()
@@ -759,8 +761,37 @@ class CCGReviewUI(QMainWindow):
             if self.time_slider is not None:
                 self.time_slider._status_lbl.setText("Nothing queued (check scope/session)")
 
+    def _on_extend_save(self, window_ms: float, bin_ms: float):
+        n = ExtendSaveDialog.run(self.nav, window_ms, bin_ms, self)
+        if n is None:
+            return
+        if self.time_slider is not None:
+            self.time_slider._status_lbl.setText(
+                f"Queued {n} extend task(s)" if n else "Nothing queued")
+
+    def _on_extend_load(self):
+        """Pick a stored extend set; extend rows then read it instead of recomputing."""
+        rows = self.cd.saved_extends()
+        if not rows:
+            QMessageBox.information(self, "Extend CCG", "No stored extend CCGs found.")
+            return
+        names = sorted({r[0] for r in rows})
+        summary = {n: sorted({f"{r[2]:g}ms/{r[3]:g}ms" for r in rows if r[0] == n})
+                   for n in names}
+        items = ["(none — always recompute)"] + [
+            f"{n}  [{', '.join(summary[n])}]  {len({r[1] for r in rows if r[0] == n})} session(s), "
+            f"{len({r[5] for r in rows if r[0] == n})} segment(s)"
+            for n in names]
+        cur = names.index(self.nav.active_extend) + 1 if self.nav.active_extend in names else 0
+        choice, ok = QInputDialog.getItem(self, "Load extend CCG", "Stored sets:",
+                                          items, cur, False)
+        if not ok:
+            return
+        self.nav.active_extend = '' if choice == items[0] else names[items.index(choice) - 1]
+        self.mainview.corr_section.set_extend_source(self.nav.active_extend)
+        self.mainview.request_render()
+
     def _manage_groups(self):
-        self.cd.nd.load_tags(self.cd.save_path, missing_ok=True)
         ManageGroupsDialog.show(
             self.nav.sel_data, self.pairs_view.pair_selection,
             pairs_by_conn_type_fn=self.nav._pairs_by_conn_type, parent=self)
@@ -784,6 +815,8 @@ class CCGReviewUI(QMainWindow):
         s.stacked_transposed = bool(self.nav.stacked_transposed)
         s.sig_chips = self.mainview.cs_section.chip_state()
         s.extend_rows = self.mainview.corr_section.extend_state()
+        s.active_extend = self.nav.active_extend
+        s.slider_filters = self.time_slider.backend.filter_snapshot()
         s.collapsed_panels = [a for a in self._panel_splitter_map
                               if not self._panel_target(a).isVisible()]
         s.save()   # settings / panel_sizes already live on s
@@ -838,7 +871,7 @@ class CCGReviewUI(QMainWindow):
         return data is not None and data.ccg is not None and data.ccg.ndim >= 4
 
     def _ensure_loaded(self, nd_key, resolution: str, on_loaded):
-        if self._ccg_ready(nd_key, resolution):
+        if not self.mainview.isVisible() or self._ccg_ready(nd_key, resolution):
             on_loaded()
             return
         if self._loading_thread is not None:
@@ -960,4 +993,5 @@ class CCGReviewUI(QMainWindow):
         QApplication.instance() or QApplication([])
         win = cls(cd, key) # __init__
         win.show()
+        QTimer.singleShot(0, win.activateWindow)   # macOS installs the native menu bar only on activation
         return win

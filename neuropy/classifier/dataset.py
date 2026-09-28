@@ -271,7 +271,7 @@ def build_labeled_set(cd, selections_dir: str = None, min_count: int = 60,
         ccg_hi, null_hi = (_highres_arrays(cd, key, compute_highres)
                            if highres else (None, None))
         session = str(key.session)
-        conn = key.type_label()   # same spelling scope_keys uses
+        conn = key.type_label()   # same spelling keys_in_scope uses
         for pair, labs in pairs.items():
             ref, tgt = (int(v) for v in pair.split(','))
             if ref >= ccg.shape[0] or tgt >= ccg.shape[1]:

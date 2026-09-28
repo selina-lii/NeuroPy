@@ -28,7 +28,7 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction, QPainter
 
 from neuropy.ui.ui_common import (
-    area_rgb, cell_areas, row_dots,
+    area_rgb, areas_by_id, row_dots,
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
     pair_label,
@@ -36,6 +36,7 @@ from neuropy.ui.ui_common import (
 from neuropy.ui.dialogs import (
     PairTagsDialog as PairTagsDialog,
     CreateGroupDialog as CreateGroupDialog,
+    CreateDerivedGroupDialog,
     MissingPairsDialog as MissingPairsDialog,
 )
 from neuropy.analyses.utils import JsonSavable
@@ -151,13 +152,13 @@ from neuropy.ui.ui_common import (
     is_special_group, is_separator_row,
     CollapseState, group_header_label, SelectionCommand,
 )
-from neuropy.analyses.utils import Autosave, UndoRedo
+from neuropy.analyses.utils import Autosave, UndoRedo, combo_header
 from neuropy.analyses.pair_selection_data import (
     SelectionData, GroupDataset, SelectionDataset as _SelectionDataset,
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
-    TagChip, all_groups_dropdown, has_primary_modifier, hotkey_char,
+    TagChip, all_groups_dropdown, derived_chips, has_primary_modifier, hotkey_char,
     row_chips, small_font_pt,
 )
 
@@ -274,6 +275,16 @@ class Groups(QObject, GroupDataset):
         current_pair = nav.current_pair
         if current_pair is None:
             nav.root._show_transient_banner("Select a pair before using a group hotkey")
+            return
+
+        seg_tag = nav.segment_tag_for_hotkey(key_str)
+        if seg_tag is not None:
+            # a segment-scoped tag names one (pair, segment); the session-wide lists do not move
+            p = tuple(current_pair)
+            sess, pair = ((nav.current_session_str, p) if len(p) == 2
+                          else (str(p[0]), p[1:]))   # all-session handles carry their own session
+            nav.sd.seg_groups.toggle_pair(seg_tag, sess, nav.current_segment, pair)
+            nav.chip_colors_changed.emit()
             return
 
         gname = self.group_for_hotkey(key_str)
@@ -605,7 +616,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         if should_gray(inds):
             it.setForeground(QBrush(_C_GRAY_FG))
         it.setData(_ROLE_PAIR, inds)
-        it.setData(_ROLE_CHIPS, row_chips(ui.groups, k))
+        it.setData(_ROLE_CHIPS, row_chips(ui.groups, k) + derived_chips(ui.groups, k))
         it.setData(_ROLE_AREAS, self._pair_area_rgb(k))
         return it
 
@@ -613,9 +624,9 @@ class PairSelectionPanel(QWidget, UndoRedo):
         """Region fill for the pair's two neurons, then any gradient tag dots."""
         nd_key = k.nd()
         if nd_key not in self._areas_cache:
-            self._areas_cache[nd_key] = cell_areas(self.ui.cd.nd.neurons_for(nd_key))
+            self._areas_cache[nd_key] = areas_by_id(self.ui.cd.nd.neurons_for(nd_key))
         return row_dots(self._areas_cache[nd_key], k,
-                        [i for i in (k.ref, k.tgt) if i is not None],
+                        self.ui.cd.nd.ids_at(k),
                         self.ui.root.settings.area_colors,
                         self.ui.root.neuron_tags)
 
@@ -722,7 +733,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             total_any_count = len(_all_trips)
 
             def _any_hdr(hdr_text, n, key=None):
-                exp = hdr_text in _expanded
+                exp = (key or hdr_text) in _expanded
                 hdr = f"── {hdr_text} ({n}) ──" + ("" if exp else " >>")
                 self._add_header_item(hdr, key or hdr_text)
                 return exp
@@ -770,10 +781,10 @@ class PairSelectionPanel(QWidget, UndoRedo):
                             if ckey:
                                 _ins((ckey, r, t))
             else:
-                for gname in all_gnames:
+                for gname in all_gnames + ui.groups.derived_groups():
                     trips_g = ui.groups.pairs_in_group_by_session(gname)
                     n_tag   = len(trips_g - dead)
-                    if _any_hdr(gname, n_tag):
+                    if _any_hdr(combo_header([gname]), n_tag, key=gname):
                         for row in ui.groups.iter_pairs(gname):
                             _ins(row)
 
@@ -813,6 +824,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
         ui, data = self.ui, self.data
         unsel_frac, sel_frac = self._save_scroll_positions()
         self._areas_cache.clear()
+        ui.groups.derived.clear()   # derived members follow the tags they are built from
         self.unselected_list.clear()
         self.selected_list.clear()
 
@@ -1194,6 +1206,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         grp_menu = QMenu("Group tag", menu)
         grp_menu.addAction("Create new group…",
                            lambda: CreateGroupDialog.show(ui.sel_data, self, widget))
+        grp_menu.addAction("Create group for comparison…",
+                           lambda: CreateDerivedGroupDialog(ui, widget).exec())
         if pairs:
             def _checkmark(gname):
                 return all((k.ref, k.tgt) in ui.groups.pairs_in_group(gname, k.session)
@@ -1698,8 +1712,6 @@ class PairSelectionPanelContainer(QWidget, Autosave):
             sess = str(sd._nd_key.session)
             for b in sd.selections.values():
                 for p in b.all_pairs:
-                    if len(p) != 2:   # all-session mode stores (sess, ref, tgt) in this bucket
-                        continue
                     g = sorted(ui.groups.groups_for_pair(sess, p[0], p[1]))
                     if g:
                         b.tags.setdefault(p, {})['groups'] = g
@@ -1733,8 +1745,8 @@ class PairSelectionPanelContainer(QWidget, Autosave):
         ui.root._save_ui_state()
 
     def _current_filter_state(self) -> dict:
-        ts = self.ui.root.time_slider
+        b = self.ui.root.time_slider.backend
         return {
-            'theme': ts._current_theme,
-            'labels': {str(lbl): bool(v) for lbl, v in ts._legend_toggles.items()},
+            'theme': b.current_theme,
+            'labels': {str(lbl): bool(v) for lbl, v in b.legend_toggles.items()},
         }

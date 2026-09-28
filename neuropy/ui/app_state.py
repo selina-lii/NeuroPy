@@ -14,10 +14,11 @@ from collections import defaultdict as _defaultdict
 import numpy as np
 from pyqtgraph.Qt.QtCore import QObject, Signal, QTimer
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from neuropy.analyses.ccg_transforms import NormalizeBy
 from neuropy.analyses.neurons_dataset import Key
-from neuropy.analyses.utils import _compact_json_str, JsonSavable
+from neuropy.analyses.pair_selection_data import _SelectionData
+from neuropy.analyses.utils import _compact_json_str, JsonSavable, combo_header, is_derived_group
 from neuropy.analyses.view_spec import NEURON_VIEW, PAIR_VIEW, NeuronView, PairView, ViewSpec
 from neuropy.ui.ui_common import is_special_group
 from neuropy.ui.pair_selection_panel import SelectionDataset
@@ -30,24 +31,39 @@ if TYPE_CHECKING:
 # Whole-session view == the permanent dim0[0]='all' segment (no virtual sum view any more).
 _ALL_SEGS = "all"
 ALL_PAIRS = '(all pairs)'   # stats-panel "every valid pair" group choice
+SIG_CHIP_COLOR = '#90EE90'  # default chip background when no other source supplies one
+SEG_ON_COLOR   = '#4E9A4E'  # hand-set on: darker than the p-value green it overrides
+SEG_OFF_COLOR  = '#B0B0B0'
 
 # Sentinel for the virtual "All sessions" entry in the session list
 _ALL_SESSION_MARKER = object()
 
 
 class NavField:
-    """Storage + read access for one AppState scalar."""
+    """Storage + read access for one AppState scalar; *on_display* names its DisplayConfig field."""
 
-    def __init__(self, name: str, *, coerce=None, compare: bool = True):
+    def __init__(self, name: str, *, coerce=None, compare: bool = True,
+                 on_display: str = None):
         self._name = name
         self._private = f"_{name}"
         self._sanitize = coerce
         self._compare_value = compare
+        self._on_display = on_display
+
+    def _read(self, obj):
+        return (getattr(obj.display, self._on_display) if self._on_display
+                else getattr(obj, self._private))
+
+    def _write(self, obj, value):
+        if self._on_display:
+            setattr(obj.display, self._on_display, value)
+        else:
+            setattr(obj, self._private, value)
 
     def __get__(self, obj, objtype=None):
         if obj is None:
             return self
-        return getattr(obj, self._private)
+        return self._read(obj)
 
     def __set__(self, obj, value):
         raise AttributeError(
@@ -58,16 +74,16 @@ class NavField:
         if self._sanitize is not None:
             value = self._sanitize(value)
         if self._compare_value:
-            if value == getattr(obj, self._private):
+            if value == self._read(obj):
                 return
-        setattr(obj, self._private, value)
+        self._write(obj, value)
         signal.emit(value)
 
 
 @dataclass
 class DisplayConfig(JsonSavable):
     """What the CCG panel shows and the stats backend computes from."""
-    _FLAGS = ('cs_nonneg', 'show_test_window', 'show_tail_window', 'show_p', 'show_pc')
+    _FLAGS = ('cs_nonneg', 'cs_offzero', 'show_test_window', 'show_tail_window', 'show_p', 'show_pc')
 
     norms: list = field(default_factory=list)
     same_scale_mode: str | None = None
@@ -77,6 +93,7 @@ class DisplayConfig(JsonSavable):
     tail_window: list = field(default_factory=lambda: [[None, -1e-3], [3e-3, None]])
     tail_source: str = 'bins'
     cs_nonneg: bool = False
+    cs_offzero: bool = False
     show_test_window: bool = True
     show_tail_window: bool = False
     show_p: bool = True
@@ -107,6 +124,7 @@ class AppState(QObject):
     stacked_segments_changed = Signal(object)
     cs_params_changed        = Signal(str, str)
     cs_overlay_changed       = Signal(bool)
+    chip_colors_changed      = Signal()
     display_changed          = Signal(object)   # CS/baseline toggles and lag windows
     custom_segs_changed      = Signal()
     groups_rewired           = Signal()   # sd.groups replaced → reconnect groups.changed
@@ -121,20 +139,23 @@ class AppState(QObject):
     cross_session_handles = NavField("cross_session_handles", compare=False)
     active_sig_threshold         = NavField("active_sig_threshold", coerce=float)
     active_norms         = NavField("active_norms")
-    same_scale_mode      = NavField("same_scale_mode")
+    same_scale_mode      = NavField("same_scale_mode", on_display="same_scale_mode")
     stacked_segments     = NavField("stacked_segments")
     stacked_transposed   = NavField("stacked_transposed", coerce=bool)
-    baseline_method      = NavField("baseline_method")
-    cs_metric            = NavField("cs_metric")
+    baseline_method      = NavField("baseline_method", on_display="baseline_method")
+    cs_metric            = NavField("cs_metric", on_display="cs_metric")
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
-    cs_nonneg            = NavField("cs_nonneg", coerce=bool)
-    show_test_window     = NavField("show_test_window", coerce=bool)
-    show_tail_window     = NavField("show_tail_window", coerce=bool)
-    show_p               = NavField("show_p", coerce=bool)
-    show_pc              = NavField("show_pc", coerce=bool)
+    cs_nonneg            = NavField("cs_nonneg", coerce=bool, on_display="cs_nonneg")
+    cs_offzero           = NavField("cs_offzero", coerce=bool, on_display="cs_offzero")
+    show_test_window     = NavField("show_test_window", coerce=bool, on_display="show_test_window")
+    show_tail_window     = NavField("show_tail_window", coerce=bool, on_display="show_tail_window")
+    show_p               = NavField("show_p", coerce=bool, on_display="show_p")
+    show_pc              = NavField("show_pc", coerce=bool, on_display="show_pc")
 
     max_together_pairs = Tunable(5)
-    max_ccg_queue = Tunable(200, on_change=lambda nav, v: setattr(
+    neuron_view_count = Tunable(10, on_change=lambda nav, v: hasattr(nav.root, 'neuron_view')
+                                and nav.root.neuron_view.render())   # the view is built on first visit
+    max_ccg_queue = Tunable(0, on_change=lambda nav, v: setattr(   # 0 = unrestricted
         nav.root.custom_mgr.worker._runner, '_max_queue', v))
     max_jitter_queue = Tunable(50, on_change=lambda nav, v: setattr(
         nav.root.jitter_mgr.jitter_worker._runner, '_max_queue', v))
@@ -151,19 +172,17 @@ class AppState(QObject):
         self._session_any_mode = False
         self._cross_session_handles = []
         self._all_pairs_np = np.empty((0, 2), dtype=int)
+        self._chip_color_source = None
+        self._aux_grid_cache = None
+        self._all_session_bucket = _SelectionData()
         self.set_sd(SelectionDataset(cd))
         self._active_sig_threshold = cd.conf.alpha
         self._active_norms = set()
-        self._same_scale_mode = None
+        self.display = DisplayConfig()
         self._stacked_segments = []
         self._stacked_transposed = False
-        self._baseline_method = 'conv'
-        self._cs_metric = 'STG'
         self._cs_overlay_active = False
-        self._cs_nonneg = False
-        self._show_test_window = True
-        self._show_tail_window = False
-        self._show_p = self._show_pc = True
+        self.active_extend = ''   # a stored extend set to read instead of recomputing
         self.root = None  # set by CCGReviewUI after construction
         self._views = {v.name: v(self) for v in (PairView, NeuronView)}
         self._view = PAIR_VIEW
@@ -197,7 +216,7 @@ class AppState(QObject):
 
         b = self.active_selections
         combined = b.unselected | b.selected | b.deleted
-        base = sorted(p for p in combined if len(p) == 2 and p[0] != p[1])
+        base = sorted(p for p in combined if p[0] != p[1])
         return np.array(base, dtype=int) if base else np.empty((0, 2), dtype=int)
 
     @property
@@ -233,6 +252,8 @@ class AppState(QObject):
 
     @property
     def active_selections(self):
+        if self.session_any_mode:
+            return self._all_session_bucket
         return self.sel_data.selections[self.key]
 
     @property
@@ -241,6 +262,8 @@ class AppState(QObject):
 
     def refresh_lists(self):
         self.root.pairs_view.pair_selection.refresh_lists()
+        if hasattr(self.root, 'neuron_view'):   # built on first switch to the neuron view
+            self.root.neuron_view.rebuild()
 
     def set_sd(self, sd) -> None:
         """Install a SelectionDataset, bound and rewired to this nav.
@@ -287,7 +310,10 @@ class AppState(QObject):
             self.set_active_norms(set())
 
     def set_current_pair(self, idx: int, *, source=None):
-        type(self).current_pair_idx.set(self, idx, self.pair_changed)
+        # the one write path, so a row remembered from a longer list is clamped here
+        n = len(self.all_pairs_np)
+        type(self).current_pair_idx.set(self, min(max(int(idx), 0), n - 1) if n else 0,
+                                        self.pair_changed)
 
     @property
     def view(self) -> 'ViewSpec':
@@ -351,14 +377,13 @@ class AppState(QObject):
         getattr(type(self), name).set(self, bool(value), self.display_changed)
 
     def get_display_config(self) -> 'DisplayConfig':
+        """A snapshot: the fields nav owns, plus the lag windows cd.conf owns."""
         c = self.cd.conf
-        return DisplayConfig(
-            norms=sorted(n.name for n in self.active_norms),
-            same_scale_mode=self.same_scale_mode,
-            baseline_method=self.baseline_method, cs_metric=self.cs_metric,
-            test_window=[c.min_lag, c.max_lag],
-            tail_window=[list(iv) for iv in c.tail_intervals], tail_source=c.tail_source,
-            **{f: getattr(self, f) for f in DisplayConfig._FLAGS})
+        return replace(self.display,
+                       norms=sorted(n.name for n in self.active_norms),
+                       test_window=[c.min_lag, c.max_lag],
+                       tail_window=[list(iv) for iv in c.tail_intervals],
+                       tail_source=c.tail_source)
 
     def apply_display_config(self, cfg: 'DisplayConfig'):
         """Drive every panel from one saved snapshot; panels follow their signals."""
@@ -375,8 +400,8 @@ class AppState(QObject):
         if (baseline_method == self.baseline_method
                 and cs_metric == self.cs_metric):
             return
-        self._baseline_method = baseline_method
-        self._cs_metric = cs_metric
+        self.display.baseline_method = baseline_method
+        self.display.cs_metric = cs_metric
         self.cs_params_changed.emit(baseline_method, cs_metric)
 
     def toggle_stacked_transposed(self) -> None:
@@ -399,15 +424,70 @@ class AppState(QObject):
         self._stacked_segments = []
         self.stacked_segments_changed.emit([])
 
+    def visible_segments(self) -> list:
+        """Segments on screen right now: the stacked set, else the one being viewed."""
+        return list(self.stacked_segments) or [self.current_segment]
+
+    def segment_tag_for_hotkey(self, key_str: str) -> str | None:
+        """The segment-scoped tag *key_str* triggers, or None — the session-wide path then runs."""
+        return self.sd.seg_groups.group_for_hotkey(key_str)
+
+    def set_chip_color_source(self, fn) -> None:
+        """Install a (ref, tgt, seg) -> colour str | None supplier; None restores p-value green."""
+        self._chip_color_source = fn
+        self.chip_colors_changed.emit()
+
+    def chip_color(self, ref: int, tgt: int, seg: int) -> str | None:
+        """Chip background for one pair in one segment, or None to leave the default."""
+        if self._chip_color_source is not None:
+            return self._chip_color_source(ref, tgt, seg)
+        manual = self.seg_manual_state(ref, tgt, seg)
+        if manual is not None:
+            return SEG_ON_COLOR if manual else SEG_OFF_COLOR
+        sweep = self._aux_grid(seg)
+        # an enabled p-value rule is the gate itself, so its raw/corrected choice takes effect
+        gate = (bool(sweep[0]['p_value'][1][ref, tgt]) if sweep and 'p_value' in sweep[0]
+                else self.is_significant(ref, tgt, seg))
+        if not gate:
+            return None
+        return SIG_CHIP_COLOR if sweep is None or sweep[1][ref, tgt] else SEG_OFF_COLOR
+
+    def _aux_grid(self, seg: int):
+        """``(results, on)`` of the enabled rules for one segment, cached: one sweep serves every chip."""
+        names = self.segment_names()
+        if seg >= len(names):
+            return None
+        specs = self.cd.aux_test_config.specs()
+        if not specs:
+            return None
+        seg_name = names[seg]
+        stamp = (self.key.nd(), self.data_resolution, seg_name, repr(sorted(specs.items())))
+        if self._aux_grid_cache is None or self._aux_grid_cache[0] != stamp:
+            # no overrides: seg_manual_state already outranks the rules in chip_color
+            grid = self.cd.sweep_aux_tests(self.key.change(segment=seg_name), tests=specs)
+            self._aux_grid_cache = (stamp, grid)
+        return self._aux_grid_cache[1]
+
+    def seg_manual_state(self, ref: int, tgt: int, seg: int) -> bool | None:
+        """A hand-set on/off for this pair in segment *seg*, or None when the tests decide."""
+        names = self.segment_names()
+        if seg >= len(names):
+            return None
+        return self.sd.seg_groups.pair_off(
+            self.current_session_str, names[seg], (ref, tgt))
+
     def is_significant(self, ref: int, tgt: int, seg: int) -> bool:
         data = self.ccg_data
-        if data is None:
+        names = self.segment_names()
+        if data is None or seg >= len(names):
             return False
+        # the UI list and this array's dim0 are built separately; go by label, not index
+        row = data.segment_index(names[seg])
         lb = data.conf.min_lag_bin
         ub = data.conf.max_lag_bin
         pc = data.pval_corrected
-        if pc is not None and seg < pc.shape[0] and ref < pc.shape[1] and tgt < pc.shape[2]:
-            return bool(pc[seg, ref, tgt, lb:ub].min() <= self.active_sig_threshold)
+        if pc is not None and row < pc.shape[0] and ref < pc.shape[1] and tgt < pc.shape[2]:
+            return bool(pc[row, ref, tgt, lb:ub].min() <= self.active_sig_threshold)
         return False
 
     @property
@@ -471,17 +551,6 @@ class AppState(QObject):
 
     def available_conn_types(self) -> list[str]:
         return self.cd.conf.conn_type_labels
-
-    def available_groups(self) -> list[str]:
-        gr = self.groups
-        return [ALL_PAIRS] + gr.groups + gr.special_groups()
-
-    def pairs_for_group(self, group_name: str, ptr_key) -> set:
-        """Valid (significant) pairs of a group for a ptr key; ALL_PAIRS = every valid pair."""
-        valid = self.cd.ptr[ptr_key].pair_set
-        if group_name == ALL_PAIRS:
-            return valid
-        return self.groups.pairs_in_group(group_name, ptr_key.session) & valid
 
     def clamp_segment(self):
         if self.current_segment not in self.available_segments():
@@ -659,19 +728,21 @@ class AppState(QObject):
 
         if sort_mode == 'tag':
             non_internal = [g for g in self.groups.defined_groups
-                            if not is_special_group(g)]
+                            if not is_special_group(g) and not is_derived_group(g)]
             tag_buckets = _defaultdict(list)
             untagged = []
             for inds in sorted(selected):
                 k = self.key_for_pair(inds)
                 tags = [g for g in non_internal
-                        if (k.ref, k.tgt) in self.groups.pairs_in_group(g, k.session)]
+                        if (k.ref, k.tgt) in self.groups.pairs_in_group(g, k.session)] \
+                    + self.groups.derived.groups_for_pair(str(k.session), k.ref, k.tgt)
                 if tags:
                     for t in tags:
                         tag_buckets[t].append(inds)
                 else:
                     untagged.append(inds)
-            sections = [(t, tag_buckets[t]) for t in sorted(tag_buckets)]
+            sections = [(combo_header([t]), tag_buckets[t])
+                        for t in sorted(tag_buckets, key=lambda t: (is_derived_group(t), t))]
             if untagged:
                 sections.append(('(untagged)', untagged))
             return sections

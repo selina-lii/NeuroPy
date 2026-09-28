@@ -7,8 +7,6 @@ of the panel's display toggles.
     python tests/test_network_smoke.py
 """
 from __future__ import annotations
-import argparse
-import json
 import os
 import sys
 
@@ -16,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_ccg_context_golden import open_ui   # sets the Qt offscreen env
+import suite_harness as harness
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "network_smoke.json")
@@ -56,34 +55,7 @@ def sweep(ui) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--record', action='store_true')
-    args = parser.parse_args()
-
-    _, ui = open_ui()
-    recorded = sweep(ui)
-
-    if args.record:
-        with open(GOLDEN_PATH, 'w') as fh:
-            json.dump(recorded, fh, indent=1, sort_keys=True)
-        print(f"recorded {len(recorded)} cases -> {GOLDEN_PATH}")
-        return 0
-
-    if not os.path.isfile(GOLDEN_PATH):
-        print(f"no golden file at {GOLDEN_PATH}; run with --record first")
-        return 2
-    with open(GOLDEN_PATH) as fh:
-        golden = json.load(fh)
-    problems = [f"{case}: {golden.get(case)} -> {summary}"
-                for case, summary in sorted(recorded.items())
-                if golden.get(case) != summary]
-    if problems:
-        print(f"FAIL: {len(problems)} case(s) differ")
-        for line in problems[:20]:
-            print(f"  {line}")
-        return 1
-    print(f"PASS: {len(recorded)} cases identical")
-    return 0
+    return harness.run(open_ui, sweep, GOLDEN_PATH, harness.check_json, harness.write_json)
 
 
 if __name__ == '__main__':

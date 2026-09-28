@@ -80,7 +80,7 @@ class PairView(ViewSpec):
         return Key.pair(self.nav.current_session_str, item[0], item[1])
 
     def neurons_of(self, item) -> list:
-        return [int(item[0]), int(item[1])]
+        return self.nav.cd.nd.ids_at(self.key_of(item))
 
     def row_label(self, item) -> str:
         return f"{int(item[0])} → {int(item[1])}"

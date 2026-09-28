@@ -91,6 +91,11 @@ class IntervalOp:
         return np.concatenate(keep) if keep else np.array([], dtype=spikes.dtype)
 
     @staticmethod
+    def split_name(base_name: str, i: int, n_splits: int) -> str:
+        """Zero-padded to the split count, so 2..10 sort as 02..10 rather than 10 before 2."""
+        return f"{base_name}{i + 1:0{len(str(n_splits))}d}"
+
+    @staticmethod
     def partition(t0: float, t1: float, n_splits: int, overlap_sec: float = 0.0,
                   base_name: str = '') -> list[tuple[float, float, str]]:
         """Partition [t0, t1] into n_splits overlapping chunks → [(t0, t1, name), ...]."""
@@ -104,7 +109,7 @@ class IntervalOp:
         chunk_len = stride if stride == total / n_splits else chunk_len
         return [(t0 + i * stride,
                  min(t0 + i * stride + chunk_len, t1),
-                 base_name + str(i + 1))
+                 IntervalOp.split_name(base_name, i, n_splits))
                 for i in range(n_splits)]
 
     @staticmethod
@@ -131,7 +136,8 @@ class IntervalOp:
             cuts.append(IntervalOp.time_at_effective(iv, i * step))
         chunks = []
         for i in range(n_splits):
-            chunks.append((cuts[i], cuts[i + 1], base_name + str(i + 1)))
+            chunks.append((cuts[i], cuts[i + 1],
+                           IntervalOp.split_name(base_name, i, n_splits)))
         return chunks
 
     @staticmethod

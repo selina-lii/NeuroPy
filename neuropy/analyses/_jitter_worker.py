@@ -30,8 +30,7 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
         jconf = JitterConfig(ccg=conf_eff, njitter=njitter)
 
         if segment is not None and t0 is not None and t1 is not None:
-            # Segment-specific jitter: filter spike trains to [t0, t1]
-            neurons_eff = neurons.time_slice(t_start=t0, t_stop=t1)
+            neurons_eff = neurons   # already windowed to the segment's active fragments
             ptr = types.SimpleNamespace(
                 inds=np.array([[segment, ref, tgt]]),
                 stored_by_segment=True,
@@ -57,6 +56,7 @@ def jitter_worker(queue, key, neurons, ccg_data, edge_times,
         queue.put({
             'ref': ref, 'tgt': tgt,
             'j_avg': j_avg, 'j_lo': j_lo, 'j_hi': j_hi,
+            'bands': j.percentiles.get(0),
             'j_pval': j_pval, 'j_pval_bins': j_pval_bins,
             'error': None,
         })

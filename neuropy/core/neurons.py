@@ -207,10 +207,11 @@ class Neurons(DataWriter):
             """
             if list1 is None and list2 is None:
                 return None
+            # follow the present side's own shape: a mean waveform is 1-D, per-channel is 2-D
             if list2 is None:
-                list2 = np.full((neurons.n_neurons,list1[0].shape[0],list1[0].shape[1]), np.nan)
+                list2 = np.full((neurons.n_neurons, *np.asarray(list1[0]).shape), np.nan)
             if list1 is None:
-                list1 = np.full((self.n_neurons,list2[0].shape[0],list2[0].shape[1]), np.nan)
+                list1 = np.full((self.n_neurons, *np.asarray(list2[0]).shape), np.nan)
             return np.concatenate([list1,list2])
         
         # SL: Make sure the two groups being merged are aligned. Are there better conditions?

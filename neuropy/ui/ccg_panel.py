@@ -10,15 +10,16 @@ from pyqtgraph.Qt.QtWidgets import (
     QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QScrollArea, QFrame, QLabel, QPushButton, QCheckBox,
-    QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox,
-    QComboBox, QInputDialog, QLineEdit, QSizePolicy, QMenu,
+    QRadioButton, QButtonGroup, QSpinBox,
+    QComboBox, QLineEdit, QSizePolicy, QMenu, QGridLayout,
     QToolButton, QSlider, QGroupBox, QFileDialog, QMessageBox,
 )
 from pyqtgraph.Qt.QtGui import QAction, QActionGroup
 from neuropy.analyses.ccg_transforms import NormalizeBy, CCGNorm, ConnectionStrength
 from neuropy.analyses.jitter import compute_jbsi, JitterConfig
 from neuropy.analyses import correlations
-from neuropy.analyses.ms_connectivity import Key, EranConv, _multiple_correction
+from neuropy.analyses.ms_connectivity import (Key, EranConv, _multiple_correction,
+                                              _nan_to_none)
 from neuropy.plotting.ccg import (
     RenderContext, JitterOverlay, TitleConfig, PlotStyle,
     test_window_bin_mask, test_window_span_ms, render_ccg_png,
@@ -27,11 +28,12 @@ from neuropy.plotting.ccg import (
 from neuropy.analyses.ccg_transforms import (_fill_waveform, lag_window_bins,
                                              peak_waveform_on_lag_axis)
 from neuropy.ui.ui_common import qt_dark_mode, LRUCache
+from neuropy.ui.app_state import SIG_CHIP_COLOR
 from neuropy.ui.utils import (chip_button, CycleButton, FlowLayout, CollapsibleSection,
                               ArrowChipBar, MetricInput, SliderWithInput,
-                              has_primary_modifier, small_font_pt,
+                              has_primary_modifier, small_font_pt, RangeListWidget,
                               widget_row, radio_group, set_checked_quietly,
-                              apply_plot_chrome, plot_pen)
+                              apply_plot_chrome, plot_pen, prompt_name, ShowDeferral)
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -45,10 +47,10 @@ PVAL_COLOR = '#e74c3c'
 _CHIP_STYLE = (
     "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
     "padding: 1px 6px; background: #e8e8e8; }"
-    "QPushButton[sig=true] { background: #90EE90; }"
+    f"QPushButton[sig=true] {{ background: {SIG_CHIP_COLOR}; }}"
     "QPushButton[active=true] { background: #4a7fd4; color: white; }"
     "QPushButton[active=true][sig=true] { background: #4CAF50; color: white; }"
-    "QPushButton[stacked=true] { background: #7fb87f; color: white; }"
+    "QPushButton[stacked=true] { border: 2px solid #4a7fd4; }"
     "QPushButton[selected=true] { border: 2px solid #4a7fd4; }"
 )
 
@@ -60,15 +62,17 @@ class SegmentBar(QWidget):
         super().__init__(parent)
         self.nav = nav
         self._chips: dict[int, QPushButton] = {}   # seg_idx → chip widget
-        self._selected: set[int] = set()            # multi-select, display-only
+        self._selected: list[int] = []              # multi-select, in click order
+        shown = ShowDeferral(self).wrap
         self._build()
-        nav.segment_changed.connect(self._refresh)
-        nav.stacked_segments_changed.connect(self._refresh)
+        shown(self.rebuild)()
+        for sig in (nav.segment_changed, nav.stacked_segments_changed):
+            sig.connect(shown(self._refresh))
         nav.resolution_changed.connect(self._on_lo_hi_btn_changed)
-        nav.key_changed.connect(self.rebuild)
-        nav.custom_segs_changed.connect(self.rebuild)
-        nav.pair_changed.connect(self._on_pair_sig_changed)
-        nav.sig_threshold_changed.connect(self._on_pair_sig_changed)
+        for sig in (nav.key_changed, nav.custom_segs_changed):
+            sig.connect(shown(self.rebuild))
+        for sig in (nav.pair_changed, nav.sig_threshold_changed, nav.chip_colors_changed):
+            sig.connect(shown(self._on_pair_sig_changed))
         nav.cs_overlay_changed.connect(self._on_cs_overlay_changed)
 
     def refresh_font(self):
@@ -96,9 +100,7 @@ class SegmentBar(QWidget):
         root.addLayout(widget_row(None, self._lo_hi_btn, self._cs_btn,
                                   stretch=False))
 
-        self.rebuild()
-
-    def rebuild(self):
+    def rebuild(self, *_):
         self._chip_bar.clear()
         self._chips.clear()
         self._selected.clear()
@@ -119,6 +121,8 @@ class SegmentBar(QWidget):
         btn.setStyleSheet(_CHIP_STYLE)
         btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         btn.clicked.connect(lambda _checked, i=seg_idx: self._on_chip_click(i))
+        if seg_idx:
+            btn.mouseDoubleClickEvent = lambda _e, lb=label: self._drop_chip(lb)
         btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         btn.customContextMenuRequested.connect(
             lambda pos, i=seg_idx, b=btn: self._show_chip_menu(i, b.mapToGlobal(pos)))
@@ -130,16 +134,23 @@ class SegmentBar(QWidget):
             if seg_idx in self._selected:
                 self._selected.remove(seg_idx)
             else:
-                self._selected.add(seg_idx)
+                self._selected.append(seg_idx)
             self._refresh()
         else:
-            self.nav.clear_stacked_segments()   # a plain click is a single-segment view
+            self._selected.clear()              # a plain click is a single-segment view
+            self.nav.clear_stacked_segments()
             self.nav.set_current_segment(self.nav.segment_name(seg_idx))
+
+    def _drop_chip(self, label: str):
+        """Unload from view only; the segment stays on disk."""
+        if label in self.nav.stacked_segments:
+            self.nav.toggle_stacked_segments([label])
+        self.nav.drop_segment(label)
 
     def _show_chip_menu(self, seg_idx: int, global_pos):
         nav = self.nav
         menu = QMenu(self)
-        labels = ([nav.segment_name(i) for i in sorted(self._selected)]
+        labels = ([nav.segment_name(i) for i in self._selected]
                   if self._selected else [nav.segment_name(seg_idx)])
         is_stacked = all(l in nav.stacked_segments for l in labels)
         verb = "Unstack" if is_stacked else "Stack"
@@ -161,10 +172,10 @@ class SegmentBar(QWidget):
     def _nav_step(self, step: int):
         """◀/▶ navigate to the prev/next segment (cyclic over All + real + custom)."""
         nav = self.nav
+        cur = nav.segment_index(nav.current_segment)   # may lazy-load, appending a segment
         names = nav.segment_names()
         if not names:
             return
-        cur = nav.segment_index(nav.current_segment)
         nav.set_current_segment(nav.segment_name((cur + step) % len(names)))
 
     def _refresh(self, *_):
@@ -178,11 +189,16 @@ class SegmentBar(QWidget):
         ref, tgt = (int(inds[0]), int(inds[1])) if inds is not None else (None, None)
         for idx, btn in self._chips.items():
             is_stacked = nav.segment_name(idx) in stacked
-            sig = nav.is_significant(ref, tgt, idx) if ref is not None else False
-            btn.setProperty("active",  idx == active_idx and not is_stacked)
+            color = nav.chip_color(ref, tgt, idx) if ref is not None else None
+            is_active = idx == active_idx and not is_stacked
+            btn.setProperty("active",  is_active)
             btn.setProperty("stacked", is_stacked)
             btn.setProperty("selected", idx in self._selected)
-            btn.setProperty("sig",     sig)
+            btn.setProperty("sig",     color is not None)
+            # stacking is a border only; the on/off colour stays visible underneath
+            outline = "border: 2px solid #4a7fd4; " if is_stacked or idx in self._selected else ""
+            btn.setStyleSheet(_CHIP_STYLE if color is None or is_active
+                              else _CHIP_STYLE + f"QPushButton {{ background: {color}; {outline}}}")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
@@ -207,6 +223,7 @@ class NormSection(CollapsibleSection):
 
     norms_changed   = Signal(object)   # set[NormalizeBy] → nav.set_active_norms
     scale_changed   = Signal(object)   # str | None      → nav.set_same_scale_mode
+    deconv_changed  = Signal()
     apply_requested = Signal()
 
     _NORM_OPTIONS = [
@@ -250,8 +267,17 @@ class NormSection(CollapsibleSection):
                 lambda checked, m=mode: self.scale_changed.emit(m if checked else None))
             self._scale_btns[mode] = button
             scale_layout.addWidget(button)
+        deconvs = QWidget()
+        deconvs.setStyleSheet('QWidget { border: none; }')
+        deconv_layout = FlowLayout(deconvs)
+        self.deconv_ref_btn = chip_button("Deconvolve ref", checkable=True)
+        self.deconv_tgt_btn = chip_button("Deconvolve tgt", checkable=True)
+        for button in (self.deconv_ref_btn, self.deconv_tgt_btn):
+            button.toggled.connect(lambda _: self.deconv_changed.emit())
+            deconv_layout.addWidget(button)
         self.body_layout.addWidget(chips)
         self.body_layout.addWidget(scales)
+        self.body_layout.addWidget(deconvs)
 
         apply_btn = chip_button("Apply to data…", checkable=False)
         apply_btn.clicked.connect(self.apply_requested)
@@ -273,52 +299,14 @@ class NormSection(CollapsibleSection):
             set_checked_quietly(button, mode == scale_mode)
 
 
-class TailRow(QWidget):
-    """One tail interval in ms; blank or ±inf means the window edge."""
-
-    changed = Signal()
-    add_requested = Signal()
-    delete_requested = Signal(object)   # self
-
-    def __init__(self, start_ms, end_ms, deletable: bool, parent=None):
-        super().__init__(parent)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.start = QLineEdit('' if start_ms is None else f"{start_ms:g}")
-        self.end = QLineEdit('' if end_ms is None else f"{end_ms:g}")
-        for box in (self.start, self.end):
-            box.setFixedWidth(44)
-            box.setPlaceholderText("inf")
-            box.editingFinished.connect(self.changed)
-        for w in (QLabel("Tail:"), self.start, QLabel("–"), self.end, QLabel("ms")):
-            row.addWidget(w)
-        self.add_btn = chip_button("+")
-        self.add_btn.clicked.connect(self.add_requested)
-        row.addWidget(self.add_btn)
-        if deletable:
-            del_btn = chip_button("−")
-            del_btn.clicked.connect(lambda: self.delete_requested.emit(self))
-            row.addWidget(del_btn)
-        row.addStretch()
-
-    @property
-    def interval(self) -> tuple:
-        """(start, end) in seconds, None where the bound is open."""
-        def parse(box):
-            try:
-                v = float(box.text())
-            except ValueError:
-                return None
-            return None if np.isinf(v) else v / 1000.0
-        return parse(self.start), parse(self.end)
-
-
 class ExtendRow(QWidget):
     """One extend view: enable toggle, window + bin size, and add/delete."""
 
     changed = Signal()
     add_requested = Signal()
     delete_requested = Signal(object)   # self
+    save_requested = Signal(object)     # self
+    load_requested = Signal()
 
     def __init__(self, make_spin, deletable: bool, parent=None):
         super().__init__(parent)
@@ -337,10 +325,19 @@ class ExtendRow(QWidget):
         self.add_btn = chip_button("+")
         self.add_btn.clicked.connect(self.add_requested)
         row.addWidget(self.add_btn)
+        save_btn = chip_button("💾")
+        save_btn.setToolTip("Compute and store this extend for every pair in every session")
+        save_btn.clicked.connect(lambda: self.save_requested.emit(self))
+        row.addWidget(save_btn)
         if deletable:
             del_btn = chip_button("−")
             del_btn.clicked.connect(lambda: self.delete_requested.emit(self))
             row.addWidget(del_btn)
+        else:
+            load_btn = chip_button("📂")   # the first row has no delete, so its slot takes load
+            load_btn.setToolTip("Load a stored extend CCG")
+            load_btn.clicked.connect(self.load_requested)
+            row.addWidget(load_btn)
         row.addStretch()
 
     @property
@@ -367,6 +364,8 @@ class ExtendRow(QWidget):
 class CorrelogramSection(CollapsibleSection):
 
     style_changed = Signal()
+    extend_save_requested = Signal(float, float)   # window_ms, bin_ms
+    extend_load_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__("Correlogram", parent=parent)
@@ -376,11 +375,11 @@ class CorrelogramSection(CollapsibleSection):
         self.body_layout.addLayout(self._trace_row())
         self.body_layout.addLayout(self._scale_row())
         self.body_layout.addLayout(self._extend_rows_box())
-        self.jitter_line_btn = CycleButton("jitter", start_hidden=True)
+        # visible by default: a finished jitter run should appear without another click
+        self.jitter_line_btn = CycleButton("jitter")
         self.body_layout.addLayout(widget_row(self.jitter_line_btn))
         for btn in (self.ccg_btn, self.baseline_btn, self.ref_btn, self.tgt_btn,
-                    self.ref_wf_btn, self.autoscale_btn, self.deconv_ref_btn,
-                    self.deconv_tgt_btn, self.jitter_line_btn):
+                    self.ref_wf_btn, self.autoscale_btn, self.jitter_line_btn):
             btn.clicked.connect(self.style_changed)
 
     def _scale_entry(self) -> 'SliderWithInput':
@@ -403,15 +402,18 @@ class CorrelogramSection(CollapsibleSection):
         self.autoscale_btn = chip_button("Autoscale", checkable=True)
         self._ref_scale_widget = self._scale_entry()
         self._tgt_scale_widget = self._scale_entry()
-        self.deconv_ref_btn = chip_button("ref", checkable=True)
-        self.deconv_tgt_btn = chip_button("tgt", checkable=True)
         self.wf_pad_slider = SliderWithInput(0, 400, 5, scale=0.01)
-        self.wf_pad_slider.value_changed.connect(lambda _: self.style_changed.emit())
+        self.wf_span_slider = SliderWithInput(5, 400, 100, scale=0.01)
+        self.wf_flip_btn = chip_button("±", checkable=True)
+        self.wf_flip_btn.setToolTip("Flip the waveform vertically")
+        for w in (self.wf_pad_slider, self.wf_span_slider):
+            w.value_changed.connect(lambda _: self.style_changed.emit())
+        self.wf_flip_btn.toggled.connect(lambda _: self.style_changed.emit())
         return widget_row(self.autoscale_btn,
                           "ref:", self._ref_scale_widget,
                           "tgt:", self._tgt_scale_widget, None,
-                          "Deconvolve", self.deconv_ref_btn, self.deconv_tgt_btn,
-                          "wf pad:", self.wf_pad_slider)
+                          "wf pad:", self.wf_pad_slider,
+                          "span:", self.wf_span_slider, self.wf_flip_btn)
 
     def _extend_rows_box(self) -> QVBoxLayout:
         self._extend_rows: list = []
@@ -419,7 +421,13 @@ class CorrelogramSection(CollapsibleSection):
         self._extend_box = QVBoxLayout()
         self._extend_box.setContentsMargins(0, 0, 0, 0)
         self._add_extend_row()
+        self._extend_source_lbl = QLabel("")
+        self._extend_source_lbl.setStyleSheet("color: #888;")
+        self._extend_box.addWidget(self._extend_source_lbl)
         return self._extend_box
+
+    def set_extend_source(self, name: str):
+        self._extend_source_lbl.setText(f"stored: {name}" if name else "")
 
     def set_sampling_rate(self, rate: float):
         """Session clock: every extend row offers its sample period as the finest bin."""
@@ -435,6 +443,9 @@ class CorrelogramSection(CollapsibleSection):
         row.changed.connect(self.style_changed)
         row.add_requested.connect(self._on_add_extend_btn)
         row.delete_requested.connect(self._on_delete_extend_btn)
+        row.save_requested.connect(
+            lambda r: self.extend_save_requested.emit(r.extend_ms, r.extend_bin_ms))
+        row.load_requested.connect(self.extend_load_requested)
         self._extend_rows.append(row)
         self._extend_box.addWidget(row)
         return row
@@ -508,7 +519,8 @@ class BaselineCSSection(CollapsibleSection):
 
     def _on_display_changed(self, _=None):
         """Mirror nav: chips and the lag windows conf owns."""
-        for btn, flag in ((self.nonneg_btn, 'cs_nonneg'), (self.p_btn, 'show_p'),
+        for btn, flag in ((self.nonneg_btn, 'cs_nonneg'), (self.offzero_btn, 'cs_offzero'),
+                          (self.p_btn, 'show_p'),
                           (self.pc_btn, 'show_pc'),
                           (self.test_window_btn, 'show_test_window'),
                           (self.tail_window_btn, 'show_tail_window')):
@@ -532,8 +544,8 @@ class BaselineCSSection(CollapsibleSection):
         self._metric_group, metric_rbs = radio_group(
             [('STG', 'STG'), ('JBSI', 'JBSI')], selected='STG', parent=self,
             on_click=lambda btn: self.metric_changed.emit(btn.text()))
-        self.win_start = MetricInput("Window:", ("ms",), default="1", input_width=44)
-        self.win_end = MetricInput("–", ("ms",), default="3", input_width=44)
+        self.win_start = MetricInput("Window:", ("ms",), default="1", input_width=44).pack()
+        self.win_end = MetricInput("–", ("ms",), default="3", input_width=44).pack()
         for box in (self.win_start, self.win_end):
             box.input.editingFinished.connect(self._on_window_input)
         layout.addLayout(widget_row(self.cs_show_check, "Measure:",
@@ -544,7 +556,11 @@ class BaselineCSSection(CollapsibleSection):
         self.nonneg_btn = chip_button("non-negative", checkable=True)
         self.nonneg_btn.toggled.connect(
             lambda on: self.nav.set_display_flag('cs_nonneg', on))
-        layout.addLayout(widget_row(self._cs_label, self.nonneg_btn))
+        self.offzero_btn = chip_button("non-sig → 0", checkable=True)
+        self.offzero_btn.setToolTip("Connection strength of off pairs counts as 0")
+        self.offzero_btn.toggled.connect(
+            lambda on: self.nav.set_display_flag('cs_offzero', on))
+        layout.addLayout(widget_row(self._cs_label, self.nonneg_btn, self.offzero_btn))
 
         self._baseline_group, self._baseline_rbs = radio_group(
             [('conv', 'Conv'), ('tailed', 'Tailed'),
@@ -577,37 +593,16 @@ class BaselineCSSection(CollapsibleSection):
         self._tail_head = widget_row("Average of:", self.tail_source_combo,
                                      None, self.tail_window_btn)
         layout.addLayout(self._tail_head)
-        self._tail_rows: list = []
-        self._tail_box = QVBoxLayout()
-        self._tail_box.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self._tail_box)
-        for start, end in self.nav.cd.conf.tail_intervals:
-            self._add_tail_row(start, end)
+        self._tail_ranges = RangeListWidget("Tail", self.nav.cd.conf.tail_intervals)
+        self._tail_ranges.changed.connect(self._on_tail_input)
+        layout.addWidget(self._tail_ranges)
         self.tail_source_combo.currentTextChanged.connect(lambda _: self._on_tail_input())
 
         self._update_pval_row_visibility('conv')
 
-    def _add_tail_row(self, start=None, end=None) -> 'TailRow':
-        row = TailRow(None if start is None else start * 1000.0,
-                      None if end is None else end * 1000.0,
-                      deletable=bool(self._tail_rows))
-        row.changed.connect(self._on_tail_input)
-        row.add_requested.connect(lambda: (self._add_tail_row(), self._on_tail_input()))
-        row.delete_requested.connect(self._on_delete_tail_btn)
-        self._tail_rows.append(row)
-        self._tail_box.addWidget(row)
-        row.setVisible(self.nav.baseline_method == 'tailed')
-        return row
-
-    def _on_delete_tail_btn(self, row: 'TailRow'):
-        self._tail_rows.remove(row)
-        row.setParent(None)
-        row.deleteLater()
-        self._on_tail_input()
-
     def _on_tail_input(self):
         """Store the typed tail intervals on the config, then redraw everything reading them."""
-        self.nav.cd.set_tail_window([r.interval for r in self._tail_rows],
+        self.nav.cd.set_tail_window(self._tail_ranges.intervals,
                                     self.tail_source_combo.currentText())
         self.nav.display_changed.emit(None)
 
@@ -632,7 +627,7 @@ class BaselineCSSection(CollapsibleSection):
         show = method in ('conv', 'jitter')
         self.p_btn.setVisible(show)
         self.pc_btn.setVisible(show)
-        for w in (self.tail_window_btn, self.tail_source_combo, *self._tail_rows):
+        for w in (self.tail_window_btn, self.tail_source_combo, self._tail_ranges):
             w.setVisible(method == 'tailed')
 
     def set_jitter_baseline_enabled(self, enabled: bool):
@@ -776,11 +771,9 @@ class JitterSection(CollapsibleSection):
         data  = self.nav.ccg_data
         if jctrl is None or inds is None or data is None:
             return
-        ref, tgt  = int(inds[0]), int(inds[1])
-        nav       = self.nav
         run_hi = self.hi_btn.isChecked()
         run_lo = self.lo_btn.isChecked() or not run_hi
-        jctrl.run_jitter(ref, tgt, self.n_jitter, run_lo=run_lo, run_hi=run_hi)
+        jctrl.run_jitter(self.nav.get_complete_key(), self.n_jitter, run_lo=run_lo, run_hi=run_hi)
         self.set_running(True)
         self._poll_timer.start()
 
@@ -799,8 +792,7 @@ class JitterSection(CollapsibleSection):
         inds  = self.nav.current_pair_inds
         if jctrl is None or inds is None:
             return
-        ref, tgt = int(inds[0]), int(inds[1])
-        jctrl.clear(ref, tgt)
+        jctrl.clear(self.nav.get_complete_key())
         self.jitter_done.emit()
 
     def _save(self):
@@ -808,6 +800,101 @@ class JitterSection(CollapsibleSection):
         if jctrl is None:
             return
         jctrl.on_save()
+
+
+class CustomCCGTagsSection(CollapsibleSection):
+    """The current pair's verdict under each enabled rule; rules are set under Groups."""
+
+    def __init__(self, nav: 'AppState', parent=None):
+        super().__init__("Custom CCG tags", parent=parent)
+        self.nav = nav
+        self._live_check = QCheckBox("live")
+        self._live_check.setChecked(True)
+        self._live_check.setToolTip("Recompute this pair's rules now instead of showing the last run")
+        self._live_check.toggled.connect(lambda *_: self.refresh_table())
+        self._pair_lbl = QLabel("")
+        self._pair_lbl.setStyleSheet("font-weight: bold;")
+        self.body_layout.addLayout(widget_row(self._pair_lbl, self._live_check))
+        self._table = QGridLayout()
+        self._table.setSpacing(2)
+        self._table.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.addLayout(self._table)
+        # the plot's render refreshes it too: pairs can arrive without a pair_changed
+        nav.chip_colors_changed.connect(ShowDeferral(self).wrap(self.refresh_table))
+
+    def _clear_layout(self, lay):
+        while lay.count():
+            item = lay.takeAt(0)
+            if (w := item.widget()) is not None:
+                w.deleteLater()
+            elif (sub := item.layout()) is not None:
+                self._clear_layout(sub)
+
+    def _pair_key(self):
+        """The current pair's own session key: in all-session mode it is not nav.key."""
+        nav = self.nav
+        base = nav.current_pair[0] if nav.session_any_mode else nav.key
+        return base.change(segment=nav.current_segment, resolution=nav.data_resolution)
+
+    def _pair_entry(self) -> tuple:
+        """``(label, entry)`` for the current pair: computed when live, else the last run."""
+        nav = self.nav
+        pair = nav.current_pair
+        if pair is None:
+            return "No pair selected.", None
+        ref, tgt = int(pair[-2]), int(pair[-1])
+        seg = nav.current_segment
+        key = self._pair_key()
+        label = f"{ref}→{tgt} · {seg}"
+        if self._live_check.isChecked():
+            results, on = nav.cd.sweep_aux_tests(key, tests=nav.cd.aux_test_config.specs())
+            entry = {name: [_nan_to_none(v[ref, tgt]), bool(p[ref, tgt])]
+                     for name, (v, p) in results.items()}
+            entry['on'] = bool(on[ref, tgt])
+            return label, entry
+        return label, nav.sd.aux_results(key, seg).pair(ref, tgt) or None
+
+    def _pval_row(self) -> tuple:
+        """The default screening when no p-value rule is enabled: min corrected p in the test window."""
+        nav = self.nav
+        pair = nav.current_pair
+        key = self._pair_key()
+        data = nav.cd.ccg_for(key)
+        seg = nav.cd.segment_index(key, nav.current_segment)
+        pc = data.pval_corrected
+        ref, tgt = int(pair[-2]), int(pair[-1])
+        c = data.conf
+        val = float(pc[seg, ref, tgt, c.min_lag_bin:c.max_lag_bin].min())
+        return val, val <= nav.active_sig_threshold
+
+    def refresh_table(self):
+        self._clear_layout(self._table)
+        label, entry = self._pair_entry()
+        self._pair_lbl.setText(label)
+        if entry is None:
+            if self.nav.current_pair is not None:
+                self._pair_lbl.setText(f"{label} — not swept; tick live to compute")
+            return
+        rows = [(k, v[0], v[1]) for k, v in entry.items() if k != 'on']
+        pval_ok = True
+        if 'p_value' not in entry:
+            pval, pval_ok = self._pval_row()
+            rows.insert(0, ('pval_screening', pval, pval_ok))
+        for row, (name, val, passed) in enumerate(rows):
+            mark = QLabel("✓" if passed else "✗")
+            mark.setStyleSheet(f"color: {'#4E9A4E' if passed else '#C04040'}; font-weight: bold;")
+            self._table.addWidget(mark, row, 0)
+            self._table.addWidget(QLabel(name), row, 1)
+            self._table.addWidget(QLabel("—" if val is None else f"{val:.3g}"), row, 2)
+        nav = self.nav
+        pair = nav.current_pair
+        manual = nav.seg_manual_state(int(pair[-2]), int(pair[-1]),
+                                      nav.cd.segment_index(nav.key, nav.current_segment))
+        on = manual if manual is not None else (entry['on'] and pval_ok)
+        combined = QLabel(f"on: {'yes' if on else 'no'}" + (" (manual)" if manual is not None else ""))
+        combined.setStyleSheet(
+            f"color: {'#4E9A4E' if on else '#B0B0B0'}; font-weight: bold; padding-top: 3px;")
+        self._table.addWidget(combined, self._table.rowCount(), 0, 1, 3)
 
 
 class SpikeAttributionSection(CollapsibleSection):
@@ -934,7 +1021,7 @@ class DisplayToggles:
     baseline: TraceToggle
     acg_ref: AcgToggle
     acg_tgt: AcgToggle
-    line_jitter: bool
+    jitter: TraceToggle
     acg_match_ccg: bool
     show_pval: bool
     show_pval_corrected: bool
@@ -942,21 +1029,26 @@ class DisplayToggles:
     show_tail_window: bool
     show_ref_waveform: bool
     wf_y_pad: float
+    wf_y_span: float
+    wf_flip: bool
 
     @classmethod
-    def read(cls, cor: 'CorrelogramSection', cs: 'BaselineCSSection') -> 'DisplayToggles':
-        """Snapshot the correlogram and baseline sections' current switches."""
+    def read(cls, cor: 'CorrelogramSection', cs: 'BaselineCSSection',
+             norm: 'NormSection') -> 'DisplayToggles':
+        """Snapshot the correlogram, baseline and normalization sections' current switches."""
         return cls(
             ccg=TraceToggle.read(cor.ccg_btn),
             baseline=TraceToggle.read(cor.baseline_btn),
             acg_ref=AcgToggle.read_acg(cor.ref_btn, cor.acg_yscale_ref,
-                                       cor.deconv_ref_btn),
+                                       norm.deconv_ref_btn),
             acg_tgt=AcgToggle.read_acg(cor.tgt_btn, cor.acg_yscale_tgt,
-                                       cor.deconv_tgt_btn),
-            line_jitter=cor.jitter_line_btn.line,
+                                       norm.deconv_tgt_btn),
+            jitter=TraceToggle.read(cor.jitter_line_btn),
             acg_match_ccg=cor.autoscale_btn.isChecked(),
             show_ref_waveform=cor.ref_wf_btn.isChecked(),
             wf_y_pad=cor.wf_pad_slider.value,
+            wf_y_span=cor.wf_span_slider.value,
+            wf_flip=cor.wf_flip_btn.isChecked(),
             show_pval=cs.nav.show_p,
             show_pval_corrected=cs.nav.show_pc,
             show_test_window=cs.nav.show_test_window,
@@ -985,6 +1077,26 @@ class CCGSource:
     refit_after_deconv: bool
 
 
+@dataclass
+class PanelDeps:
+    """What the builder needs from a panel, so it can also run without one."""
+    toggles: 'DisplayToggles'
+    dark_mode: bool
+    jitter_mgr: object = None
+    same_scale_cache: 'LRUCache' = field(default_factory=lambda: LRUCache(4))
+    extend_cache: 'LRUCache' = field(default_factory=lambda: LRUCache(32))
+
+    @classmethod
+    def from_panel(cls, panel) -> 'PanelDeps':
+        theme = panel._theme_fn() if panel._theme_fn is not None else None
+        return cls(toggles=DisplayToggles.read(panel.corr_section, panel.cs_section,
+                                               panel.norm_section),
+                   dark_mode=qt_dark_mode() if theme is None else theme.dark,
+                   jitter_mgr=panel.cs_section.jitter_mgr,
+                   same_scale_cache=panel._same_scale_cache,
+                   extend_cache=panel._extend_cache)
+
+
 class CCGContextBuilder:
     """Assemble a RenderContext from AppState + CorrelogramPanel sections.
 
@@ -995,18 +1107,15 @@ class CCGContextBuilder:
     toggles, deconvolution, and normalization that they share.
     """
 
-    def __init__(self, nav, panel):
+    def __init__(self, nav, deps: 'PanelDeps'):
         self.nav = nav
-        self.panel = panel
-        self.cor = panel.corr_section
-        self.cs = panel.cs_section
-        self.toggles = DisplayToggles.read(self.cor, self.cs)
+        self.deps = deps
+        self.toggles = deps.toggles
 
     @property
     def dark_mode(self) -> bool:
         """True when the plot should be drawn on a dark background."""
-        theme = self.panel._theme_fn() if self.panel._theme_fn is not None else None
-        return qt_dark_mode() if theme is None else theme.dark
+        return self.deps.dark_mode
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -1064,13 +1173,17 @@ class CCGContextBuilder:
         ccg_raw, null_raw, _pval, _pvc, _qval = slices
         metric = nav.cs_metric
         method = nav.baseline_method
-        cached = jitter_mgr.get_result(ref, tgt, 'lo' if resolution == 'lowres' else 'hi')
+        cached = jitter_mgr.get_result(key)
         j_avg = cached[0] if (metric == 'JBSI' and cached is not None) else None
         if method == 'jitter' and cached is not None:
             null_raw = cached[0]
         fr_ref = fr_tgt = None
         if metric == 'JBSI':
             fr_ref, fr_tgt = CCGContextBuilder._firing_rates(nav, ref, tgt)
+        if nav.cs_offzero and not nav.cd.pair_on_for(
+                key, nav.sd.seg_overrides(str(key.session), key.segment),
+                nav.cd.aux_test_config.specs())[ref, tgt]:
+            return 0.0
         return ConnectionStrength.conn_strength(
             ccg_raw, null_raw, ref, tgt, nav.cd.ccg_for(key).conf,
             metric=metric, method=method, active_norms=nav.active_norms,
@@ -1091,17 +1204,16 @@ class CCGContextBuilder:
                 None if shanks is None else int(shanks[tgt]))
 
     @staticmethod
-    def _jitter_overlay(panel, nav, ref: int, tgt: int) -> JitterOverlay:
-        """Cached jitter result for the current resolution; empty when there is none."""
-        jitter_mgr = panel.jitter_mgr
-        if jitter_mgr is None:
+    def _jitter_overlay(jitter_mgr, key, show: bool = True) -> JitterOverlay:
+        """Cached jitter result at the row's resolution; empty when hidden or absent."""
+        if jitter_mgr is None or not show:
             return JitterOverlay()
-        res_key = 'hi' if nav.resolution in ("hi", "lo_hi") else 'lo'
-        result = jitter_mgr.get_result(ref, tgt, res_key)
+        result = jitter_mgr.get_result(key)
         if result is None:
             return JitterOverlay()
-        avg, pval, _bins, lo, hi = result
-        return JitterOverlay(j_ccg=avg, j_pval=pval, j_ccg_lo=lo, j_ccg_hi=hi)
+        avg, _pval, pval_bins, lo, hi = result[:5]
+        bands = result[5] if len(result) > 5 else None
+        return JitterOverlay(j_ccg=avg, j_pval=pval_bins, j_ccg_lo=lo, j_ccg_hi=hi, bands=bands)
 
     @staticmethod
     def _bin_size(conf, n_bins: int) -> float:
@@ -1123,7 +1235,7 @@ class CCGContextBuilder:
         return pred[0], p_raw, p_corr
 
     @classmethod
-    def _same_scale_ylim(cls, nav, panel, data, ref: int, tgt: int, neurons):
+    def _same_scale_ylim(cls, nav, cache, data, ref: int, tgt: int, neurons):
         """(0, ymax) shared across a pair's segments, or across every pair in the session."""
         mode = nav.same_scale_mode
         if mode is None or data.ccg is None:
@@ -1133,7 +1245,7 @@ class CCGContextBuilder:
         # the rendered array's own bin count, not nav.resolution: 'lo_hi' draws both
         cache_key = (mode, frozenset(nav.active_norms), data.ccg.shape[-1], str(nav.key),
                      (ref, tgt) if mode == 'pair' else None)
-        hit = panel._same_scale_cache.get(cache_key)
+        hit = cache.get(cache_key)
         if hit is not None:
             return hit
 
@@ -1152,7 +1264,7 @@ class CCGContextBuilder:
                 top = max(top, float(np.nanmax(normed)))
 
         ylim = (0.0, top * 1.1) if top > 0 else (0.0, 1.0)
-        panel._same_scale_cache.put(cache_key, ylim)
+        cache.put(cache_key, ylim)
         return ylim
 
     # ── public entry points ────────────────────────────────────────────
@@ -1198,12 +1310,14 @@ class CCGContextBuilder:
         return self._finish(
             source, ref, tgt,
             seg_display=seg_label, sess_label=str(pair_key.session or ''),
-            jitter=self._jitter_overlay(self.panel, nav, ref, tgt),
+            jitter=self._jitter_overlay(self.deps.jitter_mgr,
+                                        data_key.change(ref=ref, tgt=tgt),
+                                        self.toggles.jitter.show),
             show_test_window=self.toggles.show_test_window,
             cs_overlay=nav.cs_overlay_active,
             is_significant=nav.is_significant(ref, tgt, seg_idx),
-            ylim_override=self._same_scale_ylim(nav, self.panel, data, ref, tgt, neurons),
-            cs_annotation_lines=(self._cs_annotation_lines(nav, self.cs, ref, tgt, seg_idx)
+            ylim_override=self._same_scale_ylim(nav, self.deps.same_scale_cache, data, ref, tgt, neurons),
+            cs_annotation_lines=(self._cs_annotation_lines(nav, self.deps.jitter_mgr, ref, tgt, seg_idx)
                                  if nav.cs_overlay_active else []),
         )
 
@@ -1228,16 +1342,18 @@ class CCGContextBuilder:
         duration, bin_size = extend_ms / 1000.0, extend_bin_ms / 1000.0
         seg_label = seg_label or nav.current_segment
 
-        cache_key = (str(view), seg_label, extend_ms, extend_bin_ms,
+        cache_key = (str(view), seg_label, extend_ms, extend_bin_ms, nav.active_extend,
                      frozenset(nav.active_norms), nav.key.excitability, self.toggles,
                      nav.baseline_method, tuple(nav.cd.conf.tail_intervals),
                      nav.cd.conf.tail_source, nav.cs_overlay_active)
-        hit = self.panel._extend_cache.get(cache_key)
+        hit = self.deps.extend_cache.get(cache_key)
         if hit is not None:
             return hit
 
         conf = nav.ccg_data.conf if nav.ccg_data is not None else nav.cd.conf
-        full = self._compute_extend_ccg(nav, ref, tgt, duration, bin_size, conf, seg_label)
+        full = self._stored_extend(nav, ref, tgt, extend_ms, extend_bin_ms, seg_label)
+        if full is None:
+            full = self._compute_extend_ccg(nav, ref, tgt, duration, bin_size, conf, seg_label)
         if full is None:
             return None
 
@@ -1257,7 +1373,7 @@ class CCGContextBuilder:
             is_significant=False,
             base_window_ms=(conf.duration or 0.0) * 1000.0, extend_on=True,
         )
-        self.panel._extend_cache.put(cache_key, ctx)
+        self.deps.extend_cache.put(cache_key, ctx)
         return ctx
 
     # ── the shared tail ────────────────────────────────────────────────
@@ -1324,7 +1440,7 @@ class CCGContextBuilder:
             cs_baseline_arg=baseline if (baseline is not None and cs_overlay) else None,
             cs_value=self._cs_at(ccg, baseline, src.conf, bin_size_eff),
             norm_info=None,
-            wf_y_pad=tg.wf_y_pad,
+            wf_y_pad=tg.wf_y_pad, wf_y_span=tg.wf_y_span, wf_flip=tg.wf_flip,
             extend_on=extend_on,
             cs_annotation_lines=cs_annotation_lines or [],
             min_lag_plot=src.conf.min_lag if show_test_window else None,
@@ -1337,7 +1453,7 @@ class CCGContextBuilder:
             line_baseline=tg.baseline.line,
             line_ref=tg.acg_ref.line if acg_ref is not None else False,
             line_tgt=tg.acg_tgt.line if acg_tgt is not None else False,
-            line_jitter=tg.line_jitter,
+            line_jitter=tg.jitter.line,
             acg_yscale_ref=tg.acg_ref.yscale, acg_yscale_tgt=tg.acg_tgt.yscale,
             acg_match_ccg=tg.acg_match_ccg,
             ylim=ylim_override or self._ylim(ccg, baseline),
@@ -1379,49 +1495,57 @@ class CCGContextBuilder:
     @classmethod
     def build_context(cls, nav, panel, seg_label=None, hi_res_override=None,
                       pair_override=None) -> 'RenderContext | None':
-        return cls(nav, panel).for_current(seg_label, hi_res_override, pair_override)
+        return cls(nav, PanelDeps.from_panel(panel)).for_current(
+            seg_label, hi_res_override, pair_override)
 
     @classmethod
     def build_extend_context(cls, nav, panel, seg_label=None,
                              ext_view: 'ExtendRow' = None) -> 'RenderContext | None':
-        return cls(nav, panel).for_extend(ext_view, seg_label)
+        return cls(nav, PanelDeps.from_panel(panel)).for_extend(ext_view, seg_label)
 
     @staticmethod
-    def _cs_annotation_lines(nav, cs_section: 'BaselineCSSection',
-                              ref: int, tgt: int, seg_idx: int) -> list:
+    def _cs_annotation_lines(nav, jitter_mgr, ref: int, tgt: int, seg_idx: int) -> list:
         """Connection-strength lines stamped onto an exported PNG, one per loaded resolution."""
         nonneg = nav.cs_nonneg
         lines = []
         for resolution, label in (('lowres', 'lo-res'), ('highres', 'hi-res')):
-            value = CCGContextBuilder._cs_value(nav, cs_section.jitter_mgr, seg_idx,
+            value = CCGContextBuilder._cs_value(nav, jitter_mgr, seg_idx,
                                                 ref, tgt, resolution, nonneg=nonneg)
             if value is not None:
                 lines.append(f"{nav.cs_metric} ({nav.baseline_method}) {label}: {value:.4f}")
         return lines
 
     @staticmethod
+    def _stored_extend(nav, ref: int, tgt: int, extend_ms: float, bin_ms: float,
+                       seg_label: str):
+        """The pair's [2,2,bins] slice out of a loaded extend set, or None to recompute."""
+        if not nav.active_extend:
+            return None
+        hit = nav.cd.extend_ccg_for(nav.active_extend, nav.key.nd().change(segment=seg_label),
+                                    extend_ms, bin_ms)
+        if hit is None or max(ref, tgt) >= hit[1].shape[0]:
+            return None
+        ccg, computed = hit
+        ix = np.ix_([ref, tgt], [ref, tgt])
+        return np.asarray(ccg[ix], dtype=float) if computed[ix].all() else None
+
+    @staticmethod
     def _compute_extend_ccg(nav, ref: int, tgt: int, duration: float,
                             bin_size: float, conf, seg_label: str):
         """Recompute the pair at this window and bin as [2,2,bins], ACGs on the diagonal."""
-        pair_neurons = nav.neurons.neuron_slice(neuron_inds=np.array([ref, tgt]))
-        # an appended window carries its own extent; 'full' spans the session
+        # the segment's own active intervals, as its stored CCG was computed from
         source = (nav.cd.source_config(
                       nav.get_complete_key().change(resolution=nav.data_resolution),
                       seg_label)
                   if seg_label else None)
-        windowed = (source is not None
-                    and not isinstance(source.t0, str)
-                    and not isinstance(source.t1, str))
-        kwargs = dict(neuron_inds=np.array([0, 1]), bin_size=bin_size,
-                      window_size=duration, symmetrize=conf.symmetrize_ccg,
-                      use_acceleration=conf.use_acceleration)
+        sliced = nav.cd.nd.sliced_neurons_for(source) if source is not None else None
+        pair_neurons = (sliced[0] if sliced else nav.neurons).neuron_slice(
+            neuron_inds=np.array([ref, tgt]))
         try:
-            if windowed:
-                extent = np.array([[float(source.t0)], [float(source.t1)]])
-                full = correlations.spike_correlations(
-                    pair_neurons, start_end_times=extent, **kwargs)[0]
-            else:
-                full = correlations.spike_correlations(pair_neurons, **kwargs)
+            full = correlations.spike_correlations(
+                pair_neurons, neuron_inds=np.array([0, 1]), bin_size=bin_size,
+                window_size=duration, symmetrize=conf.symmetrize_ccg,
+                use_acceleration=conf.use_acceleration)
         except (ValueError, IndexError, MemoryError) as exc:
             # a window/bin combination the correlator rejects must not kill the GUI
             print(f"[CCGPanel] extend compute failed: {exc}", flush=True)
@@ -1561,6 +1685,9 @@ class CCGPlotWidget(QWidget):
             acg_axes.append((view_box, axis))
 
         wf_vb = self._add_overlay_viewbox(pw)
+        # one-way: the waveform spans ~1 ms, so an x-link would drag the lag axis onto it
+        p.vb.sigXRangeChanged.connect(
+            lambda vb, rng: wf_vb.setXRange(*rng, padding=0))
         overlays = [pval_vb, wf_vb] + [vb for vb, _ in acg_axes]
         syncing = [False]
 
@@ -1829,16 +1956,17 @@ class CCGPlotWidget(QWidget):
             view_box.hide()
             return
         view_box.setGeometry(sub.plot.vb.sceneBoundingRect())
-        view_box.setXLink(sub.plot.vb)
         view_box.setZValue(3)   # above the p-value box (2) and the ACGs (1)
-        view_box.addItem(pg.PlotDataItem(ctx.wf_peak_ms, ctx.wf_peak_amp,
-                                         pen=plot_pen(WF_COLOR)))
-        # zero on the shared line: same height fraction as every (0, top) overlay
         amp = np.asarray(ctx.wf_peak_amp, dtype=float)
-        pad = max(ctx.wf_y_pad, 1e-6)
-        frac = pad / (1.0 + 2.0 * pad)
-        top = max(float(np.nanmax(np.abs(amp))), 1e-12)
-        view_box.setYRange(-top * frac / (1.0 - frac), top, padding=0)
+        if ctx.wf_flip:
+            amp = -amp
+        view_box.addItem(pg.PlotDataItem(ctx.wf_peak_ms, amp, pen=plot_pen(WF_COLOR)))
+        # the waveform follows the CCG's lag axis; its own ~1 ms extent must never drive it
+        view_box.setXRange(*sub.plot.vb.viewRange()[0], padding=0)
+        # span sets the height; pad only slides the waveform's zero up the axis
+        half = max(float(np.nanmax(np.abs(amp))), 1e-12) / max(ctx.wf_y_span, 1e-6)
+        shift = 2.0 * half * ctx.wf_y_pad
+        view_box.setYRange(-half - shift, half - shift, padding=0)
         view_box.show()
 
     @staticmethod
@@ -1967,6 +2095,7 @@ class CorrelogramPanel(QWidget):
         self._theme_fn = None
         self._extend_cache: LRUCache = LRUCache(32)   # several extend views × segments
         self._same_scale_cache: LRUCache = LRUCache(4)
+        self.request_render = ShowDeferral(self).wrap(self._render)
         self._build()
         self._connect_nav()
         self._connect_sections()
@@ -2016,6 +2145,7 @@ class CorrelogramPanel(QWidget):
         self.corr_section = CorrelogramSection()
         self.cs_section = BaselineCSSection(self.nav)
         self.jitter_section = JitterSection(self.nav)
+        self.tags_section = CustomCCGTagsSection(self.nav)
         self.sa_section = SpikeAttributionSection()
 
         toolbox = QWidget()
@@ -2023,7 +2153,8 @@ class CorrelogramPanel(QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(3)
         for section in (self.seg_bar, self.norm_section, self.corr_section,
-                        self.cs_section, self.jitter_section, self.sa_section):
+                        self.cs_section, self.jitter_section, self.tags_section,
+                        self.sa_section):
             layout.addWidget(self._hline())
             layout.addWidget(section)
         layout.addStretch()
@@ -2078,12 +2209,13 @@ class CorrelogramPanel(QWidget):
             return entry[0], int(entry[1]), int(entry[2])
         return self.nav.key, int(entry[0]), int(entry[1])
 
-    def request_render(self):
+    def _render(self):
         nav = self.nav
         cor = self.corr_section
         if nav.current_pair_inds is not None:
             cor.set_sampling_rate(nav.neurons.sampling_rate)
         segs = list(nav.stacked_segments) or [nav.current_segment]
+        self.tags_section.refresh_table()
         # Row axis = view kind (lo / hi / extend); column axis = segment. Transposed: swap.
         builders = ([lambda s, hi=hi: CCGContextBuilder.build_context(nav, self, seg_label=s, hi_res_override=hi)
                      for hi in ([False, True] if nav.resolution == "lo_hi" else [None])]
@@ -2128,6 +2260,7 @@ class CorrelogramPanel(QWidget):
         nav = self.nav
 
         self.norm_section.apply_requested.connect(self._on_apply_norms)
+        self.norm_section.deconv_changed.connect(self.plot_update_requested)
         self.cs_section.sig_changed.connect(lambda: self.plot_update_requested.emit())
         self.corr_section.style_changed.connect(self.plot_update_requested)
         self.corr_section.autoscale_btn.toggled.connect(self.plot_update_requested)
@@ -2136,9 +2269,8 @@ class CorrelogramPanel(QWidget):
         self.sa_section.enable_toggled.connect(self._on_spike_attr_enable)
 
     def _update_jitter_baseline_state(self, *_):
-        inds = self.nav.current_pair_inds
-        has_jitter = (inds is not None and self.jitter_mgr is not None and
-                      self.jitter_mgr.has_result(int(inds[0]), int(inds[1])))
+        has_jitter = (self.jitter_mgr is not None
+                      and self.jitter_mgr.get_result(self.nav.get_complete_key()) is not None)
         self.cs_section.set_jitter_baseline_enabled(has_jitter)
 
     def refresh_spike_attr_if_enabled(self):
@@ -2159,8 +2291,8 @@ class CorrelogramPanel(QWidget):
         data = self.nav.ccg_data
         if data is None:
             return
-        name, ok = QInputDialog.getText(self, "Apply to data", "Name for normalized dataset:")
-        if not ok or not name.strip():
+        name = prompt_name(self, "Apply to data", "Name for normalized dataset:")
+        if name is None:
             return
         nav = self.nav
         arr, null = data.ccg, data.ccg_null

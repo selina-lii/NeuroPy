@@ -645,6 +645,27 @@ class AnalysisDataset(Savable):
 
 _SPECIAL_PREFIX = "__special_"
 is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
+DERIVED_PREFIX = "__derived_"   # members come from rules over other tags, never stored
+is_derived_group = lambda n: str(n).startswith(DERIVED_PREFIX)
+
+
+def group_display(name: str) -> tuple:
+    """(picker section, name without its internal prefix); regular groups have section ''."""
+    for section, prefix in (('special', _SPECIAL_PREFIX), ('derived', DERIVED_PREFIX)):
+        if str(name).startswith(prefix):
+            return section, name[len(prefix):]
+    return '', name
+
+
+def group_display_name(name: str) -> str:
+    return group_display(name)[1]
+
+
+def combo_header(combo) -> str:
+    """Section header for a pair's groups; derived ones follow a '|', as on the row chips."""
+    plain = ', '.join(g for g in combo if not is_derived_group(g))
+    derived = ', '.join(group_display_name(g) for g in combo if is_derived_group(g))
+    return (plain + (f" | {derived}" if derived else '')).strip() or '(untagged)'
 
 # Marks a pair as machine-proposed and user-accepted, one group per model. Kept
 # as a record only: never trained on, never shown as a tag.
@@ -667,7 +688,7 @@ def is_admitted_group(name: str) -> bool:
 def is_shape_label(name: str) -> bool:
     """True for labels describing CCG shape — the only ones worth learning."""
     return (not is_admitted_group(name) and not is_special_group(name)
-            and name not in _NON_SHAPE)
+            and not is_derived_group(name) and name not in _NON_SHAPE)
 
 
 class BiIndex:

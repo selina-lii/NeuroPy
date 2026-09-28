@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Union, Optional
 
 from neuropy.analyses.utils import _san, Config, AnalysisDataset, Savable, JsonSavable
-from neuropy.core.neurons import Neurons
+from neuropy.core.neurons import Neurons, is_labelled
 from neuropy.core.probe import ProbeGroup
 from neuropy.core.epoch import Epoch
-from neuropy.analyses.neuron_tags import check_labels, confirm, resolve_labels, resolve_values
+from neuropy.analyses.neuron_tags import STABLE_TAG, check_labels, confirm, resolve_labels, resolve_values
 
 
 @dataclass(eq=False)
@@ -318,30 +318,26 @@ class NeuronsDataset(AnalysisDataset):
         active = {str(x) for x in (labels or [])}  # whitelist: keep only these
         bounds = []
         ep = self.get_themes(key).get(theme) if theme != 'segments' else None
-        raw_lbls = [str(lb).strip() for lb in (ep.labels if ep is not None else [])]
         if ep is not None:
             bounds = [(float(s), float(e), str(lb).strip())
                       for s, e, lb in zip(ep.starts, ep.stops, ep.labels)]
             if len({lb for _, _, lb in bounds if lb}) <= 1:  # single-label theme → theme name
                 bounds = [(s, e, theme) for s, e, _ in bounds]
-        print(f"[dbg:_theme_intervals] sess={key.session} theme={theme!r} "
-              f"whitelist={sorted(active)} raw_lbls={sorted(set(raw_lbls))} "
-              f"t0={t0:.1f} t1={t1:.1f} ep={'yes' if ep is not None else 'NO'}",
-              flush=True)
-        before = len(bounds)
         if active:
             bounds = [b for b in bounds if b[2] in active]
         if not bounds:
-            print(f"[dbg:_theme_intervals] EMPTY label-filter "
-                  f"before={before} whitelist={sorted(active)}", flush=True)
             return [], 0.0   # no label match → skip session
         result = EpochFilter(bounds).filter(active or {lb for _, _, lb in bounds}, t0, t1)
-        print(f"[dbg:_theme_intervals] EpochFilter→ type={type(result).__name__} "
-              f"val={result!r}", flush=True)
         if result is False or result[0] is None:
-            print(f"[dbg:_theme_intervals] DROP None/False as empty", flush=True)
             return [], 0.0
         return result
+
+    def label_intervals(self, key, label: str) -> list | None:
+        """An epoch label's intervals over the session, from whichever theme carries it; None if none does."""
+        for theme, ep in self.get_themes(key).items():
+            if label in ({str(lb).strip() for lb in ep.labels} - {''} or {theme}):
+                return self._theme_intervals(key, theme, [label], *self.session_bounds(key))[0]
+        return None
 
     def resolve_intervals(self, key, t0, t1, filter_state) -> tuple:
         """Active intervals = intersection over each theme's label whitelist. Returns (intervals, active_dur)."""
@@ -427,6 +423,11 @@ class NeuronsDataset(AnalysisDataset):
                 if name not in found:
                     found.append(name)
         return found
+
+    def tag_labels(self, name: str) -> list:
+        """Every label *name* gives a neuron, across sessions."""
+        return sorted({str(lab) for key in self.session_keys
+                       for lab in self.neurons_for(key).tags.get(name, ()) if is_labelled(lab)})
 
     def tag_table(self, name: str) -> pd.DataFrame:
         """One row per labelled neuron: session, neuron_id, label, value."""
@@ -518,8 +519,12 @@ class NeuronsDataset(AnalysisDataset):
 
     def _load_neurons(self, session):
         """Load and filter neurons."""
-        n = session.neurons #TODO neurons_stable?
+        n = session.neurons
         n.metadata['intervals'] = np.array([[n.t_start, n.t_stop]]) 
+        stable = self._stable_mask(session, n)
+        if stable is not None:
+            n.tags[STABLE_TAG] = np.where(stable, 'stable', 'unstable').astype(object)
+            n.tag_values[STABLE_TAG] = stable.astype(float)
         if self.conf.neuron_types is not None:
             n = n.get_neuron_type(self.conf.neuron_types)
         return n
@@ -560,6 +565,20 @@ class NeuronsDataset(AnalysisDataset):
             if isinstance(ep, Epoch) and ep.n_epochs > 0:
                 themes[name] = ep
         return themes
+
+    def ids_at(self, key: Key) -> list:
+        """Neuron ids of a pair Key: pairs index the filtered list, tags and groups use ids."""
+        ids = self.neurons_for(key).neuron_ids
+        return [int(ids[key.ref]), int(ids[key.tgt])]
+
+    @staticmethod
+    def _stable_mask(session, neurons) -> np.ndarray | None:
+        """Per-neuron stability as the recording marks it; None when it marks none."""
+        flags = neurons.metadata.get('is_stable')
+        if flags is not None:
+            return np.asarray(flags, dtype=bool)
+        stable = getattr(session, 'neurons_stable', None)   # bapun: a separate file of the stable units
+        return None if stable is None else np.isin(neurons.neuron_ids, stable.neuron_ids)
 
     @property
     def session_names(self):

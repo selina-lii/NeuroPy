@@ -9,7 +9,9 @@ PairListWidget — QListWidget with tkinter-compat helpers and key forwarding.
 from __future__ import annotations
 
 import inspect
+import math
 import os
+from dataclasses import dataclass, fields
 from typing import Any, Callable, TYPE_CHECKING
 
 import pyqtgraph as pg
@@ -28,6 +30,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QButtonGroup, QRadioButton,
 )
 
+from neuropy.analyses.utils import group_display
 from neuropy.ui.ui_common import qt_dark_mode
 
 if TYPE_CHECKING:
@@ -43,6 +46,28 @@ PRIMARY_MODIFIER = Qt.ControlModifier | Qt.MetaModifier
 def has_primary_modifier(mods) -> bool:
     """True if the platform primary modifier (Cmd on macOS, Ctrl elsewhere) is held."""
     return bool(mods & PRIMARY_MODIFIER)
+
+
+def prompt_name(parent, title: str, label: str, default: str = '') -> str | None:
+    """Ask for a name; None when cancelled or left blank, so callers test one thing."""
+    text, ok = QInputDialog.getText(parent, title, label, text=default)
+    return text.strip() if ok and text.strip() else None
+
+
+class ConfigBound:
+    """Widgets that round-trip a dataclass through `_BIND` = {field: (get, set)}."""
+    _CONFIG: type = None
+    _BIND: dict = {}
+
+    @property
+    def config(self):
+        return self._CONFIG(**{f.name: self._BIND[f.name][0](self)
+                               for f in fields(self._CONFIG) if f.name in self._BIND})
+
+    def apply(self, cfg) -> None:
+        for f in fields(type(cfg)):
+            if f.name in self._BIND:
+                self._BIND[f.name][1](self, getattr(cfg, f.name))
 
 
 class CheckboxVar:
@@ -243,6 +268,25 @@ class HotkeyTagFilter(QtCore.QObject):
         return bool(self._tag(char))
 
 
+class ShowDeferral(QtCore.QObject):
+    """Wrapped slots run now on a visible widget, else once, with their latest args, when it is shown."""
+
+    def __init__(self, widget: QWidget):
+        super().__init__(widget)
+        self._widget, self._pending = widget, {}
+        widget.installEventFilter(self)
+
+    def wrap(self, fn: Callable) -> Callable:
+        return lambda *a: fn(*a) if self._widget.isVisible() else self._pending.update({fn: a})
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QtCore.QEvent.Type.Show:
+            pending, self._pending = self._pending, {}
+            for fn, a in pending.items():
+                fn(*a)
+        return False
+
+
 def chip_button(label: str, checkable: bool = True, checked: bool = False,
                 parent=None) -> 'QPushButton':
     """Flat toggleable chip-style QPushButton."""
@@ -258,6 +302,71 @@ def chip_button(label: str, checkable: bool = True, checked: bool = False,
         "QPushButton:hover { background: #dde; }"
     )
     return btn
+
+
+class RangeListWidget(QWidget):
+    """Editable list of lag intervals in ms; blank or ±inf is the window edge, and one row always stays."""
+
+    changed = Signal()
+
+    def __init__(self, label: str, intervals=((None, None),), parent=None):
+        super().__init__(parent)
+        self._label = label
+        self._rows: list = []   # (host, start box, end box)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(2)
+        self.set_intervals(intervals)
+
+    def set_intervals(self, intervals) -> None:
+        """Replace the rows with *intervals*, (start, end) in seconds with None where open."""
+        for host, *_ in self._rows:
+            host.setParent(None)
+            host.deleteLater()
+        self._rows = []
+        for start, end in (list(intervals) or [(None, None)]):
+            self._add_row(start, end)
+
+    def _add_row(self, start=None, end=None):
+        host = QWidget()
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        boxes = []
+        for v in (start, end):
+            box = QLineEdit('' if v is None else f"{v * 1000.0:g}")
+            box.setFixedWidth(44)
+            box.setPlaceholderText("inf")
+            box.editingFinished.connect(self.changed)
+            boxes.append(box)
+        for w in (QLabel(f"{self._label}:"), boxes[0], QLabel("–"), boxes[1], QLabel("ms")):
+            row.addWidget(w)
+        add_btn = chip_button("+")
+        add_btn.clicked.connect(lambda: (self._add_row(), self.changed.emit()))
+        row.addWidget(add_btn)
+        if self._rows:
+            del_btn = chip_button("−")
+            del_btn.clicked.connect(lambda: self._delete_row(host))
+            row.addWidget(del_btn)
+        row.addStretch()
+        self._rows.append((host, *boxes))
+        self._lay.addWidget(host)
+
+    def _delete_row(self, host: QWidget):
+        self._rows = [r for r in self._rows if r[0] is not host]
+        host.setParent(None)
+        host.deleteLater()
+        self.changed.emit()
+
+    @property
+    def intervals(self) -> list:
+        """[(start, end)] in seconds, None where the bound is open."""
+        def parse(box):
+            try:
+                v = float(box.text())
+            except ValueError:
+                return None
+            return None if math.isinf(v) else v / 1000.0
+        return [(parse(a), parse(b)) for _host, a, b in self._rows]
 
 
 class TagChip(QLabel):
@@ -363,6 +472,15 @@ class MetricInput(QWidget):
         self.unit_combo.addItems([str(u) for u in units])
         self.unit_combo.setFixedWidth(unit_width)
         lay.addWidget(self.unit_combo)
+        self._stretch = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Policy.Expanding,
+                                              QtWidgets.QSizePolicy.Policy.Minimum)
+        lay.addSpacerItem(self._stretch)
+
+    def pack(self) -> 'MetricInput':
+        """Drop the trailing stretch so this sits flush against the next widget in a row."""
+        self.layout().removeItem(self._stretch)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return self
 
     def value(self) -> tuple:
         """(number, unit); number is 0.0 when the box holds no valid float."""
@@ -405,8 +523,11 @@ class ListPickerButton(QPushButton):
     def __init__(self, title: str, items: list[str] = (), plural: str = "items",
                  refresh_provider=None, select_all_when_empty: bool = True,
                  add_name: str = None, ordered: bool = False, followable: bool = False,
-                 parent=None):
+                 single: bool = False, disabled_items=(), display=None, parent=None):
         super().__init__(parent)
+        self._display = display or (lambda item: ('', item))   # item -> (section, shown text)
+        self._single = single                       # one choice: no Select all/none, picking closes
+        self._disabled = set(disabled_items)        # listed but unpickable
         self._leader = None
         self._follow_btn = None
         if followable:
@@ -421,8 +542,8 @@ class ListPickerButton(QPushButton):
         self._title  = title
         self._plural = plural
         self._items: list[str] = list(items)
-        self._select_all_when_empty = select_all_when_empty
-        self._selected: list[str] = list(items) if select_all_when_empty else []
+        self._select_all_when_empty = select_all_when_empty and not single
+        self._selected: list[str] = list(items) if self._select_all_when_empty else []
         self._refresh_provider = refresh_provider   # callable → fresh item list, or None
         self._add_name = add_name                   # non-None → dialog offers "Add <name>…"
         self._ordered = ordered                     # drag to reorder; selection keeps list order
@@ -431,9 +552,9 @@ class ListPickerButton(QPushButton):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_items(self, items: list[str], keep_selection: bool = True):
-        prev = set(self._selected) if keep_selection else set()
+        prev = list(self._selected) if keep_selection else []
         self._items = list(items)
-        self._selected = [x for x in self._items if x in prev]
+        self._selected = [x for x in prev if x in self._items]   # keeps the pick order
         if not self._selected and self._select_all_when_empty:
             self._selected = list(items)
         self._update_label()
@@ -444,10 +565,8 @@ class ListPickerButton(QPushButton):
         self._update_label()
 
     def set_selected(self, selected: list[str]):
-        want = set(selected)
-        # An ordered picker's selection IS the order, so it is taken as given.
-        self._selected = ([x for x in selected if x in self._items] if self._ordered
-                          else [x for x in self._items if x in want])
+        # A selection IS an order — the order things were picked in — so it is taken as given.
+        self._selected = [x for x in selected if x in self._items]
         if not self._selected and self._select_all_when_empty:
             self._selected = list(self._items)
         self._update_label()
@@ -491,13 +610,17 @@ class ListPickerButton(QPushButton):
         dlg.resize(260, 320)
         lay = QVBoxLayout(dlg)
         lst = QListWidget()
-        lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        lst.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection if self._single
+                             else QAbstractItemView.SelectionMode.ExtendedSelection)
         if self._ordered:
             lst.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
             lay.addWidget(QLabel("Drag to set the order they run in."))
 
+        def _value(i):
+            return lst.item(i).data(Qt.ItemDataRole.UserRole)
+
         def _populate():
-            keep = {lst.item(i).text() for i in range(lst.count())
+            keep = {_value(i) for i in range(lst.count())
                     if lst.item(i).isSelected()} or set(self._selected)
             lst.clear()
             # Ordered pickers list the chosen items first, in their run order, so
@@ -505,20 +628,40 @@ class ListPickerButton(QPushButton):
             items = ([x for x in self._selected if x in self._items]
                      + [x for x in self._items if x not in self._selected]
                      if self._ordered else self._items)
+            section = ''
             for item in items:
-                it = QListWidgetItem(item)
+                sec, text = self._display(item)
+                if sec != section:
+                    section = sec
+                    header = QListWidgetItem(f"─── {sec} ───")
+                    header.setFlags(Qt.ItemFlag.NoItemFlags)
+                    lst.addItem(header)
+                it = QListWidgetItem(text)
+                it.setData(Qt.ItemDataRole.UserRole, item)
+                if item in self._disabled:
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 lst.addItem(it)
-                if item in keep:
+                if item in keep and item not in self._disabled:
                     it.setSelected(True)
 
+        # Selection order is the stored order, so a later pick stacks after an earlier one.
+        click_order = [x for x in self._selected if x in self._items]
+
+        def _on_selection_changed():
+            live = [_value(i) for i in range(lst.count()) if lst.item(i).isSelected()]
+            click_order[:] = [x for x in click_order if x in set(live)]
+            click_order.extend(x for x in live if x not in click_order)
+
         _populate()
+        lst.itemSelectionChanged.connect(_on_selection_changed)
         lay.addWidget(lst)
         btns = QHBoxLayout()
-        sel_all = QPushButton("Select all")
-        sel_none = QPushButton("Select none")
-        sel_all.clicked.connect(lst.selectAll)
-        sel_none.clicked.connect(lst.clearSelection)
-        btns.addWidget(sel_all); btns.addWidget(sel_none)
+        if not self._single:
+            sel_all = QPushButton("Select all")
+            sel_none = QPushButton("Select none")
+            sel_all.clicked.connect(lst.selectAll)
+            sel_none.clicked.connect(lst.clearSelection)
+            btns.addWidget(sel_all); btns.addWidget(sel_none)
         if self._refresh_provider is not None:
             def _refresh():
                 self._items = list(self._refresh_provider())
@@ -546,8 +689,10 @@ class ListPickerButton(QPushButton):
         apply_btn.clicked.connect(dlg.accept)
         cancel_btn.clicked.connect(dlg.reject)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._selected = [lst.item(i).text()
-                              for i in range(lst.count()) if lst.item(i).isSelected()]
+            # an ordered picker's order is the list itself, set by dragging
+            self._selected = ([_value(i) for i in range(lst.count())
+                               if lst.item(i).isSelected()] if self._ordered
+                              else list(click_order))
             if not self._selected and self._select_all_when_empty:
                 self._selected = list(self._items)
             self._update_label()
@@ -555,14 +700,85 @@ class ListPickerButton(QPushButton):
 
     def _update_label(self):
         n, total = len(self._selected), len(self._items)
-        if n == 0 and not self._select_all_when_empty:
+        if self._single:
+            self.setText(self._display(self._selected[0])[1] if n else f"{self._title}: None")
+        elif n == 0 and not self._select_all_when_empty:
             self.setText(f"{self._title}: None")
         elif n == 0 or n == total:
             self.setText(f"{self._title}: All")
         elif n == 1:
-            self.setText(self._selected[0])
+            self.setText(self._display(self._selected[0])[1])
         else:
             self.setText(f"{self._title}: {n} {self._plural}")
+
+
+@dataclass(frozen=True)
+class ScopeField:
+    """One picker of a ScopePicker; the options are ListPickerButton's own."""
+    key: str
+    label: str
+    plural: str
+    provider: Callable
+    single: bool = False
+    followable: bool = False
+    add_name: str = None
+    disabled: tuple = ()
+    select_all_when_empty: bool = True
+    all_option: bool = False   # lead with '(all)'; it, or nothing picked, reads as every option
+    display: Callable = None   # item -> (section, shown text); see ListPickerButton
+
+
+ALL_OPTION = '(all)'
+
+
+class ScopePicker(QWidget):
+    """A row of ListPickerButtons, one per ScopeField: the scope a compute or a test runs over."""
+
+    selection_changed = Signal()
+
+    def __init__(self, fields_: list, *, labelled: bool = True, parent=None):
+        super().__init__(parent)
+        self._fields = {f.key: f for f in fields_}
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self.pickers: dict = {}
+        for f in fields_:
+            items = self._items_of(f)
+            p = ListPickerButton(f.label, items(), plural=f.plural, refresh_provider=items,
+                                 select_all_when_empty=f.select_all_when_empty,
+                                 add_name=f.add_name, followable=f.followable,
+                                 single=f.single, disabled_items=f.disabled, display=f.display)
+            p.selection_changed.connect(lambda *_: self.selection_changed.emit())
+            if f.all_option:
+                p.set_selected([ALL_OPTION])
+            if labelled:
+                lay.addWidget(QLabel(f.label))
+            lay.addWidget(p)
+            self.pickers[f.key] = p
+        if labelled:
+            lay.addStretch()
+
+    @staticmethod
+    def _items_of(f: ScopeField) -> Callable:
+        return (lambda: [ALL_OPTION] + list(f.provider())) if f.all_option else f.provider
+
+    @property
+    def selected(self) -> dict:
+        """Picked options per field; an '(all)' field resolves to every option it offers."""
+        out = {}
+        for k, p in self.pickers.items():
+            f, sel = self._fields[k], p.selected
+            out[k] = list(f.provider()) if f.all_option and (not sel or ALL_OPTION in sel) else sel
+        return out
+
+    def set_selected(self, selection: dict) -> None:
+        for k, v in selection.items():
+            self.pickers[k].set_selected(list(v))
+
+    def refresh(self) -> None:
+        for k, p in self.pickers.items():
+            p.set_items(self._items_of(self._fields[k])(), keep_selection=True)
 
 
 _UNIT_SEC = {'s': 1.0, 'ms': 1e-3}
@@ -677,6 +893,68 @@ class ConfigOptionsWidget(QGroupBox):
         """Kwargs for conf_cls(**values()); a blank number box falls back to the default."""
         vals = ((name, read(w)) for name, (read, w) in self._rows.items())
         return {name: v for name, v in vals if v is not _BLANK}
+
+
+class StayOpenMenu(QMenu):
+    """Ticking a checkable item keeps the menu open, so several can be ticked in one visit."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isCheckable():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def cascade_menu(tree: dict, on_pick: Callable, parent=None, checked: set = None) -> QMenu:
+    """Flyout menus from {label: subtree | value}; leaves call on_pick(value), checkable when *checked* is given."""
+    menu = StayOpenMenu(parent)
+    for label, sub in tree.items():
+        if isinstance(sub, dict):
+            menu.addMenu(cascade_menu(sub, on_pick, menu, checked)).setText(label)
+            continue
+        action = menu.addAction(label)
+        if checked is not None:
+            action.setCheckable(True)
+            action.setChecked(sub in checked)
+        action.triggered.connect(lambda _on=False, v=sub: on_pick(v))
+    return menu
+
+
+class CheckMenuButton(QPushButton):
+    """A button whose flyout menus tick any number of values; its text lists them."""
+
+    changed = Signal()
+
+    def __init__(self, tree: dict, parent=None):
+        super().__init__(parent)
+        self._tree, self.checked = tree, []
+        self.clicked.connect(self._on_click)
+        self._sync()
+
+    def _on_click(self) -> None:
+        cascade_menu(self._tree, self._toggle, self, set(self.checked)).exec(
+            self.mapToGlobal(self.rect().bottomLeft()))
+
+    def _toggle(self, value) -> None:
+        self.checked = [v for v in self.checked if v != value] if value in self.checked \
+            else self.checked + [value]
+        self._sync()
+        self.changed.emit()
+
+    def _sync(self) -> None:
+        self.setText(', '.join(self.checked) or '(choose)')
+
+
+class ExplicitCloseDialog(QDialog):
+    """Closes only through accept()/reject() from its own buttons: Return, Escape and the title bar leave it open."""
+
+    def keyPressEvent(self, event):
+        if event.key() not in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape):
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        event.ignore()
 
 
 class ResultsDialog(QDialog):
@@ -938,25 +1216,29 @@ def collapsible(title: str, parent=None) -> 'tuple[QGroupBox, QVBoxLayout]':
 
 
 def all_groups_dropdown(groups, parent_menu, checkmark, on_pick) -> None:
-    """Populate parent_menu with every group; special ones nest under a 'Special' submenu."""
-    def _add(menu, gname, display):
-        menu.addAction(f"{'✓ ' if checkmark(gname) else '  '}{display}",
-                       lambda g=gname: on_pick(g))
-
-    for gname in groups.groups:   # registry, not _fwd: untagged groups count too
-        _add(parent_menu, gname, gname)
-    special = groups.special_groups()
-    if special:
-        special_menu = QMenu("Special", parent_menu)
-        for gname in special:
-            _add(special_menu, gname, groups.get_group_metadata(gname).display_name)
-        parent_menu.addMenu(special_menu)
+    """Every taggable group, special ones under a section header; derived ones are never tagged by hand."""
+    section = ''
+    for gname in groups.groups + groups.special_groups():   # registry, not _fwd: untagged groups count too
+        sec, display = group_display(gname)
+        if sec != section:
+            section = sec
+            parent_menu.addAction(f"─── {sec} ───").setEnabled(False)
+        parent_menu.addAction(f"{'✓ ' if checkmark(gname) else '  '}{display}",
+                              lambda g=gname: on_pick(g))
 
 
 def row_chips(groups, key) -> list:
     """Tag pills for one list row, pre-tinted so the delegate never rebuilds colours."""
     return [(name, *TagChip.tint(color))
             for name, color in groups.chips_for_member(key)]
+
+
+def derived_chips(groups, key) -> list:
+    """Pills for the derived groups holding a pair, after a bare '|' that sets them apart."""
+    names = groups.derived.groups_for_pair(str(key.session), key.ref, key.tgt)
+    clear = QColor(Qt.transparent)
+    return ([('|', clear, QColor('#888'), clear)] * bool(names)
+            + [(group_display(g)[1], *TagChip.tint('')) for g in names])
 
 
 TRACE_COLOR = '#4a7fd4'        # the main series, light theme
@@ -975,19 +1257,6 @@ def plot_pen(color, style=None):
     return pen
 
 
-FLAT_ASPECT = 3000.0   # x:y for a time-series plot that reads flat but not collapsed
-
-
-def apply_flat_aspect(p, x_span: float, y_max: float,
-                      ratio: float = FLAT_ASPECT) -> None:
-    """Give y at least x_span/ratio, so a quiet trace stays flat instead of filling the plot.
-
-    Not setAspectLocked: that fixes the view box, which over a seconds-long axis
-    collapses the trace rather than flattening it. Tall data still wins.
-    """
-    view = p.getViewBox()
-    view.enableAutoRange(axis='y', enable=False)
-    view.setYRange(0, max(y_max, x_span / ratio), padding=0.05)
 
 
 def apply_plot_chrome(p, dark: bool) -> None:
@@ -1020,11 +1289,12 @@ class CycleButton(QPushButton):
                    ('□', True, True),   # line
                    ('■', True, False)]  # solid
 
-    def __init__(self, name: str, start_hidden: bool = False, parent=None):
+    def __init__(self, name: str, start_hidden: bool = False, start_line: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._name   = name
         self._states = self._STATES_REV if start_hidden else self._STATES_FWD
-        self._idx    = 0
+        self._idx    = 1 if start_line else 0
         self._apply()
         self.clicked.connect(self._cycle)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -1051,11 +1321,14 @@ class CycleButton(QPushButton):
 
 
 
-def pick_color(initial, parent=None, title: str = "Colour") -> QColor | None:
+def pick_color(initial, parent, title: str = "Colour") -> QColor | None:
     """Modal colour picker; None if cancelled. Instance API: the static one aborts shiboken."""
     dlg = QColorDialog(QColor(*initial) if isinstance(initial, tuple) else QColor(initial), parent)
     dlg.setWindowTitle(title)
-    return dlg.currentColor() if dlg.exec() == QDialog.Accepted else None
+    accepted = dlg.exec() == QDialog.Accepted
+    parent.window().raise_()   # macOS hands focus to an arbitrary window when the native panel closes
+    parent.window().activateWindow()
+    return dlg.currentColor() if accepted else None
 
 
 class ColorLabelButton(QWidget):
@@ -1083,6 +1356,7 @@ class ColorLabelButton(QWidget):
         if editable:
             self._label.textChanged.connect(self.name_changed)
         row.addWidget(self._label)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         self.set_color(color)
 
@@ -1161,7 +1435,8 @@ class FlowLayout(QtWidgets.QLayout):
         self._do_layout(rect, test=False)
 
     def sizeHint(self):
-        return self.minimumSize()
+        w = self.geometry().width() or self.minimumSize().width()
+        return QtCore.QSize(w, self.heightForWidth(w))
 
     def minimumSize(self):
         s = QtCore.QSize()
@@ -1174,7 +1449,8 @@ class FlowLayout(QtWidgets.QLayout):
         row_h = 0
         for item in self._items:
             w = item.widget()
-            if w is None or not w.isVisible():
+            # isHidden, not isVisible: a collapsed ancestor must not zero the height
+            if w is None or w.isHidden():
                 continue
             hint = w.sizeHint()
             next_x = x + hint.width() + self._spacing
@@ -1229,6 +1505,17 @@ class SideNavPanel(QWidget):
             self.nav_list.setCurrentRow(0)
         return idx
 
+    def add_divider(self) -> None:
+        """A non-selectable rule; the stack gets a filler so row and page stay aligned."""
+        item = QListWidgetItem()
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setSizeHint(QtCore.QSize(0, 9))
+        self.nav_list.addItem(item)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        self.nav_list.setItemWidget(item, line)
+        self.stack.addWidget(QWidget())
+
     def setCurrentIndex(self, index: int) -> None:
         self.nav_list.setCurrentRow(index)
 
@@ -1249,7 +1536,7 @@ class ArrowChipBar(QWidget):
         root.setSpacing(2)
         self._left = QToolButton()
         self._left.setText('◀')
-        self._left.setFixedSize(18, height)
+        self._left.setFixedHeight(height)   # width stays natural: 18 clips the glyph
         root.addWidget(self._left)
         self._scroll_area = QScrollArea()
         self._scroll_area.setWidgetResizable(True)
@@ -1268,6 +1555,7 @@ class ArrowChipBar(QWidget):
         root.addWidget(self._scroll_area, stretch=1)
         self._right = QToolButton()
         self._right.setText('▶')
+        self._right.setFixedHeight(height)
         root.addWidget(self._right)
         self._left.clicked.connect(
             lambda: self._on_left() if self._on_left else self._scroll(-80))

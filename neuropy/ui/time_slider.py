@@ -12,6 +12,8 @@ from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -21,7 +23,7 @@ from pyqtgraph.Qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QCheckBox, QComboBox, QLineEdit,
     QSpinBox, QDoubleSpinBox, QSizePolicy, QScrollArea,
-    QGraphicsRectItem, QToolButton,
+    QGraphicsRectItem, QToolButton, QTableWidget, QTableWidgetItem,
 )
 from pyqtgraph.Qt.QtGui import QFont
 from pyqtgraph.Qt.QtGui import QPainter, QPen, QColor, QBrush
@@ -34,7 +36,7 @@ from neuropy.core.intervals import IntervalOp as _SetOp
 from neuropy.ui.ui_common import BackgroundTaskRunner
 from neuropy.ui.utils import (
     AddableDropdown, chip_button, CollapsibleSection, ListPickerButton, MetricInput,
-    ResultsDialog, small_font_pt, regular_font_pt)
+    ResultsDialog, small_font_pt, regular_font_pt, radio_group, prompt_name)
 from neuropy.utils.data_storage_util import atomic_write_json
 
 if TYPE_CHECKING:
@@ -46,6 +48,16 @@ _TS_COLORS = [
     '#F8BBD0', '#D7CCC8', '#B2EBF2', '#DCEDC8', '#F0F4C3',
 ]
 _TS_NONE_COLOR = '#E0E0E0'
+_CUSTOM_COLORS = [
+    '#E6194B', '#3CB44B', '#4363D8', '#F58231', '#911EB4',
+    '#42D4F4', '#F032E6', '#9A6324', '#469990', '#800000',
+    '#808000', '#000075', '#BFEF45', '#DCBEFF', '#FFD8B1',
+    '#AAFFC3', '#FABED4', '#FFE119', '#A9A9A9', '#E6BEFF',
+]
+_CUSTOM_ALPHA = 110
+_FAMILY_PREFIX = '⊞ '
+_CUSTOM_COLS = ["name", "start", "end", "active", "filters", "overlap"]
+_MODE_ICONS = {'epoch': ('⏱', "Behavioral epochs"), 'custom': ('◆', "Custom CCG windows")}
 
 _ALL_SEGS = "all"  # whole-session view == permanent dim0[0]='all' (must match ccg_ui._ALL_SEGS)
 
@@ -196,7 +208,7 @@ class EpochPlotWidget(pg.PlotWidget):
         vb.mouseReleaseEvent = _vb_release
 
     def update_epochs(self, bounds: list[tuple], label_colors: dict,
-                      t_min: float, t_max: float):
+                      t_min: float, t_max: float, overlays: list = ()):
         vb = self.getViewBox()
         for item in self._epoch_rects:
             vb.removeItem(item)
@@ -219,6 +231,15 @@ class EpochPlotWidget(pg.PlotWidget):
             self._epoch_rects.append(rect)
             snap.add(t0)
             snap.add(t1)
+        for t0, t1, color in overlays:
+            fill = QColor(color); fill.setAlpha(_CUSTOM_ALPHA)
+            rect = QGraphicsRectItem(t0, self._BAR_Y0, t1 - t0, bar_h)
+            rect.setBrush(QBrush(fill))
+            rect.setPen(QPen(QColor(color), 0))
+            rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect.setZValue(-0.5)
+            vb.addItem(rect)
+            self._epoch_rects.append(rect)
         self._snap_times = sorted(snap)
         self._update_box()
 
@@ -343,11 +364,265 @@ class EpochPlotWidget(pg.PlotWidget):
         self._on_cursor_moved()
 
 
+class TimeSliderBackend:
+    """Headless time-slider state: themes, label filters, window, custom-CCG batches."""
+
+    def __init__(self, nav: 'AppState', cd: 'CCGDataset'):
+        self.nav = nav
+        self.cd = cd
+        self.epoch_bounds:  list = []
+        self.total_sec:     float = 0.0
+        self.all_theme_bounds: dict = {}    # theme → [(s, e, label)]
+        self.current_theme: str = 'segments'
+        self.per_theme_label_state: dict = {}   # theme → {label: bool}
+        self.legend_toggles: dict = {}      # label → bool (current theme)
+        self.filter_checks:  dict = {}      # theme → included in the cross-theme AND
+        self.start: float = 0.0
+        self.end:   float = 0.0
+        self.name:  str = ''
+        self.name_is_auto: bool = True
+        self.n_splits: int = 1
+        self.seg_len_sec: float = 0.0
+        self.discard_last: bool = False
+        self.overlap: tuple = (0.0, '%')
+        self.equal_effective: bool = False
+        self.sessions: list = []
+        self.batch_counts:  dict = {}       # batch_id → tasks remaining
+        self.batch_totals:  dict = {}
+        self.batch_names:   dict = {}
+        self.batch_meta:    dict = {}       # batch_id → {spec_name, skipped, rows}
+        self.batch_next_id: int = 1
+        self._label_colors: dict | None = None
+        self.mode: Literal['epoch', 'custom'] = 'epoch'
+        self.custom_selected: list = []
+        self.custom_visible:  dict = {}
+        self._custom_windows: tuple = (None, [])
+
+    def current_session(self) -> str | None:
+        """The session the slider is scoped to, or None in all-session mode."""
+        return None if self.nav.session_any_mode else str(self.nav.key.session)
+
+    def set_current_session(self, key) -> None:
+        """Scope the slider to one session, or to all when *key* is None."""
+        self.nav.set_session_any_mode(key is None)
+        if key is not None:
+            self.nav.set_key(self.nav.key.change(session=str(key)))
+
+    def list_themes(self) -> list:
+        """Discovered themes, 'segments' first."""
+        return ['segments'] + sorted(self.all_theme_bounds)
+
+    def discover_themes(self, themes: dict) -> str:
+        """Store each theme's bounds; returns the theme that should be current."""
+        self.all_theme_bounds = {
+            attr: self._theme_bounds(obj, attr) for attr, obj in themes.items()}
+        names = self.list_themes()
+        cur = self.current_theme
+        return cur if cur in names else (names[1] if len(names) > 1 else 'segments')
+
+    @staticmethod
+    def _theme_bounds(obj, attr: str) -> list:
+        labs = [str(x).strip() for x in obj.labels]
+        bounds = [(float(s), float(e), lb)
+                  for s, e, lb in zip(obj.starts, obj.stops, labs)]
+        if len({lb for lb in labs if lb}) <= 1:   # unlabelled theme: the theme is the label
+            bounds = [(s, e, attr) for s, e, _ in bounds]
+        return bounds
+
+    def set_theme(self, theme: str) -> None:
+        """Select *theme* and reload its bounds and total span."""
+        self.current_theme = theme
+        self._label_colors = None
+        if theme != 'segments' and theme in self.all_theme_bounds:
+            self.epoch_bounds = list(self.all_theme_bounds[theme])
+            self.total_sec = max((b[1] for b in self.epoch_bounds), default=1.0)
+        else:   # 'segments' = no label filter: timeline spans the whole session
+            self.epoch_bounds = []
+            _, t_stop = self.nav.cd.nd.session_bounds(self.nav.key)
+            self.total_sec = float(t_stop) or 1.0
+
+    @property
+    def active_bounds(self) -> list:
+        """Current theme's epochs whose label is toggled on."""
+        return [b for b in self.epoch_bounds if self.legend_toggles.get(b[2], True)]
+
+    @staticmethod
+    def label_colors(labels) -> dict[str, str]:
+        """The slider's palette over *labels* in sorted order; NONE is always grey."""
+        cmap, ci = {}, 0
+        for lb in sorted(set(labels)):
+            if lb == 'NONE':
+                cmap[lb] = _TS_NONE_COLOR
+            else:
+                cmap[lb] = _TS_COLORS[ci % len(_TS_COLORS)]
+                ci += 1
+        return cmap
+
+    def label_color_map(self) -> dict[str, str]:
+        if self._label_colors is None:
+            self._label_colors = self.label_colors(lb for _, _, lb in self.epoch_bounds)
+        return self._label_colors
+
+    def rebuild_legend(self) -> dict:
+        """Refresh ``legend_toggles`` from the saved per-theme state; returns it."""
+        saved = self.per_theme_label_state.get(self.current_theme, {})
+        self.legend_toggles = {lb: saved.get(lb, True)
+                               for lb in self.label_color_map()}
+        self.legend_toggles['NONE'] = saved.get('NONE', True)
+        return self.legend_toggles
+
+    def set_label(self, label: str, active: bool) -> None:
+        self.legend_toggles[label] = active
+        self.per_theme_label_state.setdefault(self.current_theme, {})[label] = active
+
+    def theme_whitelist(self, theme: str) -> list:
+        """Labels checked in the legend for *theme* (unrecorded = checked)."""
+        saved = self.per_theme_label_state.get(theme, {})
+        labels = sorted({lb for _, _, lb in self.all_theme_bounds.get(theme, [])})
+        return [lb for lb in labels if saved.get(lb, True)]
+
+    def custom_windows(self) -> dict:
+        """Current session's custom CCGs: segment → (effective intervals, config)."""
+        sess = str(self.nav.key.session)
+        if self._custom_windows[0] != sess:
+            self._custom_windows = (sess, {seg: (iv, cfg) for seg, iv, cfg
+                                           in self.cd.custom_windows(self.nav.key)})
+        return self._custom_windows[1]
+
+    def custom_families(self) -> dict:
+        return self.cd.custom_families(list(self.custom_windows()))
+
+    def custom_items(self) -> list:
+        """Picker rows: families first, then every custom CCG of the session."""
+        return [_FAMILY_PREFIX + f for f in sorted(self.custom_families())] + list(self.custom_windows())
+
+    def custom_color_map(self) -> dict[str, str]:
+        return {seg: _CUSTOM_COLORS[i % len(_CUSTOM_COLORS)]
+                for i, seg in enumerate(self.custom_selected)}
+
+    def set_custom(self, picked: list) -> None:
+        """Chips = picked custom CCGs, a family expanding to its members, in pick order."""
+        fams = self.custom_families()
+        segs = [m for p in picked for m in fams.get(p.removeprefix(_FAMILY_PREFIX), [p])]
+        self.custom_selected = [s for i, s in enumerate(segs)
+                                if s in self.custom_windows() and s not in segs[:i]]
+
+    def custom_overlays(self) -> list:
+        """(t0, t1, color) per effective interval of each visible chip."""
+        wins, cmap = self.custom_windows(), self.custom_color_map()
+        return [(t0, t1, cmap[seg]) for seg in self.custom_selected
+                if seg in wins and self.custom_visible.get(seg, True) for t0, t1 in wins[seg][0]]
+
+    def filter_snapshot(self) -> dict:
+        """Theme and filter state for UIStates; it outlives the window and must survive a restart."""
+        return {'mode': self.mode,
+                'custom_selected': list(self.custom_selected),
+                'custom_visible': dict(self.custom_visible),
+                'current_theme': self.current_theme,
+                'filter_checks': dict(self.filter_checks),
+                'per_theme_label_state': {t: dict(d)
+                                          for t, d in self.per_theme_label_state.items()}}
+
+    def restore_filters(self, state: dict) -> None:
+        self.mode = state.get('mode', 'epoch')
+        self.custom_selected = list(state.get('custom_selected') or [])
+        self.custom_visible = dict(state.get('custom_visible') or {})
+        self.filter_checks = dict(state.get('filter_checks') or {})
+        self.per_theme_label_state = {t: dict(d) for t, d
+                                      in (state.get('per_theme_label_state') or {}).items()}
+        theme = state.get('current_theme')
+        if theme in self.list_themes():
+            self.current_theme = theme
+
+    def filter_state(self) -> list:
+        """AND-list of themes: include-checked ones if any, else the current theme."""
+        checked = [t for t, on in self.filter_checks.items() if on]
+        return [{'name': t, 'labels': self.theme_whitelist(t)}
+                for t in (checked or [self.current_theme])]
+
+    def auto_name(self) -> str:
+        """A lone selected label names the segment; otherwise the name clears."""
+        picked = [lb for lb in self.theme_whitelist(self.current_theme) if lb != 'NONE']
+        return picked[0] if len(picked) == 1 else ''
+
+    def parse_time(self, text: str) -> float:
+        s = text.strip().lower()
+        if s in ('start', 'end'):
+            return 0.0 if s == 'start' else self.total_sec
+        return self._hms_to_sec(text)
+
+    def build_request(self, t0_spec, t1_spec) -> CCGBatchRequest:
+        """The batch request the current backend state describes."""
+        return CCGBatchRequest(
+            name=self.name or 'custom', t0=t0_spec, t1=t1_spec,
+            scope=('all' if self.nav.session_any_mode
+                   else str(getattr(self.nav.key, 'session', ''))),
+            sessions=self.sessions, n_splits=self.n_splits,
+            seg_len_sec=self.seg_len_sec, discard_last=self.discard_last,
+            overlap_raw=self.overlap[0], overlap_unit=self.overlap[1],
+            split_mode='equal_effective' if self.equal_effective else 'raw_span',
+            filter_state=self.filter_state())
+
+    def saved_custom_ccgs(self, session: str = None, name: str = None) -> list:
+        """Saved batch requests, newest first, optionally filtered by session or name."""
+        specs = self.nav.root.custom_mgr.state.load_suggestions()
+        if session is not None:
+            specs = [s for s in specs if str(session) in (s.sessions or [s.scope])]
+        if name is not None:
+            specs = [s for s in specs if str(s.name) == str(name)]
+        return sorted(specs, key=lambda s: str(s.name))
+
+    def run_custom_ccg(self, request: CCGBatchRequest = None) -> int:
+        """Queue *request* (or the one the current state describes); returns tasks queued."""
+        if request is None:
+            request = self.build_request(self.start, self.end)
+        mgr = self.nav.root.custom_mgr
+        n = mgr._queue_custom_ccgs(request)
+        if n:
+            mgr.worker._custom_ccg_start_next()
+        return n
+
+    def plot(self, path: str, *, start: float = None, end: float = None,
+             pin_start: bool = False, pin_end: bool = False,
+             px_w: int = 1200, px_h: int = 220, dpi: int = 100) -> str:
+        """Write a static PNG of the epoch timeline with optional window markers."""
+        fig = Figure(figsize=(px_w / dpi, px_h / dpi), dpi=dpi)
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        cmap = self.label_color_map()
+        for s, e, lb in self.active_bounds:
+            ax.axvspan(s, e, color=cmap.get(lb, _TS_NONE_COLOR), lw=0)
+        for t, pin in ((start, pin_start), (end, pin_end)):
+            if t is not None:
+                ax.axvline(float(t), color='#C62828' if pin else '#1565C0',
+                           lw=2.0 if pin else 1.2)
+        ax.set_xlim(0.0, self.total_sec or 1.0)
+        ax.set_yticks([])
+        ax.set_xlabel('time (s)')
+        ax.set_title(f"{self.current_session() or 'all sessions'} — {self.current_theme}")
+        fig.tight_layout()
+        fig.savefig(path)
+        return path
+
+    @staticmethod
+    def _hms_to_sec(hms: str) -> float:
+        parts = hms.strip().split(':')
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+
+    @staticmethod
+    def _sec_to_hms(sec: float) -> str:
+        sec = max(0.0, float(sec))
+        return f"{int(sec // 3600):02d}:{int((sec % 3600) // 60):02d}:{int(sec % 60):02d}"
+
+
 class TimeSliderPanel(QWidget):
     """Time slider panel; custom CCG work is emitted to the parent."""
 
     queue_ccg_requested = Signal(object)   # CCGSourceConfig
-    save_requested        = Signal()
     load_requested        = Signal()
     window_changed        = Signal(float, float)
     theme_changed         = Signal()
@@ -356,20 +631,7 @@ class TimeSliderPanel(QWidget):
         super().__init__(parent)
         self.nav = nav
         self.cd  = cd
-
-        # Epoch state
-        self._epoch_bounds:    list = []
-        self._total_sec:       float = 0.0
-        self._all_theme_bounds: dict = {}    # theme_name → [(s,e,label)]
-        self._current_theme:   str  = 'segments'
-        self._label_colors:    dict | None = None
-        self._per_theme_label_state: dict = {}  # theme → {label: bool}
-        self._legend_toggles:  dict = {}     # label → bool (current theme)
-        self._batch_counts:    dict = {}     # batch_id → tasks remaining
-        self._batch_totals:    dict = {}     # batch_id → total tasks (lo + hi)
-        self._batch_names:     dict = {}
-        self._batch_meta:      dict = {}     # batch_id → {spec_name, skipped, rows}
-        self._batch_next_id:   int = 1
+        self.backend = TimeSliderBackend(nav, cd)
 
         self._build()
         self._connect_nav()
@@ -382,17 +644,15 @@ class TimeSliderPanel(QWidget):
     @property
     def active_bounds(self) -> list:
         """(start, stop, label) of the current theme's epochs whose label is toggled on."""
-        return [b for b in self._epoch_bounds
-                if self._legend_toggles.get(b[2], True)]
+        return self.backend.active_bounds
 
     @property
     def theme_names(self) -> list:
         """Themes the slider has discovered, 'segments' first."""
-        return ['segments'] + sorted(self._all_theme_bounds)
+        return self.backend.list_themes()
 
     def _refresh_theme_ui(self, themes: dict):
         """Refresh combo, bounds, timeline, and legend."""
-        self._label_colors = None
         self._discover_themes(themes)
         self._init_times()
         self._update_legend()
@@ -409,31 +669,46 @@ class TimeSliderPanel(QWidget):
         root.addWidget(title_lbl)
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Theme:"))
+        self._epoch_ctrls = QWidget()
+        epoch_lay = QHBoxLayout(self._epoch_ctrls)
+        epoch_lay.addWidget(QLabel("Theme:"))
         self._theme_combo = AddableDropdown('theme', self.add_theme)
         self._theme_combo.set_items(['segments'])
         self._theme_combo.setFixedWidth(140)
         self._theme_combo.currentTextChanged.connect(self._on_theme_change)
-        row1.addWidget(self._theme_combo)
+        epoch_lay.addWidget(self._theme_combo)
         self._theme_info_lbl = QLabel("")
         self._theme_info_lbl.setStyleSheet(f"color:#888; font-size:{small_font_pt()}pt;")
-        row1.addWidget(self._theme_info_lbl)
+        epoch_lay.addWidget(self._theme_info_lbl)
 
-        self._filter_checks: dict[str, bool] = {}   # per-theme "include in filter" (cross-theme AND; see FUTURE_STEPS)
         self._filter_check = chip_button("Include in filter", checked=False)
-        self._filter_check.toggled.connect(lambda on: self._filter_check.setText(
-            "✓ Include in filter" if on else "Include in filter"))
         self._filter_check.toggled.connect(self._on_filter_toggle)
-        row1.addWidget(self._filter_check)
-        row1.addSpacing(12)
+        epoch_lay.addWidget(self._filter_check)
+        epoch_lay.addSpacing(12)
         for text, width, slot in (("All", 40, self._on_label_reset), ("None", 40, self._on_label_none)):
             btn = QPushButton(text); btn.setFixedWidth(width); btn.clicked.connect(slot)
-            row1.addWidget(btn)
+            epoch_lay.addWidget(btn)
+        row1.addWidget(self._epoch_ctrls)
+
+        self._custom_ctrls = QWidget()
+        custom_lay = QHBoxLayout(self._custom_ctrls)
+        custom_lay.addWidget(QLabel("Custom CCGs:"))
+        self._custom_picker = ListPickerButton(
+            "Custom CCGs", plural="custom CCGs", select_all_when_empty=False, ordered=True,
+            refresh_provider=self.backend.custom_items)
+        self._custom_picker.setFixedWidth(180)
+        custom_lay.addWidget(self._custom_picker)
+        custom_set_btn = QPushButton("Set"); custom_set_btn.clicked.connect(self._on_custom_set_btn)
+        custom_lay.addWidget(custom_set_btn)
+        family_btn = QPushButton("Save family…"); family_btn.clicked.connect(self._on_family_save_btn)
+        custom_lay.addWidget(family_btn)
+        row1.addWidget(self._custom_ctrls)
         row1.addStretch()
 
-        for icon, signal in (("💾", self.save_requested), ("📂", self.load_requested)):
-            tb = QToolButton(); tb.setText(icon); tb.clicked.connect(signal)
-            row1.addWidget(tb)
+        self._mode_btn = QToolButton(); self._mode_btn.clicked.connect(self._on_mode_btn)
+        row1.addWidget(self._mode_btn)
+        tb = QToolButton(); tb.setText("📂"); tb.clicked.connect(self.load_requested)
+        row1.addWidget(tb)
         sep_tb = QFrame(); sep_tb.setFrameShape(QFrame.VLine); sep_tb.setStyleSheet('color: #ccc;')
         row1.addWidget(sep_tb)
         self._snap_check = QCheckBox("Snap")
@@ -492,21 +767,11 @@ class TimeSliderPanel(QWidget):
         extra_lay.addWidget(self._sessions_picker)
         extra_lay.addWidget(QLabel("Name:"))
         self._name_entry = self._fixed_line_edit("", 100)
-        self._name_is_auto = True   # False once the user types their own name
-        self._name_entry.textEdited.connect(lambda _t: setattr(self, '_name_is_auto', False))
+        self._name_entry.textEdited.connect(self._on_name_entry)
         extra_lay.addWidget(self._name_entry)
-        extra_lay.addWidget(QLabel("Splits:"))
-        self._splits_spin = QSpinBox()
-        self._splits_spin.setRange(1, 99); self._splits_spin.setValue(1); self._splits_spin.setFixedWidth(45)
-        extra_lay.addWidget(self._splits_spin)
-        self._overlap_metric = MetricInput(
-            "Overlap:", ('%', 'hr', 'min', 's'), default="0",
-            suggestions=(0, 10, 25, 50), input_width=45, unit_width=60)
-        extra_lay.addWidget(self._overlap_metric)
-        self._equal_effective_check = QCheckBox("Equal duration")
-        self._equal_effective_check.setToolTip(
-            "Splits share equal effective (filtered) time; real-time edges may differ.")
-        extra_lay.addWidget(self._equal_effective_check)
+        self._split_mode_group, self._split_mode_btns = radio_group(
+            [('splits', "Splits:"), ('seg_len', "Segment length:")], 'splits',
+            on_click=lambda *_: self._on_split_mode_btn())
         timing_row.addWidget(self._ccg_extra_widget)
 
         self._status_lbl = QLabel("")
@@ -514,7 +779,40 @@ class TimeSliderPanel(QWidget):
         timing_row.addWidget(self._status_lbl)
         timing_row.addStretch()
 
-        for lyt in (row1, self._legend_layout, timing_row, extra_lay):
+        split_row = QHBoxLayout()
+        self._timing_section.body_layout.addLayout(split_row)
+        split_row.addWidget(self._split_mode_btns['splits'])
+        self._splits_spin = QSpinBox()
+        self._splits_spin.setRange(1, 99); self._splits_spin.setValue(1); self._splits_spin.setFixedWidth(45)
+        split_row.addWidget(self._splits_spin)
+        split_row.addWidget(self._split_mode_btns['seg_len'])
+        self._seg_len_metric = MetricInput(
+            "", ('hr', 'sec', 'ms'), default="1",
+            suggestions=(1, 2, 6), input_width=45, unit_width=55)
+        split_row.addWidget(self._seg_len_metric)
+        self._discard_last_check = QCheckBox("discard last")
+        self._discard_last_check.setToolTip("Drop the short tail rather than keeping a partial segment")
+        split_row.addWidget(self._discard_last_check)
+        self._on_split_mode_btn()
+        self._overlap_metric = MetricInput(
+            "Overlap:", ('%', 'hr', 'min', 'sec'), default="0",
+            suggestions=(0, 10, 25, 50), input_width=45, unit_width=60)
+        split_row.addWidget(self._overlap_metric)
+        self._equal_effective_check = QCheckBox("Equal duration")
+        self._equal_effective_check.setToolTip(
+            "Splits share equal effective (filtered) time; real-time edges may differ.")
+        split_row.addWidget(self._equal_effective_check)
+        split_row.addStretch()
+
+        self._custom_table = QTableWidget(0, len(_CUSTOM_COLS))
+        self._custom_table.setHorizontalHeaderLabels(_CUSTOM_COLS)
+        self._custom_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._custom_table.verticalHeader().setVisible(False)
+        self._custom_table.horizontalHeader().setStretchLastSection(True)
+        root.addWidget(self._custom_table)
+
+        for lyt in (row1, epoch_lay, custom_lay, self._legend_layout, timing_row, extra_lay,
+                    split_row):
             lyt.setContentsMargins(0, 0, 0, 0)
             lyt.setSpacing(4)
         root.setContentsMargins(0, 0, 0, 0)
@@ -523,6 +821,7 @@ class TimeSliderPanel(QWidget):
                   self._timing_section):
             w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         root.addStretch()
+        self._apply_mode()
 
     def _connect_nav(self):
         nav = self.nav
@@ -546,46 +845,87 @@ class TimeSliderPanel(QWidget):
         self._refresh_theme_ui(themes)
 
     def _discover_themes(self, themes: dict):
-        bounds_by_theme: dict = {}
-        for attr, obj in themes.items():
-            labs = [str(x).strip() for x in obj.labels]
-            bounds = [(float(s), float(e), lb)
-                      for s, e, lb in zip(obj.starts, obj.stops, labs)]
-            unique = {lb for lb in labs if lb}
-            if len(unique) <= 1:
-                bounds = [(s, e, attr) for s, e, _ in bounds]
-            bounds_by_theme[attr] = bounds
-        self._all_theme_bounds = bounds_by_theme
-        theme_names = ['segments'] + sorted(themes)
-        cur = self._theme_combo.currentText()
-        default = cur if cur in theme_names else (theme_names[1] if len(theme_names) > 1 else 'segments')
+        b = self.backend
+        default = b.discover_themes(themes)
         self._theme_combo.blockSignals(True)
-        self._theme_combo.set_items(theme_names)
+        self._theme_combo.set_items(b.list_themes())
         self._theme_combo.setCurrentText(default)
         self._theme_combo.blockSignals(False)
-        self._current_theme = default
+        b.current_theme = default
         n = len(themes)
         self._theme_info_lbl.setText(f"{n} theme{'s' if n != 1 else ''}")
 
     def _init_times(self):
-        theme = self._current_theme
-        if theme != 'segments' and theme in self._all_theme_bounds:
-            self._epoch_bounds = list(self._all_theme_bounds[theme])
-            self._total_sec = max((b[1] for b in self._epoch_bounds), default=1.0)
-        else:  # 'segments' = no label filter: empty legend, timeline spans the whole session
-            self._epoch_bounds = []
-            _, t_stop = self.nav.cd.nd.session_bounds(self.nav.key)
-            self._total_sec = float(t_stop) or 1.0
+        b = self.backend
+        b.set_theme(b.current_theme)
 
         # Initialise overlap from source config if available
         source = getattr(self.cd, 'source', None)
         if isinstance(source, CCGSourceConfig):
-            self._overlap_metric.set_value(source.overlap_sec, 's')
+            self._overlap_metric.set_value(source.overlap_sec, 'sec')
 
         self._filter_check.blockSignals(True)
-        self._filter_check.setChecked(self._filter_checks.get(theme, False))
+        self._filter_check.setChecked(b.filter_checks.get(b.current_theme, False))
         self._filter_check.blockSignals(False)
+        self._sync_filter_check()
         self._update_legend()
+
+    def restore_filters(self, state: dict) -> None:
+        """Re-apply saved theme and filters, then resync combo, checkbox and legend to them."""
+        self.backend.restore_filters(state)
+        self._theme_combo.blockSignals(True)
+        self._theme_combo.setCurrentText(self.backend.current_theme)
+        self._theme_combo.blockSignals(False)
+        self._init_times()
+        self._apply_mode()
+
+    def _on_mode_btn(self):
+        self.backend.mode = 'custom' if self.backend.mode == 'epoch' else 'epoch'
+        self._apply_mode()
+
+    def _apply_mode(self):
+        """Swap row-1 controls and the time-range section; neither view's state is touched."""
+        custom = self.backend.mode == 'custom'
+        icon, tip = _MODE_ICONS[self.backend.mode]
+        self._mode_btn.setText(icon); self._mode_btn.setToolTip(tip)
+        self._epoch_ctrls.setVisible(not custom)
+        self._custom_ctrls.setVisible(custom)
+        self._timing_section.setVisible(not custom)
+        self._custom_table.setVisible(custom)
+        if custom:
+            self._custom_picker.set_items(self.backend.custom_items())
+        self._update_legend()
+
+    def _on_custom_set_btn(self):
+        self.backend.set_custom(self._custom_picker.selected)
+        self._update_legend()
+
+    def _remove_custom_chip(self, seg: str):
+        self.backend.custom_selected.remove(seg)
+        self._custom_picker.set_selected(self.backend.custom_selected)
+        self._update_legend()
+
+    def _on_family_save_btn(self):
+        name = prompt_name(self, "Save family", "Family name:")
+        if name:
+            self.cd.save_custom_family(name, self.backend.custom_selected)
+            self._custom_picker.set_items(self.backend.custom_items())
+
+    def _fill_custom_table(self):
+        wins = self.backend.custom_windows()
+        rows = [s for s in self.backend.custom_selected if s in wins]
+        self._custom_table.setRowCount(len(rows))
+        for r, seg in enumerate(rows):
+            cfg = wins[seg][1]
+            filt = "; ".join(f"{th['name']}: {', '.join(th.get('labels') or [])}"
+                             for th in cfg.get('filter_state') or [])
+            t0, t1 = (self.cd.nd.resolve_time(self.nav.key, cfg[k]) for k in ('t0', 't1'))
+            vals = (seg, self._sec_to_hms(t0), self._sec_to_hms(t1),
+                    self._sec_to_hms(cfg.get('active_duration') or 0.0), filt,
+                    f"{cfg.get('overlap_sec', 0.0):g} s")
+            for c, v in enumerate(vals):
+                self._custom_table.setItem(r, c, QTableWidgetItem(v))
+        self._custom_table.resizeColumnsToContents()
 
     def _reset_handles(self):
         self._main_plot.clear_selection()
@@ -606,18 +946,20 @@ class TimeSliderPanel(QWidget):
             if item and item.widget():
                 item.widget().deleteLater()
 
-        cmap = self._label_color_map()
-        saved = self._per_theme_label_state.get(self._current_theme, {})
-        self._legend_toggles = {}
-
+        if self.backend.mode == 'custom':
+            wins = self.backend.custom_windows()
+            for seg, color in self.backend.custom_color_map().items():
+                if seg in wins:
+                    chip = self._add_legend_chip(seg, color, self.backend.custom_visible.get(seg, True))
+                    chip.mouseDoubleClickEvent = lambda _e, s=seg: self._remove_custom_chip(s)
+            self._fill_custom_table()
+            self._redraw_main()
+            return
+        cmap = self.backend.label_color_map()
+        toggles = self.backend.rebuild_legend()
         for lbl, color in cmap.items():
-            active = saved.get(lbl, True)
-            self._legend_toggles[lbl] = active
-            self._add_legend_chip(lbl, color, active)
-
-        none_active = saved.get('NONE', True)
-        self._legend_toggles['NONE'] = none_active
-        self._add_legend_chip('NONE', _TS_NONE_COLOR, none_active, none_style=True)
+            self._add_legend_chip(lbl, color, toggles[lbl])
+        self._add_legend_chip('NONE', _TS_NONE_COLOR, toggles['NONE'], none_style=True)
 
         self._sync_name_to_labels()
         self._redraw_main()
@@ -640,84 +982,78 @@ class TimeSliderPanel(QWidget):
         chip.setStyleSheet(ss)
         chip.toggled.connect(lambda on, lb=label: self._on_legend_toggle(lb, on))
         self._legend_layout.insertWidget(self._legend_layout.count() - 1, chip)
+        return chip
 
     def _on_legend_toggle(self, label: str, active: bool):
-        self._legend_toggles[label] = active
-        state = self._per_theme_label_state.setdefault(self._current_theme, {})
-        state[label] = active
+        if self.backend.mode == 'custom':
+            self.backend.custom_visible[label] = active
+            self._redraw_main()
+            return
+        self.backend.set_label(label, active)
         self._sync_name_to_labels()
         self._redraw_main()
         self.theme_changed.emit()
 
     def _sync_name_to_labels(self):
         """Name mirrors a lone selected label; clears when that stops holding (typed names kept)."""
-        if self._name_entry.text().strip() and not self._name_is_auto:
+        if self._name_entry.text().strip() and not self.backend.name_is_auto:
             return
-        picked = [lb for lb in self._theme_whitelist(self._current_theme) if lb != 'NONE']
-        self._name_entry.setText(picked[0] if len(picked) == 1 else '')
-        self._name_is_auto = True
-
-    def _label_color_map(self) -> dict[str, str]:
-        if self._label_colors is not None:
-            return self._label_colors
-        labels = sorted({lb for _, _, lb in self._epoch_bounds})
-        cmap = {}
-        ci = 0
-        for lb in labels:
-            if lb == 'NONE':
-                cmap[lb] = _TS_NONE_COLOR
-            else:
-                cmap[lb] = _TS_COLORS[ci % len(_TS_COLORS)]
-                ci += 1
-        self._label_colors = cmap
-        return cmap
+        self._name_entry.setText(self.backend.auto_name())
+        self.backend.name_is_auto = True
 
     def _redraw_main(self):
         if self.nav.session_any_mode:
             self._main_plot.update_epochs([], {}, 0, 1)
             return
-        if not self._epoch_bounds:
+        if not self.backend.epoch_bounds and self.backend.mode == 'epoch':
             return
-        self._main_plot.update_epochs(self.active_bounds, self._label_color_map(),
-                                      0.0, self._total_sec)
+        overlays = self.backend.custom_overlays() if self.backend.mode == 'custom' else ()
+        self._main_plot.update_epochs(self.active_bounds, self.backend.label_color_map(),
+                                      0.0, self.backend.total_sec, overlays)
 
     def add_theme(self):
         """Add an epoch theme: pick source + format, attach to the session, add to the combo."""
         pass
 
+    def _on_name_entry(self, _text: str):
+        self.backend.name_is_auto = False
+
     def _on_theme_change(self, theme: str):
-        if theme == self._current_theme:
+        b = self.backend
+        if theme == b.current_theme:
             return
         if self._theme_combo.is_add_row(self._theme_combo.currentIndex()):
             return   # AddableDropdown reverts the index and calls add_theme
-        self._filter_checks[self._current_theme] = self._filter_check.isChecked()
-        self._current_theme = theme
-        self._label_colors = None
+        b.filter_checks[b.current_theme] = self._filter_check.isChecked()
+        b.current_theme = theme
         self._init_times()
         self._filter_check.blockSignals(True)
-        self._filter_check.setChecked(self._filter_checks.get(theme, False))
+        self._filter_check.setChecked(b.filter_checks.get(theme, False))
         self._filter_check.blockSignals(False)
+        self._sync_filter_check()
         self.theme_changed.emit()
 
     def _on_label_reset(self):
-        self._per_theme_label_state.pop(self._current_theme, None)
+        self.backend.per_theme_label_state.pop(self.backend.current_theme, None)
         self._update_legend()
 
     def _on_label_none(self):
-        labels = sorted({lb for _, _, lb in self._epoch_bounds})
-        off = {lb: False for lb in labels}
+        off = {lb: False for lb in {lb for _, _, lb in self.backend.epoch_bounds}}
         off['NONE'] = False
-        self._per_theme_label_state[self._current_theme] = off
+        self.backend.per_theme_label_state[self.backend.current_theme] = off
         self._update_legend()
 
     def _on_filter_toggle(self, checked: bool):
-        self._filter_checks[self._current_theme] = checked
+        self.backend.filter_checks[self.backend.current_theme] = checked
+        self._sync_filter_check()
+
+    def _sync_filter_check(self):
+        """Label follows filter_checks, never the signal — blockSignals must not let it lie."""
+        on = self.backend.filter_checks.get(self.backend.current_theme, False)
+        self._filter_check.setText("✓ Include in filter" if on else "Include in filter")
 
     def _parse_time_text(self, text: str) -> float:
-        s = text.strip().lower()
-        if s in ('start', 'end'):
-            return 0.0 if s == 'start' else self._total_sec
-        return self._hms_to_sec(text)
+        return self.backend.parse_time(text)
 
     def _sync_timing_entries(self, t0: float, t1: float):
         self._start_entry.setText(self._sec_to_hms(t0))
@@ -768,92 +1104,56 @@ class TimeSliderPanel(QWidget):
         # keep 'start'/'end' symbolic so each session resolves them against its own bounds
         t0_spec = t0_txt.lower() if t0_txt.lower() in ('start', 'end') else t0
         t1_spec = t1_txt.lower() if t1_txt.lower() in ('start', 'end') else t1
-        return (t0_spec, t1_spec, self._splits_spin.value(), *self._overlap_metric.value())
+        return (t0_spec, t1_spec, self._splits_spin.value(), *self._overlap_metric.value(),
+                self._seg_len_sec(), self._discard_last_check.isChecked())
+
+    _SEG_LEN_UNITS = {'hr': 3600.0, 'sec': 1.0, 'ms': 0.001}
+
+    def _on_split_mode_btn(self):
+        """Only the picked sizing control stays live; the other cannot contribute."""
+        by_len = self._split_mode_btns['seg_len'].isChecked()
+        self._splits_spin.setEnabled(not by_len)
+        self._seg_len_metric.setEnabled(by_len)
+        self._discard_last_check.setEnabled(by_len)
+
+    def _seg_len_sec(self) -> float:
+        if not self._split_mode_btns['seg_len'].isChecked():
+            return 0.0
+        raw, unit = self._seg_len_metric.value()
+        return float(raw) * self._SEG_LEN_UNITS[unit]
 
     def _theme_whitelist(self, theme: str) -> list:
-        """Labels checked in the legend for *theme* (unrecorded = checked, as the chips show)."""
-        saved = self._per_theme_label_state.get(theme, {})
-        labels = sorted({lb for _, _, lb in self._all_theme_bounds.get(theme, [])})
-        return [lb for lb in labels if saved.get(lb, True)]
-
-    def _read_filter(self) -> dict:
-        """Filter state: AND-list of themes. Include-checked themes if any; else current theme."""
-        checked = [t for t, on in self._filter_checks.items() if on]
-        names = checked or [self._current_theme]
-        return [{'name': t, 'labels': self._theme_whitelist(t)} for t in names]
+        return self.backend.theme_whitelist(theme)
 
     def _on_set(self):
-        any_mode = self.nav.session_any_mode
+        b = self.backend
         if (self._name_entry.text().strip() or 'custom').lower() == _FULL_SEG:
             QMessageBox.warning(None, "Custom CCG",
                                 f"'{_FULL_SEG}' is a reserved name — choose another.")
             return
-        timing = self._read_timing(any_mode)
+        timing = self._read_timing(self.nav.session_any_mode)
         if timing is None:
             self._status_lbl.setText("Check the start/end times — end must follow start")
             return
-        t0_spec, t1_spec, n_splits, overlap_raw, overlap_unit = timing
-        request = CCGBatchRequest(
-            name=self._name_entry.text() or 'custom',
-            t0=t0_spec, t1=t1_spec,
-            scope=('all' if self.nav.session_any_mode   # scope = session-mode marker
-                   else str(getattr(self.nav.key, 'session', ''))),
-            sessions=self._sessions_picker.selected,
-            n_splits=n_splits, overlap_raw=overlap_raw, overlap_unit=overlap_unit,
-            split_mode=('equal_effective' if self._equal_effective_check.isChecked() else 'raw_span'),
-            filter_state=self._read_filter())
+        (t0_spec, t1_spec, b.n_splits, overlap_raw, overlap_unit,
+         b.seg_len_sec, b.discard_last) = timing
+        b.overlap = (overlap_raw, overlap_unit)
+        b.name = self._name_entry.text()
+        b.sessions = self._sessions_picker.selected
+        b.equal_effective = self._equal_effective_check.isChecked()
+        request = b.build_request(t0_spec, t1_spec)
         self._status_lbl.setText(f"Queued: {request.name}")
         self.queue_ccg_requested.emit(request)
 
     def _on_clear(self):
         self._reset_handles()
         self._name_entry.clear()
-        self._name_is_auto = True   # hand the name back to the chips
+        self.backend.name_is_auto = True   # hand the name back to the chips
         self._sync_name_to_labels()
         self._status_lbl.setText("")
 
-    def save_state(self, path: str):
-        import json
-        state = {
-            'theme': self._current_theme,
-            'legend_toggles': dict(self._legend_toggles),
-            'per_theme_label_state': {k: dict(v) for k, v in self._per_theme_label_state.items()},
-            'include_in_filter': self._filter_checks.get(
-                self._current_theme, self._filter_check.isChecked()),
-        }
-        with open(path, 'w') as f:
-            json.dump(state, f, indent=2)
-
-    def load_state(self, path: str):
-        import json
-        with open(path) as f:
-            state = json.load(f)
-        if 'theme' in state:
-            idx = self._theme_combo.findText(state['theme'])
-            if idx >= 0:
-                self._theme_combo.setCurrentIndex(idx)
-        self._per_theme_label_state = state.get('per_theme_label_state', {})
-        inc = state.get('include_in_filter', False)
-        self._filter_checks[self._current_theme] = inc
-        self._filter_check.setChecked(inc)
-        self._update_legend()
-
-    @staticmethod
-    def _hms_to_sec(hms: str) -> float:
-        parts = hms.strip().split(':')
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
-        return float(parts[0])
-
-    @staticmethod
-    def _sec_to_hms(sec: float) -> str:
-        sec = max(0.0, float(sec))
-        h = int(sec // 3600)
-        m = int((sec % 3600) // 60)
-        s = int(sec % 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
+    _hms_to_sec = staticmethod(TimeSliderBackend._hms_to_sec)
+    _sec_to_hms = staticmethod(TimeSliderBackend._sec_to_hms)
 
 
 @dataclass
@@ -868,13 +1168,15 @@ class CCGTask:
     batch_id: int | None = None
     resolution: str = 'lowres'
     session_key: Key | None = None
+    extend: dict | None = None      # {name, window_ms, bin_ms}: an extend unit, not a segment
+    aux: dict | None = None         # {segment, tests, overrides, pairs}: an aux-rule sweep
 
     @property
     def whole_session(self) -> bool:
-        return self.spec is None
+        return self.spec is None and self.extend is None and self.aux is None
 
     def ccg_key(self) -> Key:
-        base = self.session_key if self.whole_session else self.spec.key
+        base = self.session_key if self.spec is None else self.spec.key
         return base.change(resolution=self.resolution)
 
 
@@ -901,22 +1203,24 @@ class CustomCCGWorker:
 
     def enqueue_task(self, *, spec: CCGSourceConfig = None, load_into_ui: bool = False,
                      batch_id: int | None = None, resolution: str = 'lowres',
-                     session_key: Key = None) -> bool:
-        """Queue a segment compute (*spec*) or a whole-session one (*session_key*)."""
+                     session_key: Key = None, extend: dict = None, aux: dict = None) -> bool:
+        """Queue a segment compute (*spec*), a whole-session one, an extend unit, or an aux sweep."""
         task = CCGTask(spec=spec, load_into_ui=bool(load_into_ui),
                        batch_id=batch_id, resolution=resolution,
-                       session_key=session_key)
+                       session_key=session_key, extend=extend, aux=aux)
         return self._runner.enqueue(task)
 
     def on_done(self, completed_task, _result):
         ui, mgr = self._ui, self._mgr
         r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
         name = ('whole session' if completed_task.whole_session
+                else f"aux {completed_task.aux['segment']}" if completed_task.aux
+                else f"extend {completed_task.extend['name']}" if completed_task.extend
                 else completed_task.spec.name)
         print(f"[CCGq] on_done {name} {completed_task.resolution} "
               f"result={'none' if r is None else ('ok' if r.ok else r.error)}", flush=True)
         bid = completed_task.batch_id
-        meta = ui.time_slider._batch_meta.get(bid) if bid is not None else None
+        meta = ui.time_slider.backend.batch_meta.get(bid) if bid is not None else None
 
         if r is None or not r.ok:
             err = r.error if r else 'unknown error'
@@ -926,8 +1230,13 @@ class CustomCCGWorker:
             else:
                 QMessageBox.critical(None, "Custom CCG",
                     f"Computation failed:\n{err}")
-        elif completed_task.whole_session:
-            # get_ccg already stored and saved dim0[0]; nothing to splice.
+        elif completed_task.aux is not None:
+            if meta is not None:
+                meta['rows'].append((r.session, name, 'ok', r.value))
+            if r.session == str(ui.nav.key.session):
+                ui.nav.chip_colors_changed.emit()
+        elif completed_task.whole_session or completed_task.extend is not None:
+            # both wrote their own storage: dim0[0] via get_ccg, or an extend unit dir.
             if meta is not None:
                 meta['rows'].append((r.session, name, 'ok', str(r.session)))
         else:
@@ -965,13 +1274,35 @@ class CustomCCGWorker:
             self._thread_result.clear()
             seg_key = task.ccg_key()
 
-            name = 'whole session' if task.whole_session else str(task.spec.name)
+            name = ('whole session' if task.whole_session
+                    else f"aux {task.aux['segment']}" if task.aux
+                    else f"extend {task.extend['name']}" if task.extend
+                    else str(task.spec.name))
 
             def _ccg_worker():
                 sess = str(seg_key.session)
                 import time as _t; _t0 = _t.time()
                 print(f"[CCGq] START {sess} {task.resolution} '{name}'", flush=True)
                 try:
+                    if task.aux is not None:
+                        a = task.aux
+                        results, on = nav.cd.sweep_aux_tests(
+                            task.session_key.change(segment=a['segment']),
+                            tests=a['tests'], overrides=a['overrides'])
+                        store = nav.sd.aux_results(task.session_key, a['segment'])
+                        store.set_results(results, on)
+                        store.save()
+                        idx = tuple(np.array(a['pairs']).T)
+                        tally = f"{int(on[idx].sum())}/{len(a['pairs'])} on ({task.session_key.type_label()})"
+                        self._thread_result.append(CCGTaskResult(tally, None, sess))
+                        return
+                    if task.extend is not None:
+                        e = task.extend
+                        nav.cd.compute_extend(e['name'], task.session_key.change(segment=e['segment']),
+                                              e['window_ms'], e['bin_ms'], e['pairs'])
+                        print(f"[CCGq] DONE  {sess} extend {_t.time()-_t0:.1f}s", flush=True)
+                        self._thread_result.append(CCGTaskResult(None, None, sess))
+                        return
                     if task.whole_session:
                         # get_ccg computes dim0 index 0 and writes its own file;
                         # there is no parent array to splice it onto.
@@ -1010,26 +1341,26 @@ class CustomCCGWorker:
         if bid is None:
             return
         ts = self._ui.time_slider
-        if bid not in ts._batch_counts:
+        if bid not in ts.backend.batch_counts:
             return
-        ts._batch_counts[bid] -= 1
-        total = ts._batch_totals.get(bid, 0)
-        if ts._batch_counts[bid] > 0:
-            done = total - ts._batch_counts[bid]
+        ts.backend.batch_counts[bid] -= 1
+        total = ts.backend.batch_totals.get(bid, 0)
+        if ts.backend.batch_counts[bid] > 0:
+            done = total - ts.backend.batch_counts[bid]
             ts._status_lbl.setText(f"Computing custom CCG… {done}/{total}")
             # A panel that queued this batch may own the screen while it runs, so
             # the slider's own label is not the only place progress has to land.
-            on_progress = (ts._batch_meta.get(bid) or {}).get('on_progress')
+            on_progress = (ts.backend.batch_meta.get(bid) or {}).get('on_progress')
             if on_progress is not None:
                 on_progress(done, total)
             return
-        del ts._batch_counts[bid]
-        ts._batch_totals.pop(bid, None)
+        del ts.backend.batch_counts[bid]
+        ts.backend.batch_totals.pop(bid, None)
         self._ui.nav.cd.nd.clear_slice_cache()
-        spec_name = (ts._batch_meta.get(bid) or {}).get('spec_name', '')
+        spec_name = (ts.backend.batch_meta.get(bid) or {}).get('spec_name', '')
         ts._status_lbl.setText(f"Done: {spec_name} — {total} CCG(s)")
-        names = list(ts._batch_names.pop(bid, []))
-        meta = ts._batch_meta.pop(bid, None)
+        names = list(ts.backend.batch_names.pop(bid, []))
+        meta = ts.backend.batch_meta.pop(bid, None)
         if meta is not None:
             if meta.get('on_done') is not None:
                 failed = [s for s, _n, st, _v in meta.get('rows', []) if st == 'fail']
@@ -1038,17 +1369,17 @@ class CustomCCGWorker:
         QTimer.singleShot(100, lambda n=names: self._prompt_save_chunks(n))
 
     def _show_batch_report(self, meta: dict):
-        rows = meta.get('rows', [])
-        ok   = [f"  {s}  ->  {v}" for s, _n, st, v in rows if st == 'ok']
-        fail = [f"  {s}: {v}"     for s, _n, st, v in rows if st == 'fail']
-        skip = [f"  {s}: {w}"     for s, w in meta.get('skipped', [])]
-        if len(ok) <= 1 and not fail and not skip:
-            return
-        lines = [f"Custom CCG: {meta.get('spec_name', '')}"]
-        for title, items in (("Computed", ok), ("Failed", fail), ("Skipped", skip)):
-            if items or title == "Computed":
-                lines += ["", f"{title} ({len(items)}):", *(items or ["  (none)"])]
-        ResultsDialog.show_report("Custom CCG results", "\n".join(lines))
+        rows, skipped = meta.get('rows', []), meta.get('skipped', [])
+        line = lambda s, n, v: f"  {s}  {n}" + (f"  ->  {v}" if v not in (None, s) else "")
+        ok   = [line(s, n, v) for s, n, st, v in rows if st == 'ok']
+        fail = [line(s, n, v) for s, n, st, v in rows if st == 'fail']
+        skip = [f"  {s}: {w}" for s, w in skipped]
+        n_sess = len({r[0] for r in rows} | {s for s, _ in skipped})
+        lines = [f"Batch: {meta.get('spec_name', '')}",
+                 f"Sessions: {n_sess}   done {len(ok)} · failed {len(fail)} · skipped {len(skip)}"]
+        for title, items in (("Done", ok), ("Failed", fail), ("Skipped", skip)):
+            lines += ["", f"{title} ({len(items)}):", *(items or ["  (none)"])]
+        ResultsDialog.show_report("Custom CCG queue", "\n".join(lines))
 
     def _prompt_save_chunks(self, names: list[str]):
         return
@@ -1168,19 +1499,63 @@ class CustomCCGManager(Savable):
         panel is covering the slider's status label.
         """
         ts = self._ui.time_slider
-        bid = ts._batch_next_id
-        ts._batch_next_id += 1
+        bid = ts.backend.batch_next_id
+        ts.backend.batch_next_id += 1
         queued = 0
         for sess in sessions:
             if self.worker.enqueue_task(session_key=Key(session=str(sess)),
                                         batch_id=bid, resolution=resolution):
                 queued += 1
         if queued:
-            ts._batch_counts[bid] = queued
-            ts._batch_totals[bid] = queued
-            ts._batch_meta[bid] = {'spec_name': f'{resolution} CCG',
+            ts.backend.batch_counts[bid] = queued
+            ts.backend.batch_totals[bid] = queued
+            ts.backend.batch_meta[bid] = {'spec_name': f'{resolution} CCG',
                                    'skipped': [], 'rows': [], 'on_done': on_done,
                                    'on_progress': on_progress}
+            self.worker._custom_ccg_start_next()
+        return queued
+
+    def queue_extend(self, name: str, jobs: list, window_ms: float, bin_ms: float,
+                     skipped: list = ()) -> int:
+        """Queue an extend per ``(ptr_key, segment, pairs)`` job on the custom-CCG queue and counter."""
+        ts = self._ui.time_slider
+        bid = ts.backend.batch_next_id
+        ts.backend.batch_next_id += 1
+        queued = 0
+        for key, seg, pairs in jobs:
+            if self.worker.enqueue_task(
+                    session_key=key, batch_id=bid,
+                    extend={'name': name, 'window_ms': window_ms, 'bin_ms': bin_ms,
+                            'segment': seg, 'pairs': pairs}):
+                queued += 1
+        if queued:
+            ts.backend.batch_counts[bid] = queued
+            ts.backend.batch_totals[bid] = queued
+            ts.backend.batch_meta[bid] = {'spec_name': f"extend {name}",
+                                          'skipped': list(skipped), 'rows': []}
+            self.worker._custom_ccg_start_next()
+        return queued
+
+    def queue_aux(self, jobs: list, tests: dict, skipped: list, on_done=None,
+                  on_progress=None) -> int:
+        """Queue aux-rule sweeps, one per ``(ptr_key, segment, overrides, pairs)``, on the custom-CCG queue."""
+        ts = self._ui.time_slider
+        bid = ts.backend.batch_next_id
+        ts.backend.batch_next_id += 1
+        queued = 0
+        for key, seg, overrides, pairs in jobs:
+            if self.worker.enqueue_task(session_key=key, batch_id=bid,
+                                        aux=dict(segment=seg, tests=tests,
+                                                 overrides=overrides, pairs=pairs)):
+                queued += 1
+        if queued:
+            ts.backend.batch_counts[bid] = queued
+            ts.backend.batch_totals[bid] = queued
+            meta = ts.backend.batch_meta[bid] = {
+                'spec_name': f"aux rules: {', '.join(tests)}", 'skipped': skipped, 'rows': [],
+                'on_done': on_done}
+            if on_progress is not None:
+                meta['on_progress'] = lambda *_: on_progress(meta['rows'])
             self.worker._custom_ccg_start_next()
         return queued
 
@@ -1191,8 +1566,8 @@ class CustomCCGManager(Savable):
         nav = self._ui.nav
         _any = nav.session_any_mode
         ts = self._ui.time_slider
-        bid = ts._batch_next_id
-        ts._batch_next_id += 1
+        bid = ts.backend.batch_next_id
+        ts.backend.batch_next_id += 1
         work, skipped = nav.cd.parse_ccg_batch_request(spec)
         split_names = [s.name for s in work] if len(work) > 1 else []
         # PATCH: always queue both resolutions; the worker computes a missing base CCG in background
@@ -1213,10 +1588,10 @@ class CustomCCGManager(Savable):
                 f"({len(runner._pending)}/{runner._max_queue}). "
                 "Wait for running tasks to complete, then retry.")
         if queued:
-            ts._batch_counts[bid] = queued
-            ts._batch_totals[bid] = queued
-            ts._batch_names[bid] = split_names
-            ts._batch_meta[bid] = {'spec_name': str(spec.name),
+            ts.backend.batch_counts[bid] = queued
+            ts.backend.batch_totals[bid] = queued
+            ts.backend.batch_names[bid] = split_names
+            ts.backend.batch_meta[bid] = {'spec_name': str(spec.name),
                                    'skipped': skipped, 'rows': []}
         else:
             self.worker._show_batch_report({'spec_name': str(spec.name),

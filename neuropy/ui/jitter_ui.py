@@ -11,13 +11,16 @@ from typing import TYPE_CHECKING
 
 from neuropy.analyses._jitter_worker import jitter_worker
 from neuropy.analyses.jitter import JitterTask
+from neuropy.analyses.jitter_batch import DEFAULT_NJITTER, pairs_for, run_and_store
+from neuropy.analyses.utils import group_display
 from neuropy.ui.ui_common import BackgroundTaskRunner, LRUCache
 from pyqtgraph.Qt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton)
-from pyqtgraph.Qt.QtCore import QObject, QTimer, Signal as _Signal
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
+    QComboBox, QLabel, QCheckBox, QProgressDialog, QApplication)
+from pyqtgraph.Qt.QtCore import QObject, QTimer, Qt, Signal as _Signal
 from pyqtgraph.Qt.QtWidgets import QMessageBox
 
-from neuropy.ui.utils import ResultsDialog
+from neuropy.ui.utils import ListPickerButton, ResultsDialog
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -70,10 +73,6 @@ class JitterWorker:
             )
         return self._runner.start_next(_launch)
 
-    def cache_clear(self, ref: int, tgt: int, seg_key):
-        for res_key in ('lo', 'hi'):
-            self._cache.pop((ref, tgt, res_key, seg_key))
-
 
 
 class JitterManager(QObject):
@@ -106,9 +105,9 @@ class JitterManager(QObject):
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._poll)
 
-    def run_jitter(self, ref: int, tgt: int, njitter: int,
-                   run_lo: bool = True, run_hi: bool = False):
-        """Enqueue jitter for (ref, tgt) at current segment and start polling."""
+    def run_jitter(self, key, njitter: int, run_lo: bool = True, run_hi: bool = False):
+        """Enqueue jitter for *key*'s pair at the current segment and start polling."""
+        ref, tgt = key.ref, key.tgt
         nav = self.nav
         if nav.neurons is None:
             QMessageBox.critical(None, "Jitter", "No neuron data attached.")
@@ -131,13 +130,7 @@ class JitterManager(QObject):
         else:
             jitter_t0 = jitter_t1 = None
 
-        nd_key = nav.key.nd()
-        if nav.session_any_mode:
-            hl = nav.cross_session_handles or []
-            idx = nav.current_pair_idx
-            if idx < len(hl):
-                nd_key = hl[idx][0].nd()
-
+        nd_key = key.nd()
         lo_ccg = self.cd.ccg_for(nd_key.change(resolution='lowres')) or nav.ccg_data
         hi_ccg = self.cd.ccg_for(nd_key.change(resolution='highres'))
 
@@ -160,6 +153,17 @@ class JitterManager(QObject):
         self._update_status()
         self._start_next()
 
+    def _neurons_for_task(self, task, nd_key):
+        """Neurons over the segment's active fragments — a contiguous slice would let the
+        null see filtered-out time the real CCG never saw."""
+        whole = self.cd.nd.neurons_for(nd_key)   # the task's session: the cursor may have moved since enqueue
+        if task.seg_arg is None:
+            return whole
+        label = self.cd.segment_name(nd_key, task.seg_arg)
+        src = self.cd.source_config(nd_key, label)
+        sliced = self.cd.nd.sliced_neurons_for(src) if src is not None else None
+        return sliced[0] if sliced is not None else whole
+
     def _start_next(self):
         nav = self.nav
         if not self.jitter_worker._runner.pending_count():
@@ -170,7 +174,7 @@ class JitterManager(QObject):
         lo = self.cd.ccg_for(nd_key.change(resolution='lowres')) or nav.ccg_data
         hi = self.cd.ccg_for(nd_key.change(resolution='highres'))
         started = self.jitter_worker.start_next(
-            nav.key, nav.neurons, lo, hi,
+            nav.key, self._neurons_for_task(task, nd_key), lo, hi,
             None, self.cd.conf)   # no CCG-derived edge times; window bounds ride on the task
         self._update_status()
         if started and not self._timer.isActive():
@@ -185,39 +189,30 @@ class JitterManager(QObject):
             res_key  = completed.res_key  if completed is not None else 'lo'
             seg_key  = completed.seg_arg  if completed is not None else None
             ref, tgt = int(result['ref']), int(result['tgt'])
-            cache_key = (ref, tgt, res_key, seg_key)
+            nd_key   = completed.nd_key if completed is not None else self.nav.key.nd()
+            cache_key = (nd_key, ref, tgt, res_key, seg_key)
             jitter_val = (result.get('j_avg'), result.get('j_pval'),
-                          result.get('j_pval_bins'), result.get('j_lo'), result.get('j_hi'))
+                          result.get('j_pval_bins'), result.get('j_lo'), result.get('j_hi'),
+                          result.get('bands'))
+            # live cache only: a single-pair run is exploratory, batches are what persist
             self.jitter_worker._cache.put(cache_key, jitter_val)
-
-            nd_key = self.nav.key.nd()
-            if hasattr(self.cd, '_jitter_results'):
-                self.cd._jitter_results.setdefault(nd_key, {})[cache_key] = jitter_val
-
             self.jitter_worker.unviewed.add((ref, tgt))
             self.completed.emit(ref, tgt, res_key, seg_key)
             self.colors_changed.emit((ref, tgt))
-        elif result is not None and result.get('error'):
-            self.failed.emit(str(result['error']))
+        elif completed is not None:
+            self.failed.emit(str((result or {}).get('error') or "jitter worker exited without a result"))
         self._start_next()
 
 
     def load_from_cd(self):
-        nav = self.nav
-        if not hasattr(self.cd, '_jitter_results'):
-            return
-        nd_key = nav.key.nd()
+        """Pull saved batch results for this session into the live cache."""
+        self.cd.load_jitter()
+        nd_key = self.nav.key.nd()
         for cache_key, val in self.cd._jitter_results.get(nd_key, {}).items():
-            if len(cache_key) == 3:
-                cache_key = cache_key + (None,)
-            self.jitter_worker._cache.put(cache_key, val)
+            self.jitter_worker._cache.put((nd_key, *cache_key), val)
         self.colors_changed.emit(None)
 
     def on_save(self):
-        if not hasattr(self.cd, 'save_jitter'):
-            QMessageBox.critical(None, "Save Jitter",
-                                 "CCGDataset does not support jitter persistence.")
-            return
         try:
             self.cd.save_jitter()
             total = sum(len(v) for v in self.cd._jitter_results.values())
@@ -253,17 +248,14 @@ class JitterManager(QObject):
         worker._runner._pending.clear()
         return n
 
-    def clear(self, ref: int, tgt: int):
-        seg_key = self.seg()
+    def clear(self, key):
+        """Drop *key*'s pair at both resolutions, live and saved."""
+        saved = self.cd._jitter_results.get(key.nd(), {})
         for rk in ('lo', 'hi'):
-            self.jitter_worker._cache.pop((ref, tgt, rk, seg_key), None)
-        nd_key = self.nav.key.nd()
-        if hasattr(self.cd, '_jitter_results'):
-            res = self.cd._jitter_results.get(nd_key, {})
-            for rk in ('lo', 'hi'):
-                res.pop((ref, tgt, rk, seg_key), None)
-        self.jitter_worker.unviewed.discard((ref, tgt))
-        self.colors_changed.emit((ref, tgt))
+            self.jitter_worker._cache.pop((key.nd(), key.ref, key.tgt, rk, self.seg()), None)
+            saved.pop((key.ref, key.tgt, rk, self.seg()), None)
+        self.jitter_worker.unviewed.discard((key.ref, key.tgt))
+        self.colors_changed.emit((key.ref, key.tgt))
 
     def apply_list_colors(self):
         """Refresh pair-list jitter highlight colors (no-op if lists handle via signal)."""
@@ -283,14 +275,10 @@ class JitterManager(QObject):
             return True
         return False
 
-    def has_result(self, ref: int, tgt: int, res_key: str = 'lo') -> bool:
-        seg_key = self.seg()
-        return self.jitter_worker._cache.get((ref, tgt, res_key, seg_key)) is not None
-
-    def get_result(self, ref: int, tgt: int, res_key: str = 'lo'):
-        """Return cached jitter tuple or None."""
-        seg_key = self.seg()
-        return self.jitter_worker._cache.get((ref, tgt, res_key, seg_key))
+    def get_result(self, key):
+        """Cached jitter tuple for *key*'s pair at its resolution, or None."""
+        res_key = 'hi' if key.resolution == 'highres' else 'lo'
+        return self.jitter_worker._cache.get((key.nd(), key.ref, key.tgt, res_key, self.seg()))
 
     def _update_status(self):
         running = self.jitter_worker.is_running()
@@ -369,3 +357,104 @@ class JitterQueueDialog(QDialog):
             pending.clear()
             pending.extend(lst)
         self._refresh()
+
+
+class JitterBatchDialog(QDialog):
+    """Run jitter over sessions x conn-types x segments, optionally limited to pair groups."""
+
+    NJITTERS = (100, 200, 500, 1000, 2000)
+
+    def __init__(self, nav, parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        self.setWindowTitle("Run Jitter Batch")
+        self.resize(520, 300)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Results key on (session, conn-type, segment); running another "
+                             "group later merges into the same store."))
+
+        self._sess = self._picker(lay, "Sessions", self._sessions(), "sessions",
+                                  [nav.current_session_str])
+        self._ct   = self._picker(lay, "Conn types", self._conn_types(), "conn types",
+                                  [nav.key.type_label()])
+        self._seg  = self._picker(lay, "Segments", nav.cd.available_segments(nav.key),
+                                  "segments", [_ALL_SEGS])
+        self._grp  = self._picker(lay, "Groups", nav.sd.groups.pickable_groups(), "groups", [],
+                                  select_all_when_empty=False, display=group_display)
+        lay.addWidget(QLabel("No group selected = every screened pair."))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("njitter:"))
+        self._nj = QComboBox()
+        self._nj.addItems([str(n) for n in self.NJITTERS])
+        self._nj.setCurrentText(str(DEFAULT_NJITTER))
+        row.addWidget(self._nj)
+        self._hi = QCheckBox("High resolution")
+        row.addWidget(self._hi)
+        row.addStretch()
+        lay.addLayout(row)
+
+        btns = QHBoxLayout()
+        run = QPushButton("Run"); run.clicked.connect(self._run_btn)
+        close = QPushButton("Close"); close.clicked.connect(self.reject)
+        btns.addStretch(); btns.addWidget(run); btns.addWidget(close)
+        lay.addLayout(btns)
+
+    def _picker(self, lay, title: str, items: list, plural: str, selected: list,
+                select_all_when_empty: bool = True, display=None) -> ListPickerButton:
+        """A batch has no row above it, so nothing to follow: followable stays off."""
+        p = ListPickerButton(title, [str(i) for i in items], plural=plural,
+                             select_all_when_empty=select_all_when_empty, display=display)
+        if selected:
+            p.set_selected([str(s) for s in selected])
+        lay.addWidget(p)
+        return p
+
+    def _sessions(self) -> list:
+        return sorted({str(k.session) for k in self.nav.cd.ptr})
+
+    def _conn_types(self) -> list:
+        return sorted({k.type_label() for k in self.nav.cd.ptr})
+
+    def _ptr_keys(self) -> list:
+        sessions, cts = set(self._sess.selected), set(self._ct.selected)
+        return [k for k in sorted(self.nav.cd.ptr, key=str)
+                if str(k.session) in sessions and k.type_label() in cts]
+
+    def _jobs(self) -> list:
+        """(ptr_key, segment, group) triples this run covers; group None = all screened."""
+        groups = self._grp.selected or [None]
+        return [(k, seg, g) for k in self._ptr_keys()
+                for seg in self._seg.selected for g in groups]
+
+    def _run_btn(self):
+        nav, jobs = self.nav, self._jobs()
+        if not jobs:
+            QMessageBox.information(self, "Jitter", "Nothing selected.")
+            return
+        njitter = int(self._nj.currentText())
+        res_key = 'hi' if self._hi.isChecked() else 'lo'
+        dlg = QProgressDialog(f"Jittering {len(jobs)} block(s) x {njitter}…",
+                              "Stop", 0, len(jobs), self)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.show()
+        total, failed = 0, []
+        for i, (key, seg, grp) in enumerate(jobs):
+            if dlg.wasCanceled():
+                break
+            dlg.setLabelText(f"{key.session} {key.type_label()} {seg}"
+                             + (f" [{grp}]" if grp else ""))
+            dlg.setValue(i)
+            QApplication.processEvents()
+            try:
+                total += run_and_store(nav.cd, nav.sd, key, seg, group=grp,
+                                       njitter=njitter, res_key=res_key,
+                                       progress=lambda s: print(f"[jitter] {s}", flush=True))
+            except Exception as exc:
+                failed.append(f"{key.session} {key.type_label()} {seg}: {exc}")
+        dlg.close()
+        lines = [f"Stored {total} pair result(s) over {len(jobs)} block(s).",
+                 f"Saved to {nav.cd.jitter_path()}"]
+        if failed:
+            lines += ["", f"{len(failed)} block(s) failed:"] + [f"  {f}" for f in failed]
+        ResultsDialog.show_report("Jitter Batch", "\n".join(lines))

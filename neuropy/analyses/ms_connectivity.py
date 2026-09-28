@@ -1,6 +1,7 @@
 import datetime
 import glob
 import json
+import math
 import os
 import copy
 import shutil
@@ -27,7 +28,7 @@ from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
 from neuropy.analyses.ccg_transforms import (
-    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig, lag_window_bins,
+    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig, AuxTestConfig, lag_window_bins,
     hollow_conv, multiple_correction)
 from neuropy.utils.data_storage_util import atomic_write_json
 from neuropy.utils.data_management import (bin_token as _bin_token, read_meta,
@@ -42,6 +43,12 @@ def _san(v) -> str:
     return str(v).replace('.', '-')
 
 
+def _nan_to_none(v):
+    """NaN is not valid JSON; an unmeasurable test reads back as null."""
+    f = float(v)
+    return None if np.isnan(f) else f
+
+
 class CCGConfig(Config):
     """CCG compute config (`key` → recompute; `derived` → EranConv only)."""
 
@@ -51,7 +58,7 @@ class CCGConfig(Config):
         'key': ['name', 'resolution', 'bin_size', 'duration', 'conv_window',
                 'conn_types', 'use_acceleration', 'symmetrize_ccg'],
         'derived': ['alpha', 'alpha2', 'min_lag', 'max_lag', 'tail_intervals', 'tail_source',
-                    'min_spkcount', 'spkcnt_scope', 'multiple_correction'],
+                    'min_spkcount', 'spkcnt_scope', 'multiple_correction', 'aux_tests'],
     }
 
     # "init param": ("kind", choices)  — what a builder UI exposes; defaults come from __init__
@@ -89,6 +96,7 @@ class CCGConfig(Config):
         tail_source: str = 'bins',     # 'bins' | 'conv' | 'jitter'
         min_spkcount=2.5,
         spkcount_scope=12e-3,
+        aux_tests: dict = None,   # AuxTestConfig.serialize(); which tests decide on/off
         multiple_correction: str = 'bonferroni',  # 'bonferroni' or 'fdr_bh'
         use_acceleration=None,  # None → auto-detect CuPy; True/False to override
         symmetrize_ccg=True,
@@ -117,14 +125,23 @@ class CCGConfig(Config):
         self.multiple_correction = multiple_correction
         self.min_lag = min_lag
         self.max_lag = max_lag
-        self.tail_intervals = [tuple(iv) for iv in (
-            tail_intervals if tail_intervals is not None
-            else [(None, -min_lag), (max_lag, None)])]
+        self.tail_intervals = (tail_intervals if tail_intervals is not None
+                               else [(None, -min_lag), (max_lag, None)])
         self.tail_source = tail_source
         self.min_spkcount = min_spkcount
         self.spkcnt_scope = spkcount_scope
+        self.aux_tests = dict(aux_tests or {})
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
+
+    @property
+    def tail_intervals(self) -> list:
+        return self._tail_intervals
+
+    @tail_intervals.setter
+    def tail_intervals(self, intervals) -> None:
+        """Tuples, not lists: this travels into cache keys, and JSON reads it back as lists."""
+        self._tail_intervals = [tuple(iv) for iv in (intervals or [])]
 
     @property
     def conn_types_E(self):
@@ -320,8 +337,8 @@ def open_project(name: str = None, sessions: list = None):
     else:                                      # caller-supplied (ProcessData) -> name them here
         neurons = NeuronsDataset(sessions, nd_conf, naming=header.naming)
     cd = CCGDataset(conf, neurons, header=header)
+    neurons.load_tags(cd.save_path, missing_ok=True)
     cd.missing_sessions()
-    cd.load()
     sd = SelectionDataset(cd)
     sd.load_sessions()
     return neurons, cd, sd
@@ -336,15 +353,24 @@ class CCGBatchRequest:
     scope: str = ''                                      # '' | 'all' | a session
     sessions: list = field(default_factory=list)
     n_splits: int = 1
+    seg_len_sec: float = 0.0                             # >0 sizes the splits instead of n_splits
+    discard_last: bool = False                           # drop the short tail a fixed length leaves
     overlap_raw: float = 0.0
     overlap_unit: str = 'sec'                            # 'sec' | 'min' | 'hr' | '%'
     filter_state: list = field(default_factory=list)
     split_mode: str = 'raw_span'                          # 'raw_span' | 'equal_effective'
 
     _JSON_KEYS = frozenset([
-        'name', 't0', 't1', 'scope', 'sessions', 'n_splits',
+        'name', 't0', 't1', 'scope', 'sessions', 'n_splits', 'seg_len_sec', 'discard_last',
         'overlap_raw', 'overlap_unit', 'filter_state', 'split_mode',
     ])
+
+    def splits_for(self, span_sec: float) -> int:
+        """Split count for a span: a fixed segment length sizes them, else n_splits stands."""
+        if self.seg_len_sec <= 0:
+            return max(1, self.n_splits)
+        exact = span_sec / self.seg_len_sec
+        return max(1, int(exact) if self.discard_last else math.ceil(exact - 1e-9))
 
     @staticmethod
     def resolve_overlap_sec(t0, t1, overlap_raw, overlap_unit) -> float:
@@ -372,6 +398,9 @@ class CCGBatchRequest:
         return cls(**{k: d[k] for k in cls._JSON_KEYS if k in d})
 
 
+_UNIT_META = ('session', 'segment', 'bin_size', 'n_bins')
+
+
 class CCGSourceConfig(Config):
     """One custom segment's timing/filter metadata (owns its ``Key``)."""
 
@@ -383,9 +412,10 @@ class CCGSourceConfig(Config):
     ])
 
     def __init__(self, key, t0=None, t1=None, overlap_sec=0.0,
-                 filter_state=None, active_duration=None, firing_rates=None):
-        super().__init__()
+                 filter_state=None, active_duration=None, firing_rates=None, families=None):
+        super().__init__(ignored_attrs=['key', *_UNIT_META])   # the unit json writes these itself
         self.key = key
+        self.families = families
         self.t0 = self._coerce_time(t0)
         self.t1 = self._coerce_time(t1)
         self.overlap_sec = overlap_sec
@@ -421,8 +451,10 @@ class CCGSourceConfig(Config):
         return os.path.join(self._root, 'custom_ccg', f"{self._stem()}.{token}")
 
     def save_path(self) -> str:
-        """Res-independent meta json, beside the unit dirs it describes."""
-        return os.path.join(self._root, 'custom_ccg', self._stem())
+        """Every unit dir's json carries this whole config; any one of them reads back."""
+        units = sorted(glob.glob(os.path.join(self._root, 'custom_ccg', f"{self._stem()}.*",
+                                              f"{self._stem()}.json")))
+        return units[0][:-len('.json')] if units else os.path.join(self._root, 'custom_ccg', self._stem())
 
     def erase(self) -> None:
         """Remove everything on disk named for this segment: the config json and every unit dir."""
@@ -480,6 +512,11 @@ class CCGPointer(HklSavable):
         return self._inds
 
     @property
+    def stored_by_segment(self) -> bool:
+        """inds carries a segment column, so a row names one segment, not the session sum."""
+        return True
+
+    @property
     def pairs(self):
         return SetOp.unique(self.inds[:, 1:])  # unique (ref, tgt)
 
@@ -531,7 +568,7 @@ class CCGPointer(HklSavable):
 
 class _CCGData(NpzSavable):
     def __init__(self, key, ccg=None, ccg_null=None, pval=None, qval=None, root=DATA_ROOT,
-                 bin_size=None, segment=None):
+                 bin_size=None, segment=None, src=None):
         super().__init__()
         self.key = key
         self._root = root  # caller-supplied npy target dir
@@ -541,13 +578,16 @@ class _CCGData(NpzSavable):
         self.qval = qval
         self.bin_size = bin_size
         self.segment = segment
+        self.src = src
 
     def save(self):
         super().save(path=self._root)
-        atomic_write_json(os.path.join(self._root, meta_name(self._root)), {
-            'session': str(self.key.session), 'segment': self.segment,
-            'bin_size': self.bin_size, 'n_bins': int(self.ccg.shape[-1]),
-        })
+        cfg = self.src.serialize() if self.src is not None else {}
+        meta = {'session': str(self.key.session), 'segment': self.segment,
+                'families': cfg.pop('families', None),
+                'bin_size': self.bin_size, 'n_bins': int(self.ccg.shape[-1]), **cfg}
+        atomic_write_json(os.path.join(self._root, meta_name(self._root)),
+                          {k: v for k, v in meta.items() if v is not None})
 
 
 
@@ -678,9 +718,8 @@ class CCGData(NpzSavable):
                 pval=self.pval[seg_idx] if self.pval is not None else None,
                 qval=self.qval[seg_idx] if self.qval is not None else None,
                 root=src.data_dir(self.key.resolution, self.conf.bin_size),
-                bin_size=self.conf.bin_size, segment=seg_name
+                bin_size=self.conf.bin_size, segment=seg_name, src=src
         ).save()
-        src.save()
 
     def drop_segment(self, seg_name: str):
         """Drop segment from memory (index 0 is permanent)."""
@@ -785,6 +824,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
             self.src_conf._root = save_path
         self.cache = SessionMemoryCache(self._ccg)
         self._applied_norm_methods: list[str] | None = None
+        self._custom_keys_cache: tuple | None = None
+        self._jitter_results: dict = {}   # nd_key -> {(ref, tgt, res_key, seg): jitter tuple}
         self.conn_strength_config: ConnStrengthConfig | None = None
         self.conn_strength: dict = {}
         if src_conf is not None:
@@ -861,6 +902,69 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def custom_dir(self):
         return os.path.join(self.save_path, "custom_ccg")
 
+    @property
+    def extend_dir(self):
+        return os.path.join(self.save_path, "extend_ccg")
+
+    @staticmethod
+    def extend_name(window_ms: float, bin_ms: float) -> str:
+        """The only name an extend set gets: its window and bin."""
+        return f"extend_{window_ms:g}ms_bin{bin_ms:g}ms"
+
+    def extend_unit_dir(self, name: str, key, window_ms: float, bin_ms: float) -> str:
+        """One unit per (segment, session) under the set's name, named like a custom-CCG unit."""
+        return os.path.join(self.extend_dir, _san(name),
+                            f"{key.segment}.{key.session}.{_bin_token(bin_ms / 1000.0)}")
+
+    def saved_extends(self) -> list:
+        """(name, session, window_ms, bin_ms, n_computed, segment) per stored extend unit."""
+        out = []
+        for d in sorted(glob.glob(os.path.join(self.extend_dir, '*', '*', ''))):
+            m = read_meta(d)
+            if m is not None:
+                out.append((m['name'], m['session'], m['window_ms'], m['bin_ms'],
+                            m['n_computed'], m['segment']))
+        return out
+
+    def extend_ccg_for(self, name: str, key, window_ms: float, bin_ms: float):
+        """``(ccg [ref, tgt, bin], computed [ref, tgt])`` of one stored unit, or None when never saved."""
+        d = self.extend_unit_dir(name, key, window_ms, bin_ms)
+        if not os.path.isfile(os.path.join(d, 'ccg.npy')):
+            return None
+        return (np.load(os.path.join(d, 'ccg.npy'), mmap_mode='r'),
+                np.load(os.path.join(d, 'computed.npy')))
+
+    def compute_extend(self, name: str, key, window_ms: float, bin_ms: float, pairs) -> str:
+        """Extend every combination of the neurons *pairs* touch, ACGs included, and merge it into the unit."""
+        self.segment_index(key, key.segment)
+        src = self.ccg_for(key).sources.get(key.segment)
+        sliced = self.nd.sliced_neurons_for(src) if src is not None else None
+        neurons = sliced[0] if sliced else self.nd.neurons_for(key)
+        inds = np.unique(np.asarray(pairs, dtype=int).ravel())
+        duration = window_ms / 1000.0
+        bin_size = max(bin_ms, 1000.0 / neurons.sampling_rate) / 1000.0
+        sub = np.asarray(correlations.spike_correlations(
+            neurons=neurons, neuron_inds=inds, bin_size=bin_size, window_size=duration,
+            symmetrize=self.conf.symmetrize_ccg, use_acceleration=self.conf.use_acceleration),
+            dtype=float)
+        n = neurons.n_neurons
+        stored = self.extend_ccg_for(name, key, window_ms, bin_ms)
+        ccg = np.array(stored[0]) if stored else np.full((n, n, sub.shape[-1]), np.nan)
+        computed = np.array(stored[1]) if stored else np.zeros((n, n), dtype=bool)
+        ccg[np.ix_(inds, inds)] = sub
+        computed[np.ix_(inds, inds)] = True
+        d = self.extend_unit_dir(name, key, window_ms, bin_ms)
+        os.makedirs(d, exist_ok=True)
+        np.save(os.path.join(d, 'ccg.npy'), ccg)
+        np.save(os.path.join(d, 'computed.npy'), computed)
+        atomic_write_json(os.path.join(d, meta_name(d)), {
+            'name': name, 'session': str(key.session), 'segment': str(key.segment),
+            'window_ms': window_ms, 'bin_ms': bin_ms, 'n_bins': int(ccg.shape[-1]),
+            'n_computed': int(computed.sum()),
+            'computed_at': datetime.datetime.now().isoformat(),
+        })
+        return d
+
     def saved_sessions(self):
         return self._list_dir(
             self.ccg_dir,
@@ -868,8 +972,55 @@ class CCGDataset(AnalysisDataset, Cacheable):
 
     def saved_customs(self):
         """Custom segment keys from on-disk meta json."""
-        stems = [_Path(f).stem for f in glob.glob(os.path.join(self.custom_dir, '*.json'))]
-        return [CCGSourceConfig.stem_to_key(s) for s in stems]
+        return list(dict.fromkeys(self._custom_keys()))
+
+    def segment_intervals(self, key, name: str) -> list | None:
+        src = CCGSourceConfig(key=key.nd().change(segment=name))
+        src._root = self.save_path
+        if not os.path.isfile(src.save_path() + '.json'):
+            return self.nd.label_intervals(key.nd(), name)
+        src.load()
+        return self.nd.resolve_intervals(key.nd(), src.t0, src.t1, src.filter_state)[0] or []
+
+    def custom_windows(self, key) -> list:
+        """(segment, effective intervals, config dict) for *key*'s session's saved custom CCGs."""
+        out = []
+        for k in sorted(self.saved_customs(), key=lambda k: str(k.segment)):
+            if str(k.session) != str(key.session):
+                continue
+            src = CCGSourceConfig(key=k)
+            src._root = self.save_path
+            with open(src.save_path() + '.json') as f:
+                cfg = json.load(f)
+            iv, _ = self.nd.resolve_intervals(key, cfg['t0'], cfg['t1'], cfg.get('filter_state'))
+            out.append((str(k.segment), iv or [], cfg))
+        return out
+
+    @property
+    def custom_families_path(self):
+        return os.path.join(self.custom_dir, 'families.json')
+
+    def custom_families(self, segments) -> dict:
+        """Name-stem families (≥2 members) merged with the manual ones in ``families.json``."""
+        fam = defaultdict(list)
+        for seg in segments:
+            fam[seg.rstrip('0123456789')].append(seg)
+        fam = {f: m for f, m in fam.items() if len(m) > 1 and f not in m}
+        if os.path.exists(self.custom_families_path):
+            with open(self.custom_families_path) as f:
+                manual = json.load(f)
+            fam.update({f: [s for s in m if s in segments] for f, m in manual.items()})
+        return {f: m for f, m in fam.items() if m}
+
+    def save_custom_family(self, name: str, segments: list) -> None:
+        path = self.custom_families_path
+        manual = {}
+        if os.path.exists(path):
+            shutil.copy2(path, path + '.bak')
+            with open(path) as f:
+                manual = json.load(f)
+        manual[name] = list(segments)
+        atomic_write_json(path, manual)
         
     def by_session(self, session) -> dict:
         """In-memory ``CCGData`` for one session, keyed by ``Key``."""
@@ -970,8 +1121,16 @@ class CCGDataset(AnalysisDataset, Cacheable):
             if source is not None:
                 conf.tail_source = source
 
-    def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig) -> np.ndarray:
+    def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig,
+                              overrides: dict = None) -> np.ndarray:
         """Connection-strength grid ``[seg, ref, tgt]`` after norms — batch call of the per-pair chain."""
+        cs = self._conn_strength_raw(key, active_norms, cfg)
+        if cfg.off_mode == 'flag':
+            return cs
+        on = self.pair_on_for(key, overrides, tests=self.aux_test_config.specs())
+        return np.where(on, 1.0, 0.0) if cfg.off_mode == 'binarize' else np.where(on, cs, 0.0)
+
+    def _conn_strength_raw(self, key, active_norms, cfg: ConnStrengthConfig) -> np.ndarray:
         data = self.ccg_for(key)
         refs, tgts = data._ref_tgt_grid()
         seg = self.segment_index(key, key.segment)
@@ -983,10 +1142,106 @@ class CCGDataset(AnalysisDataset, Cacheable):
             custom_time_hours=self.time_hours_for(key, key.segment),
             excitability=key.excitability)
 
+    def jitter_path(self) -> str:
+        return os.path.join(self.save_path, 'jitter', 'jitter_results.hkl')
+
+    def save_jitter(self) -> str:
+        """Persist jitter percentile bands; the raw njitter draws are never stored."""
+        path = self.jitter_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        bundle = {str(nd): {'_'.join(str(p) for p in ck): v for ck, v in pairs.items()}
+                  for nd, pairs in self._jitter_results.items() if pairs}
+        hkl.dump(bundle, path)
+        return path
+
+    def load_jitter(self) -> int:
+        """Read saved jitter back into ``_jitter_results``; returns how many pairs landed."""
+        path = self.jitter_path()
+        if not os.path.isfile(path):
+            return 0
+        n = 0
+        for nd_str, pairs in hkl.load(path).items():
+            out = self._jitter_results.setdefault(Key.from_str(nd_str), {})
+            for ck_str, val in pairs.items():
+                ref, tgt, res_key, seg = ck_str.split('_', 3)
+                out[(int(ref), int(tgt), res_key,
+                     None if seg == 'None' else int(seg))] = val   # seg is a dim0 index
+                n += 1
+        return n
+
+    @property
+    def aux_test_config(self) -> AuxTestConfig:
+        """Which auxiliary tests decide on/off — stored on conf, so it survives a restart."""
+        return AuxTestConfig.from_dict(self.conf.aux_tests)
+
+    @aux_test_config.setter
+    def aux_test_config(self, cfg: AuxTestConfig) -> None:
+        self.conf.aux_tests = cfg.serialize()
+
+    def keys_in_scope(self, sessions: list = None, type_labels: list = None) -> list:
+        """Pointer keys inside a scope; an empty or ``None`` list means no narrowing."""
+        want_sess, want_type = set(sessions or []), set(type_labels or [])
+        return [key for key in self.ptr
+                if (not want_sess or str(key.session) in want_sess)
+                and (not want_type or key.type_label() in want_type)]
+
+    def aux_tests_for(self, key, tests: dict = None) -> dict:
+        """``{name: (value, passed)}``, each ``[ref, tgt]``, for *key*'s segment.
+
+        *tests* maps a name to its kwargs (``threshold``, ``factor``); None runs all, {} runs none."""
+        specs = {n: {} for n in ConnectionStrength.AUX_TESTS} if tests is None else tests
+        out = {}
+        for name, kw in specs.items():
+            kw = kw or {}
+            res = kw.get('resolution') or ConnectionStrength.AUX_TESTS[name][4].get('resolution') \
+                or key.resolution
+            rkey = key.change(resolution=res)
+            data = self.ccg_for(rkey)
+            seg = self.segment_index(rkey, key.segment)
+            conf = data.conf
+            src = data.pval[seg] if name in ConnectionStrength.PVAL_TESTS else data.ccg[seg]
+            out[name] = ConnectionStrength.aux_test(
+                name, src, conf, conf.min_lag_bin, conf.max_lag_bin, **kw)
+        return out
+
+    def _combine_on(self, key, results: dict) -> np.ndarray:
+        """AND of every enabled test; with none enabled a pair is on until said otherwise."""
+        if results:
+            return np.logical_and.reduce([passed for _v, passed in results.values()])
+        data = self.ccg_for(key)
+        return np.ones(data.ccg.shape[1:3], dtype=bool)
+
+    def pair_on_for(self, key, overrides: dict = None, tests: dict = None) -> np.ndarray:
+        """``[ref, tgt]`` on/off in *key*'s segment: every enabled test, with manual entries winning."""
+        results = self.aux_tests_for(key, tests)
+        on = self._combine_on(key, results)
+        for (ref, tgt), state in (overrides or {}).items():
+            if ref < on.shape[0] and tgt < on.shape[1]:
+                on[ref, tgt] = state
+        return on
+
+    def sweep_aux_tests(self, key, tests: dict = None,
+                        overrides: dict = None) -> tuple:
+        """``({name: (value, passed)}, on)``, each ``[ref, tgt]``, for *key*'s segment."""
+        results = self.aux_tests_for(key, tests)
+        on = self._combine_on(key, results)
+        for (ref, tgt), state in (overrides or {}).items():
+            if ref < on.shape[0] and tgt < on.shape[1]:
+                on[ref, tgt] = state
+        return results, on
+
+    def _custom_keys(self):
+        """Segment keys on disk, cached on the dir mtime: a rescan opens a json per unit dir."""
+        stamp = os.path.getmtime(self.custom_dir) if os.path.isdir(self.custom_dir) else None
+        if self._custom_keys_cache is None or self._custom_keys_cache[0] != stamp:
+            keys = self._list_dir(self.custom_dir,
+                                  lambda b: CCGSourceConfig.stem_to_key(split_unit_name(b)[0]))
+            self._custom_keys_cache = (stamp, keys)
+        return self._custom_keys_cache[1]
+
     def available_segments(self, key=None):
         """Computed segment labels on disk (ccgdata); ``key=None`` → project-wide, else that session."""
-        keys = self._list_dir(self.custom_dir,
-                              lambda b: CCGSourceConfig.stem_to_key(split_unit_name(b)[0]))
+        keys = self._custom_keys()
         names = ['all']
         for sk in keys:
             nm = str(sk.segment)
@@ -1058,11 +1313,14 @@ class CCGDataset(AnalysisDataset, Cacheable):
             # per-session overlap ('%' needs window length)
             overlap = CCGBatchRequest.resolve_overlap_sec(t0, t1, spec.overlap_raw, spec.overlap_unit)
             before = len(work)
-            n, name, fs = max(1, spec.n_splits), str(spec.name), list(spec.filter_state)
+            name, fs = str(spec.name), list(spec.filter_state)
             active, _ = self.nd.resolve_intervals(key, t0, t1, fs) if fs else (None, None)
             if spec.split_mode == 'equal_effective':  # cut the active-time axis, not the real-time axis
+                span = IntervalOp.duration(IntervalOp.merge(active)) if active else 0.0
+                n = spec.splits_for(span)
                 chunks = IntervalOp.partition_effective(active, n, name) if active else []
             else:
+                n = spec.splits_for((active[-1][1] - active[0][0]) if active else t1 - t0)
                 if active:   # raw_span with a filter: split the filtered span, not the full window
                     t0, t1 = active[0][0], active[-1][1]
                 chunks = IntervalOp.partition(t0, t1, n, overlap, name)

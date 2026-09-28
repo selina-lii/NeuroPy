@@ -11,9 +11,9 @@ from pyqtgraph.Qt.QtGui import QAction
 from neuropy.analyses.ms_connectivity import ProjectConfig, build_project, projects_on_disk
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.ui.app_state import _ALL_SESSION_MARKER
-from neuropy.ui.dialogs import (AddProjectDialog, CreateGroupDialog, ExportOptionsDialog,
+from neuropy.ui.dialogs import (AddProjectDialog, CreateDerivedGroupDialog, CreateGroupDialog, CustomTagRulesDialog, ExportOptionsDialog,
                                 SettingsDialog)
-from neuropy.ui.jitter_ui import JitterQueueDialog
+from neuropy.ui.jitter_ui import JitterBatchDialog, JitterQueueDialog
 from neuropy.ui.utils import AddableDropdown, chip_button, make_button
 
 if TYPE_CHECKING:
@@ -326,7 +326,9 @@ class ReviewMenuBar:
 
         groups_menu = mb.addMenu("Groups")
         groups_menu.addAction("Create group…", lambda: CreateGroupDialog.show(w.nav.sel_data, w.pairs_view.pair_selection, w))
+        groups_menu.addAction("Create group for comparison…", lambda: CreateDerivedGroupDialog(w.nav, w).exec())
         groups_menu.addAction("Manage groups…", w._manage_groups)
+        groups_menu.addAction("Custom CCG tag rules…", lambda: CustomTagRulesDialog.show_for(w.nav, w))
         groups_menu.addSeparator()
         groups_menu.addAction("Export groups…", lambda: w.nav.groups.save())
         groups_menu.addAction("Import groups…", lambda: w.nav.groups.load())
@@ -346,6 +348,7 @@ class ReviewMenuBar:
         stats_menu = mod_menu.addMenu("Stats tests")
         stats_menu.addAction("Run stats test…", w._show_stats_panel)
         jitter_menu = mod_menu.addMenu("Jitter")
+        jitter_menu.addAction("Run batch…", lambda: JitterBatchDialog(w.nav, w).exec())
         jitter_menu.addAction("View queue…", lambda: JitterQueueDialog(w.jitter_mgr, w).exec())
         jitter_menu.addAction("Clear queue", w.jitter_mgr.clear_queue)
         mod_menu.addSeparator()

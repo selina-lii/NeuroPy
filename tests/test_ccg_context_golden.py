@@ -8,7 +8,6 @@ while this passes.
     python tests/test_ccg_context_golden.py            # verify against it
 """
 from __future__ import annotations
-import argparse
 import os
 import sys
 
@@ -25,12 +24,14 @@ os.environ["QT_PLUGIN_PATH"] = _PLUGINS
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "notebooks"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pyqtgraph.Qt.QtWidgets import QApplication
 import subjects
 from neuropy.analyses.ms_connectivity import open_project
 from neuropy.ui.ccg_ui import CCGReviewUI, UIStates
 from neuropy.ui.ccg_panel import CCGContextBuilder
+import suite_harness as harness
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "ccg_context_golden.npz")
@@ -84,7 +85,7 @@ def context_values(ctx) -> dict:
 def sweep(ui) -> dict:
     """Build contexts over a grid of display settings; returns case -> arrays."""
     nav, panel = ui.nav, ui.mainview
-    cor, cs = panel.corr_section, panel.cs_section
+    cor, cs, norm = panel.corr_section, panel.cs_section, panel.norm_section
     extend_row = cor._extend_rows[0]
     recorded = {}
 
@@ -103,8 +104,8 @@ def sweep(ui) -> dict:
                 cs.p_btn.setChecked(pvals)
                 cs.pc_btn.setChecked(pvals)
                 for deconv in (False, True):
-                    cor.deconv_ref_btn.setChecked(deconv)
-                    cor.deconv_tgt_btn.setChecked(deconv)
+                    norm.deconv_ref_btn.setChecked(deconv)
+                    norm.deconv_tgt_btn.setChecked(deconv)
                     tag = f"acg{int(show_acg)}_bl{int(show_baseline)}" \
                           f"_p{int(pvals)}_dc{int(deconv)}"
                     record(f"stored_{tag}",
@@ -152,31 +153,12 @@ def compare(recorded: dict, golden) -> list:
     return problems
 
 
+def check_npz(path: str, recorded: dict) -> list:
+    return compare(recorded, np.load(path, allow_pickle=True))
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--record', action='store_true',
-                        help='write the golden file instead of checking it')
-    args = parser.parse_args()
-
-    _, ui = open_ui()
-    recorded = sweep(ui)
-
-    if args.record:
-        np.savez_compressed(GOLDEN_PATH, **recorded)
-        print(f"recorded {len(recorded)} arrays -> {GOLDEN_PATH}")
-        return 0
-
-    if not os.path.isfile(GOLDEN_PATH):
-        print(f"no golden file at {GOLDEN_PATH}; run with --record first")
-        return 2
-    problems = compare(recorded, np.load(GOLDEN_PATH, allow_pickle=True))
-    if problems:
-        print(f"FAIL: {len(problems)} difference(s)")
-        for line in problems[:40]:
-            print(f"  {line}")
-        return 1
-    print(f"PASS: {len(recorded)} arrays identical")
-    return 0
+    return harness.run(open_ui, sweep, GOLDEN_PATH, check_npz, harness.write_npz)
 
 
 if __name__ == '__main__':

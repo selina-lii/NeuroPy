@@ -81,6 +81,8 @@ def plot_ccg_panel(
     acg_yscale_ref=1.0,
     acg_yscale_tgt=1.0,
     acg_match_ccg=False,
+    wf_peak_ms=None,
+    wf_peak_amp=None,
     show_ccg=True,
     plot_style='bar',
     line_ccg=False,
@@ -656,6 +658,7 @@ class JitterOverlay:
     j_pval:   Optional[np.ndarray] = None
     j_ccg_lo: Optional[np.ndarray] = None
     j_ccg_hi: Optional[np.ndarray] = None
+    bands:    Optional[dict] = None   # {percentile: [n_bins]}; drawn instead of lo/hi when present
 
 
 @dataclass
@@ -731,7 +734,9 @@ class RenderContext:
     title:  TitleConfig
     dark_mode: bool = False
     base_window_ms: Optional[float] = None   # extend mode: width of the lo-res window it widened
-    wf_y_pad: float = 0.05
+    wf_y_pad: float = 0.05        # fraction of the span the waveform's zero sits above the floor
+    wf_y_span: float = 1.0        # height of the waveform as a fraction of the plot
+    wf_flip: bool = False
     cs_window: Optional[tuple] = None   # CS shades this window even when it is not drawn
 
 
@@ -764,6 +769,8 @@ def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
         acg_yscale_ref         = ctx.acg_yscale_ref,
         acg_yscale_tgt         = ctx.acg_yscale_tgt,
         acg_match_ccg          = ctx.acg_match_ccg,
+        wf_peak_ms             = ctx.wf_peak_ms,
+        wf_peak_amp            = ctx.wf_peak_amp,
         show_ccg               = ctx.show_ccg,
         line_ccg               = ctx.line_ccg,
         line_baseline          = ctx.line_baseline,
@@ -788,21 +795,26 @@ def render_ccg_png(ctx: RenderContext, png_path: str, dpi: int = 100) -> None:
         except Exception:
             pass
 
-    if ctx.jitter.j_ccg_lo is not None and ctx.jitter.j_ccg_hi is not None:
+    _bands = ctx.jitter.bands or (
+        {5.0: ctx.jitter.j_ccg_lo, 95.0: ctx.jitter.j_ccg_hi}
+        if ctx.jitter.j_ccg_lo is not None and ctx.jitter.j_ccg_hi is not None else None)
+    if _bands:
         try:
-            jlo = np.asarray(ctx.jitter.j_ccg_lo, dtype=float)
-            jhi = np.asarray(ctx.jitter.j_ccg_hi, dtype=float)
-            if len(jlo) == len(ctx.ccg) and len(jhi) == len(ctx.ccg):
-                bs     = ctx.bin_size_eff
-                ws     = ctx.window_size_eff
-                bins_s = np.arange(-ws / 2, ws / 2 + bs, bs)
-                bins   = bins_s * 1000.0
-                edges  = np.append(bins - bs * 500.0, bins[-1] + bs * 500.0)
-                x_step = np.repeat(edges, 2)[1:-1]
-                for arr in (jlo, jhi):
-                    ax.plot(x_step, np.repeat(arr, 2),
-                            color='#C62828', linewidth=1.15,
-                            alpha=0.9, linestyle=(0, (4, 3)), zorder=4)
+            bs     = ctx.bin_size_eff
+            ws     = ctx.window_size_eff
+            bins   = np.arange(-ws / 2, ws / 2 + bs, bs) * 1000.0
+            edges  = np.append(bins - bs * 500.0, bins[-1] + bs * 500.0)
+            x_step = np.repeat(edges, 2)[1:-1]
+            for level, arr in sorted(_bands.items()):
+                arr = np.asarray(arr, dtype=float)
+                if len(arr) != len(ctx.ccg):
+                    continue
+                # the median is the null itself; outer bands fade as they get rarer
+                far = abs(float(level) - 50.0) / 50.0
+                ax.plot(x_step, np.repeat(arr, 2), color='#C62828',
+                        linewidth=1.3 - 0.4 * far, alpha=0.95 - 0.35 * far,
+                        linestyle='-' if float(level) == 50.0 else (0, (4, 3)),
+                        zorder=4, label=f'jitter p{level:g}')
         except Exception:
             pass
 

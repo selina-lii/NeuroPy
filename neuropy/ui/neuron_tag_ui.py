@@ -9,14 +9,14 @@ from __future__ import annotations
 from pyqtgraph.Qt.QtCore import Qt
 from pyqtgraph.Qt.QtGui import QColor
 from pyqtgraph.Qt.QtWidgets import (QComboBox, QHBoxLayout,
-                                    QInputDialog, QLabel, QMessageBox,
+                                    QLabel, QMessageBox,
                                     QPushButton, QSpinBox, QTreeWidget,
                                     QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from neuropy.analyses.neuron_tags import (FIRING_RATE, NORMALIZERS, SCOPE_ALL,
                                           SCOPE_SESSION, NeuronTagSet,
                                           NeuronTagSpec)
-from neuropy.ui.utils import ColorLabelButton
+from neuropy.ui.utils import ColorLabelButton, prompt_name
 
 
 class NeuronTagPage(QWidget):
@@ -53,10 +53,6 @@ class NeuronTagPage(QWidget):
 
         self._editor = QWidget()
         el = QVBoxLayout(self._editor)
-
-        self._source = QComboBox()
-        self._source.currentTextChanged.connect(self._on_definition_changed)
-        el.addLayout(_row("Source:", self._source))
 
         self._segment = QComboBox()
         self._segment.currentTextChanged.connect(self._on_definition_changed)
@@ -140,13 +136,8 @@ class NeuronTagPage(QWidget):
         self._editor.setEnabled(spec is not None)
         if spec is None:
             return
-        for widget in (self._source, self._segment, self._norm,
-                       self._scope, self._nbins):
+        for widget in (self._segment, self._norm, self._scope, self._nbins):
             widget.blockSignals(True)
-
-        self._source.clear()
-        self._source.addItems(self.tags.available_sources(self.nav.key))
-        self._source.setCurrentText(spec.source)
 
         self._segment.clear()
         self._segment.addItem('(whole session)')
@@ -159,8 +150,7 @@ class NeuronTagPage(QWidget):
         self._scope.setCurrentText(spec.scope)
         self._nbins.setValue(len(spec.labels))
 
-        for widget in (self._source, self._segment, self._norm,
-                       self._scope, self._nbins):
+        for widget in (self._segment, self._norm, self._scope, self._nbins):
             widget.blockSignals(False)
 
         self._color_btn.set_color(tuple(int(c) for c in spec.base_rgb))
@@ -181,7 +171,6 @@ class NeuronTagPage(QWidget):
         spec = self._current
         if spec is None:
             return
-        spec.source = self._source.currentText()
         segment = self._segment.currentText()
         spec.segment = '' if segment.startswith('(') else segment
         norm = self._norm.currentText()
@@ -209,9 +198,8 @@ class NeuronTagPage(QWidget):
         self._after_edit()
 
     def _on_add_btn(self):
-        name, ok = QInputDialog.getText(self, "New neuron tag", "Prefix (e.g. frate):")
-        name = name.strip()
-        if not ok or not name:
+        name = prompt_name(self, "New neuron tag", "Prefix (e.g. frate):")
+        if name is None:
             return
         if name in self.tags.specs:
             QMessageBox.warning(self, "New neuron tag", f"{name!r} already exists.")
@@ -233,7 +221,7 @@ class NeuronTagPage(QWidget):
 
     def _emit_changed(self):
         self.tags.save()
-        self.nav.selection_changed.emit()
+        self.nav.refresh_lists()
 
 
 def _row(label: str, widget) -> QHBoxLayout:

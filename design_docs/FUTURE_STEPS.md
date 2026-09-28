@@ -77,3 +77,14 @@ Open questions to settle first:
 - Where `ch_per_shank` belongs (currently `nd_conf`, applied in `_load_probe_info`).
 - Whether dataset x/y columns override probegroup coords (see project_neuron_xy_override).
 - What the bapun per-channel numbering issue actually is — diagnose before designing.
+
+## Segment families (queued)
+- Store `family` and `index` in each unit json.
+- Backfill family/index from name stem, keep names.
+- Stats compares segments by (family, index).
+- Segment picker: families on top, sash, then segments.
+- Groups › Manage segments: two-sided picker assigns families.
+- Fold `custom_ccg/families.json` into unit configs.
+- Record pair count per unit json.
+- Main-session ccgdata json: same union format?
+- `post.RatJ_Day2.lowres`: legacy unit dir, no json.

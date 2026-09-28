@@ -4,13 +4,18 @@ from __future__ import annotations
 import numpy as np
 from pyqtgraph.Qt.QtCore import QPointF, QRectF, Qt, Signal
 from pyqtgraph.Qt.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
-from pyqtgraph.Qt.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
-                                    QInputDialog, QLabel, QMessageBox,
+from pyqtgraph.Qt.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
+                                    QDoubleSpinBox, QFormLayout,
+                                    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                     QPushButton, QSizePolicy, QTableWidget,
                                     QTableWidgetItem, QVBoxLayout, QWidget)
 
 from neuropy.analyses.neuron_tags import (CUT_ABSOLUTE, NeuronTagSpec,
-                                          NeuronTagSet, tag_value_source)
+                                          NeuronTagSet, activity_source, tag_value_source)
+from neuropy.ui.utils import (CheckMenuButton, ExplicitCloseDialog, cascade_menu,
+                              make_button, pick_color)
+
+NEW_TAG_MENU = {'activity': {'frate': {'during': 'frate_during', 'ratio': 'frate_ratio'}}}
 
 HANDLE_W = 9
 HANDLE_H = 15
@@ -38,8 +43,10 @@ class CutoffSlider(QWidget):
         self._cutoffs: list[float] = []
         self._labels: list[str] = ['all']
         self._colors: list[tuple] = [(120, 120, 120)]
+        self.overrides: dict = {}   # label -> picked rgb
         self._source = ''
         self._dragging = None
+        self._log = False
 
     def set_values(self, values) -> None:
         """The population being cut; sets the axis range and the histogram.
@@ -55,15 +62,21 @@ class CutoffSlider(QWidget):
                 self._hi = self._lo + 1.0
         self.update()
 
+    def set_log(self, on: bool) -> None:
+        """Draw the value axis logarithmically; cutoff values themselves stay raw."""
+        self._log = bool(on)
+        self.update()
+
     def set_source(self, name: str) -> None:
         """What is being cut, printed under the value ticks."""
         self._source = name
         self.update()
 
-    def set_bands(self, cutoffs: list, labels: list, colors: list = None) -> None:
+    def set_bands(self, cutoffs: list, labels: list, colors: list = None, overrides: dict = None) -> None:
         self._cutoffs = [float(c) for c in cutoffs]
         self._labels = list(labels)
         self._colors = list(colors) if colors else _band_colors(len(labels))
+        self.overrides = dict(overrides or {})
         self.update()
 
     @property
@@ -94,10 +107,33 @@ class CutoffSlider(QWidget):
         self.changed.emit()
         self.update()
 
+    def set_cutoff(self, index: int, value: float) -> int:
+        """Move one cutoff, keeping cutoffs sorted and bands with them; returns its new index."""
+        self._cutoffs[index] = float(value)
+        order = list(np.argsort(self._cutoffs))
+        if order != sorted(order):
+            self._labels = [self._labels[0]] + [self._labels[i + 1] for i in order]
+            self._cutoffs = sorted(self._cutoffs)
+            index = order.index(index)
+        self.changed.emit()
+        self.update()
+        return index
+
+    def band_color(self, band: int) -> tuple:
+        return tuple(self.overrides.get(self._labels[band], self._colors[band]))
+
     def rename_band(self, index: int, name: str) -> None:
+        if self._labels[index] in self.overrides:
+            self.overrides[name] = self.overrides.pop(self._labels[index])
         self._labels[index] = name
         self.changed.emit()
         self.update()
+
+    def widest_band_midpoint(self) -> float:
+        """Where a new cutoff does the most good: the middle of the largest band."""
+        bounds = [self._lo] + self._cutoffs + [self._hi]
+        spans = [(b - a, (a + b) / 2) for a, b in zip(bounds, bounds[1:])]
+        return max(spans)[1]
 
     def band_of(self, x: float) -> int:
         """Which band a pixel x falls in."""
@@ -105,13 +141,29 @@ class CutoffSlider(QWidget):
 
     # ── geometry ────────────────────────────────────────────────────────
 
+    @property
+    def _draw_lo(self) -> float:
+        """Log drawing cannot reach zero, so the axis starts at the smallest positive value."""
+        if not self._log:
+            return self._lo
+        pos = self._values[self._values > 0]
+        return float(pos.min()) if len(pos) else 1e-12
+
+    def _fwd(self, value: float) -> float:
+        return np.log10(max(value, self._draw_lo)) if self._log else value
+
+    def _inv(self, t: float) -> float:
+        return float(10.0 ** t) if self._log else t
+
     def _x_of(self, value: float) -> float:
-        span = self._hi - self._lo
-        return 4 + (value - self._lo) / span * max(1, self.width() - 8)
+        lo, hi = self._fwd(self._draw_lo), self._fwd(self._hi)
+        span = (hi - lo) or 1.0
+        return 4 + (self._fwd(value) - lo) / span * max(1, self.width() - 8)
 
     def _value_at(self, x: float) -> float:
+        lo, hi = self._fwd(self._draw_lo), self._fwd(self._hi)
         span = max(1, self.width() - 8)
-        return self._lo + (x - 4) / span * (self._hi - self._lo)
+        return self._inv(lo + (x - 4) / span * (hi - lo))
 
     def _handle_at(self, pos) -> int | None:
         for i, cut in enumerate(self._cutoffs):
@@ -124,12 +176,13 @@ class CutoffSlider(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._dragging = self._handle_at(event.position())
-            if self._dragging is None and event.position().y() < TRACK_H:
-                self.add_cutoff(self._value_at(event.position().x()))
         elif event.button() == Qt.RightButton:
             hit = self._handle_at(event.position())
             if hit is not None:
-                self.remove_cutoff(hit)
+                menu = QMenu(self)
+                act = menu.addAction("Remove")
+                if menu.exec(event.globalPosition().toPoint()) is act:
+                    self.remove_cutoff(hit)
 
     def mouseMoveEvent(self, event):
         if self._dragging is None:
@@ -137,24 +190,43 @@ class CutoffSlider(QWidget):
             self.setCursor(Qt.SizeHorCursor if over is not None else Qt.ArrowCursor)
             return
         value = min(self._hi, max(self._lo, self._value_at(event.position().x())))
-        self._cutoffs[self._dragging] = value
-        order = list(np.argsort(self._cutoffs))
-        if order != sorted(order):
-            self._labels = [self._labels[0]] + [self._labels[i + 1] for i in order]
-            self._cutoffs = sorted(self._cutoffs)
-            self._dragging = order.index(self._dragging)
-        self.changed.emit()
-        self.update()
+        self._dragging = self.set_cutoff(self._dragging, value)
 
     def mouseReleaseEvent(self, _event):
         self._dragging = None
 
     def mouseDoubleClickEvent(self, event):
         band = self.band_of(event.position().x())
-        name, ok = QInputDialog.getText(self, "Band label", "Label:",
-                                        text=self._labels[band])
-        if ok and name.strip():
-            self.rename_band(band, name.strip())
+        cut = [band - 1 if band else 0]    # a band is bounded below by the cutoff before it
+        dlg, name = ExplicitCloseDialog(self), QLineEdit(self._labels[band])
+        form = QFormLayout(dlg)
+        form.addRow("Label:", name)
+        name.editingFinished.connect(
+            lambda: name.text().strip() and self.rename_band(band, name.text().strip()))
+        if self._cutoffs:
+            value = QDoubleSpinBox(decimals=6, minimum=-1e18, maximum=1e18)
+            value.setValue(self._cutoffs[cut[0]])
+            value.editingFinished.connect(
+                lambda: cut.__setitem__(0, self.set_cutoff(cut[0], value.value())))
+            form.addRow("Lower bound:" if band else "Upper bound:", value)
+        swatch = QPushButton()
+        swatch.setAutoDefault(False)
+        swatch.setStyleSheet("background: rgb%s;" % (self.band_color(band),))
+
+        def on_swatch_btn():
+            c = pick_color(self.band_color(band), dlg)
+            if c is not None:
+                self.overrides[self._labels[band]] = c.getRgb()[:3]
+                swatch.setStyleSheet("background: rgb%s;" % (self.band_color(band),))
+                self.changed.emit()
+                self.update()
+        swatch.clicked.connect(on_swatch_btn)
+        form.addRow("Colour:", swatch)
+        close = QPushButton("Close")
+        close.setAutoDefault(False)
+        close.clicked.connect(dlg.accept)
+        form.addRow(close)
+        dlg.exec()
 
     # ── painting ────────────────────────────────────────────────────────
 
@@ -174,14 +246,16 @@ class CutoffSlider(QWidget):
             painter.drawText(QRectF(0, 0, self.width(), TRACK_H),
                              Qt.AlignCenter, "no values for this source")
             return
-        counts, edges = np.histogram(self._values, bins=48,
-                                     range=(self._lo, self._hi))
+        lo = self._draw_lo
+        bins = (np.logspace(np.log10(lo), np.log10(self._hi), 49) if self._log
+                else np.linspace(self._lo, self._hi, 49))
+        counts, edges = np.histogram(self._values, bins=bins)
         tallest = max(1, counts.max())
         painter.setPen(Qt.NoPen)
         for count, left, right in zip(counts, edges[:-1], edges[1:]):
             band = int(np.digitize([(left + right) / 2], self._cutoffs)[0])
             height = count / tallest * (TRACK_H - 8)
-            painter.setBrush(QBrush(QColor(*self._colors[band])))
+            painter.setBrush(QBrush(QColor(*self.band_color(band))))
             painter.drawRect(QRectF(self._x_of(left), TRACK_H - height,
                                     max(1.0, self._x_of(right) - self._x_of(left) - 1),
                                     height))
@@ -208,7 +282,7 @@ class CutoffSlider(QWidget):
         bounds = [self._lo] + self._cutoffs + [self._hi]
         for i, label in enumerate(self._labels):
             left, right = self._x_of(bounds[i]), self._x_of(bounds[i + 1])
-            painter.setPen(QColor(*self._colors[i]))
+            painter.setPen(QColor(*self.band_color(i)))
             painter.drawText(QRectF(left, TRACK_H + 15, max(10.0, right - left), 14),
                              Qt.AlignCenter, label)
 
@@ -216,13 +290,13 @@ class CutoffSlider(QWidget):
         """The value range under the track: min, midpoint, max, and the source cut."""
         row = QRectF(4, TRACK_H + 30, self.width() - 8, 13)
         painter.setPen(QColor(140, 140, 140))
-        mid = (self._lo + self._hi) / 2
-        painter.drawText(row, Qt.AlignLeft, f"{self._lo:.4g}")
-        painter.drawText(row, Qt.AlignCenter, f"{mid:.4g}")
+        lo = self._draw_lo
+        painter.drawText(row, Qt.AlignLeft, f"{lo:.4g}")
+        painter.drawText(row, Qt.AlignCenter, f"{self._value_at(self.width() / 2):.4g}")
         painter.drawText(row, Qt.AlignRight, f"{self._hi:.4g}")
         if self._source:
             painter.drawText(QRectF(4, TRACK_H + 43, self.width() - 8, 13),
-                             Qt.AlignCenter, self._source)
+                             Qt.AlignCenter, self._source + (" (log)" if self._log else ""))
 
 
 class NeuronTagsPanel(QWidget):
@@ -249,6 +323,8 @@ class NeuronTagsPanel(QWidget):
         top.addWidget(QLabel("Tag:"))
         top.addWidget(self._tag_list)
 
+        self._new_btn = make_button("New tag ▾", self._on_new_btn)
+        top.addWidget(self._new_btn)
         delete = QPushButton("Delete")
         delete.clicked.connect(self._on_delete_btn)
         top.addWidget(delete)
@@ -259,14 +335,12 @@ class NeuronTagsPanel(QWidget):
         self._scope_combo.setMinimumWidth(170)
         self._scope_combo.currentIndexChanged.connect(self._on_scope_combo)
         top.addWidget(self._scope_combo)
+        self._type_combo = QComboBox()
+        self._type_combo.currentIndexChanged.connect(self._on_type_combo)
+        top.addWidget(self._type_combo)
         outer.addLayout(top)
 
         source = QHBoxLayout()
-        source.addWidget(QLabel("Cut on:"))
-        self._source_combo = QComboBox()
-        self._source_combo.setMinimumWidth(200)
-        self._source_combo.currentIndexChanged.connect(self._on_source_combo)
-        source.addWidget(self._source_combo)
         source.addStretch(1)
         self._counts = QLabel("")
         self._counts.setStyleSheet("color: #888;")
@@ -277,13 +351,30 @@ class NeuronTagsPanel(QWidget):
         self._slider.changed.connect(self._on_slider_changed)
         outer.addWidget(self._slider)
 
-        hint = QLabel("click to add a cutoff · drag to move · right-click to remove "
-                      "· double-click a band to rename")
+        tools = QHBoxLayout()
+        add_cut = QPushButton("+ Add cutoff")
+        add_cut.clicked.connect(self._on_add_cutoff_btn)
+        tools.addWidget(add_cut)
+        self._log_btn = QPushButton("log")
+        self._log_btn.setCheckable(True)
+        self._log_btn.setFixedWidth(46)
+        self._log_btn.toggled.connect(self._on_log_btn)
+        tools.addWidget(self._log_btn)
+        tools.addWidget(make_button("Recompute", self._on_recompute_btn))
+        tools.addStretch(1)
+        outer.addLayout(tools)
+
+        hint = QLabel("drag to move · right-click a handle to remove "
+                      "· double-click a band to rename and set its cutoff")
         hint.setStyleSheet("color: #888;")
         outer.addWidget(hint)
 
         assign = QHBoxLayout()
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #888;")
+        assign.addWidget(self._status)
         assign.addStretch(1)
+        assign.addWidget(make_button("Preview", self._on_preview_btn))
         self._assign_btn = QPushButton("Assign")
         self._assign_btn.clicked.connect(self._on_assign_btn)
         assign.addWidget(self._assign_btn)
@@ -293,6 +384,7 @@ class NeuronTagsPanel(QWidget):
         self._table.setHorizontalHeaderLabels(['Session', 'Neuron', 'Label', 'Value'])
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setSortingEnabled(True)
         outer.addWidget(self._table, stretch=1)
 
     # ── state ───────────────────────────────────────────────────────────
@@ -309,8 +401,8 @@ class NeuronTagsPanel(QWidget):
     def _spec_for(self, name: str) -> NeuronTagSpec:
         """The cutoff spec backing *name*, created on first use."""
         spec = self.tags.specs.get(name)
-        if spec is None:
-            spec = NeuronTagSpec(prefix=name, cut_mode=CUT_ABSOLUTE)
+        if spec is None:   # a tag supplied from outside cuts on its own stored values
+            spec = NeuronTagSpec(prefix=name, source=tag_value_source(name), cut_mode=CUT_ABSOLUTE)
             self.tags.add_spec(spec)
         spec.cut_mode = CUT_ABSOLUTE
         return spec
@@ -320,7 +412,7 @@ class NeuronTagsPanel(QWidget):
     def refresh(self) -> None:
         """Rebuild every list from the dataset, keeping the current tag if it survives."""
         keep = self.tag_name
-        for combo in (self._tag_list, self._scope_combo):
+        for combo in (self._tag_list, self._scope_combo, self._type_combo):
             combo.blockSignals(True)
 
         self._tag_list.clear()
@@ -334,39 +426,30 @@ class NeuronTagsPanel(QWidget):
         for nd_key in self.nd.session_keys:
             self._scope_combo.addItem(str(nd_key.session), nd_key)
 
-        for combo in (self._tag_list, self._scope_combo):
+        self._type_combo.clear()
+        self._type_combo.addItem("All types", '')
+        for t in sorted({str(t) for k in self.nd.session_keys
+                         for t in self.nd.neurons_for(k).neuron_type}):
+            self._type_combo.addItem(t, t)
+
+        for combo in (self._tag_list, self._scope_combo, self._type_combo):
             combo.blockSignals(False)
         self._reload_tag()
 
     def _reload_tag(self) -> None:
         name = self.tag_name
         has_tag = bool(name)
-        for widget in (self._source_combo, self._slider, self._assign_btn):
+        for widget in (self._slider, self._assign_btn, self._log_btn):
             widget.setEnabled(has_tag)
         if not has_tag:
             self._table.setRowCount(0)
             self._counts.setText("")
             return
-        self._reload_sources()
+        self._type_combo.blockSignals(True)
+        self._type_combo.setCurrentIndex(self._type_combo.findData(self._spec_for(name).cell_type))
+        self._type_combo.blockSignals(False)
         self._reload_slider()
         self._reload_table()
-
-    def _reload_sources(self) -> None:
-        spec = self._spec_for(self.tag_name)
-        key = self.scope_key or self.nd.session_keys[0]
-        self._source_combo.blockSignals(True)
-        self._source_combo.clear()
-        self._source_combo.addItems(self.tags.available_sources(key))
-        own = tag_value_source(self.tag_name)
-        self._source_combo.setCurrentText(
-            spec.source if spec.source in self._sources() else
-            own if own in self._sources() else self._source_combo.itemText(0))
-        spec.source = self._source_combo.currentText()
-        self._source_combo.blockSignals(False)
-
-    def _sources(self) -> list:
-        return [self._source_combo.itemText(i)
-                for i in range(self._source_combo.count())]
 
     def _reload_slider(self) -> None:
         spec = self._spec_for(self.tag_name)
@@ -376,7 +459,9 @@ class NeuronTagsPanel(QWidget):
         if not spec.cutoffs and len(values):
             spec.cutoffs = [float(np.quantile(values, 0.5))]
             spec.labels = ['lo', 'hi']
-        self._slider.set_bands(spec.cutoffs, spec.labels)
+        self._slider.set_bands(spec.cutoffs, spec.labels, overrides=spec.label_colors)
+        self._log_btn.setChecked(spec.log_axis)
+        self._slider.set_log(spec.log_axis)
         self._update_counts()
 
     def _update_counts(self) -> None:
@@ -386,13 +471,15 @@ class NeuronTagsPanel(QWidget):
                                        for label, n in zip(spec.labels, counts)))
 
     def _reload_table(self) -> None:
-        table = self.nd.tag_table(self.tag_name)
-        if self.scope_key is not None:
-            table = table[table['session'] == str(self.scope_key.session)]
+        table = self.tags.preview(self._spec_for(self.tag_name), self.scope_key)
+        self._table.setSortingEnabled(False)    # else each setItem re-sorts mid-fill
         self._table.setRowCount(len(table))
-        for row, (_, record) in enumerate(table.iterrows()):
-            for col, field in enumerate(['session', 'neuron_id', 'label', 'value']):
-                self._table.setItem(row, col, QTableWidgetItem(str(record[field])))
+        for row, record in enumerate(table[['session', 'neuron_id', 'label', 'value']].values.tolist()):
+            for col, value in enumerate(record):
+                item = QTableWidgetItem()
+                item.setData(Qt.DisplayRole, value if isinstance(value, (int, float)) else str(value))
+                self._table.setItem(row, col, item)
+        self._table.setSortingEnabled(True)
 
     # ── handlers ────────────────────────────────────────────────────────
 
@@ -402,31 +489,81 @@ class NeuronTagsPanel(QWidget):
     def _on_scope_combo(self, _index: int) -> None:
         self._reload_tag()
 
-    def _on_source_combo(self, _index: int) -> None:
+    def _on_type_combo(self, _index: int) -> None:
         spec = self._spec_for(self.tag_name)
-        spec.source = self._source_combo.currentText()
-        spec.cutoffs = []
+        spec.cell_type = self._type_combo.currentData()
         self.tags.invalidate(spec)
         self._reload_slider()
+        self._reload_table()
+
+    def _on_preview_btn(self) -> None:
+        self._reload_table()
+
+    def _on_recompute_btn(self) -> None:
+        self.tags.clear_values()
+        self._reload_slider()
+        self._warn_missing()
+
+    def _on_new_btn(self) -> None:
+        cascade_menu(NEW_TAG_MENU, self._on_new_tag_pick, self).exec(
+            self._new_btn.mapToGlobal(self._new_btn.rect().bottomLeft()))
+
+    def _on_new_tag_pick(self, fn: str) -> None:
+        dlg = ActivityTagDialog(fn, _segment_tree(self.nav.cd), self)
+        if not dlg.exec():
+            return
+        spec = NeuronTagSpec(prefix=dlg.name.text().strip(), source=dlg.source, cut_mode=CUT_ABSOLUTE)
+        self.tags.add_spec(spec)
+        values = self.tags.pooled_values(spec)
+        spec.cutoffs = [float(np.median(values))] if len(values) else []
+        if self._assign(spec):
+            self.refresh()
+            self._tag_list.setCurrentText(spec.prefix)
+
+    def _warn_missing(self) -> None:
+        missing = self.tags.take_missing()
+        if missing:
+            body = '\n'.join(f"{seg}: {', '.join(sorted(s))}" for seg, s in sorted(missing.items()))
+            QMessageBox.warning(self, "Segment missing for some sessions",
+                                f"These sessions lack a segment, so their neurons stay untagged:\n\n{body}")
+
+    def _on_log_btn(self, on: bool) -> None:
+        self._spec_for(self.tag_name).log_axis = on
+        self._slider.set_log(on)
+        self.tags.save_if_bound()
+
+    def _on_add_cutoff_btn(self) -> None:
+        self._slider.add_cutoff(self._slider.widest_band_midpoint())
 
     def _on_slider_changed(self) -> None:
         spec = self._spec_for(self.tag_name)
         spec.cutoffs = self._slider.cutoffs
         spec.labels = self._slider.labels
+        colors = {lb: c for lb, c in self._slider.overrides.items() if lb in spec.labels}
+        recolored, spec.label_colors = colors != spec.label_colors, colors
         self.tags.invalidate(spec)
+        if recolored:
+            self.nav.refresh_lists()
         self._update_counts()
 
     def _on_assign_btn(self) -> None:
-        spec = self._spec_for(self.tag_name)
-        written = self.tags.apply(spec, self.scope_key)
+        self._assign(self._spec_for(self.tag_name), self.scope_key)
+
+    def _assign(self, spec: NeuronTagSpec, key=None) -> bool:
+        written = self.tags.apply(spec, key)
+        self._warn_missing()
+        skipped = [str(k.session) for k in ([key] if key is not None else self.nd.session_keys)
+                   if str(k.session) not in written]
+        self._status.setText(f"Assigned {spec.prefix} to {len(written)} session(s)"
+                             + (f" · no values: {', '.join(skipped)}" if skipped else ''))
         if not written:
-            QMessageBox.warning(self, "Assign",
-                                f"{spec.source!r} has no values in this scope.")
-            return
+            QMessageBox.warning(self, "Assign", f"{spec.source!r} has no values in this scope.")
+            return False
         self.tags.save_if_bound()
-        self.nd.save_tags(self.nav.cd.save_path, [self.tag_name], overwrite=True)
+        self.nd.save_tags(self.nav.cd.save_path, [spec.prefix], overwrite=True)
         self._reload_table()
-        self.nav.selection_changed.emit()
+        self.nav.refresh_lists()
+        return True
 
     def _on_delete_btn(self) -> None:
         name = self.tag_name
@@ -440,7 +577,57 @@ class NeuronTagsPanel(QWidget):
         self.tags.remove_spec(name)
         self.tags.save_if_bound()
         self.refresh()
-        self.nav.selection_changed.emit()
+        self.nav.refresh_lists()
+
+
+class ActivityTagDialog(ExplicitCloseDialog):
+    """Name a new activity tag and tick the segments of each group it compares."""
+
+    def __init__(self, fn: str, tree: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"New activity tag — {fn}")
+        self.fn = fn
+        form = QFormLayout(self)
+        self.name = QLineEdit()
+        form.addRow("Name:", self.name)
+        self.groups = [CheckMenuButton(tree) for _ in range(2 if fn == 'frate_ratio' else 1)]
+        for letter, group in zip("AB", self.groups):
+            group.changed.connect(self._sync)
+            form.addRow(f"Group {letter}:", group)
+        self.expr = QLabel()
+        form.addRow(self.expr)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(make_button("Cancel", self.reject))
+        buttons.addWidget(make_button("Create", self._on_create_btn))
+        form.addRow(buttons)
+        self._sync()
+
+    @property
+    def source(self) -> str:
+        return activity_source(self.fn, [g.checked for g in self.groups])
+
+    def _sync(self) -> None:
+        self.expr.setText(self.source)
+
+    def _on_create_btn(self) -> None:
+        picked = [g.checked for g in self.groups]
+        problem = ("Name the tag." if not self.name.text().strip() else
+                   "Tick at least one segment in every group." if not all(picked) else
+                   "'none' stands alone in its group." if any('none' in g and len(g) > 1 for g in picked) else
+                   "'none' needs a real segment group to invert." if all(g == ['none'] for g in picked) else '')
+        if problem:
+            QMessageBox.warning(self, "New activity tag", problem)
+            return
+        self.accept()
+
+
+def _segment_tree(cd) -> dict:
+    """Custom CCGs and epoch labels (by theme) for the group menus, plus 'none'."""
+    epochs = {theme: {lb: lb for lb in sorted({str(x).strip() for x in ep.labels} - {''}) or [theme]}
+              for theme, ep in cd.nd.get_themes_any().items()}
+    return {'Custom CCG': {s: s for s in cd.available_segments() if s != 'all'},
+            'Epochs': epochs, 'none': 'none'}
 
 
 def _band_colors(n: int) -> list:

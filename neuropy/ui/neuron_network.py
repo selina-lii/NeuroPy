@@ -1984,6 +1984,7 @@ class NetworkPanel:
 
         cur_peak, cur_shank = _meta(self.ui.neurons)
         cache: dict = {}   # nd_key → (peak_channels, shank_ids), for any_mode
+        admitted = self.ui.root.neuron_selections.is_selected
 
         def _gray(inds) -> bool:
             if any_mode:
@@ -1993,10 +1994,15 @@ class NetworkPanel:
                     cache[nd_key] = meta = _meta(self.ui.cd.nd.neurons_for(nd_key))
                 peak_channels, shank_ids = meta
                 ref_i, tgt_i = int(inds[1]), int(inds[2])
+                key = nd_key
             else:
                 peak_channels, shank_ids = cur_peak, cur_shank
                 ref_i, tgt_i = int(inds[0]), int(inds[1])
+                key = self.ui.key
             pair  = (ref_i, tgt_i)
+            if not all(admitted(key.change(ref=nid))
+                       for nid in self.ui.cd.nd.ids_at(key.change(ref=ref_i, tgt=tgt_i))):
+                return True
             if fn is not None and ref_i != fn and tgt_i != fn:
                 return True
             if fp is not None and pair != fp:

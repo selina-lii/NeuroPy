@@ -81,14 +81,22 @@ def cell_areas(neurons):
     return (neurons.metadata or {}).get('cell_area') if neurons is not None else None
 
 
+def areas_by_id(neurons) -> dict | None:
+    """`cell_areas` re-keyed by neuron id, which is what a list row has to index by."""
+    areas = cell_areas(neurons)
+    if areas is None:
+        return None
+    return {int(nid): a for nid, a in zip(neurons.neuron_ids, areas)}
+
+
 def row_dots(areas, key, neuron_ids, palette, tags=None) -> list:
     """Region colour then gradient-tag colours, for each of *neuron_ids*.
 
     One rule for every view: a list row shows its item's neurons, so a pair gets
-    two of each and a single neuron one. *areas* comes from `cell_areas`.
+    two of each and a single neuron one. *areas* comes from `areas_by_id`.
     """
     dots = [] if areas is None else [area_rgb(areas[i], palette)
-                                     for i in neuron_ids if i < len(areas)]
+                                     for i in neuron_ids if i in areas]
     if tags is not None:
         for neuron in neuron_ids:
             dots.extend(tags.neuron_rgb(key, int(neuron)))
@@ -318,7 +326,7 @@ class BackgroundTaskRunner:
 
 
     def enqueue(self, task) -> bool:
-        if len(self._pending) >= self._max_queue:
+        if self._max_queue and len(self._pending) >= self._max_queue:
             return False
         self._pending.append(task)
         return True

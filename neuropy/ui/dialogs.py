@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 import pyqtgraph as pg
-from pyqtgraph.Qt.QtCore import Qt
+from pyqtgraph.Qt.QtCore import Qt, QTimer
 from pyqtgraph.Qt.QtWidgets import (
     QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QListWidget, QListWidgetItem,
@@ -28,6 +28,11 @@ from neuropy.ui.neuron_tag_ui import NeuronTagPage
 from neuropy.ui.neuron_tags_frontend import NeuronTagsPanel
 from neuropy.ui.ui_common import area_rgb, cell_areas, _SPECIAL_PREFIX
 from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig
+from neuropy.analyses.ccg_transforms import ConnectionStrength
+from neuropy.analyses.pair_selection_data import DerivedRule, SegmentGroups
+from neuropy.analyses.utils import DERIVED_PREFIX, group_display
+
+AUX_TESTS = tuple(ConnectionStrength.AUX_TESTS)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDatasetConfig
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io import datasets
@@ -35,8 +40,9 @@ from neuropy.io.fieldmap import Field, FieldMap, OPTIONAL
 from neuropy.io.nwbio import NWB_DEFAULT, UNITS_SCHEMA, NWBFile
 
 from neuropy.ui.utils import (ConfigOptionsWidget, FlowLayout, MetricInput, SideNavPanel,
+                              ListPickerButton, RangeListWidget, ScopeField, ScopePicker,
                               ValueMapEditor, chip_button, make_button, ColorLabelButton,
-                              regular_font_pt, small_font_pt)
+                              prompt_name, regular_font_pt, small_font_pt, ExplicitCloseDialog)
 
 if TYPE_CHECKING:
     from neuropy.ui.app_state import AppState
@@ -131,7 +137,425 @@ class CreateGroupDialog(QDialog):
         dlg.exec()
 
 
-class ManageGroupsDialog(QDialog):
+class DerivedRuleRow(QWidget):
+    """One rule: pair tag is any of the picked tags, or a neuron tag is any of the picked labels."""
+
+    def __init__(self, nav: 'AppState', rule: DerivedRule = None, parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._kind, self._name, self._side = QComboBox(), QComboBox(), QComboBox()
+        self._kind.addItems(DerivedRule.KINDS)
+        self._name.addItems(nav.cd.nd.tag_names)
+        self._side.addItems(DerivedRule.SIDES)
+        self._values = ListPickerButton("is", plural="values", select_all_when_empty=False,
+                                        display=group_display)
+        self._kind.currentTextChanged.connect(self._on_kind_combo)
+        self._name.currentTextChanged.connect(self._on_name_combo)
+        for w in (self._kind, self._side, self._name, self._values):
+            row.addWidget(w)
+        row.addWidget(make_button("x", self.deleteLater, width=22))
+        self._on_kind_combo(self._kind.currentText())
+        if rule is not None:
+            self._kind.setCurrentText(rule.kind)
+            self._name.setCurrentText(rule.name)
+            self._side.setCurrentText(rule.side)
+            self._values.set_selected(rule.values)
+
+    def _on_kind_combo(self, kind: str) -> None:
+        neuron = kind == DerivedRule.NEURON_TAG
+        self._name.setVisible(neuron)
+        self._side.setVisible(neuron)
+        self._on_name_combo()
+
+    def _on_name_combo(self, *_) -> None:
+        groups = self.nav.sd.groups
+        self._values.set_items(self.nav.cd.nd.tag_labels(self._name.currentText())
+                               if self._kind.currentText() == DerivedRule.NEURON_TAG
+                               else groups.groups + groups.special_groups(), keep_selection=False)
+
+    def rule(self) -> DerivedRule:
+        neuron = self._kind.currentText() == DerivedRule.NEURON_TAG
+        return DerivedRule(self._kind.currentText(), self._name.currentText() if neuron else '',
+                           self._values.selected, self._side.currentText())
+
+
+class DerivedRulesEditor(QWidget):
+    """Editable rule rows plus '+ Add rule'; a pair joins when every rule holds."""
+
+    def __init__(self, nav: 'AppState', rules: list = (), parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel("A pair joins when every rule holds; members follow the tags live."))
+        self._rows = QVBoxLayout()
+        lay.addLayout(self._rows)
+        lay.addWidget(make_button("+ Add rule", self._on_add_rule_btn))
+        for rule in rules or [None]:
+            self._rows.addWidget(DerivedRuleRow(nav, rule, self))
+
+    def _on_add_rule_btn(self) -> None:
+        self._rows.addWidget(DerivedRuleRow(self.nav, None, self))
+
+    def rules(self) -> list:
+        """The rows that pick at least one value, as rules."""
+        rules = [self._rows.itemAt(i).widget().rule() for i in range(self._rows.count())]
+        return [r for r in rules if r.values]
+
+
+class CreateDerivedGroupDialog(QDialog):
+    """A group for comparison: the pairs meeting every rule, kept live under the __derived_ prefix."""
+
+    def __init__(self, nav: 'AppState', parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        self.setWindowTitle("Create group for comparison")
+        self.resize(560, 260)
+        lay = QVBoxLayout(self)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Group name:"))
+        self._name = QLineEdit()
+        name_row.addWidget(self._name)
+        lay.addLayout(name_row)
+        self._editor = DerivedRulesEditor(nav, parent=self)
+        lay.addWidget(self._editor)
+        lay.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._on_ok_btn)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _on_ok_btn(self) -> None:
+        name = self._name.text().strip()
+        rules = self._editor.rules()
+        groups = self.nav.sd.groups
+        full = DERIVED_PREFIX + name
+        problem = ("Name is empty." if not name else "No rule picked." if not rules
+                   else "Name is taken." if full in groups.registry else '')
+        if problem:
+            QMessageBox.information(self, "Create group for comparison", problem)
+            return
+        groups.get_group_metadata(full).rules = rules
+        groups.dirty = True
+        groups.save()
+        groups.changed.emit()
+        self.accept()
+
+
+def pair_scope_fields(nav: 'AppState') -> list:
+    """Segment / session / conn type / group: the scope of a per-pair compute."""
+    cd = nav.cd
+    return [ScopeField('seg', "Segments", "segments", lambda: sorted(cd.available_segments()),
+                       select_all_when_empty=False, all_option=True),
+            ScopeField('sess', "Sessions", "sessions", lambda: sorted({str(k.session) for k in cd.ptr}),
+                       select_all_when_empty=False, all_option=True),
+            ScopeField('ct', "Conn type", "types", lambda: list(cd.conf.conn_type_labels),
+                       select_all_when_empty=False, all_option=True),
+            ScopeField('grp', "Groups", "groups", nav.sd.groups.pickable_groups,
+                       select_all_when_empty=False, all_option=True, display=group_display)]
+
+
+def pair_scope_jobs(nav: 'AppState', sel: dict) -> tuple:
+    """``([(ptr_key, segment, pairs)], [(session, why)])`` for a pair_scope_fields selection."""
+    # every group means every screened pair, ungrouped ones included
+    groups = [None] if set(sel['grp']) >= set(nav.sd.groups.groups) else sel['grp']
+    jobs, skipped = [], []
+    for key in nav.cd.keys_in_scope(sel['sess'], sel['ct']):
+        sess = str(key.session)
+        for seg in sel['seg']:
+            if seg not in nav.cd.available_segments(key):
+                skipped.append((sess, f"{seg} not computed"))
+                continue
+            pairs = sorted({p for g in groups for p in nav.sd.pairs_for_group_key(g, key)})
+            if pairs:
+                jobs.append((key, seg, pairs))
+    return jobs, skipped
+
+
+class OnOffPage(QWidget):
+    """On/off hotkey and the pairs each verdict holds, shown like any other group."""
+
+    def __init__(self, nav, gname: str, parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        self._gname = gname
+        self._want_on = gname == SegmentGroups.ON
+        lay = QVBoxLayout(self)
+        lay.setSpacing(6)
+        lay.addWidget(QLabel(
+            f"Pairs the swept rules put '{gname}', hand-set tags winning. The hotkey tags the "
+            f"current pair '{gname}' in the current segment; pressing again clears it."))
+        lay.addLayout(self._hotkey_row())
+        lay.addWidget(self._pairs_box(), stretch=1)
+
+    def _pairs_box(self) -> QWidget:
+        """Session tabs of pairs, as every group shows them; a tab fills only when first opened."""
+        nav = self.nav
+        by_sess: dict = {}
+        for k, ptr in nav.cd.ptr.items():
+            by_sess.setdefault(str(k.session), []).append((k, ptr.pair_set))
+        sessions = sorted(by_sess)
+        tabs = QTabWidget()
+        tabs.setTabPosition(QTabWidget.TabPosition.North)
+        for sess in sessions:
+            tabs.addTab(QListWidget(), sess)
+        built: set = set()
+
+        def fill(i: int):
+            if i < 0 or i in built:
+                return
+            built.add(i)
+            lst = tabs.widget(i)
+            members = nav.sd.aux_members(sessions[i], by_sess[sessions[i]], self._want_on)
+            for seg, pairs in members.items():
+                head = QListWidgetItem(seg)
+                head.setFlags(Qt.ItemFlag.NoItemFlags)
+                f = head.font(); f.setBold(True); head.setFont(f)
+                lst.addItem(head)
+                for ref, tgt in pairs:
+                    lst.addItem(f"[{ref} {tgt}]")
+            if lst.count() == 0:
+                lst.addItem("(no pairs in this group)")
+
+        tabs.currentChanged.connect(fill)
+        cur = nav.current_session_str
+        tabs.setCurrentIndex(sessions.index(cur) if cur in sessions else 0)
+        fill(tabs.currentIndex())
+        return ManageGroupsDialog._labelled_box("Pairs in group:", tabs)
+
+    def _hotkey_row(self) -> QHBoxLayout:
+        sg = self.nav.sd.seg_groups
+        meta = sg.get_group_metadata(self._gname)
+        edit = QLineEdit(meta.hotkey)
+        edit.setMaximumWidth(60)
+        set_btn = QPushButton("Set")
+
+        def apply():
+            try:
+                key = sg.valid_hotkey(edit.text())
+                clash = key and self.nav.sd.groups.group_for_hotkey(key)
+                if clash:
+                    raise ValueError(
+                        f"'{key}' already tags '{clash}'; a segment tag would shadow it.")
+                sg.set_group_hotkey(self._gname, key)
+                sg.dirty = True
+            except ValueError as exc:
+                QMessageBox.warning(self, "Hotkey", str(exc))
+                edit.setText(sg.get_group_metadata(self._gname).hotkey)
+
+        set_btn.clicked.connect(apply)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Hotkey (0-9/a-z):"))
+        row.addWidget(edit)
+        row.addWidget(set_btn)
+        row.addStretch()
+        return row
+
+
+class ExtendSaveDialog(QDialog):
+    """Name an extend and pick the pairs it is computed and stored for."""
+
+    def __init__(self, nav: 'AppState', window_ms: float, bin_ms: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Save extend CCG")
+        lay = QVBoxLayout(self)
+        self.name = nav.cd.extend_name(window_ms, bin_ms)
+        lay.addWidget(QLabel(f"Name: <b>{self.name}</b>"))
+        lay.addWidget(QLabel(f"Window {window_ms:g} ms, bin {bin_ms:g} ms. "
+                             "Only the picked pairs are computed; saving again adds more."))
+        self.scope = ScopePicker(pair_scope_fields(nav))
+        self.scope.set_selected({'seg': nav.visible_segments(), 'sess': [nav.current_session_str]})
+        lay.addWidget(self.scope)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    @classmethod
+    def run(cls, nav: 'AppState', window_ms: float, bin_ms: float, parent=None) -> int | None:
+        """Queue the picked scope; the number of units queued, or None when cancelled."""
+        dlg = cls(nav, window_ms, bin_ms, parent)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        jobs, skipped = pair_scope_jobs(nav, dlg.scope.selected)
+        return nav.root.custom_mgr.queue_extend(dlg.name, jobs, window_ms, bin_ms, skipped)
+
+
+class CustomTagRulesDialog(QDialog):
+    """One page per custom-CCG tag rule plus the sweep that assigns tags; the Manage Groups shell."""
+
+    _CHOICES = {'mode': ConnectionStrength.SPIKE_COUNT_MODES,
+                'correction': ConnectionStrength.P_CORRECTIONS}
+
+    def __init__(self, nav: 'AppState', parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        self.setWindowTitle("Custom CCG tag rules")
+        self.resize(640, 420)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        side = SideNavPanel(min_width=100, nav_width=170)
+        for name in AUX_TESTS:
+            side.add_page(name, self._rule_page(name))
+        side.add_divider()
+        side.add_page("Assign tags", self._assign_page())
+        lay.addWidget(side, stretch=1)
+
+    # -- rules ---------------------------------------------------------------
+
+    def _rule_page(self, name: str) -> QWidget:
+        """Enable, cutoff, and the rule's own arguments, read straight off the registry."""
+        _fn, targ, default, below, extra = ConnectionStrength.AUX_TESTS[name]
+        cfg = self.nav.cd.aux_test_config
+        args = cfg.args.get(name) or {}
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        on = QCheckBox("enabled")
+        on.setChecked(name in cfg.enabled)
+        on.toggled.connect(lambda v: self._set_enabled(name, v))
+        lay.addWidget(on)
+
+        def row(label: str, widget: QWidget):
+            r = QHBoxLayout()
+            r.addWidget(QLabel(label))
+            r.addWidget(widget)
+            r.addStretch()
+            lay.addLayout(r)
+
+        thr = QDoubleSpinBox()
+        thr.setRange(-1e6, 1e6)
+        thr.setDecimals(4)
+        # aux_test takes the cutoff as 'threshold'; targ is only the registry's label for it
+        thr.setValue(float(args.get('threshold', default)))
+        thr.valueChanged.connect(lambda v: self._set_arg(name, 'threshold', v))
+        row(f"{targ} ({'pass ≤' if below else 'pass ≥'}):", thr)
+
+        for arg, adef in extra.items():
+            if arg == 'resolution':
+                combo = QComboBox()
+                combo.addItems(list(self.nav.cd.available_resolutions()))
+                combo.setCurrentText(str(args.get(arg, adef)))
+                combo.currentTextChanged.connect(lambda v, a=arg: self._set_arg(name, a, v))
+                row(f"{arg}:", combo)
+            elif arg == 'tail':
+                own = args.get(arg)
+                follow = QCheckBox("baseline: follow the global tail window")
+                follow.setChecked(own is None)
+                ranges = RangeListWidget("Baseline", own or self.nav.cd.conf.tail_intervals)
+                ranges.setEnabled(own is not None)
+                follow.toggled.connect(ranges.setDisabled)
+                write = lambda *_, f=follow, r=ranges: self._set_arg(
+                    name, 'tail', None if f.isChecked() else r.intervals)
+                follow.toggled.connect(write)
+                ranges.changed.connect(write)
+                lay.addWidget(follow)
+                lay.addWidget(ranges)
+            elif arg == 'ranges':
+                half = float(self.nav.cd.conf.spkcnt_scope) / 2
+                ranges = RangeListWidget("Scope", args.get(arg) or [(-half, half)])
+                ranges.changed.connect(lambda r=ranges: self._set_arg(name, 'ranges', r.intervals))
+                lay.addWidget(ranges)
+            elif arg in self._CHOICES:
+                combo = QComboBox()
+                combo.addItems(self._CHOICES[arg])
+                combo.setCurrentText(str(args.get(arg, adef)))
+                combo.currentTextChanged.connect(lambda v, a=arg: self._set_arg(name, a, v))
+                row(f"{arg}:", combo)
+            else:
+                # only an optional arg reads 0 as "unset"; a factor of 0 is a real value
+                optional = adef is None
+                box = QDoubleSpinBox()
+                box.setRange(0.0, 1e6)
+                box.setDecimals(3)
+                if optional:
+                    box.setSpecialValueText("whole CCG")
+                cur = args.get(arg, adef)
+                box.setValue(0.0 if cur is None else float(cur))
+                box.valueChanged.connect(
+                    lambda v, a=arg, o=optional: self._set_arg(name, a, (v or None) if o else v))
+                row(f"{arg}:", box)
+        lay.addStretch()
+        return page
+
+    def _set_enabled(self, name: str, on: bool):
+        self.nav.cd.aux_test_config = self.nav.cd.aux_test_config.with_test(name, on)
+        self.nav.chip_colors_changed.emit()
+
+    def _set_arg(self, name: str, arg: str, value):
+        self.nav.cd.aux_test_config = self.nav.cd.aux_test_config.with_args(name, **{arg: value})
+        self.nav.chip_colors_changed.emit()
+
+    # -- assign tags ---------------------------------------------------------
+
+    def _assign_page(self) -> QWidget:
+        nav = self.nav
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(QLabel("Sweep the enabled rules over this scope; results land live."))
+        self._scope = ScopePicker(pair_scope_fields(nav))
+        self._scope.set_selected({'seg': nav.visible_segments(), 'sess': [nav.current_session_str]})
+        lay.addWidget(self._scope)
+        run = QPushButton("Run rules")
+        run.clicked.connect(self._on_run_btn)
+        r = QHBoxLayout()
+        r.addWidget(run)
+        r.addStretch()
+        lay.addLayout(r)
+        self._running = QLabel("Running…")
+        self._running.setStyleSheet("color: #C08000;")
+        lay.addWidget(self._running)
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #888;")
+        lay.addWidget(self._status)
+        lay.addStretch()
+        # the task queue has no signal: poll it while the dialog is open
+        self._busy_timer = QTimer(self, interval=500, timeout=self._sync_running)
+        self._busy_timer.start()
+        self._sync_running()
+        return page
+
+    def _sync_running(self):
+        runner = self.nav.root.custom_mgr.worker._runner
+        self._running.setVisible(runner.is_running() or runner.pending_count() > 0)
+
+    def _on_run_btn(self):
+        nav = self.nav
+        sel = self._scope.selected
+        tests = nav.cd.aux_test_config.specs()
+        if not tests:
+            QMessageBox.warning(self, "Custom CCG tags", "No rule is enabled.")
+            return
+        jobs, skipped = pair_scope_jobs(nav, sel)
+        jobs = [(k, seg, nav.sd.seg_overrides(str(k.session), seg), pairs) for k, seg, pairs in jobs]
+        self._jobs_per_sess = Counter(str(k.session) for k, *_ in jobs)
+        n = nav.root.custom_mgr.queue_aux(jobs, tests, skipped, on_done=self._on_sweep_done,
+                                          on_progress=self._on_sweep_progress)
+        self._status.setText(f"Queued {n} sweep(s) over {len(self._jobs_per_sess)} session(s)…")
+
+    def _on_sweep_progress(self, rows: list):
+        seen = Counter(sess for sess, *_ in rows)
+        done = sum(seen[s] >= n for s, n in self._jobs_per_sess.items())
+        self._status.setText(f"{done}/{len(self._jobs_per_sess)} sessions tagged")
+
+    def _on_sweep_done(self, failed: list):
+        n = len(self._jobs_per_sess)
+        self._status.setText(f"{n}/{n} sessions tagged{f', {len(failed)} failed' if failed else ''}.")
+
+    @classmethod
+    def show_for(cls, nav: 'AppState', parent):
+        """Non-modal and kept: a sweep reports back to it after it is hidden."""
+        dlg = getattr(parent, '_tag_rules_dlg', None)
+        if dlg is None:
+            dlg = parent._tag_rules_dlg = cls(nav, parent)
+        dlg.show()
+        dlg.raise_()
+
+
+class ManageGroupsDialog(ExplicitCloseDialog):
     """Rename, set hotkey, edit notes, and delete groups.
 
     Top-tab layout: regular groups alphabetically, "Special" last.
@@ -158,6 +582,7 @@ class ManageGroupsDialog(QDialog):
 
         gr = self._groups
         app = gr.ui
+        gr_seg = app.sd.seg_groups
         nav = SideNavPanel(min_width=100, nav_width=160)
 
         if app.view.name == NEURON_VIEW:
@@ -170,6 +595,9 @@ class ManageGroupsDialog(QDialog):
             nav.add_page("Assign Tags",
                          NeuronTagsPanel(app.root.neuron_tags, app, parent=self))
         else:
+            for gname in gr_seg.segment_tags():
+                nav.add_page(gname, OnOffPage(app, gname, parent=self))
+            nav.add_divider()
             for gname in gr.groups:
                 nav.add_page(gname, self._make_group_tab(gname, is_special=False))
             special = gr.special_groups()
@@ -181,6 +609,12 @@ class ManageGroupsDialog(QDialog):
                     sp_tabs.addTab(self._make_group_tab(gname, is_special=True), display)
                 sp_tabs.currentChanged.connect(self._autosave_notes)
                 nav.add_page("Special", sp_tabs)
+            derived = gr.derived_groups()
+            if derived:
+                d_tabs = QTabWidget()
+                for gname in derived:
+                    d_tabs.addTab(self._make_derived_tab(gname), group_display(gname)[1])
+                nav.add_page("Derived", d_tabs)
 
         nav.currentChanged.connect(self._autosave_notes)
         lay.addWidget(nav, stretch=1)
@@ -213,6 +647,33 @@ class ManageGroupsDialog(QDialog):
             layout.addLayout(self._hotkey_row(gname))
         layout.addWidget(self._notes_and_pairs(gname), stretch=1)
         layout.addLayout(self._group_button_row(gname, is_special, display))
+        return tab
+
+    def _make_derived_tab(self, gname: str) -> QWidget:
+        """A derived group's editable rules and its live members; it has no hand tags to edit."""
+        groups = self._groups
+        meta = groups.get_group_metadata(gname)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        editor = DerivedRulesEditor(groups.ui, meta.rules, tab)
+        layout.addWidget(editor)
+        layout.addWidget(self._labelled_box("Pairs in group:", self._session_pair_tabs(gname)),
+                         stretch=1)
+
+        def apply_rules():
+            rules = editor.rules()
+            if not rules:
+                raise ValueError("No rule picked.")
+            meta.rules = rules
+            groups.dirty = True
+            groups.save()
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(make_button("Apply rules", lambda: self._apply_group_change("Rules", apply_rules)))
+        buttons.addWidget(make_button(f"Delete group '{group_display(gname)[1]}'",
+                                      lambda: self._delete_group(gname)))
+        buttons.addStretch()
+        layout.addLayout(buttons)
         return tab
 
     def _name_row(self, gname: str, is_special: bool, display: str) -> QHBoxLayout:
@@ -362,10 +823,6 @@ class ManageGroupsDialog(QDialog):
         self.accept()
         ManageGroupsDialog.show(sd, gm, pct, par)
 
-    def closeEvent(self, event):
-        self._autosave_notes()
-        event.accept()
-
     @classmethod
     def show(cls, sel_data: 'SelectionData', group_mgr: 'PairSelectionPanel',
              pairs_by_conn_type_fn=None, parent=None):
@@ -375,7 +832,8 @@ class ManageGroupsDialog(QDialog):
                                     "No groups yet. Create one first.")
             return
         dlg = cls(sel_data, group_mgr, pairs_by_conn_type_fn, parent)
-        dlg.exec()
+        dlg.finished.connect(dlg.deleteLater)
+        dlg.setVisible(True)   # modeless: the main window stays usable
 
 
 class VersionSaveDialog(QDialog):
@@ -469,9 +927,8 @@ class VersionLoadDialog(QDialog):
             if ver is None or len(lst.selectedIndexes()) > 1:
                 return
             name, path, saved_at, is_valid, is_history = ver
-            new, ok = QInputDialog.getText(dlg, "Rename", "New name:", text=name)
-            new = (new or '').strip()
-            if not ok or not new or new == name:
+            new = prompt_name(dlg, "Rename", "New name:", name)
+            if new is None or new == name:
                 return
             dst = os.path.join(os.path.dirname(path), new + os.path.splitext(path)[1])
             if os.path.exists(dst):
@@ -1182,8 +1639,8 @@ class ExportOptionsDialog(QDialog):
         """Show dialog. Returns opt-dict or None on cancel."""
         cd        = nav.cd
         sel_data  = nav.sel_data
-        group_mgr = nav.root.pairs_view.left_panel
-        ui_state  = nav.root._load_ui_state()
+        group_mgr = nav.root.pairs_view   # the container owns both .ui and _save_all_state
+        ui_state  = nav.root.ui_states.panel_state
         seg_names = nav.available_segments()
 
         parent = nav.root
@@ -1254,6 +1711,8 @@ class SettingsTabs:
         dl.setSpacing(8)
         self._spin_row(dl, "Max pairs in 'Show Together':",
                        ui.nav, 'max_together_pairs', 2, 20)
+        self._spin_row(dl, "Neuron view: neurons shown together:",
+                       ui.nav, 'neuron_view_count', 1, 50)
         self._spin_row(dl, "Minimum font size:", ui.settings, 'min_font_size', 6, 32,
                        on_live=lambda v: ui._apply_min_font_size(v))
         self._spin_row(dl, "Classifier: min pairs per label:", ui.settings,
@@ -1275,7 +1734,8 @@ class SettingsTabs:
         cache = QWidget()
         cl = QVBoxLayout(cache)
         cl.setSpacing(8)
-        self._spin_row(cl, "Max CCG queue size:", ui.nav, 'max_ccg_queue', 1, 500)
+        self._spin_row(cl, "Max CCG queue size (0 = unrestricted):",
+                       ui.nav, 'max_ccg_queue', 0, 100000)
         self._spin_row(cl, "Max jitter queue size:", ui.nav, 'max_jitter_queue', 1, 500)
         self._spin_row(cl, "Max jitter cache size:", ui.nav, 'max_jitter_cache', 1, 5000)
         cl.addStretch()
@@ -1456,9 +1916,8 @@ class FieldMapWidget(QWidget):
 
     def _on_add_extra_btn(self):
         """Name a field the schema does not have; its values land in Neurons.metadata."""
-        name, ok = QInputDialog.getText(self, "Extra field", "Name for this metadata field:")
-        name = name.strip()
-        if not ok or not name:
+        name = prompt_name(self, "Extra field", "Name for this metadata field:")
+        if name is None:
             return
         if name in self._boxes:
             QMessageBox.information(self, "Extra field", f"'{name}' is already a field.")

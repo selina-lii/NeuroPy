@@ -1,3 +1,5 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path as _Path
 from typing import Union
@@ -41,6 +43,8 @@ class JitterConfig:
         alpha: float = 0.05,
         use_acceleration: bool = True,
         ccg_batch_bytes: int = 256_000_000,
+        jitter_chunk: int = 5,
+        n_threads: int = 0,
     ):
         """
         Parameters
@@ -59,6 +63,11 @@ class JitterConfig:
             Use CuPy GPU acceleration where available.
         ccg_batch_bytes : int
             Memory budget (bytes) for jitter trials per batch. Larger = more parallelism.
+        jitter_chunk : int
+            Jitter trials pooled into one CCG call. Cost is superlinear in the pooled
+            spike count, so small is fast; 0 lets the batch path pick.
+        n_threads : int
+            Threads over chunks; 0 = one per core. The CCG inner loop releases the GIL.
         """
         self.ccg = ccg
         self.njitter = njitter
@@ -67,6 +76,8 @@ class JitterConfig:
         self.alpha = alpha
         self.use_acceleration = use_acceleration
         self.ccg_batch_bytes = int(ccg_batch_bytes) if ccg_batch_bytes is not None else 256_000_000
+        self.jitter_chunk = int(jitter_chunk) or 5
+        self.n_threads = int(n_threads) or (os.cpu_count() or 1)
 
     def __str__(self):
         return (
@@ -121,6 +132,7 @@ class Jitter:
         self.JBSI = None     # [n_pairs, n_bins] float
         # pair_idx → (j_avg [n_bins], j_lo [n_bins], j_hi [n_bins])
         self._j_ccg_cache: dict = {}
+        self.percentiles: dict = {}   # pair_idx → {level: [n_bins]}
 
         self._group_by_target()
 
@@ -150,6 +162,18 @@ class Jitter:
     def n_pairs(self):
         inds = self.ccg_ptr.inds
         return len(inds) if inds is not None else 0
+
+    @staticmethod
+    def percentile_levels(njitter: int) -> list:
+        """Bands worth keeping: a tail needs enough draws to sit on, so 1/99 waits for 1000."""
+        levels = [25.0, 50.0, 75.0]
+        if njitter >= 20:
+            levels = [5.0] + levels + [95.0]
+        if njitter >= 200:
+            levels = [2.5] + levels + [97.5]
+        if njitter >= 1000:
+            levels = [1.0] + levels + [99.0]
+        return levels
 
     # ------------------------------------------------------------------
     # Core computation
@@ -205,10 +229,11 @@ class Jitter:
                     j_ccg_avg = j_ccg[ref_i].mean(axis=0)
                     real_ccg = self.ccg_data.ccg[:, ref, tgt].sum(axis=0)
 
-                # Cache null distribution for verification plotting
-                j_ccg_lo = np.percentile(j_ccg[ref_i], 5, axis=0)
-                j_ccg_hi = np.percentile(j_ccg[ref_i], 95, axis=0)
-                self._j_ccg_cache[pair_idx] = (j_ccg_avg, j_ccg_lo, j_ccg_hi)
+                # Percentiles are what survives: the raw njitter x n_bins draw is not stored
+                qs = self.percentile_levels(self.conf.njitter)
+                bands = dict(zip(qs, np.percentile(j_ccg[ref_i], qs, axis=0)))
+                self.percentiles[pair_idx] = bands
+                self._j_ccg_cache[pair_idx] = (j_ccg_avg, bands[qs[0]], bands[qs[-1]])
 
                 # Per-bin empirical p-values: fraction of jitter trials
                 # where the jitter count >= real count at each bin
@@ -264,28 +289,19 @@ class Jitter:
         tgt_id_base = int(self.neurons.neuron_ids[tgt_ind])
         tgt_type = (self.neurons.neuron_type[tgt_ind][0]
                     if getattr(self.neurons, 'neuron_type', None) is not None else None)
-        try:
-            n_bins_est = int(round(ccg_conf.duration / ccg_conf.bin_size)) + 1
-        except Exception:
-            n_bins_est = 64
-        budget = int(getattr(self.conf, 'ccg_batch_bytes', 256_000_000) or 256_000_000)
-        batch = max(1, min(njitter, budget // max(1, n_ref * n_bins_est * 8)))
-        out = None
-        n_bins = None
-        done = 0
-        while done < njitter:
-            b = min(batch, njitter - done)
-            ref_neurons = self.neurons.neuron_slice(neuron_inds=np.asarray(refs))
-            j_neurons = Neurons(
-                spiketrains=j_list[done:done + b],
+        chunk = max(1, int(self.conf.jitter_chunk))
+
+        def _slab(start: int, b: int):
+            """One chunk's CCG; the pooled spike array is what costs, so keep it small."""
+            combined = self.neurons.neuron_slice(neuron_inds=np.asarray(refs))
+            combined.merge(Neurons(
+                spiketrains=j_list[start:start + b],
                 t_start=self.neurons.t_start,
                 t_stop=self.neurons.t_stop,
-                neuron_ids=[tgt_id_base * 100000 + (done + i) for i in range(b)],
+                neuron_ids=[tgt_id_base * 100000 + (start + i) for i in range(b)],
                 neuron_type=([tgt_type] * b) if tgt_type is not None else None,
-            )
-            combined = ref_neurons
-            combined.merge(j_neurons)
-            ccg_j = correlations.spike_correlations(
+            ))
+            return correlations.spike_correlations(
                 neurons=combined,
                 ref_neuron_inds=np.arange(n_ref),
                 neuron_inds=np.arange(n_ref, n_ref + b),
@@ -295,21 +311,27 @@ class Jitter:
                 symmetrize=ccg_conf.symmetrize_ccg,
                 one_to_many=(n_ref == 1),
             )
-            if out is None:
-                n_bins = int(ccg_j.shape[-1])
-                if not n_bins:
-                    raise ValueError("spike_correlations returned empty CCG")
-                out = np.empty((n_ref, njitter, n_bins), dtype=float)
-            elif int(ccg_j.shape[-1]) != n_bins:
-                raise ValueError(f"jitter CCG bin mismatch: expected {n_bins}, got {ccg_j.shape[-1]}")
-            out[:, done:done + b, :] = ccg_j
-            done += b
+
+        spans = [(s, min(chunk, njitter - s)) for s in range(0, njitter, chunk)]
+        workers = min(int(self.conf.n_threads), len(spans))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                slabs = list(pool.map(lambda sb: _slab(*sb), spans))
+        else:
+            slabs = [_slab(*sb) for sb in spans]
+
+        n_bins = int(slabs[0].shape[-1])
+        if not n_bins:
+            raise ValueError("spike_correlations returned empty CCG")
+        out = np.empty((n_ref, njitter, n_bins), dtype=float)
+        for (start, b), slab in zip(spans, slabs):
+            if int(slab.shape[-1]) != n_bins:
+                raise ValueError(f"jitter CCG bin mismatch: expected {n_bins}, got {slab.shape[-1]}")
+            out[:, start:start + b, :] = slab
         return out
 
     def _compute_jitter_ccg(self, refs, tgt_ind, j_trains):
-        """Dispatch to one- or batch-ref jitter CCG computation."""
-        if len(refs) == 1:
-            return self._compute_jitter_ccg_one(refs[0], tgt_ind, j_trains)
+        """One or many refs: the batch path chunks and threads, which one ref needs just as much."""
         return self._compute_jitter_ccg_batch(refs, tgt_ind, j_trains)
 
     def _jbsi(self, ref, tgt, real_ccg, j_ccg_avg):
@@ -524,7 +546,6 @@ def plot_jitter_verification(jitter_obj,
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     if save_path is not None:
-        import os
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=120, bbox_inches='tight')
         print(f"[plot_jitter_verification] Saved to {save_path}")

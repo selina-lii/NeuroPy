@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum as _Enum, auto as _auto
 import numpy as np
 from scipy.signal import windows
@@ -7,6 +7,12 @@ from scipy.stats import poisson
 from scipy import ndimage
 from statsmodels.stats.multitest import multipletests
 from neuropy.analyses.jitter import compute_jbsi, JitterConfig
+
+def _ratio(num, den):
+    """num/den, NaN where the denominator is empty: no baseline is unknown, not dominance."""
+    num, den = np.asarray(num, dtype=float), np.asarray(den, dtype=float)
+    return np.divide(num, den, out=np.full(np.broadcast(num, den).shape, np.nan),
+                     where=den > 0)
 
 
 def multiple_correction(pvals: np.ndarray, alpha: float, method: str = 'bonferroni') -> tuple:
@@ -213,12 +219,12 @@ class ConnectionStrength:
         return np.asarray(j_avg, dtype=float).copy()
 
     @staticmethod
-    def tail_mask(n_bins, conf, bin_size_eff=None) -> np.ndarray:
-        """Bool mask over bins, the union of conf's tail intervals; None edges reach the window edge."""
+    def tail_mask(n_bins, conf, bin_size_eff=None, intervals=None) -> np.ndarray:
+        """Bool mask over bins, the union of *intervals* (default conf's tail); None edges reach the window edge."""
         bs = bin_size_eff or (conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size)
         half = (n_bins // 2) * bs
         mask = np.zeros(n_bins, dtype=bool)
-        for start, end in conf.tail_intervals:
+        for start, end in (conf.tail_intervals if intervals is None else intervals):
             a = -half if start is None else max(-half, float(start))
             b = half if end is None else min(half, float(end))
             if b < a:      # the interval lies wholly outside the window
@@ -228,11 +234,11 @@ class ConnectionStrength:
         return mask
 
     @staticmethod
-    def baseline_tail(ccg, conf, *, bin_size_eff=None, source=None):
+    def baseline_tail(ccg, conf, *, bin_size_eff=None, source=None, intervals=None):
         """Flat baseline at the tail-interval mean, of the CCG itself or of *source*."""
         ccg = np.asarray(ccg, dtype=float)
         n_bins = ccg.shape[-1]
-        mask = ConnectionStrength.tail_mask(n_bins, conf, bin_size_eff)
+        mask = ConnectionStrength.tail_mask(n_bins, conf, bin_size_eff, intervals)
         if not mask.any():
             mask[:max(1, n_bins // 10)] = mask[-max(1, n_bins // 10):] = True
         vals = ccg if source is None else np.broadcast_to(
@@ -279,6 +285,100 @@ class ConnectionStrength:
         """One pair's JBSI — the batch routine on a single trace."""
         return float(ConnectionStrength.conn_strength_JBSI_batch(
             ccg, j_avg, fr_ref, fr_tgt, conf, lo, hi, jscale))
+
+    @staticmethod
+    def mean_over_max_tail(ccg, conf, lo, hi, *, bin_size_eff=None, factor=1.0, tail=None):
+        """Window mean over the largest tail bin.
+
+        Tail intervals rather than all non-window bins, since the zero-lag artifact sits
+        just outside the window and would otherwise veto every real connection."""
+        c = np.asarray(ccg, dtype=float)
+        mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)
+        if not mask.any():
+            return np.full(c.shape[:-1], np.nan)
+        return _ratio(np.nanmean(c[..., lo:hi], axis=-1),
+                      factor * np.nanmax(c[..., mask], axis=-1))
+
+    @staticmethod
+    def mean_over_avg_tail(ccg, conf, lo, hi, *, bin_size_eff=None, factor=1.0, tail=None):
+        """Window mean over the tail mean — the same comparison against a flat tail baseline."""
+        c = np.asarray(ccg, dtype=float)
+        mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)
+        if not mask.any():
+            return np.full(c.shape[:-1], np.nan)
+        return _ratio(np.nanmean(c[..., lo:hi], axis=-1),
+                      factor * np.nanmean(c[..., mask], axis=-1))
+
+    @staticmethod
+    def peak_percentile(ccg, conf, lo, hi, *, bin_size_eff=None, tail=None):
+        """Where the window peak sits among all bins (or *tail*'s), as a top-percent: smaller is stronger."""
+        c = np.asarray(ccg, dtype=float)
+        peak = np.nanmax(c[..., lo:hi], axis=-1)
+        ref = c if tail is None else c[..., ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)]
+        return 100.0 * np.nanmean(ref >= peak[..., None], axis=-1)
+
+    @staticmethod
+    def peak_to_baseline_ratio(ccg, conf, lo, hi, *, bin_size_eff=None, tail=None):
+        """Window peak over the tail-interval baseline (not the classifier's outer-thirds flank)."""
+        c = np.asarray(ccg, dtype=float)
+        base = ConnectionStrength.baseline_tail(c, conf, bin_size_eff=bin_size_eff, intervals=tail)[..., 0]
+        return _ratio(np.nanmax(c[..., lo:hi], axis=-1), base)
+
+    @staticmethod
+    def spike_count(ccg, conf, lo, hi, *, bin_size_eff=None, ranges=None, mode='avg'):
+        """Counts over the union of lag *ranges* (default ±spkcnt_scope/2): ``mode`` picks avg, every bin, or one."""
+        c = np.asarray(ccg, dtype=float)
+        half = float(conf.spkcnt_scope) / 2
+        mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff,
+                                            [(-half, half)] if ranges is None else ranges)
+        win = c[..., mask]
+        if win.shape[-1] == 0:
+            return np.full(c.shape[:-1], np.nan)
+        if mode == 'every':
+            return np.nanmin(win, axis=-1)
+        if mode == 'one':
+            return np.nanmax(win, axis=-1)
+        return np.nanmean(win, axis=-1)
+
+    @staticmethod
+    def p_value(pval, conf, lo, hi, *, bin_size_eff=None, correction='bonferroni'):
+        """Min p over the lag window, corrected across all bins first unless ``correction='none'``."""
+        p = np.asarray(pval, dtype=float)
+        if correction != 'none':
+            _sig, p = multiple_correction(p, conf.alpha, method=correction)
+        return np.nanmin(p[..., lo:hi], axis=-1)
+
+    # name -> (function, threshold arg, default, pass when value <= cut, tunable kwargs)
+    AUX_TESTS = {
+        'p_value':                (p_value,                'alpha',     0.05, True,
+                                   {'correction': 'bonferroni'}),
+        'mean_over_max_tail':     (mean_over_max_tail,     'min_ratio', 1.0, False,
+                                   {'factor': 1.0, 'resolution': 'lowres', 'tail': None}),
+        'mean_over_avg_tail':     (mean_over_avg_tail,     'min_ratio', 1.0, False,
+                                   {'factor': 1.0, 'resolution': 'lowres', 'tail': None}),
+        'peak_percentile':        (peak_percentile,        'top_pct',   5.0, True,
+                                   {'resolution': 'lowres', 'tail': None}),
+        'peak_to_baseline_ratio': (peak_to_baseline_ratio, 'min_ratio', 1.0, False,
+                                   {'resolution': 'lowres', 'tail': None}),
+        'spike_count':            (spike_count,            'min_count', 2.5, False,
+                                   {'ranges': None, 'mode': 'avg'}),
+    }
+
+    SPIKE_COUNT_MODES = ('avg', 'every', 'one')
+    P_CORRECTIONS = ('none', 'bonferroni', 'fdr_bh')
+    PVAL_TESTS = ('p_value',)   # these read the per-bin p array, not the CCG
+
+    @staticmethod
+    def aux_test(name, ccg, conf, lo, hi, *, bin_size_eff=None, threshold=None, **kw):
+        """One auxiliary test as ``(value, passed)``; advisory only, never a validity test."""
+        fn, _targ, default, below, extra = ConnectionStrength.AUX_TESTS[name]
+        # None means "unset" only where the default is None; elsewhere it must not shadow it
+        kw = {k: v for k, v in kw.items() if v is not None or extra.get(k, 0) is None}
+        kw = {**extra, **kw}
+        kw.pop('resolution', None)   # picks which CCG the caller hands in, not a rule argument
+        value = fn.__func__(ccg, conf, lo, hi, bin_size_eff=bin_size_eff, **kw)
+        cut = default if threshold is None else float(threshold)
+        return value, (value <= cut) if below else (value >= cut)
 
     @staticmethod
     def conn_strength(ccg_raw, null_raw, ref, tgt, conf, *,
@@ -362,15 +462,17 @@ def load_peak_waveform(ref: int, waveforms, peak_channels, shank_ids,
     discarded_arr = None if discarded is None else np.asarray(discarded, dtype=int)
     if discarded_arr is not None and discarded_arr.size and np.isin(peak_ch, discarded_arr):
         return None, None
-    local_idx = peak_ch - ch_per_shank * rs
-    if not (0 <= local_idx < ch_per_shank):
+    wf = np.asarray(waveforms[ref], dtype=float)
+    if wf.ndim == 1:        # the session stored one channel per neuron: it is the peak
+        tr = wf
+    elif peak_ch < wf.shape[0]:   # rows are probe channels, so the peak channel indexes them
+        tr = wf[peak_ch]
+    else:
         return None, None
-    ref_full = _fill_waveform(waveforms[ref], rs, ch_per_shank, discarded_arr)
-    tr = ref_full[local_idx]
-    if not np.any(np.isfinite(tr)):
+    if not np.any(np.isfinite(tr)) or float(np.nanmax(tr) - np.nanmin(tr)) == 0.0:
         return None, None
     n = int(tr.shape[0])
-    return np.arange(n, dtype=float) - n // 2, np.asarray(tr, dtype=float)
+    return np.arange(n, dtype=float) - n // 2, tr
 
 
 def peak_waveform_on_lag_axis(neurons, ref: int, ch_per_shank: int,
@@ -403,3 +505,48 @@ class ConnStrengthConfig:
     cs_metric: str = "CS"
     min_lag_bin: int | None = None
     max_lag_bin: int | None = None
+    off_mode: str = 'flag'   # 'flag' (CS untouched) | 'zero' | 'binarize'
+
+
+@dataclass(frozen=True, slots=True)
+class AuxTestConfig:
+    """Which auxiliary tests decide on/off, and with what arguments."""
+    enabled: tuple = ()          # test names; empty = none contribute, every pair stays on
+    args: dict = field(default_factory=dict)   # {test_name: {threshold, factor, ...}}
+
+    def specs(self) -> dict:
+        """The ``tests`` mapping pair_on_for/sweep_aux_tests take."""
+        return {name: dict(self.args.get(name) or {}) for name in self.enabled}
+
+    def with_test(self, name: str, on: bool) -> 'AuxTestConfig':
+        names = [n for n in ConnectionStrength.AUX_TESTS
+                 if (n in self.enabled or n == name) and (on or n != name)]
+        return AuxTestConfig(tuple(names), dict(self.args))
+
+    def with_args(self, name: str, **kw) -> 'AuxTestConfig':
+        args = dict(self.args)
+        args[name] = {**(args.get(name) or {}), **kw}
+        return AuxTestConfig(tuple(self.enabled), args)
+
+    def serialize(self) -> dict:
+        return {'enabled': list(self.enabled), 'args': self.args}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'AuxTestConfig':
+        d = d or {}
+        return cls(tuple(d.get('enabled') or ()), dict(d.get('args') or {}))
+
+
+@dataclass(frozen=True, slots=True)
+class PvalScreeningConfig:
+    """The primary peak rule, declared so it can be configured; EranConv is not routed through it."""
+    roi_start: float = 1e-3        # ROI in seconds, the one test window
+    roi_end: float = 3e-3
+    alpha: float = 0.05
+    multiple_correction: str = 'bonferroni'   # 'bonferroni' | 'fdr_bh'
+
+    @classmethod
+    def from_conf(cls, conf) -> 'PvalScreeningConfig':
+        """What a CCGConfig currently implies, so the two cannot drift apart unnoticed."""
+        return cls(roi_start=conf.min_lag, roi_end=conf.max_lag, alpha=conf.alpha,
+                   multiple_correction=conf.multiple_correction or 'bonferroni')

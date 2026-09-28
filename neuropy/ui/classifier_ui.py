@@ -31,7 +31,7 @@ from neuropy.classifier.run import (DEFAULT_MODEL, apply_cascade, apply_model,
                                     delete_model, list_models, missing_highres,
                                     model_path, open_projects, predict_project,
                                     rename_model,
-                                    scope_keys, scorable_keys, train_project)
+                                    scorable_keys, train_project)
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -420,8 +420,8 @@ class ClassifierDialog(QDialog):
                 'extra': open_projects(self.extra_picker.selected),
                 'min_count': int(self._win.settings.classifier_min_count),
                 'only_labels': self.label_picker.selected,
-                'scope': scope_keys(self._win.cd, self.session_picker.selected,
-                                    self.type_picker.selected)}
+                'scope': self._win.cd.keys_in_scope(self.session_picker.selected,
+                                                    self.type_picker.selected)}
 
     def _on_apply_btn(self):
         self._launch(self.saved_combo.currentData())

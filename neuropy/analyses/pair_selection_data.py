@@ -15,14 +15,18 @@ import datetime
 import hashlib
 import json
 import os
+import re
+import numpy as np
 from collections import defaultdict as _defaultdict
 
 from neuropy.analyses.utils import (
     JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
+    is_derived_group, group_display_name,
     ADMITTED_PREFIX, is_shape_label, is_admitted_group, NOTHING,
 )
 from neuropy.utils.data_storage_util import atomic_write_json
 from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.neuron_tags import STABLE_TAG
 
 
 class _SelectionData(JsonSavable):
@@ -168,22 +172,105 @@ class SelectionData(JsonSavable):
         return {SelectionData.as_pair_key(p): float(v) for p, v in zip(pairs, vals)}
 
 
+def _dir_token(v) -> str:
+    """Path-safe token: conn-type labels carry arrows and spaces."""
+    return re.sub(r'[^A-Za-z0-9_-]', '-', str(v))
+
+
+class AuxResults:
+    """Swept auxiliary-rule arrays for one (session, conn type, segment), as ``[ref, tgt]`` npys.
+
+    One unit dir per segment: a new segment is a new dir and a dropped one is an rmtree,
+    so nothing reshapes when the segment set changes."""
+
+    ON = 'on'
+
+    def __init__(self, save_dir: str, nd_key: Key, conn_type: str, segment: str):
+        self._dir = os.path.join(
+            save_dir, 'aux_tests',
+            f"{_dir_token(nd_key.session)}.{_dir_token(conn_type)}.{_dir_token(segment)}")
+        self.arrays: dict = {}
+
+    @property
+    def stored(self) -> bool:
+        return os.path.isdir(self._dir)
+
+    def load(self) -> 'AuxResults':
+        self.arrays = {f[:-4]: np.load(os.path.join(self._dir, f), mmap_mode='r')
+                       for f in os.listdir(self._dir)} if self.stored else {}
+        return self
+
+    def save(self) -> None:
+        os.makedirs(self._dir, exist_ok=True)
+        for name, arr in self.arrays.items():
+            np.save(os.path.join(self._dir, name + '.npy'), arr)
+
+    def set_results(self, results: dict, on: 'np.ndarray') -> None:
+        """Whole-grid replace: value/passed per rule plus the combined on."""
+        self.arrays = {self.ON: np.asarray(on, dtype=bool)}
+        for name, (value, passed) in results.items():
+            self.arrays[name + '.value'] = np.asarray(value, dtype=float)
+            self.arrays[name + '.passed'] = np.asarray(passed, dtype=bool)
+
+    def pair(self, ref: int, tgt: int) -> dict:
+        """``{rule: [value, passed], 'on': bool}`` for one pair, the shape the table reads."""
+        if not self.arrays:
+            return {}
+        out = {name[:-6]: [float(arr[ref, tgt]),
+                           bool(self.arrays[name[:-6] + '.passed'][ref, tgt])]
+               for name, arr in self.arrays.items() if name.endswith('.value')}
+        out[self.ON] = bool(self.arrays[self.ON][ref, tgt])
+        return out
+
+
+class DerivedRule(JsonSavable):
+    """One condition of a derived group: any of *values* matches; a neuron rule tests ref, tgt, either or both."""
+
+    PAIR_TAG, NEURON_TAG = 'pair tag', 'neuron tag'
+    KINDS = (PAIR_TAG, NEURON_TAG)
+    SIDES = ('ref', 'tgt', 'either', 'both')
+
+    def __init__(self, kind: str = PAIR_TAG, name: str = '', values: list = None,
+                 side: str = 'either'):
+        JsonSavable.__init__(self)
+        self.kind = kind
+        self.name = name   # the neuron tag; pair tag rules name their tags in values
+        self.values = list(values or [])
+        self.side = side
+
+    def __str__(self) -> str:
+        values = ' or '.join(group_display_name(v) for v in self.values)
+        if self.kind == self.PAIR_TAG:
+            return f"pair tag is {values}"
+        return f"{self.side} neuron {self.name} is {values}"
+
+
 class Group(JsonSavable):
-    """One group's metadata (name + optional hotkey + notes)."""
+    """One group's metadata (name + optional hotkey + notes); a derived group also holds its rules."""
 
     def __init__(self, name: str = '', hotkey: str = '', notes: str = '',
-                 ui_color: str = ''):
+                 ui_color: str = '', rules: list = None):
         JsonSavable.__init__(self)
         self.name     = name
         self.hotkey   = hotkey
         self.notes    = notes
         self.ui_color = ui_color   # '' = auto colour from name; special groups stay ''
+        self.rules: list[DerivedRule] = list(rules or [])
+
+    def __setstate__(self, state: dict) -> None:
+        JsonSavable.__setstate__(self, state)
+        self.rules = [DerivedRule(**r) for r in state.get('rules', [])]
+
+    def serialize(self) -> dict:
+        state = JsonSavable.serialize(self)
+        if not self.rules:   # only derived groups carry rules; others keep their saved shape
+            state.pop('rules')
+        return state
 
     @property
     def display_name(self) -> str:
-        """Name without the internal ``__special_`` prefix, for display."""
-        return (self.name[len(_SPECIAL_PREFIX):] if is_special_group(self.name)
-                else self.name)
+        """Name without its internal prefix, for display."""
+        return group_display_name(self.name)
 
     @property
     def display_color(self) -> str:
@@ -191,7 +278,7 @@ class Group(JsonSavable):
 
         Special groups get '' (transparent) — they are not colour-tagged.
         """
-        if is_special_group(self.name):
+        if is_special_group(self.name) or is_derived_group(self.name):
             return ''
         if self.ui_color:
             return self.ui_color
@@ -209,11 +296,12 @@ class GroupDataset(JsonSavable, BiIndex):
     _custom_types = {'registry': Group}
 
     def __init__(self, save_dir: str = ''):
-        JsonSavable.__init__(self, ignored_attrs=['ui', 'dirty'])
+        JsonSavable.__init__(self, ignored_attrs=['ui', 'dirty', 'derived'])
         BiIndex.__init__(self)
         self.registry: dict[str, Group] = {}
         self.dirty = False
         self.ui = None
+        self.derived: DerivedGroups = None   # set by the SelectionDataset that owns this
         self._save_dir: str = save_dir
 
     def bind(self, ui) -> None:
@@ -239,10 +327,24 @@ class GroupDataset(JsonSavable, BiIndex):
         """Tags a user can apply — machine markers are not offered as choices."""
         return sorted(g for g in self.defined_groups
                       if g != NOTHING
-                      and not is_special_group(g) and not is_admitted_group(g))
+                      and not is_special_group(g) and not is_admitted_group(g)
+                      and not is_derived_group(g))
 
     def special_groups(self) -> list[str]:
         return sorted(g for g in self.defined_groups if is_special_group(g))
+
+    def derived_groups(self) -> list[str]:
+        return sorted(g for g in self.defined_groups if is_derived_group(g))
+
+    def pickable_groups(self) -> list[str]:
+        """Every group a scope can draw pairs from, in picker section order."""
+        return self.groups + self.special_groups() + self.derived_groups()
+
+    def forward(self, a) -> set:
+        if is_derived_group(a):
+            return {(sess, *p) for sess in self.derived.sessions()
+                    for p in self.derived.members(a, sess)}
+        return BiIndex.forward(self, a)
 
     def group_for_hotkey(self, key_str: str) -> str | None:
         """Group a hotkey tags, or ``None`` when the key is unassigned."""
@@ -286,6 +388,8 @@ class GroupDataset(JsonSavable, BiIndex):
 
     def members_in_group(self, gname: str, sess: str) -> set:
         """Id tuples tagged by *gname* in one session, without the session itself."""
+        if is_derived_group(gname):
+            return self.derived.members(gname, sess)
         return {tuple(rest) for s, *rest in self.forward(gname) if s == sess}
 
     def members_in_groups(self, gnames, sess: str) -> set:
@@ -393,6 +497,75 @@ def groups_dir(cd) -> str:
     return str(cd.data_root)
 
 
+class SegmentGroups(GroupDataset):
+    """Group tags carrying a segment: a pair can be tagged in ``maze`` but not in ``post``.
+
+    Its own registry and file, so session-wide tags keep their segment-free member keys."""
+
+    ON, OFF = 'on', 'off'
+
+    @staticmethod
+    def member(key: Key) -> tuple:
+        ids = (key.ref,) if key.tgt is None else (key.ref, key.tgt)
+        return (str(key.session), str(key.segment), *(int(i) for i in ids))
+
+    def tag_pair(self, gname: str, sess: str, segment: str, pair: tuple, on: bool) -> None:
+        key = Key(session=str(sess), segment=str(segment),
+                  ref=int(pair[0]), tgt=int(pair[1]))
+        (self.add_member if on else self.discard_member)(gname, key)
+
+    def toggle_pair(self, gname: str, sess: str, segment: str, pair: tuple) -> bool:
+        """Flip *pair*'s membership of *gname* in *segment*; returns whether it is now tagged."""
+        want = gname not in self.tags_for_pair(sess, segment, pair)
+        self.tag_pair(gname, sess, segment, pair, want)
+        return want
+
+    def tags_for_pair(self, sess: str, segment: str, pair: tuple) -> set:
+        return self.groups_for_member(Key(session=str(sess), segment=str(segment),
+                                          ref=int(pair[0]), tgt=int(pair[1])))
+
+    def pairs_tagged(self, gname: str, sess: str, segment: str) -> set:
+        """Pairs tagged by *gname* in one (session, segment)."""
+        return {(r, t) for s, seg, r, t in self.forward(gname)
+                if s == str(sess) and seg == str(segment)}
+
+    def pair_off(self, sess: str, segment: str, pair: tuple) -> bool | None:
+        """Manual override: True on, False off, None when the tests decide."""
+        tags = self.tags_for_pair(sess, segment, pair)
+        if self.OFF in tags:
+            return False
+        return True if self.ON in tags else None
+
+    def segment_tags(self) -> list:
+        """Tag names offered here; on/off always exist, user tags follow."""
+        rest = sorted(g for g in self.registry if g not in (self.ON, self.OFF))
+        return [self.ON, self.OFF] + rest
+
+    def segments_tagged(self, sess: str) -> list:
+        return sorted({seg for _g, members in self._fwd.items()
+                       for s, seg, *_ in members if s == str(sess)})
+
+    def save_path(self, **_) -> str | None:
+        d = self._save_dir or (groups_dir(self.ui.cd) if self.ui is not None else '')
+        return os.path.join(d, 'segment_groups') if d else None
+
+    def serialize(self) -> dict:
+        """Membership travels with the registry: there is no per-session file hosting it."""
+        state = super().serialize()
+        state['members'] = {g: sorted([str(s), str(seg), int(r), int(t)]
+                                      for s, seg, r, t in members)
+                            for g, members in self._fwd.items()}
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        members = (state or {}).pop('members', None) or {}
+        super().__setstate__(state)
+        self._fwd, self._inv = {}, {}
+        for gname, rows in members.items():
+            for s, seg, r, t in rows:
+                self.add(gname, (str(s), str(seg), int(r), int(t)))
+
+
 class NeuronGroups(GroupDataset):
     """Neuron groups, stored per project: a neuron id only means something in its session.
 
@@ -422,6 +595,86 @@ class NeuronGroups(GroupDataset):
                 self.add(gname, (str(member[0]), *(int(i) for i in member[1:])))
 
 
+class NeuronSelections:
+    """Per-session neuron selections in the pair file format; a member is a 1-tuple (neuron_id,)."""
+
+    def __init__(self, cd):
+        self.cd = cd
+        self.save_dir = str(cd.nd.neuron_dir(cd.save_path) / 'selections')
+        self.sessions: dict[Key, SelectionData] = {}
+
+    def bucket(self, key: Key) -> _SelectionData:
+        """The session's selection, read from disk or seeded from the stable tag."""
+        nd_key = key.nd()
+        if nd_key not in self.sessions:
+            sd = self.sessions[nd_key] = SelectionData(save_dir=self.save_dir, nd_key=nd_key)
+            neurons = self.cd.nd.neurons_for(nd_key)
+            ids = [(int(i),) for i in neurons.neuron_ids]
+            if os.path.isfile(sd.save_path() + '.json'):
+                sd.load(sd.save_path())
+                selected, deleted = sd.selections[nd_key].selected, sd.selections[nd_key].deleted
+            else:
+                stable = neurons.tag_values.get(STABLE_TAG, [1.0] * len(ids))   # values survive relabelling
+                selected, deleted = {m for m, v in zip(ids, stable) if v == 1.0}, set()
+            sd.selections[nd_key].reset(ids, selected=selected, deleted=deleted)
+        return self.sessions[nd_key].selections[nd_key]
+
+    def is_selected(self, key: Key) -> bool:
+        return (key.ref,) in self.bucket(key).selected
+
+    def save(self) -> None:
+        for sd in self.sessions.values():
+            if sd.dirty:
+                sd.save()
+
+
+class DerivedGroups:
+    """Members of each derived group: the session's screened pairs meeting every rule, recomputed per ask."""
+
+    def __init__(self, cd, sd: 'SelectionDataset'):
+        self.cd = cd
+        self.sd = sd
+        self.groups = sd.groups
+        self._memo: dict = {}
+
+    def sessions(self) -> list:
+        return [str(k.session) for k in self.cd.nd.session_keys]
+
+    def members(self, gname: str, sess: str) -> set:
+        tests = [self._test(rule, sess) for rule in self.groups.get_group_metadata(gname).rules]
+        universe = set().union(*(self.cd.ptr[k].pair_set for k in self.cd.ptr
+                                 if str(k.session) == sess))
+        return {p for p in universe if all(test(p) for test in tests)}
+
+    def cached_members(self, gname: str, sess: str) -> set:
+        """members, kept until clear(): a list refresh asks once per row."""
+        if (gname, sess) not in self._memo:
+            self._memo[(gname, sess)] = self.members(gname, sess)
+        return self._memo[(gname, sess)]
+
+    def clear(self) -> None:
+        self._memo.clear()
+
+    def groups_for_pair(self, sess: str, ref: int, tgt: int) -> list:
+        return [g for g in self.groups.derived_groups()
+                if (ref, tgt) in self.cached_members(g, sess)]
+
+    def _test(self, rule: DerivedRule, sess: str):
+        """The rule as a predicate on a (ref, tgt) of *sess*; pairs index neurons by position."""
+        if rule.kind == DerivedRule.PAIR_TAG:
+            self.sd.ensure_groups_loaded_for([sess])   # pair tags are indexed per session on first use
+            return self.groups.members_in_groups(rule.values, sess).__contains__
+        neurons = self.cd.nd.neurons_for(Key(session=sess))
+        ids = [int(i) for i in neurons.neuron_ids]
+        labels = neurons.tags.get(rule.name, [None] * len(ids))
+        hit = {i for i, lb in zip(ids, labels) if str(lb) in rule.values}
+
+        def test(pair) -> bool:
+            r, t = ids[pair[0]] in hit, ids[pair[1]] in hit
+            return {'ref': r, 'tgt': t, 'either': r or t, 'both': r and t}[rule.side]
+        return test
+
+
 class SelectionDataset(JsonSavable, Autosave):
     """Project-level owner of groups + per-session SelectionData.
 
@@ -430,7 +683,8 @@ class SelectionDataset(JsonSavable, Autosave):
     """
 
     def __init__(self, cd, groups_factory=GroupDataset):
-        JsonSavable.__init__(self, ignored_attrs=['cd', 'sessions'])
+        JsonSavable.__init__(self, ignored_attrs=['cd', 'sessions', 'segtags', 'seg_groups',
+                                                  'neuron_groups'])
         self.cd = cd
         save_dir = cd.selections_dir
         self.groups = groups_factory()
@@ -440,13 +694,23 @@ class SelectionDataset(JsonSavable, Autosave):
         # with none of its own still knows every tag.
         if os.path.isfile(self.groups.save_path() + '.json'):
             self.groups.load(self.groups.save_path())
+        # segment names are a project's own, so this registry lives with the project
+        self.seg_groups = SegmentGroups(save_dir=save_dir)
+        if os.path.isfile(self.seg_groups.save_path() + '.json'):
+            self.seg_groups.load(self.seg_groups.save_path())
+        self.neuron_groups = NeuronGroups(cd)
+        if os.path.isfile(self.neuron_groups.save_path() + '.json'):
+            self.neuron_groups.load()
+        self.groups.derived = DerivedGroups(cd, self)
         self.sessions: dict[Key, SelectionData] = {}
+        self.segtags: dict[tuple, AuxResults] = {}
         self.save_dir = save_dir
         self._indexed: set = set()
 
     @property
     def dirty(self) -> bool:
-        return self.groups.dirty or any(sd.dirty for sd in self.sessions.values())
+        return (self.groups.dirty or self.seg_groups.dirty
+                or any(sd.dirty for sd in self.sessions.values()))
 
     def save(self, path: str = None, **kw):
         """Each session owns its file; the roster indexes whichever ones exist."""
@@ -455,6 +719,8 @@ class SelectionDataset(JsonSavable, Autosave):
                 sd.save()
         self.groups.save()
         self.groups.dirty = False
+        self.seg_groups.save()
+        self.seg_groups.dirty = False
         self.save_roster()
 
     def saved_sessions(self) -> list:
@@ -495,6 +761,55 @@ class SelectionDataset(JsonSavable, Autosave):
             sd = SelectionData(save_dir=self.save_dir, nd_key=nd)
             self.sessions[nd] = sd
         return sd
+
+    def pairs_for_group_key(self, group: str | None, ptr_key: Key) -> set:
+        """Screened pairs of *ptr_key*, narrowed to *group*; None = every screened pair."""
+        valid = self.cd.ptr[ptr_key].pair_set
+        if not group:
+            return valid
+        sess = str(ptr_key.session)
+        self.ensure_groups_loaded_for([sess])
+        return self.groups.pairs_in_group(group, sess) & valid
+
+    def seg_overrides(self, sess: str, segment: str) -> dict:
+        """``{(ref,tgt): bool}`` manual on/off for *segment* — what pair_on_for takes."""
+        sg = self.seg_groups
+        return {**{p: True for p in sg.pairs_tagged(sg.ON, sess, segment)},
+                **{p: False for p in sg.pairs_tagged(sg.OFF, sess, segment)}}
+
+    def aux_results(self, key: Key, segment: str) -> AuxResults:
+        """Swept rule arrays for one (session, conn type, segment), memmapped on first ask."""
+        ck = (key.nd(), key.type_label(), segment)
+        res = self.segtags.get(ck)
+        if res is None:
+            res = AuxResults(self.save_dir, key.nd(), key.type_label(), segment).load()
+            self.segtags[ck] = res
+        return res
+
+    def aux_segments(self, key: Key) -> list:
+        """Segments swept for *key*'s session and conn type, read off the store's dir names."""
+        root = os.path.join(self.save_dir, 'aux_tests')
+        prefix = f"{_dir_token(key.session)}.{_dir_token(key.type_label())}."
+        return sorted(n[len(prefix):] for n in os.listdir(root)
+                      if n.startswith(prefix)) if os.path.isdir(root) else []
+
+    def aux_members(self, sess: str, keys_pairs: list, on: bool) -> dict:
+        """``{segment: [(ref, tgt)]}`` whose verdict is *on*: the swept store, hand-set tags winning."""
+        out: dict = {}
+        for key, pair_set in keys_pairs:
+            pairs = sorted(pair_set)
+            if not pairs:
+                continue
+            idx = tuple(np.array(pairs).T)
+            for seg in self.aux_segments(key):
+                verdict = np.asarray(self.aux_results(key, seg).arrays[AuxResults.ON])[idx]
+                out.setdefault(seg, set()).update(
+                    p for p, v in zip(pairs, verdict.tolist()) if v == on)
+        for seg in self.seg_groups.segments_tagged(sess):
+            bucket = out.setdefault(seg, set())
+            for p, v in self.seg_overrides(sess, seg).items():
+                (bucket.add if v == on else bucket.discard)(p)
+        return {seg: sorted(ps) for seg, ps in sorted(out.items()) if ps}
 
     def has_shape_tag(self, sess: str, pair: tuple) -> bool:
         """True while the pair carries a tag naming a shape, not a marker or a note."""
