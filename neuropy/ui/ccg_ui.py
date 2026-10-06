@@ -22,9 +22,9 @@ from neuropy.ui.pair_selection_panel import PairSelectionPanelContainer
 from neuropy.ui.ui_common import AREA_RGB, UITheme, qt_dark_mode
 from neuropy.ui.utils import GroupHotkeysBar, Tunable
 from neuropy.ui.dialogs import (
-    QuickSaveDialog, ManageGroupsDialog, CustomCCGManageDialog, ExtendSaveDialog,
+    QuickSaveDialog, CreateGroupDialog, ManageGroupsDialog, CustomCCGManageDialog, ExtendSaveDialog,
 )
-from neuropy.ui.stats_tests_frontend import StatsTestPanel
+from neuropy.ui.stats_tests_frontend import StatsTestTabs
 from neuropy.ui.jitter_ui import JitterManager
 from neuropy.ui.time_slider import CustomCCGManager, TimeSliderPanel
 from neuropy.ui.menubar import ReviewMenuBar, IndexBar
@@ -77,6 +77,9 @@ class UISettings(JsonSavable):
     # Fewest tagged pairs a label needs before the classifier will train on it.
     classifier_min_count = Tunable(20)
     jump_to_next_after_select = Tunable(False)
+    slideshow_on = Tunable(True)        # holding an arrow 5 s in a pair list plays it
+    slideshow_min_ms = Tunable(200)     # least time each pair stays on screen
+    slideshow_warned = Tunable(False)   # the first-use notice was dismissed for good
     # Brain region -> [r, g, b] neuron fill; editable so a new dataset's regions
     # can be named without a code change.
     area_colors = Tunable(dict(AREA_RGB))
@@ -442,8 +445,7 @@ class CCGReviewUI(QMainWindow):
 
         ReviewMenuBar(self).build()
         self.status_bar = BottomStatusBar(self.nav, self.statusBar(), self)
-        self.stats_panel = StatsTestPanel(self.nav)
-        self.stats_panel.setWindowTitle("Stats Tests")
+        self.stats_panel = StatsTestTabs(self.nav)
         self.stats_panel.resize(1100, 750)
 
     def _offer_save_before_switch(self) -> bool:
@@ -476,7 +478,7 @@ class CCGReviewUI(QMainWindow):
         self.nav.set_cross_session_handles([])   # they name the old project's sessions
         self._project_dir = _Path(new_cd.save_path).name   # cd owns the path; combo reads this
         self._nd_by_project[self._project_dir] = new_cd.nd
-        self.jitter_mgr.cd = new_cd
+        self.jitter_mgr.set_cd(new_cd)
         self.time_slider.cd = new_cd
 
         # a freshly built project has different sessions entirely -> fall back to its first;
@@ -654,8 +656,9 @@ class CCGReviewUI(QMainWindow):
             self.pairs_view.spike_pairs.activate()
 
     def _on_pair_changed(self):
-        self.status_bar.refresh()
-        self.mainview.request_render()
+        if self.nav.slideshow:
+            return
+        self.status_bar.refresh()   # the plot panel renders on pair_changed itself
         self.neuron_network.follow_current_pair()
 
     def _on_segment_changed(self):
@@ -791,10 +794,17 @@ class CCGReviewUI(QMainWindow):
         self.mainview.corr_section.set_extend_source(self.nav.active_extend)
         self.mainview.request_render()
 
-    def _manage_groups(self):
+    def _create_group(self):
+        """A neuron group in the neuron view, else a pair group."""
+        if self.nav.view.name == NEURON_VIEW:
+            self.neuron_view.list_panel.create_group()
+        else:
+            CreateGroupDialog.show(self.nav.sel_data, self.pairs_view.pair_selection, self)
+
+    def _manage_groups(self, kind: str):
         ManageGroupsDialog.show(
             self.nav.sel_data, self.pairs_view.pair_selection,
-            pairs_by_conn_type_fn=self.nav._pairs_by_conn_type, parent=self)
+            pairs_by_conn_type_fn=self.nav._pairs_by_conn_type, parent=self, kind=kind)
 
     def _undo(self):
         self.nav.view.list_panel(self).undo()
@@ -849,7 +859,7 @@ class CCGReviewUI(QMainWindow):
             self.nav.any_expanded_group_tags = (
                 set(self.nav.groups.header_names())
                 | {str(k.session) for k in self.nav.real_nd_keys()})
-            self.pairs_view.pair_selection._sort_btns.select('tag')
+            self.pairs_view.pair_selection.set_sort('sel', 'tag')
             self.all_sess_mgr.rebuild_universe()
             self.nav.set_current_pair(0)
             self.nav.set_current_segment(_ALL_SEGS)

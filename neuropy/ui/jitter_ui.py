@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from neuropy.analyses._jitter_worker import jitter_worker
 from neuropy.analyses.jitter import JitterTask
 from neuropy.analyses.jitter_batch import DEFAULT_NJITTER, pairs_for, run_and_store
+from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import group_display
 from neuropy.ui.ui_common import BackgroundTaskRunner, LRUCache
 from pyqtgraph.Qt.QtWidgets import (
@@ -33,8 +34,8 @@ class JitterWorker:
 
     Process/queue/deque lifecycle is delegated to BackgroundTaskRunner.
 
-    Cache key: (ref: int, tgt: int, res_key: str, seg_arg: int | None)
-    Cache value: (j_avg, j_pval, j_pval_bins, j_lo, j_hi)
+    Cache key: (nd_key, ref: int, tgt: int, res_key: str, seg_arg: int | None)
+    Cache value: (j_avg, j_pval, j_pval_bins, j_lo, j_hi, bands)
     """
 
     UNVIEWED_BG = '#FFEE58'
@@ -98,9 +99,9 @@ class JitterManager(QObject):
     def __init__(self, nav: 'AppState', cd):
         super().__init__()
         self.nav = nav
-        self.cd  = cd
         self.jitter_worker = JitterWorker(max_queue=nav.max_jitter_queue,
                                           max_cache=nav.max_jitter_cache)
+        self.set_cd(cd)
         self._timer = QTimer()
         self._timer.setInterval(300)
         self._timer.timeout.connect(self._poll)
@@ -194,8 +195,8 @@ class JitterManager(QObject):
             jitter_val = (result.get('j_avg'), result.get('j_pval'),
                           result.get('j_pval_bins'), result.get('j_lo'), result.get('j_hi'),
                           result.get('bands'))
-            # live cache only: a single-pair run is exploratory, batches are what persist
             self.jitter_worker._cache.put(cache_key, jitter_val)
+            self.save_pair_cache()
             self.jitter_worker.unviewed.add((ref, tgt))
             self.completed.emit(ref, tgt, res_key, seg_key)
             self.colors_changed.emit((ref, tgt))
@@ -204,13 +205,21 @@ class JitterManager(QObject):
         self._start_next()
 
 
+    def set_cd(self, cd):
+        """Adopt *cd*'s project: its saved single-pair runs replace the previous project's."""
+        self.cd = cd
+        self.jitter_worker._cache.clear()
+        for (nd_str, *rest), val in cd.load_pair_jitter():
+            self.jitter_worker._cache.put((Key.from_str(nd_str), *rest), val)
+
     def load_from_cd(self):
-        """Pull saved batch results for this session into the live cache."""
+        """Read saved batch results; get_result falls back to them after the pair cache."""
         self.cd.load_jitter()
-        nd_key = self.nav.key.nd()
-        for cache_key, val in self.cd._jitter_results.get(nd_key, {}).items():
-            self.jitter_worker._cache.put((nd_key, *cache_key), val)
         self.colors_changed.emit(None)
+
+    def save_pair_cache(self):
+        self.cd.save_pair_jitter([((str(k[0]), *k[1:]), v)
+                                  for k, v in self.jitter_worker._cache.items()])
 
     def on_save(self):
         try:
@@ -254,6 +263,7 @@ class JitterManager(QObject):
         for rk in ('lo', 'hi'):
             self.jitter_worker._cache.pop((key.nd(), key.ref, key.tgt, rk, self.seg()), None)
             saved.pop((key.ref, key.tgt, rk, self.seg()), None)
+        self.save_pair_cache()
         self.jitter_worker.unviewed.discard((key.ref, key.tgt))
         self.colors_changed.emit((key.ref, key.tgt))
 
@@ -276,9 +286,11 @@ class JitterManager(QObject):
         return False
 
     def get_result(self, key):
-        """Cached jitter tuple for *key*'s pair at its resolution, or None."""
+        """Jitter tuple for *key*'s pair at its resolution: a single run first, then the batch store."""
         res_key = 'hi' if key.resolution == 'highres' else 'lo'
-        return self.jitter_worker._cache.get((key.nd(), key.ref, key.tgt, res_key, self.seg()))
+        cached = self.jitter_worker._cache.get((key.nd(), key.ref, key.tgt, res_key, self.seg()))
+        return cached if cached is not None else self.cd._jitter_results.get(key.nd(), {}).get(
+            (key.ref, key.tgt, res_key, self.seg()))
 
     def _update_status(self):
         running = self.jitter_worker.is_running()

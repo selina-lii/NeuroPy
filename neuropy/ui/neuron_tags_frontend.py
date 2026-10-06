@@ -10,12 +10,18 @@ from pyqtgraph.Qt.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
                                     QPushButton, QSizePolicy, QTableWidget,
                                     QTableWidgetItem, QVBoxLayout, QWidget)
 
-from neuropy.analyses.neuron_tags import (CUT_ABSOLUTE, NeuronTagSpec,
-                                          NeuronTagSet, activity_source, tag_value_source)
-from neuropy.ui.utils import (CheckMenuButton, ExplicitCloseDialog, cascade_menu,
-                              make_button, pick_color)
+from neuropy.analyses.neuron_tags import (CUT_ABSOLUTE, PLACEFIELD, NeuronTagSpec,
+                                          NeuronTagSet, activity_source, conn_source,
+                                          tag_value_source)
+from neuropy.analyses.pair_selection_data import DerivedRule
+from neuropy.analyses.utils import group_display
+from neuropy.ui.utils import (CheckMenuButton, ExplicitCloseDialog, ListPickerButton,
+                              cascade_menu, make_button, pick_color, prompt_name)
 
-NEW_TAG_MENU = {'activity': {'frate': {'during': 'frate_during', 'ratio': 'frate_ratio'}}}
+CONN_TAG = 'conn'
+NEW_TAG_MENU = {'activity': {'frate': {'during': 'frate_during', 'ratio': 'frate_ratio'},
+                             'placefield': PLACEFIELD},
+                'connection': {'sends E/I': CONN_TAG}}
 
 HANDLE_W = 9
 HANDLE_H = 15
@@ -509,13 +515,23 @@ class NeuronTagsPanel(QWidget):
             self._new_btn.mapToGlobal(self._new_btn.rect().bottomLeft()))
 
     def _on_new_tag_pick(self, fn: str) -> None:
-        dlg = ActivityTagDialog(fn, _segment_tree(self.nav.cd), self)
-        if not dlg.exec():
-            return
-        spec = NeuronTagSpec(prefix=dlg.name.text().strip(), source=dlg.source, cut_mode=CUT_ABSOLUTE)
+        if fn == PLACEFIELD:
+            name, source = prompt_name(self, "New placefield tag", "Name:", PLACEFIELD), PLACEFIELD
+            if name is None:
+                return
+        else:
+            dlg = (ConnTagDialog(self.nav.sd.groups, self) if fn == CONN_TAG
+                   else ActivityTagDialog(fn, _segment_tree(self.nav.cd), self))
+            if not dlg.exec():
+                return
+            name, source = dlg.name.text().strip(), dlg.source
+        spec = NeuronTagSpec(prefix=name, source=source, cut_mode=CUT_ABSOLUTE)
         self.tags.add_spec(spec)
-        values = self.tags.pooled_values(spec)
-        spec.cutoffs = [float(np.median(values))] if len(values) else []
+        if fn in (CONN_TAG, PLACEFIELD):   # counts or 0/1: anything above zero is a yes
+            spec.cutoffs, spec.labels = [0.5], ['no', 'yes']
+        else:
+            values = self.tags.pooled_values(spec)
+            spec.cutoffs = [float(np.median(values))] if len(values) else []
         if self._assign(spec):
             self.refresh()
             self._tag_list.setCurrentText(spec.prefix)
@@ -618,6 +634,41 @@ class ActivityTagDialog(ExplicitCloseDialog):
                    "'none' needs a real segment group to invert." if all(g == ['none'] for g in picked) else '')
         if problem:
             QMessageBox.warning(self, "New activity tag", problem)
+            return
+        self.accept()
+
+
+class ConnTagDialog(ExplicitCloseDialog):
+    """Name a tag counting the significant E/I connections each neuron sends, optionally within pair tags."""
+
+    def __init__(self, groups, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New connection tag")
+        form = QFormLayout(self)
+        self.name = QLineEdit()
+        form.addRow("Name:", self.name)
+        self.types = ListPickerButton("sends", list(DerivedRule.EXCITABILITIES), plural="types",
+                                      select_all_when_empty=False)
+        form.addRow("Type:", self.types)
+        self.pair_tags = ListPickerButton("in", groups.groups + groups.special_groups(), plural="tags",
+                                          select_all_when_empty=False, display=group_display)
+        self.pair_tags.setToolTip("Pair tags whose connections count; none picked = every significant pair")
+        form.addRow("Pair tags:", self.pair_tags)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(make_button("Cancel", self.reject))
+        buttons.addWidget(make_button("Create", self._on_create_btn))
+        form.addRow(buttons)
+
+    @property
+    def source(self) -> str:
+        return conn_source(self.types.selected, self.pair_tags.selected)
+
+    def _on_create_btn(self) -> None:
+        problem = ("Name the tag." if not self.name.text().strip() else
+                   "Pick E, I or both." if not self.types.selected else '')
+        if problem:
+            QMessageBox.warning(self, "New connection tag", problem)
             return
         self.accept()
 

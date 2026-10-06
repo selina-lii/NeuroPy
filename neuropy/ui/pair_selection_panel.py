@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import random
+import time
 from collections import defaultdict as _defaultdict
 from typing import TYPE_CHECKING, Callable
 
@@ -28,7 +29,7 @@ from pyqtgraph.Qt.QtWidgets import (
 from pyqtgraph.Qt.QtGui import QColor, QFont, QBrush, QAction, QPainter
 
 from neuropy.ui.ui_common import (
-    area_rgb, areas_by_id, row_dots,
+    DOT_SASH, area_rgb, areas_by_id, row_dots,
     _SPECIAL_PREFIX, _SEPARATOR_ROW, is_special_group, is_separator_row,
     group_header_label, SelectionCommand,
     pair_label,
@@ -36,7 +37,6 @@ from neuropy.ui.ui_common import (
 from neuropy.ui.dialogs import (
     PairTagsDialog as PairTagsDialog,
     CreateGroupDialog as CreateGroupDialog,
-    CreateDerivedGroupDialog,
     MissingPairsDialog as MissingPairsDialog,
 )
 from neuropy.analyses.utils import JsonSavable
@@ -65,6 +65,7 @@ class TagRowDelegate(QStyledItemDelegate):
         return fm.horizontalAdvance(name) + 2 * TagChip.PAD
 
     _DOT_R = 3   # px radius of the ref/tgt brain-region dots
+    _SASH_W = 7
 
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
@@ -92,7 +93,10 @@ class TagRowDelegate(QStyledItemDelegate):
     def _areas_width(self, index) -> int:
         """Room the region dots take, so the tag pills start clear of them."""
         dots = index.data(_ROLE_AREAS)
-        return 0 if not dots else len(dots) * (2 * self._DOT_R + 2) + 4
+        return 0 if not dots else sum(self._dot_step(d) for d in dots) + 4
+
+    def _dot_step(self, dot) -> int:
+        return self._SASH_W if dot is DOT_SASH else 2 * self._DOT_R + 2
 
     def _paint_areas(self, painter, option, index):
         """Ref and target region as two dots, matching the network's fills."""
@@ -106,9 +110,15 @@ class TagRowDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         for rgb in areas:
-            painter.setBrush(QColor(*rgb))
-            painter.drawEllipse(QPoint(x + self._DOT_R, cy), self._DOT_R, self._DOT_R)
-            x += 2 * self._DOT_R + 2
+            if rgb is DOT_SASH:
+                painter.setPen(_C_GRAY_FG)
+                painter.drawLine(x + self._SASH_W // 2 - 1, cy - self._DOT_R - 1,
+                                 x + self._SASH_W // 2 - 1, cy + self._DOT_R + 1)
+                painter.setPen(Qt.PenStyle.NoPen)
+            else:
+                painter.setBrush(QColor(*rgb))
+                painter.drawEllipse(QPoint(x + self._DOT_R, cy), self._DOT_R, self._DOT_R)
+            x += self._dot_step(rgb)
         painter.restore()
 
     def sizeHint(self, option, index):
@@ -124,6 +134,8 @@ class TagRowDelegate(QStyledItemDelegate):
         return size
 
 _C_GRAY_FG   = QColor('#AAAAAA')
+_C_UNSCREENED_FG = QColor('#C04040')
+_C_UNSCREENED_GRAY_FG = QColor('#B89494')   # red, desaturated toward the gray-out gray
 _C_HDR_FG    = QColor('#444444')
 _C_HDR_BG    = QColor('#CCCCCC')
 _C_SEP_FG    = QColor('#AAAAAA')
@@ -152,14 +164,14 @@ from neuropy.ui.ui_common import (
     is_special_group, is_separator_row,
     CollapseState, group_header_label, SelectionCommand,
 )
-from neuropy.analyses.utils import Autosave, UndoRedo, combo_header
+from neuropy.analyses.utils import Autosave, UndoRedo, combo_header, SLIDESHOW_GROUP, is_transient_group
 from neuropy.analyses.pair_selection_data import (
     SelectionData, GroupDataset, SelectionDataset as _SelectionDataset,
 )
 from neuropy.ui.utils import (
     CheckboxVar, ExclusiveButtonSet, LabelVar, LineEditVar, PairListWidget,
     TagChip, all_groups_dropdown, derived_chips, has_primary_modifier, hotkey_char,
-    row_chips, small_font_pt,
+    row_chips, set_checked_quietly, small_font_pt,
 )
 
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -457,6 +469,8 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self._select_timer     = QTimer(self)
         self._select_timer.setSingleShot(True)
         self._select_timer.timeout.connect(self._do_pair_select_update)
+        self._arrow_hold = None   # (key, press time) of the arrow being held
+        self._slide = None        # (list, key) while the slideshow plays
         self._next_focus_pair: tuple | None = None
         self._deferred_jump: tuple | None = None
         self._batch_held: bool = False   # a pinned row of None is still a pending batch
@@ -513,21 +527,23 @@ class PairSelectionPanel(QWidget, UndoRedo):
         btn_layout.setContentsMargins(2, 2, 2, 2)
         btn_layout.setSpacing(4)
         btn_layout.addWidget(QLabel("Sort by:"))
-        self._sort_btns = ExclusiveButtonSet(on_change=self.refresh_lists, parent=btn_row)
-        for key, label, cache_key, cb_attr, var_attr in (
-            ('group', 'Group',     'sort_selected', '_sort_selected_cb', '_sort_selected'),
-            ('tag',   'Tag',       'sort_by_tag',   '_sort_by_tag_cb',   '_sort_by_tag'),
-            ('mean',  'Mean',      'sort_by_mean',  '_sort_by_mean_cb',  '_sort_by_mean'),
-            ('min_p', 'Min p-val', 'sort_by_min_p', '_sort_by_min_p_cb', '_sort_by_min_p'),
-            ('session', 'Session', 'sort_by_session', '_sort_by_session_cb', '_sort_by_session'),
+        self._sort_btns = ExclusiveButtonSet(on_change=self._on_sort_btns, parent=btn_row)
+        for key, label, cache_key in (
+            ('group', 'Group',     'sort_selected'),
+            ('tag',   'Tag',       'sort_by_tag'),
+            ('rule',  'Rule',      'sort_by_rule'),
+            ('mean',  'Mean',      'sort_by_mean'),
+            ('min_p', 'Min p-val', 'sort_by_min_p'),
+            ('session', 'Session', 'sort_by_session'),
         ):
-            btn, var = self._sort_btns.add(
-                key, label, checked=ui_state_cache.get(cache_key, False))
-            setattr(self, cb_attr, btn)
-            setattr(self, var_attr, var)
+            btn, _var = self._sort_btns.add(key, label, checked=ui_state_cache.get(cache_key, False))
             btn_layout.addWidget(btn)
         btn_layout.addStretch()
         root.addWidget(btn_row)
+        # the buttons show and set the sort of the list holding the cursor
+        self._sort_modes = {'avail': None, 'sel': self._checked_sort()}
+        self._sort_list = 'sel'
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
         for lst, action, other in (
             (self.unselected_list, 'add',    self.selected_list),
@@ -613,10 +629,18 @@ class PairSelectionPanel(QWidget, UndoRedo):
                            bookmarked=k in ui.bookmarked_pairs,
                            any_mode=any_mode)
         it = QListWidgetItem(label)
-        if should_gray(inds):
-            it.setForeground(QBrush(_C_GRAY_FG))
+        ptr = ui.cd.ptr.get((inds[0] if any_mode else ui.key).ptr())
+        pair = (int(inds[-2]), int(inds[-1]))
+        gray = should_gray(inds)
+        unscreened = ptr is not None and pair not in ptr.pair_set   # shown only by "show all possible pairs"
+        fg = {(True, False): _C_GRAY_FG, (False, True): _C_UNSCREENED_FG,
+              (True, True): _C_UNSCREENED_GRAY_FG}.get((gray, unscreened))
+        if fg is not None:
+            it.setForeground(QBrush(fg))
         it.setData(_ROLE_PAIR, inds)
-        it.setData(_ROLE_CHIPS, row_chips(ui.groups, k) + derived_chips(ui.groups, k))
+        automated = ([('admitted', '')] * (ptr is not None and pair in ptr.picked_set)
+                     + [(f"sig {name}", color) for name, color in ui.shown_rule_sets(inds)])
+        it.setData(_ROLE_CHIPS, row_chips(ui.groups, k) + derived_chips(ui.groups, k, automated))
         it.setData(_ROLE_AREAS, self._pair_area_rgb(k))
         return it
 
@@ -630,29 +654,67 @@ class PairSelectionPanel(QWidget, UndoRedo):
                         self.ui.root.settings.area_colors,
                         self.ui.root.neuron_tags)
 
+    def _checked_sort(self) -> str | None:
+        return next((k for k in self._SORT_KEYS if self._sort_btns.is_checked(k)), None)
+
+    _SORT_KEYS = ('group', 'tag', 'rule', 'mean', 'min_p', 'session')
+    _SORT_MODE = {'group': 'group', 'tag': 'tag', 'rule': 'rule', 'mean': 'mean', 'min_p': 'minp'}
+
+    def _on_sort_btns(self):
+        self._sort_modes[self._sort_list] = self._checked_sort()
+        self.refresh_lists()
+
+    def _on_focus_changed(self, _old, new):
+        side = {self.unselected_list: 'avail', self.selected_list: 'sel'}.get(new)
+        if side is None or side == self._sort_list:
+            return
+        self._sort_list = side
+        for k in self._SORT_KEYS:
+            set_checked_quietly(self._sort_btns.button(k), self._sort_modes[side] == k)
+
+    def set_sort(self, side: str, key: str) -> None:
+        """Sort one list by *key* regardless of where the cursor is."""
+        self._sort_modes[side] = key
+        if side == self._sort_list:
+            for k in self._SORT_KEYS:
+                set_checked_quietly(self._sort_btns.button(k), k == key)
+        self.refresh_lists()
+
     def _populate_avail_list(self, ui, data, should_gray):
         self.avail_list_pairs = []
         if ui.session_any_mode:
             return
-        for inds in sorted(ui.active_selections.unselected):
-            self.unselected_list.addItem(self._make_pair_item(inds, should_gray, False))
-            self.avail_list_pairs.append((inds, None))
+        sections = ui.pair_sections(ui.active_selections.unselected,
+                                    self._SORT_MODE.get(self._sort_modes['avail'], 'plain'))
+        if len(sections) == 1 and sections[0][0] in ('(untagged)', '(no rule set)'):
+            sections = [(None, sections[0][1])]   # no tag on any available pair: nothing to group by
+        for header, pairs in sections:
+            if header is not None:
+                self._add_separator(self.unselected_list, f"── {header} ({len(pairs)}) ──")
+                self.avail_list_pairs.append((_SEPARATOR_ROW, header))
+            for inds in pairs:
+                self.unselected_list.addItem(self._make_pair_item(inds, should_gray, False))
+                self.avail_list_pairs.append((inds, None))
 
         deleted_inds = ui.active_selections.deleted
         if deleted_inds:
-            sep = QListWidgetItem('── deleted ──')
-            sep.setForeground(QBrush(_C_SEP_FG))
-            sep.setBackground(QBrush(_C_SEP_BG))
-            sep.setFlags(Qt.ItemIsEnabled)
-            self.unselected_list.addItem(sep)
+            self._add_separator(self.unselected_list, '── deleted ──')
             self.avail_list_pairs.append((_SEPARATOR_ROW, 'deleted'))
             for inds in sorted(deleted_inds):
-                it = QListWidgetItem(f"[{inds[0]}, {inds[1]}]")
+                it = self._make_pair_item(inds, should_gray, False)   # chips too: rule tags stay visible
+                it.setText(f"[{inds[0]}, {inds[1]}]")
                 it.setForeground(QBrush(_C_GRAY_FG))
-                it.setData(_ROLE_PAIR, inds)
                 it.setData(_ROLE_TAG, 'deleted')
                 self.unselected_list.addItem(it)
                 self.avail_list_pairs.append((inds, 'deleted'))
+
+    @staticmethod
+    def _add_separator(lst, text: str) -> None:
+        sep = QListWidgetItem(text)
+        sep.setForeground(QBrush(_C_SEP_FG))
+        sep.setBackground(QBrush(_C_SEP_BG))
+        sep.setFlags(Qt.ItemIsEnabled)
+        lst.addItem(sep)
 
     def _sel_insert_pair(self, inds, should_gray, any_mode):
         self.selected_list.addItem(self._make_pair_item(inds, should_gray, any_mode))
@@ -694,7 +756,7 @@ class PairSelectionPanel(QWidget, UndoRedo):
             for h in hs:
                 out[h] = (worst if not has else
                           ccgd.mean_ccg(int(h[1]), int(h[2]), seg) if kind == 'mean'
-                          else ccgd.min_pval(int(h[1]), int(h[2]), seg))
+                          else ccgd.min_pval(int(h[1]), int(h[2]), seg, h[0].excitability))
         return out
 
     def _populate_selected_list(self, ui, should_gray) -> int:
@@ -702,11 +764,9 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self.sel_list_pairs       = []
         self.sel_list_header_keys = []
         any_mode   = ui.session_any_mode
-        sort_group = self._sort_selected_cb.isChecked()
-        sort_tag   = self._sort_by_tag_cb.isChecked()
-        sort_mean  = self._sort_by_mean_cb.isChecked()
-        sort_minp  = self._sort_by_min_p_cb.isChecked()
-        sort_session = self._sort_by_session_cb.isChecked()
+        sort = self._sort_modes['sel']
+        sort_group = sort == 'group'
+        sort_mean, sort_minp, sort_session = sort == 'mean', sort == 'min_p', sort == 'session'
         def _ins(inds):
             self._sel_insert_pair(inds, should_gray, any_mode)
 
@@ -784,16 +844,13 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 for gname in all_gnames + ui.groups.derived_groups():
                     trips_g = ui.groups.pairs_in_group_by_session(gname)
                     n_tag   = len(trips_g - dead)
-                    if _any_hdr(combo_header([gname]), n_tag, key=gname):
+                    if n_tag and _any_hdr(combo_header([gname]), n_tag, key=gname):
                         for row in ui.groups.iter_pairs(gname):
                             _ins(row)
 
         else:
-            mode = ('mean'  if sort_mean  else
-                    'minp'  if sort_minp  else
-                    'group' if sort_group else
-                    'tag'   if sort_tag   else 'plain')
-            for header, pairs in ui.selected_sections(mode):
+            for header, pairs in ui.pair_sections(ui.active_selections.selected,
+                                                  self._SORT_MODE.get(sort, 'plain')):
                 if header is not None and _ins_hdr(header, len(pairs)):
                     continue
                 for inds in pairs:
@@ -835,8 +892,6 @@ class PairSelectionPanel(QWidget, UndoRedo):
         net = ui.root.neuron_network
         should_gray = net.build_should_gray(ui.session_any_mode)
 
-        self._sort_by_mean_cb.setEnabled(True)
-        self._sort_by_min_p_cb.setEnabled(True)
         self._sort_btns.button('session').setVisible(ui.session_any_mode)
 
         self._populate_avail_list(ui, data, should_gray)
@@ -907,6 +962,88 @@ class PairSelectionPanel(QWidget, UndoRedo):
             self.move_to_selected(item)
         else:
             self.move_to_unselected(item)
+
+    SLIDE_HOLD_S = 5.0
+
+    def slide_thru_ccg_deck(self, widget, key, repeat: bool) -> bool:
+        """An arrow held 5 s plays the list as a slideshow; that arrow pressed again stops it. True = key consumed."""
+        if self._slide is not None:
+            if not repeat and key == self._slide[1]:
+                self._stop_slideshow()
+            return True
+        if not repeat:
+            self._arrow_hold = (key, time.monotonic())
+            return False
+        settings = self.ui.root.settings
+        held = self._arrow_hold is not None and self._arrow_hold[0] == key \
+            and time.monotonic() - self._arrow_hold[1] >= self.SLIDE_HOLD_S
+        if not (settings.slideshow_on and held):
+            return False
+        self._arrow_hold = None
+        self._start_slideshow(widget, key)
+        return True
+
+    def _start_slideshow(self, widget, key) -> None:
+        if not self.ui.root.settings.slideshow_warned and not self._slideshow_warning():
+            return
+        self._slide = (widget, key)
+        self.ui.slideshow = True
+        groups = self.ui.groups
+        if SLIDESHOW_GROUP in groups.registry:   # each slideshow starts a fresh pick list
+            groups.delete_group(SLIDESHOW_GROUP)
+        groups.create_group(SLIDESHOW_GROUP)
+        widget.setFocus()   # the stopping arrow and Space reach the list
+        QTimer.singleShot(0, self._slide_step)
+
+    def slide_pick(self) -> bool:
+        """Space during a slideshow tags the pair on screen into the temporary picks group. True = key consumed."""
+        if self._slide is None:
+            return False
+        ui = self.ui
+        ui.groups.add_member(SLIDESHOW_GROUP, ui.key_for_pair(self._slide[0].currentItem().data(_ROLE_PAIR)))
+        n = len(ui.groups.forward(SLIDESHOW_GROUP))
+        ui.root._show_transient_banner(f"Slideshow picks: {n}", 1500)
+        return True
+
+    def _slideshow_warning(self) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Information, "Slideshow",
+                          "Slideshow: the list plays on its own, drawing only the CCG and baseline "
+                          "of the current segment.\nSpace adds the pair on screen to the temporary "
+                          "special group 'slideshow picks' (never saved).\n"
+                          "Press the same arrow again to stop.", parent=self)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        hide = QCheckBox("Don't show again")
+        box.setCheckBox(hide)
+        ok = box.exec() == QMessageBox.StandardButton.Ok
+        self.ui.root.settings.slideshow_warned = hide.isChecked()
+        return ok
+
+    def _slide_step(self):
+        """Advance one visible pair row, holding each for at least the configured time."""
+        if self._slide is None:
+            return
+        widget, key = self._slide
+        step = 1 if key == Qt.Key_Down else -1
+        row = widget.currentRow() + step
+        while 0 <= row < widget.count() and (widget.item(row).data(_ROLE_PAIR) is None
+                                             or is_separator_row(widget.item(row).data(_ROLE_PAIR))):
+            row += step
+        if not 0 <= row < widget.count():
+            self._stop_slideshow()
+            return
+        t0 = time.monotonic()
+        widget.setCurrentRow(row)
+        self.ui.set_current_pair(self.ui.get_pair_index(widget.item(row).data(_ROLE_PAIR)))
+        spent_ms = (time.monotonic() - t0) * 1000
+        QTimer.singleShot(int(max(0.0, self.ui.root.settings.slideshow_min_ms - spent_ms)), self._slide_step)
+
+    def _stop_slideshow(self):
+        self._slide = None
+        self.ui.slideshow = False
+        if self.ui.groups.forward(SLIDESHOW_GROUP):   # picks were added quietly: show their pills
+            self.ui.groups.changed.emit()
+            self.refresh_lists()
+        self.ui.pair_changed.emit(self.ui.current_pair_idx)   # one full render of the last pair
 
     def _on_arrow_key(self):
         """Arrow key: update plot after list moves cursor."""
@@ -1014,6 +1151,40 @@ class PairSelectionPanel(QWidget, UndoRedo):
             return
         nxt, self._deferred_jump, self._batch_held = self._deferred_jump, None, False
         self.advance_cursor(nxt if nxt is not None else self.ui.current_pair)
+
+    def admit_rule_set(self, name: str) -> None:
+        """Every pair carrying *name*'s pass tag, in every session and conn type, moves to Selected."""
+        self._select_tagged(self.ui.sd.rule_set_pairs(name))
+        self.ui.sd.save()
+
+    def group_rule_set(self, name: str, parent) -> None:
+        """Every pair carrying *name*'s pass tag joins a new group and, as grouped pairs do, Selected."""
+        group = CreateGroupDialog.show(self.ui.sel_data, self, parent)
+        if not group:
+            return
+        ui = self.ui
+        ui.sd.ensure_groups_loaded_for(list(ui.cd.sessions))   # the save mirrors every session's groups back
+        tagged = ui.sd.rule_set_pairs(name)
+        added = [(group, str(k.session), p, 'add') for k, pairs in tagged.items()
+                 for p in pairs - ui.sd.get_selection_by_session(k).selections[k].deleted]
+        for g, sess, p, _ in added:
+            ui.groups.add_to_group(g, sess, p)
+        self._select_tagged(tagged, added)
+        ui.root.pairs_view.save_quietly()
+
+    def _select_tagged(self, tagged: dict, group_changes: list = ()) -> None:
+        """Move ``{ptr key: pairs}`` out of Available; only the list on screen goes through the undoable path."""
+        ui = self.ui
+        here = None if ui.session_any_mode else ui.key.ptr()
+        for k, pairs in tagged.items():
+            bucket = ui.sd.get_selection_by_session(k).selections[k]
+            if k != here:
+                for p in pairs - bucket.selected - bucket.deleted:
+                    bucket.set_pair_state(p, 'sel')
+        sel = ui.active_selections
+        self._transition_many({p: ('unsel', 'sel') for p in tagged.get(here, set()) - sel.selected - sel.deleted},
+                              list(group_changes), nxt=self.row_below_cursor())
+        self.refresh_lists()
 
     def move_to_unselected(self, item: QListWidgetItem = None):
         ui = self.ui
@@ -1149,9 +1320,19 @@ class PairSelectionPanel(QWidget, UndoRedo):
         self.push_undo(SelectionCommand(changes, list(group_changes)))
         for p, (_, new) in changes.items():
             ui.active_selections.set_pair_state(p, new)
+        if not ui.session_any_mode:   # a pair leaving Available from outside the screen joins the pointer
+            picked = {tuple(p) for p, (old, _) in changes.items() if old == 'unsel'} \
+                - ui.cd.ptr[ui.key.ptr()].pair_set
+            if picked:
+                ui.cd.pick_pairs(ui.key, picked)
         self.advance_cursor(anchor if anchor is not None else ui.current_pair, nxt,
                             held=held)
         self._restore_scroll_positions(unsel_frac, sel_frac)
+
+    def _on_show_all_pairs_action(self, on: bool) -> None:
+        self.ui.show_all_pairs = on
+        self.ui.apply_sel_for_key(self.ui.key)
+        self.refresh_lists()
 
     def _ctx_menu(self, pos, widget: PairListWidget, action: str):
         ui         = self.ui
@@ -1201,13 +1382,22 @@ class PairSelectionPanel(QWidget, UndoRedo):
                 menu.addAction(_lbl("Move to Deleted", n),
                                lambda pp=pairs: _move(pp, 'del'))
 
+        if action == 'add':
+            label = "Hide all non-significant pairs" if ui.show_all_pairs else "Show all possible pairs"
+            show_all = menu.addAction(label + (" (single session only)" if _any else ""),
+                                      lambda: self._on_show_all_pairs_action(not ui.show_all_pairs))
+            show_all.setEnabled(not _any)
+
+        menu.addAction("Start slideshow (↓ stops)", lambda: self._start_slideshow(widget, Qt.Key_Down))
+
         menu.addSeparator()
 
         grp_menu = QMenu("Group tag", menu)
         grp_menu.addAction("Create new group…",
                            lambda: CreateGroupDialog.show(ui.sel_data, self, widget))
-        grp_menu.addAction("Create group for comparison…",
-                           lambda: CreateDerivedGroupDialog(ui, widget).exec())
+        if pairs:
+            menu.addAction(_lbl("Create group from selection…", n),
+                           lambda pp=pairs: self._create_group_from(pp, widget))
         if pairs:
             def _checkmark(gname):
                 return all((k.ref, k.tgt) in ui.groups.pairs_in_group(gname, k.session)
@@ -1433,6 +1623,11 @@ class PairSelectionPanel(QWidget, UndoRedo):
             if self._pair_state(p) != old:
                 changes[p] = (old, self._pair_state(p))
         return changes, group_changes
+
+    def _create_group_from(self, pairs, parent) -> None:
+        name = CreateGroupDialog.show(self.ui.sel_data, self, parent)
+        if name:
+            self._toggle_pairs_group(pairs, name)
 
     def _toggle_pairs_group(self, pairs, group_name, *, remove=None):
         nxt = self.row_below_cursor()
@@ -1710,13 +1905,19 @@ class PairSelectionPanelContainer(QWidget, Autosave):
             if sd._nd_key is None:   # placeholder session with no nd-key → nothing to tag
                 continue
             sess = str(sd._nd_key.session)
+            if sess not in ui.sd._indexed:   # its groups were never read in: empty here is not "untagged"
+                continue
             for b in sd.selections.values():
                 for p in b.all_pairs:
-                    g = sorted(ui.groups.groups_for_pair(sess, p[0], p[1]))
-                    if g:
+                    g = sorted(n for n in ui.groups.groups_for_pair(sess, p[0], p[1])
+                               if not is_transient_group(n))
+                    old = b.tags.get(p, {}).get('groups')
+                    if g and old != g:
                         b.tags.setdefault(p, {})['groups'] = g
-                    elif p in b.tags:   # every group removed: drop the key, don't leave the old list
-                        b.tags[p].pop('groups', None)
+                        b._dirty = True   # an in-place tag edit: the save skips clean buckets
+                    elif not g and old is not None:   # every group removed: drop the key, don't leave the old list
+                        b.tags[p].pop('groups')
+                        b._dirty = True
 
     def _do_save(self, name: str = ''):
         ui = self.ui

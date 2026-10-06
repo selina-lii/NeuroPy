@@ -11,6 +11,7 @@ from pyqtgraph.Qt.QtWidgets import (QAbstractItemView, QDoubleSpinBox, QHBoxLayo
                                     QListWidget, QListWidgetItem,
                                     QMenu, QSlider, QSplitter, QVBoxLayout, QWidget)
 
+from neuropy.analyses.placefield_data import PlacefieldData
 from neuropy.analyses.utils import UndoRedo
 from neuropy.analyses.view_spec import NEURON_VIEW, epoch_bin_mask
 from neuropy.ui.ccg_panel import WaveformPanelQt
@@ -29,7 +30,10 @@ from neuropy.ui.utils import (AddableDropdown, CycleButton, ExclusiveButtonSet, 
 OVERLAP_RGB = (62, 207, 110)   # the cross-theme overlap: one colour, not per label
 
 
-_SORTS = (('group', 'Group'), ('tag', 'Tag'), ('rate', 'Mean rate'), ('ntag', 'Neuron tag'))
+_SORTS = (('group', 'Group'), ('tag', 'Tag'), ('rate', 'Mean rate'), ('ntag', 'Neuron tag'),
+          ('FRmax', 'FRmax'), ('r_odd_even', 'r odd/even'), ('r_maze_remaze', 'r maze/remaze'))
+FOCUS_RGBA = (66, 135, 245, 45)
+PF_DIRECTION_COLORS = {'up': '#2e86de', 'down': '#e74c3c'}
 
 
 class NeuronListPanel(QWidget, UndoRedo):
@@ -198,13 +202,20 @@ class NeuronListPanel(QWidget, UndoRedo):
             lambda g: all(g in self.groups.groups_for_member(k) for k in keys),
             self.toggle_group)
         menu.addMenu(tag_menu)
-        menu.addAction("New group…", self._new_group)
+        if keys:
+            menu.addAction("Create group from selection…", self._new_group_from_selection)
         menu.exec(lst.mapToGlobal(pos))
 
-    def _new_group(self) -> None:
+    def create_group(self) -> str | None:
+        """Ask for a name and add an empty neuron group; the name, or None when cancelled."""
         name = prompt_name(self, "New neuron group", "Name:")
         if name:
             self.groups.create_group(name)
+        return name
+
+    def _new_group_from_selection(self) -> None:
+        name = self.create_group()
+        if name:
             self.toggle_group(name)
 
     # ── lists ───────────────────────────────────────────────────────────
@@ -281,6 +292,9 @@ class NeuronListPanel(QWidget, UndoRedo):
             return sorted(buckets.items(), key=lambda kv: (kv[0] == '(untagged)', kv[0]))
         if self._sort_btns.is_checked('group'):
             return self._combo_sections(items, self._group_names)
+        for stat in PlacefieldData.NEURON_STATS:
+            if self._sort_btns.is_checked(stat):
+                return [(None, sorted(items, key=lambda it: self._pf_order(it, stat)))]
         if self._sort_btns.is_checked('ntag'):
             return self._combo_sections(items, lambda k: [
                 w for w, _rgb in self.nav.root.neuron_tags.neuron_words(k, k.ref)])
@@ -301,6 +315,12 @@ class NeuronListPanel(QWidget, UndoRedo):
         key = self.nav.view.key_of(item)
         neurons = self.nav.cd.nd.neurons_for(key.nd())
         return float(neurons.firing_rate[list(neurons.neuron_ids).index(key.ref)])
+
+    def _pf_order(self, item, stat: str) -> tuple:
+        """Highest first; neurons without fields last."""
+        key = self.nav.view.key_of(item)
+        value = self.nav.cd.placefields.neuron_stat(str(key.session), int(key.ref), stat)
+        return (np.isnan(value), -np.nan_to_num(value))
 
     def _tag_words(self, key, item) -> list:
         """Each neuron tag covering the row's neuron as a named pill, tinted like its dot."""
@@ -361,12 +381,15 @@ class NeuronRatePanel(QWidget):
         self.log_btn.toggled.connect(lambda _on: self.render())
         self.wf_btn = chip_button("waveform", checkable=True)
         self.wf_btn.toggled.connect(self._on_wf_btn)
+        self.pf_btn = chip_button("placefields", checkable=True)
+        self.pf_btn.setToolTip("Swap firing rates for place-field peaks; needs placefield data for the session")
+        self.pf_btn.toggled.connect(lambda _on: self.render())
         row = QWidget()
         row.setLayout(widget_row("Theme:", self.theme_combo, None,
                                  self.bounds_btn, self.rate_btn, None,
                                  "Bin:", self.bin_spin, None,
                                  "Y:", self.y_slider, self.log_btn, None,
-                                 self.wf_btn))
+                                 self.wf_btn, self.pf_btn))
         return row
 
     def _on_wf_btn(self, on: bool) -> None:
@@ -396,19 +419,23 @@ class NeuronRatePanel(QWidget):
         lo = min(max(cur - n // 2, 0), max(len(items) - n, 0))
         window = list(range(lo, min(lo + n, len(items))))
         dark = qt_dark_mode()
-        groups = self._bound_groups()
+        self.pf_btn.setEnabled(any(self.nav.cd.placefields.has_session(str(self.nav.view.key_of(items[i]).session))
+                                   for i in window))   # all-session mode mixes sessions
+        groups = [] if self._show_pf else self._bound_groups()
         first = None
         for row, i in enumerate(window):
             plot = lay.addPlot(row=row, col=1)
             apply_plot_chrome(plot, dark)
+            if i == cur:
+                plot.getViewBox().setBackgroundColor(FOCUS_RGBA)
             if first is None:
                 first = plot
             else:
                 plot.setXLink(first)
-            if row < len(window) - 1:
+            if row == len(window) - 1:
+                plot.setLabel('bottom', 'Position (bin)' if self._show_pf else 'Time (s)')
+            elif not self._show_pf:   # place-field strips each keep their ticks
                 plot.hideAxis('bottom')
-            else:
-                plot.setLabel('bottom', 'Time (s)')
             lay.addLabel(self._draw_strip(plot, items[i], i == cur, groups, dark),
                          row=row, col=0)
 
@@ -420,6 +447,45 @@ class NeuronRatePanel(QWidget):
         if not len(found):      # the row outlived the session it was listed for
             return ''
         index = int(found[0])
+        if current and self.wf_panel.isVisible():
+            self.wf_panel.render(neurons, index)
+        title = self._title(key, neurons, index)
+        if self._show_pf:
+            title += self._draw_placefields(plot, str(key.session), int(key.ref))
+        else:
+            self._draw_rate_strip(plot, neurons, index, dark, groups)
+        words = ''.join(
+            f' <span style="color:#%02x%02x%02x">{w}</span>' % tuple(rgb)
+            for w, rgb in self.nav.root.neuron_tags.neuron_words(key, int(key.ref)))
+        return (f"<b>▶ {title}</b>" if current else title) + (f"<br>{words}" if words else '')
+
+    @property
+    def _show_pf(self) -> bool:
+        return self.pf_btn.isEnabled() and self.pf_btn.isChecked()
+
+    def _draw_placefields(self, plot, session: str, nid: int) -> str:
+        """Each peak as a triangle from its edges to its height, up above zero and down below; returns the stats line."""
+        pf = self.nav.cd.placefields
+        rows = pf.neuron_rows(session, nid)
+        weak = '#888888'
+        plot.setXRange(0, pf.n_bins, padding=0.02)   # strips are x-linked: an empty one must not set the range
+        for c, h, prom, w, le, re, frmax, direction in zip(
+                rows['center_bin'], rows['height'], rows['prominence'], rows['width_bin'],
+                rows['left_edge'], rows['right_edge'], rows['FRmax'], rows['direction']):
+            le = c - w / 2 if np.isnan(le) else le   # an edge past the track end is left blank
+            re = c + w / 2 if np.isnan(re) else re
+            sign = -1 if direction == 'down' else 1   # mirrored: up and down fields often coincide
+            base, h = sign * (h - prom), sign * h
+            color = PF_DIRECTION_COLORS[direction] if frmax >= pf.conf.frmax_threshold else weak
+            plot.addItem(pg.PlotDataItem([le, c, re], [base, h, base], fillLevel=base,
+                                         pen=plot_pen(color), brush=pg.mkBrush(pg.mkColor(color).getRgb()[:3] + (90,))))
+        plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=plot_pen(weak)))
+        if not len(rows['cell_id']):
+            return '<br><i>no place fields</i>'
+        stats = '  '.join(f"{stat} {pf.neuron_stat(session, nid, stat):.2f}" for stat in PlacefieldData.NEURON_STATS)
+        return f"<br>{pf.conf.segment}: {stats}"
+
+    def _draw_rate_strip(self, plot, neurons, index: int, dark: bool, groups: list) -> None:
         bin_size = self.bin_spin.value()
         counts, times = neurons.binned_counts(index, bin_size)
         if self.log_btn.isChecked():
@@ -429,13 +495,6 @@ class NeuronRatePanel(QWidget):
         self._draw_rates(plot, times, counts, bin_size, dark)
         self._draw_boundaries(plot, dark, groups)
         self._draw_label_highlight(plot, times, counts, bin_size, dark, groups)
-        if current and self.wf_panel.isVisible():
-            self.wf_panel.render(neurons, index)
-        words = ''.join(
-            f' <span style="color:#%02x%02x%02x">{w}</span>' % tuple(rgb)
-            for w, rgb in self.nav.root.neuron_tags.neuron_words(key, int(key.ref)))
-        title = self._title(key, neurons, index)
-        return (f"<b>▶ {title}</b>" if current else title) + (f"<br>{words}" if words else '')
 
     def _draw_rates(self, plot, times, counts, bin_size: float, dark: bool) -> None:
         if not self.rate_btn.show:
@@ -546,13 +605,14 @@ class NeuronViewPanel:
             self.plot_panel.render()
 
     def rebuild(self) -> None:
-        self.list_panel.refresh()
-        self.plot_panel.render()
+        """Relist and redraw; skipped while hidden, when nav.view's items are pairs."""
+        if self.active:
+            self.list_panel.refresh()
+            self.plot_panel.render()
 
     def _on_rows_changed(self, *_args) -> None:
         """Any change to which neurons the view lists, from any of nav's signals."""
-        if self.active:
-            self.rebuild()
+        self.rebuild()
 
     def _on_theme_changed(self) -> None:
         self.plot_panel.reload_themes(self.nav.root.time_slider.theme_names)

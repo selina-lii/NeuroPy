@@ -1,11 +1,11 @@
 """CCG main view panel."""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
-from pyqtgraph.Qt.QtCore import Qt, Signal, QObject, QRectF, QTimer
+from pyqtgraph.Qt.QtCore import Qt, Signal, QObject, QRectF, QTimer, QEvent
 from pyqtgraph.Qt.QtWidgets import (
     QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -15,7 +15,8 @@ from pyqtgraph.Qt.QtWidgets import (
     QToolButton, QSlider, QGroupBox, QFileDialog, QMessageBox,
 )
 from pyqtgraph.Qt.QtGui import QAction, QActionGroup
-from neuropy.analyses.ccg_transforms import NormalizeBy, CCGNorm, ConnectionStrength
+from neuropy.analyses.ccg_transforms import Rules, NormalizeBy, CCGNorm, ConnectionStrength
+from neuropy.analyses.pair_selection_data import RuleResults
 from neuropy.analyses.jitter import compute_jbsi, JitterConfig
 from neuropy.analyses import correlations
 from neuropy.analyses.ms_connectivity import (Key, EranConv, _multiple_correction,
@@ -43,6 +44,7 @@ pg.setConfigOptions(antialias=True)
 CH_PER_SHANK = 16
 _Y_PAD = 0.05   # shared by every overlay: equal padding puts every zero on one line
 PVAL_COLOR = '#e74c3c'
+JITTER_COLOR = '#f39c12'
 
 _CHIP_STYLE = (
     "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
@@ -87,9 +89,7 @@ class SegmentBar(QWidget):
         self._seg_lbl.setStyleSheet(f"font-size: {small_font_pt()}pt;")
         root.addWidget(self._seg_lbl)
 
-        self._chip_bar = ArrowChipBar(
-            self, on_left=lambda: self._nav_step(-1),
-            on_right=lambda: self._nav_step(+1))
+        self._chip_bar = ArrowChipBar(self)
         root.addWidget(self._chip_bar, stretch=1)   # only the chips absorb spare width
 
         self._lo_hi_btn = chip_button("lo|hi", checkable=True)
@@ -126,6 +126,7 @@ class SegmentBar(QWidget):
         btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         btn.customContextMenuRequested.connect(
             lambda pos, i=seg_idx, b=btn: self._show_chip_menu(i, b.mapToGlobal(pos)))
+        btn.installEventFilter(self)
         self._chip_bar.add_widget(btn)
         self._chips[seg_idx] = btn
 
@@ -169,14 +170,30 @@ class SegmentBar(QWidget):
         self._selected.clear()   # multi-select is transient: consumed by the stack action
         self.nav.toggle_stacked_segments(labels)
 
-    def _nav_step(self, step: int):
-        """◀/▶ navigate to the prev/next segment (cyclic over All + real + custom)."""
+    def keyPressEvent(self, event):
+        if not self._step_key(event):
+            super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        # a focused chip would spend left/right on moving focus to its sibling
+        return event.type() == QEvent.Type.KeyPress and self._step_key(event) or super().eventFilter(obj, event)
+
+    def _step_key(self, event) -> bool:
+        step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: +1}.get(event.key())
+        if step:
+            self.nav_step(step)
+        return bool(step)
+
+    def nav_step(self, step: int):
+        """Left/right keys go to the prev/next segment (cyclic over All + real + custom)."""
         nav = self.nav
         cur = nav.segment_index(nav.current_segment)   # may lazy-load, appending a segment
         names = nav.segment_names()
         if not names:
             return
-        nav.set_current_segment(nav.segment_name((cur + step) % len(names)))
+        idx = (cur + step) % len(names)
+        nav.set_current_segment(nav.segment_name(idx))
+        self._chip_bar.ensure_visible(self._chips[idx])
 
     def _refresh(self, *_):
         nav = self.nav
@@ -203,7 +220,8 @@ class SegmentBar(QWidget):
             btn.style().polish(btn)
 
     def _on_pair_sig_changed(self, *_):
-        self._refresh()
+        if not self.nav.slideshow:
+            self._refresh()
 
     def _on_lo_hi_btn_changed(self, res: str):
         set_checked_quietly(self._lo_hi_btn, res == "lo_hi")
@@ -375,11 +393,8 @@ class CorrelogramSection(CollapsibleSection):
         self.body_layout.addLayout(self._trace_row())
         self.body_layout.addLayout(self._scale_row())
         self.body_layout.addLayout(self._extend_rows_box())
-        # visible by default: a finished jitter run should appear without another click
-        self.jitter_line_btn = CycleButton("jitter")
-        self.body_layout.addLayout(widget_row(self.jitter_line_btn))
         for btn in (self.ccg_btn, self.baseline_btn, self.ref_btn, self.tgt_btn,
-                    self.ref_wf_btn, self.autoscale_btn, self.jitter_line_btn):
+                    self.ref_wf_btn, self.autoscale_btn):
             btn.clicked.connect(self.style_changed)
 
     def _scale_entry(self) -> 'SliderWithInput':
@@ -722,6 +737,8 @@ class JitterSection(CollapsibleSection):
     # Injected via set_jitter_mgr() after construction.
 
     jitter_done = Signal()   # emitted when poll completes → CorrelogramPanel rerenders
+    style_changed = Signal()
+    BANDS = (25.0, 5.0, 2.5, 1.0)
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__("Jitter", parent=parent)
@@ -749,6 +766,14 @@ class JitterSection(CollapsibleSection):
             self._outline_button("Clear", self._clear),
             self._outline_button("Save", self._save),
             "Resolution:", self.lo_btn, self.hi_btn, spacing=4))
+        self.mean_btn = CycleButton("mean")
+        self.median_btn = chip_button("median", checked=True)
+        self.p_btn = chip_button("p", checked=True)
+        self.band_btns = {q: chip_button(f"{q:g}–{100 - q:g}", checked=True) for q in self.BANDS}
+        self.body_layout.addLayout(widget_row("Show:", self.mean_btn, self.median_btn, self.p_btn,
+                                              *self.band_btns.values(), spacing=4))
+        for btn in (self.mean_btn, self.median_btn, self.p_btn, *self.band_btns.values()):
+            btn.clicked.connect(self.style_changed)
 
     def _outline_button(self, label: str, slot) -> QPushButton:
         button = QPushButton(label)
@@ -833,8 +858,7 @@ class CustomCCGTagsSection(CollapsibleSection):
     def _pair_key(self):
         """The current pair's own session key: in all-session mode it is not nav.key."""
         nav = self.nav
-        base = nav.current_pair[0] if nav.session_any_mode else nav.key
-        return base.change(segment=nav.current_segment, resolution=nav.data_resolution)
+        return nav.pair_ptr_key.change(segment=nav.current_segment, resolution=nav.data_resolution)
 
     def _pair_entry(self) -> tuple:
         """``(label, entry)`` for the current pair: computed when live, else the last run."""
@@ -847,25 +871,14 @@ class CustomCCGTagsSection(CollapsibleSection):
         key = self._pair_key()
         label = f"{ref}→{tgt} · {seg}"
         if self._live_check.isChecked():
-            results, on = nav.cd.sweep_aux_tests(key, tests=nav.cd.aux_test_config.specs())
+            results, on = nav.cd.sweep_rule_sets(key, nav.sd.rule_plan(key))
             entry = {name: [_nan_to_none(v[ref, tgt]), bool(p[ref, tgt])]
                      for name, (v, p) in results.items()}
-            entry['on'] = bool(on[ref, tgt])
+            arrays = {f"{n}.{part}": a for n, (v, p) in results.items() for part, a in (('value', v), ('passed', p))}
+            book = nav.cd.rule_book
+            entry['on'] = bool(RuleResults.combine(arrays, book.on_sets, book.on_mode, on.shape)[ref, tgt])
             return label, entry
-        return label, nav.sd.aux_results(key, seg).pair(ref, tgt) or None
-
-    def _pval_row(self) -> tuple:
-        """The default screening when no p-value rule is enabled: min corrected p in the test window."""
-        nav = self.nav
-        pair = nav.current_pair
-        key = self._pair_key()
-        data = nav.cd.ccg_for(key)
-        seg = nav.cd.segment_index(key, nav.current_segment)
-        pc = data.pval_corrected
-        ref, tgt = int(pair[-2]), int(pair[-1])
-        c = data.conf
-        val = float(pc[seg, ref, tgt, c.min_lag_bin:c.max_lag_bin].min())
-        return val, val <= nav.active_sig_threshold
+        return label, nav.sd.rule_results(key, seg).pair(ref, tgt) or None
 
     def refresh_table(self):
         self._clear_layout(self._table)
@@ -876,21 +889,25 @@ class CustomCCGTagsSection(CollapsibleSection):
                 self._pair_lbl.setText(f"{label} — not swept; tick live to compute")
             return
         rows = [(k, v[0], v[1]) for k, v in entry.items() if k != 'on']
-        pval_ok = True
-        if 'p_value' not in entry:
-            pval, pval_ok = self._pval_row()
-            rows.insert(0, ('pval_screening', pval, pval_ok))
+        titles = {f"{r.name}:{label}": t for r in self.nav.cd.rule_book.later_sets()
+                  for label, t in r.tests.titles().items()}   # stored results of a since-removed set keep their label
         for row, (name, val, passed) in enumerate(rows):
-            mark = QLabel("✓" if passed else "✗")
+            is_set = ':' not in name   # a rule set's verdict heads its rules
+            mark = QLabel("–" if val is None and passed else "✓" if passed else "✗")   # –: dropped before this ran
             mark.setStyleSheet(f"color: {'#4E9A4E' if passed else '#C04040'}; font-weight: bold;")
             self._table.addWidget(mark, row, 0)
-            self._table.addWidget(QLabel(name), row, 1)
-            self._table.addWidget(QLabel("—" if val is None else f"{val:.3g}"), row, 2)
+            text = f"<b>{name}</b>" if is_set else "  " + titles.get(name, Rules.display(name.split(':')[-1]))
+            self._table.addWidget(QLabel(text), row, 1)
+            self._table.addWidget(QLabel("" if is_set or (val is None and passed) else   # ran to NaN: nothing to measure
+                                         "none" if val is None else f"{val:.3g}"), row, 2)
         nav = self.nav
         pair = nav.current_pair
-        manual = nav.seg_manual_state(int(pair[-2]), int(pair[-1]),
-                                      nav.cd.segment_index(nav.key, nav.current_segment))
-        on = manual if manual is not None else (entry['on'] and pval_ok)
+        ref, tgt = int(pair[-2]), int(pair[-1])
+        manual = nav.seg_manual_state(ref, tgt, nav.cd.segment_index(nav.key, nav.current_segment))
+        key = self._pair_key().change(resolution='lowres')
+        data = nav.cd.ccg_for(key)
+        screened = data.screened(data.segment_index(nav.current_segment), key.excitability)[ref, tgt]
+        on = manual if manual is not None else bool(entry['on'] and screened)
         combined = QLabel(f"on: {'yes' if on else 'no'}" + (" (manual)" if manual is not None else ""))
         combined.setStyleSheet(
             f"color: {'#4E9A4E' if on else '#B0B0B0'}; font-weight: bold; padding-top: 3px;")
@@ -1022,6 +1039,9 @@ class DisplayToggles:
     acg_ref: AcgToggle
     acg_tgt: AcgToggle
     jitter: TraceToggle
+    jitter_median: bool
+    jitter_bands: tuple
+    jitter_p: bool
     acg_match_ccg: bool
     show_pval: bool
     show_pval_corrected: bool
@@ -1034,7 +1054,7 @@ class DisplayToggles:
 
     @classmethod
     def read(cls, cor: 'CorrelogramSection', cs: 'BaselineCSSection',
-             norm: 'NormSection') -> 'DisplayToggles':
+             norm: 'NormSection', jit: 'JitterSection') -> 'DisplayToggles':
         """Snapshot the correlogram, baseline and normalization sections' current switches."""
         return cls(
             ccg=TraceToggle.read(cor.ccg_btn),
@@ -1043,7 +1063,10 @@ class DisplayToggles:
                                        norm.deconv_ref_btn),
             acg_tgt=AcgToggle.read_acg(cor.tgt_btn, cor.acg_yscale_tgt,
                                        norm.deconv_tgt_btn),
-            jitter=TraceToggle.read(cor.jitter_line_btn),
+            jitter=TraceToggle.read(jit.mean_btn),
+            jitter_median=jit.median_btn.isChecked(),
+            jitter_bands=tuple(q for q, b in jit.band_btns.items() if b.isChecked()),
+            jitter_p=jit.p_btn.isChecked(),
             acg_match_ccg=cor.autoscale_btn.isChecked(),
             show_ref_waveform=cor.ref_wf_btn.isChecked(),
             wf_y_pad=cor.wf_pad_slider.value,
@@ -1090,7 +1113,7 @@ class PanelDeps:
     def from_panel(cls, panel) -> 'PanelDeps':
         theme = panel._theme_fn() if panel._theme_fn is not None else None
         return cls(toggles=DisplayToggles.read(panel.corr_section, panel.cs_section,
-                                               panel.norm_section),
+                                               panel.norm_section, panel.jitter_section),
                    dark_mode=qt_dark_mode() if theme is None else theme.dark,
                    jitter_mgr=panel.cs_section.jitter_mgr,
                    same_scale_cache=panel._same_scale_cache,
@@ -1170,7 +1193,7 @@ class CCGContextBuilder:
         slices = nav.cd.pair_slices(key)
         if slices is None:
             return None
-        ccg_raw, null_raw, _pval, _pvc, _qval = slices
+        ccg_raw, null_raw, _pval, _pvc = slices
         metric = nav.cs_metric
         method = nav.baseline_method
         cached = jitter_mgr.get_result(key)
@@ -1180,9 +1203,7 @@ class CCGContextBuilder:
         fr_ref = fr_tgt = None
         if metric == 'JBSI':
             fr_ref, fr_tgt = CCGContextBuilder._firing_rates(nav, ref, tgt)
-        if nav.cs_offzero and not nav.cd.pair_on_for(
-                key, nav.sd.seg_overrides(str(key.session), key.segment),
-                nav.cd.aux_test_config.specs())[ref, tgt]:
+        if nav.cs_offzero and not nav.sd.on_grid(key, key.segment)[ref, tgt]:
             return 0.0
         return ConnectionStrength.conn_strength(
             ccg_raw, null_raw, ref, tgt, nav.cd.ccg_for(key).conf,
@@ -1204,16 +1225,18 @@ class CCGContextBuilder:
                 None if shanks is None else int(shanks[tgt]))
 
     @staticmethod
-    def _jitter_overlay(jitter_mgr, key, show: bool = True) -> JitterOverlay:
-        """Cached jitter result at the row's resolution; empty when hidden or absent."""
-        if jitter_mgr is None or not show:
-            return JitterOverlay()
-        result = jitter_mgr.get_result(key)
+    def _jitter_overlay(jitter_mgr, key, tg: 'DisplayToggles') -> JitterOverlay:
+        """Cached jitter result at the row's resolution, holding only the parts toggled on."""
+        result = jitter_mgr.get_result(key) if jitter_mgr is not None else None
         if result is None:
             return JitterOverlay()
         avg, _pval, pval_bins, lo, hi = result[:5]
-        bands = result[5] if len(result) > 5 else None
-        return JitterOverlay(j_ccg=avg, j_pval=pval_bins, j_ccg_lo=lo, j_ccg_hi=hi, bands=bands)
+        bands = (result[5] if len(result) > 5 else None) or {5.0: lo, 95.0: hi}
+        return JitterOverlay(
+            j_ccg=avg if tg.jitter.show else None,
+            j_median=bands.get(50.0) if tg.jitter_median else None,
+            j_pval=pval_bins if tg.jitter_p else None,
+            bands={q: b for q, b in bands.items() if min(q, 100 - q) in tg.jitter_bands})
 
     @staticmethod
     def _bin_size(conf, n_bins: int) -> float:
@@ -1293,7 +1316,7 @@ class CCGContextBuilder:
         seg_label = seg_label or nav.current_segment
         seg_idx = self.nav.cd.segment_index(data_key, seg_label)
         arr = data.ccg          # segment_index may have grown dim0 by lazy-loading
-        ccg, baseline, pval, pval_corrected, _qval = data.pair(seg_idx, ref, tgt)
+        ccg, baseline, pval, pval_corrected = data.pair(seg_idx, ref, tgt, pair_key.excitability)
         if ccg is None or len(ccg) == 0:
             return None
 
@@ -1310,15 +1333,14 @@ class CCGContextBuilder:
         return self._finish(
             source, ref, tgt,
             seg_display=seg_label, sess_label=str(pair_key.session or ''),
-            jitter=self._jitter_overlay(self.deps.jitter_mgr,
-                                        data_key.change(ref=ref, tgt=tgt),
-                                        self.toggles.jitter.show),
+            jitter=(JitterOverlay() if nav.slideshow else
+                    self._jitter_overlay(self.deps.jitter_mgr, data_key.change(ref=ref, tgt=tgt), self.toggles)),
             show_test_window=self.toggles.show_test_window,
-            cs_overlay=nav.cs_overlay_active,
+            cs_overlay=nav.cs_overlay_active and not nav.slideshow,
             is_significant=nav.is_significant(ref, tgt, seg_idx),
             ylim_override=self._same_scale_ylim(nav, self.deps.same_scale_cache, data, ref, tgt, neurons),
             cs_annotation_lines=(self._cs_annotation_lines(nav, self.deps.jitter_mgr, ref, tgt, seg_idx)
-                                 if nav.cs_overlay_active else []),
+                                 if nav.cs_overlay_active and not nav.slideshow else []),
         )
 
     def for_extend(self, ext_view: 'ExtendRow',
@@ -1411,6 +1433,7 @@ class CCGContextBuilder:
         acg_ref = src.acg_ref if tg.acg_ref.show else None
         acg_tgt = src.acg_tgt if tg.acg_tgt.show else None
 
+        jitter = self._normalize_jitter(src, ccg, jitter, ref, tgt)
         ccg, baseline = self._normalize(src, ccg, baseline, ref, tgt)
         acg_ref = self._normalize_acg(src, acg_ref, ref)
         acg_tgt = self._normalize_acg(src, acg_tgt, tgt)
@@ -1472,6 +1495,14 @@ class CCGContextBuilder:
         """(ccg, baseline) under the active normalizations."""
         return CCGNorm.apply(ccg, baseline, ref, tgt, self.nav.active_norms,
                              neurons=src.neurons, custom_time_hours=src.time_hours)
+
+    def _normalize_jitter(self, src: CCGSource, ccg, jitter: JitterOverlay, ref: int, tgt: int):
+        """Jitter traces in the CCG's units, as the baseline is; p-values stay probabilities."""
+        def norm(trace):
+            return (None if trace is None
+                    else self._normalize(src, ccg, np.asarray(trace, dtype=float), ref, tgt)[1])
+        return replace(jitter, j_ccg=norm(jitter.j_ccg), j_median=norm(jitter.j_median),
+                       bands=jitter.bands and {q: norm(b) for q, b in jitter.bands.items()})
 
     def _normalize_acg(self, src: CCGSource, acg, neuron: int):
         """One ACG under the active normalizations; BASELINE never applies to an ACG."""
@@ -1645,7 +1676,7 @@ class CCGPlotWidget(QWidget):
     def _make_subplot(self, slot: int) -> 'Subplot':
         """One plot with its p-value and ACG overlays wired up."""
         pw = pg.PlotWidget()
-        pw.setMinimumSize(280, self._MIN_PLOT_H)
+        pw.setMinimumSize(self._MIN_PLOT_H, self._MIN_PLOT_H)
         pw.setBackground('w')
         pw.showGrid(x=False, y=True, alpha=0.3)
         pw.setMouseEnabled(x=False, y=False)
@@ -1799,9 +1830,9 @@ class CCGPlotWidget(QWidget):
             self._render_one(sub, contexts[i] if i < len(contexts) else None)
         self._show_bin_readout(None)   # stale labels point at the previous data
         vp = self._plot_scroll.viewport()
-        max_row_len = max(row_lengths)
-        plot_w = max(320 * max_row_len, vp.width())
         plot_h = max(self._MIN_PLOT_H * len(row_lengths), vp.height())
+        col_w = min(320, plot_h // len(row_lengths))   # columns narrow to square before scrolling
+        plot_w = max(col_w * max(row_lengths), vp.width())
         self._plot_container.setMinimumSize(plot_w, plot_h)
 
     def _render_one(self, sub: 'Subplot', ctx) -> None:
@@ -1859,11 +1890,15 @@ class CCGPlotWidget(QWidget):
 
     @staticmethod
     def _draw_baseline(p, ctx, geom: 'LagAxis') -> None:
-        if ctx.ccg_null_plot is None:
-            return
-        null = np.asarray(ctx.ccg_null_plot, dtype=float)
-        color = '#cc6666' if ctx.dark_mode else '#e88'
-        if ctx.line_baseline:
+        if ctx.ccg_null_plot is not None:
+            CCGPlotWidget._draw_null(p, geom, ctx.ccg_null_plot,
+                                     '#cc6666' if ctx.dark_mode else '#e88', ctx.line_baseline)
+
+    @staticmethod
+    def _draw_null(p, geom: 'LagAxis', values, color: str, line: bool) -> None:
+        """A baseline-like trace: dashed step line, or translucent bars."""
+        null = np.asarray(values, dtype=float)
+        if line:
             p.addItem(pg.PlotDataItem(geom.edges[:len(null) + 1], null, stepMode='center',
                                       pen=plot_pen(color, Qt.PenStyle.DashLine)))
         else:
@@ -1971,35 +2006,40 @@ class CCGPlotWidget(QWidget):
 
     @staticmethod
     def _draw_jitter(p, ctx, geom: 'LagAxis') -> None:
+        """CI bands as outlines, inner ones more opaque; the mean painted like a baseline, the median a line."""
         jitter = ctx.jitter
-        if jitter.j_ccg is None:
-            return
-        xs = geom.centers[:len(jitter.j_ccg)]
-        if jitter.j_ccg_lo is not None and jitter.j_ccg_hi is not None:
-            lo = pg.PlotDataItem(xs, jitter.j_ccg_lo, pen=None)
-            hi = pg.PlotDataItem(xs, jitter.j_ccg_hi, pen=None)
-            p.addItem(lo)
-            p.addItem(hi)
-            p.addItem(pg.FillBetweenItem(lo, hi, brush=pg.mkBrush(180, 160, 210, 100)))
-        style = Qt.PenStyle.DashLine if ctx.line_jitter else Qt.PenStyle.SolidLine
-        p.plot(xs, jitter.j_ccg, pen=plot_pen('#9b59b6', style))
-        if jitter.j_pval is not None:
-            p.plot(xs, jitter.j_pval, pen=plot_pen('#6c3483', Qt.PenStyle.DotLine))
+        bands = jitter.bands or {}
+        # mean first: its bars would otherwise bury the inner bands
+        if jitter.j_ccg is not None:
+            CCGPlotWidget._draw_null(p, geom, jitter.j_ccg, JITTER_COLOR, ctx.line_jitter)
+        for q in sorted(q for q in bands if q < 50):
+            depth = q / 50
+            xs = geom.edges[:len(bands[q]) + 1]
+            edge = pg.mkPen(243, 156, 18, int(150 + 105 * depth), width=1.5)
+            for qq in (q, 100 - q):
+                p.addItem(pg.PlotDataItem(xs, bands[qq], stepMode='center', pen=edge))
+        if jitter.j_median is not None:
+            p.plot(geom.centers[:len(jitter.j_median)], jitter.j_median, pen=plot_pen('#d35400'))
 
     @staticmethod
     def _draw_pvalues(p, ctx, geom: 'LagAxis', pval_vb, pval_items, pval_axis=None) -> None:
         """P-values on their own 0-1 view box, above the CCG and the ACGs."""
         pval_vb.setGeometry(p.vb.sceneBoundingRect())
         pval_vb.setZValue(2)
-        if ctx.pval is None and ctx.pval_corrected is None:
+        traces = ((ctx.pval, PVAL_COLOR, Qt.PenStyle.DotLine),
+                  (ctx.pval_corrected, '#922b21', Qt.PenStyle.DashLine),
+                  (ctx.jitter.j_pval, JITTER_COLOR, Qt.PenStyle.DotLine))
+        if all(values is None for values, _, _ in traces):
             if pval_axis is not None:
                 pval_axis.hide()
             return
         if pval_axis is not None:
+            color = JITTER_COLOR if ctx.pval is None and ctx.pval_corrected is None else PVAL_COLOR
+            pval_axis.setPen(pg.mkPen(color))
+            pval_axis.setTextPen(pg.mkPen(color))
+            pval_axis.setLabel('p', color=color)
             pval_axis.show()
         pval_vb.setYRange(0, 1, padding=_Y_PAD)   # not linked to the right axis: pyqtgraph recurses
-        traces = ((ctx.pval, PVAL_COLOR, Qt.PenStyle.DotLine),
-                  (ctx.pval_corrected, '#922b21', Qt.PenStyle.DashLine))
         for values, color, style in traces:
             if values is None:
                 continue
@@ -2107,6 +2147,7 @@ class CorrelogramPanel(QWidget):
     def set_jitter_mgr(self, jctrl):
         self.jitter_mgr = jctrl
         self.jitter_section.set_jitter_mgr(jctrl)
+        jctrl.completed.connect(self._update_jitter_baseline_state)
         self.cs_section.set_jitter_mgr(jctrl)
 
     def _build(self):
@@ -2215,19 +2256,20 @@ class CorrelogramPanel(QWidget):
         if nav.current_pair_inds is not None:
             cor.set_sampling_rate(nav.neurons.sampling_rate)
         segs = list(nav.stacked_segments) or [nav.current_segment]
-        self.tags_section.refresh_table()
+        if not nav.slideshow:   # a slideshow keeps the layout but draws only CCG and baseline
+            self.tags_section.refresh_table()
         # Row axis = view kind (lo / hi / extend); column axis = segment. Transposed: swap.
         builders = ([lambda s, hi=hi: CCGContextBuilder.build_context(nav, self, seg_label=s, hi_res_override=hi)
                      for hi in ([False, True] if nav.resolution == "lo_hi" else [None])]
                     + [lambda s, v=v: CCGContextBuilder.build_extend_context(
                            nav, self, seg_label=s, ext_view=v)
-                       for v in cor.extend_views])
+                       for v in ([] if nav.slideshow else cor.extend_views)])
         rows = [[build(seg) for seg in segs] for build in builders]
         if nav.stacked_transposed:
             rows = [list(r) for r in zip(*rows)]
         rows = [[c for c in row if c is not None] for row in rows]
         # "Show Together": overlay each pinned pair's CCG on top of the current view, own row each.
-        for entry in nav.together_pairs:
+        for entry in ([] if nav.slideshow else nav.together_pairs):
             pk, r, t = self._together_handle(entry)
             tctx = CCGContextBuilder.build_context(nav, self, pair_override=(pk, r, t))
             if tctx is not None:
@@ -2237,6 +2279,8 @@ class CorrelogramPanel(QWidget):
             print(f"[CCGPanel] RENDER FAILED: {self._render_fail_reason(nav)}",
                   flush=True)
         self.plot_widget.render(rows)
+        if nav.slideshow:
+            return
         self.cs_section.update_display()
         if hasattr(self, '_wf_panel') and self._wf_panel.isVisible():
             if nav.current_pair_inds is not None:
@@ -2253,7 +2297,8 @@ class CorrelogramPanel(QWidget):
                     nav.display_changed):
             sig.connect(lambda _: self.plot_update_requested.emit())
         nav.cs_params_changed.connect(lambda *_: self.plot_update_requested.emit())
-        nav.pair_changed.connect(self._update_jitter_baseline_state)
+        for sig in (nav.pair_changed, nav.segment_changed, nav.resolution_changed, nav.key_changed):
+            sig.connect(self._update_jitter_baseline_state)
         self.plot_update_requested.connect(self.request_render)
 
     def _connect_sections(self):
@@ -2265,6 +2310,7 @@ class CorrelogramPanel(QWidget):
         self.corr_section.style_changed.connect(self.plot_update_requested)
         self.corr_section.autoscale_btn.toggled.connect(self.plot_update_requested)
         self.jitter_section.jitter_done.connect(self.request_render)
+        self.jitter_section.style_changed.connect(self.plot_update_requested)
         self.sa_section.set_requested.connect(self._on_spike_attr_set)
         self.sa_section.enable_toggled.connect(self._on_spike_attr_enable)
 
@@ -2325,16 +2371,8 @@ class CorrelogramPanel(QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key == Qt.Key.Key_Left:
-            self.nav.set_current_segment(
-                self.nav.segment_name(
-                    (self.nav.segment_index(self.nav.current_segment) - 1)
-                    % len(self.nav.available_segments())))
-        elif key == Qt.Key.Key_Right:
-            self.nav.set_current_segment(
-                self.nav.segment_name(
-                    (self.nav.segment_index(self.nav.current_segment) + 1)
-                    % len(self.nav.available_segments())))
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            self.seg_bar.keyPressEvent(event)
         elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_R:
             self.nav.set_resolution("lo" if self.nav.resolution == "hi" else "hi")
         else:
@@ -2365,11 +2403,16 @@ class CorrelogramPanel(QWidget):
     # (menu label, RenderContext field)
     _VIEWABLE = [("CCG", 'ccg'), ("Reference ACG", 'acg_ref'),
                  ("Target ACG", 'acg_tgt'), ("Baseline", 'ccg_null_plot'),
-                 ("P-values", 'pval')]
+                 ("P-values", 'pval'), ("Corrected p-values", 'pval_corrected')]
 
     def _view_values(self, field: str):
-        """Print one context array to the terminal, from the plot's context menu."""
-        ctx = CCGContextBuilder.build_context(self.nav, self)
+        """Print one context array to the terminal, from the plot's context menu, whether or not it is drawn."""
+        deps = PanelDeps.from_panel(self)
+        t = deps.toggles
+        deps.toggles = replace(t, ccg=replace(t.ccg, show=True), baseline=replace(t.baseline, show=True),
+                               acg_ref=replace(t.acg_ref, show=True), acg_tgt=replace(t.acg_tgt, show=True),
+                               show_pval=True, show_pval_corrected=True)
+        ctx = CCGContextBuilder(self.nav, deps).for_current()
         if ctx is None:
             return
         values = getattr(ctx, field)

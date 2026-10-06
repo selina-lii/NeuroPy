@@ -89,6 +89,9 @@ def areas_by_id(neurons) -> dict | None:
     return {int(nid): a for nid, a in zip(neurons.neuron_ids, areas)}
 
 
+DOT_SASH = None   # in a dot list: a '|' between one neuron's tag dots and the next's
+
+
 def row_dots(areas, key, neuron_ids, palette, tags=None) -> list:
     """Region colour then gradient-tag colours, for each of *neuron_ids*.
 
@@ -98,8 +101,12 @@ def row_dots(areas, key, neuron_ids, palette, tags=None) -> list:
     dots = [] if areas is None else [area_rgb(areas[i], palette)
                                      for i in neuron_ids if i in areas]
     if tags is not None:
-        for neuron in neuron_ids:
-            dots.extend(tags.neuron_rgb(key, int(neuron)))
+        per_neuron = [tags.neuron_rgb(key, int(neuron)) for neuron in neuron_ids]
+        if any(per_neuron):
+            dots.extend(per_neuron[0])
+            for rgb in per_neuron[1:]:
+                dots.append(DOT_SASH)
+                dots.extend(rgb)
     return dots
 
 from neuropy.analyses.utils import _SPECIAL_PREFIX, is_special_group  # noqa: F401

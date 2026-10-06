@@ -645,8 +645,18 @@ class AnalysisDataset(Savable):
 
 _SPECIAL_PREFIX = "__special_"
 is_special_group = lambda n: str(n).startswith(_SPECIAL_PREFIX)
+SLIDESHOW_GROUP = _SPECIAL_PREFIX + "slideshow picks"   # Space during a slideshow; never saved
+is_transient_group = lambda n: n == SLIDESHOW_GROUP
 DERIVED_PREFIX = "__derived_"   # members come from rules over other tags, never stored
 is_derived_group = lambda n: str(n).startswith(DERIVED_PREFIX)
+
+
+def moved(seq, i: int, step: int) -> list:
+    """*seq* with item *i* shifted *step* places, clamped to the ends."""
+    out = list(seq)
+    item = out.pop(i)
+    out.insert(min(max(i + step, 0), len(out)), item)
+    return out
 
 
 def group_display(name: str) -> tuple:

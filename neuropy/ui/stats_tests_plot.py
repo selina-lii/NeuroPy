@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from neuropy.ui.pair_selection_panel import SelectionData
+from neuropy.ui.ui_common import UITheme
 from neuropy.ui.stats_tests_backend import (
     _BAR_COLORS, StatsTestBackend, StatsTestConfig, _ViewConfig, _star)
 
@@ -22,22 +23,27 @@ def pairwise_pvals(result, groups) -> list:
         if rows:
             return [{'a': r.get('a', ''), 'b': r.get('b', ''),
                      'p_adj': r.get('p_adj', 1.0)} for r in rows]
+    if 'p_val' in result and len(groups) == 2:   # a two-group test is its own single comparison
+        return [{'a': groups[0].get('name', 'A'), 'b': groups[1].get('name', 'B'), 'p_adj': result['p_val']}]
+    if 'p_val' in result and len(groups) == 1:   # one-sample: the group against 0
+        return [{'a': groups[0].get('name', 'A'), 'b': None, 'p_adj': result['p_val']}]
     return []
 
 
-def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, log: bool, dark: bool,
+def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, dark: bool,
                      paired=False, sig_pairs=(), one_sample=False) -> None:
     """One panel of the stats figure: bars or violins, jittered points, pairing lines, brackets."""
     if not groups:
         ax.axis('off')
         return
-    fg, bg = ('#ffffff', '#1e1e1e') if dark else ('#000000', 'white')
-    ax.set_facecolor(bg)
+    t = UITheme.from_dark(dark)
+    fg = t.fg
+    ax.set_facecolor(t.plot_bg)
     ax.tick_params(colors=fg, labelsize=8)
     ax.xaxis.label.set_color(fg); ax.yaxis.label.set_color(fg)
     ax.title.set_color(fg)
     for sp in ax.spines.values():
-        sp.set_color('#555555' if dark else '#cccccc')
+        sp.set_color(t.dim)
 
     n_g = len(groups)
     names = [g.get('name', chr(65 + i)) or chr(65 + i) for i, g in enumerate(groups)]
@@ -59,14 +65,14 @@ def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, log: bool, dark:
                                showmedians=True, showextrema=True, widths=0.6)
             for i, pc in enumerate(vp.get('bodies', [])):
                 pc.set_facecolor(nonempty[i][2]); pc.set_alpha(0.85)
-                pc.set_edgecolor('#aaa' if dark else '#333'); pc.set_linewidth(0.8)
+                pc.set_edgecolor(t.fg_muted); pc.set_linewidth(0.8)
             med = vp.get('cmedians')
             if med:
                 med.set_linewidth(2); med.set_color(fg)
     else:
         stats = [_mean_sem(a) for a in arrays]   # one pass: bar height and its error bar
         ax.bar(xs, [m for m, _ in stats], yerr=[e for _, e in stats],
-               capsize=4, color=colors, edgecolor='#333', lw=0.8)
+               capsize=4, color=colors, edgecolor=t.fg_muted, ecolor=fg, lw=0.8)
 
     if paired and n_g >= 2:
         gmaps = [{SelectionData.as_pair_key(p): (all_xpos[gi][j], float(arrays[gi][j]))
@@ -78,14 +84,14 @@ def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, log: bool, dark:
         for pk in common:
             ax.plot([gmaps[gi][pk][0] for gi in range(n_g)],
                     [gmaps[gi][pk][1] for gi in range(n_g)],
-                    color='#888', alpha=0.1, lw=0.7, zorder=1)
+                    color=t.fg_muted, alpha=0.1, lw=0.7, zorder=1)
 
     for i, (arr, xpos) in enumerate(zip(arrays, all_xpos)):
         if arr.size == 0:
             continue
-        out_idx = set(StatsTestBackend.outlier_indices(groups[i], log))
+        out_idx = set(StatsTestBackend.outlier_indices(groups[i]))   # plot groups are already on the test scale
         if view.outliers:
-            ax.scatter(xpos, arr, s=14, color='#222', alpha=0.2, lw=0, zorder=2)
+            ax.scatter(xpos, arr, s=14, color=fg, alpha=0.2, lw=0, zorder=2)
             for j in out_idx:
                 if j < arr.size and j < len(pairs_lists[i]):
                     p = pairs_lists[i][j]
@@ -94,16 +100,16 @@ def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, log: bool, dark:
                                 xytext=(0, 3), textcoords='offset points')
         else:
             keep = [k for k in range(arr.size) if k not in out_idx]
-            ax.scatter(xpos[keep], arr[keep], s=14, color='#222', alpha=0.2, lw=0, zorder=2)
+            ax.scatter(xpos[keep], arr[keep], s=14, color=fg, alpha=0.2, lw=0, zorder=2)
 
-    ax.grid(axis='y', alpha=0.25, lw=0.7)
+    ax.grid(axis='y', color=fg, alpha=0.25, lw=0.7)
     if one_sample:
-        ax.axhline(0, color='#555', lw=0.8, ls='--', zorder=0)
+        ax.axhline(0, color=t.dim, lw=0.8, ls='--', zorder=0)
     if not sig_pairs:
         return
     nm2x = {n: x for n, x in zip(names, xs)}
-    starred = [(r['a'], r['b'], s) for r in sig_pairs
-               if r['a'] in nm2x and r['b'] in nm2x and (s := _star(r['p_adj'])) is not None]
+    starred = [(r['a'], r['b'] or r['a'], s) for r in sig_pairs
+               if r['a'] in nm2x and (r['b'] or r['a']) in nm2x and (s := _star(r['p_adj'])) is not None]
     if not starred:
         return
     ylo, ytop = ax.get_ylim()
@@ -114,9 +120,10 @@ def _draw_group_axes(ax, groups, title, view: '_ViewConfig', *, log: bool, dark:
     for lv, (a_nm, b_nm, star) in enumerate(starred):
         x0, x1 = nm2x[a_nm], nm2x[b_nm]
         y = ybase + step * lv
-        ax.plot([x0, x0, x1, x1], [y - tick, y, y, y - tick], color='#333', lw=0.9, clip_on=False)
+        if x0 != x1:   # a one-sample star stands alone
+            ax.plot([x0, x0, x1, x1], [y - tick, y, y, y - tick], color=fg, lw=0.9, clip_on=False)
         ax.text((x0 + x1) / 2, y + tick * 0.2, star,
-                ha='center', va='bottom', fontsize=8, color='#333', clip_on=False)
+                ha='center', va='bottom', fontsize=8, color=fg, clip_on=False)
     ax.set_ylim(top=ybase + step * (len(starred) + 0.8))
 
 
@@ -124,10 +131,9 @@ def draw_stats_figure(fig, results: list, view: '_ViewConfig',
                       test_config: 'StatsTestConfig | None', *, dark: bool) -> None:
     """Fill *fig* with one panel per result; pure matplotlib, no widgets."""
     fig.clf()
-    fig.patch.set_facecolor('#2b2b2b' if dark else 'white')
+    fig.patch.set_facecolor(UITheme.from_dark(dark).plot_bg)
     if not results:
         return
-    log = test_config.log_transform if test_config else False
     is_paired = ((test_config.test_type if test_config else '') == "Pairwise t-test"
                  or any(sr.is_paired for sr in results))
     n = len(results)
@@ -137,11 +143,18 @@ def draw_stats_figure(fig, results: list, view: '_ViewConfig',
         groups = sr.plot_groups or []
         dtype = groups[0].get('data_type', '') if groups else ''
         title = dtype + (f" ({_res_lbl.get(sr.resolution, sr.resolution)})" if n > 1 else '')
+        if view.show_n and groups:
+            r = sr.res or {}
+            matched = r.get('n_subjects') or r.get('n') or (r.get('n_a') if r.get('paired') else None)   # pairs the test kept
+            ns = [matched] if matched else list(dict.fromkeys(len(g.get('vals') or []) for g in groups))
+            title += f"  n={'/'.join(map(str, ns))}"
         ax = fig.add_subplot(1, n, i + 1, sharey=first_ax)
         first_ax = first_ax if first_ax is not None else ax
-        _draw_group_axes(ax, groups, title, view, log=log, dark=dark, paired=is_paired,
+        _draw_group_axes(ax, groups, title, view, dark=dark, paired=is_paired,
                          sig_pairs=pairwise_pvals(sr.res, groups) if view.sig_brackets else (),
                          one_sample=sr.is_one_sample)
+        if sr.log_shift is not None:
+            ax.set_ylabel(f"log(value + {sr.log_shift:.4g})" if sr.log_shift else "log(value)")
 
 
 def fit_figure_rect(fig, px_w: int, px_h: int, wh_ratio: str) -> None:

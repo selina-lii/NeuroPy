@@ -17,6 +17,7 @@ SCOPE_SESSION = 'session'
 NORMALIZERS = ('', 'zscore', 'log10', 'rank')
 
 FIRING_RATE = 'firing_rate'   # not a metadata column: derived from the spike trains
+PLACEFIELD = 'placefield'     # 1 for a place cell in the placefield config's segment, else 0
 
 STABLE_TAG = 'stable'         # read from the recording at load, never saved
 TAG_VALUE_PREFIX = 'tag:'     # source 'tag:<name>' reads Neurons.tag_values[<name>]
@@ -36,6 +37,18 @@ def activity_source(fn: str, groups: list) -> str:
 def parse_activity(source: str) -> tuple:
     fn, groups = source[len(ACTIVITY_PREFIX):].split(':', 1)
     return fn, [[s.strip() for s in g.split(',') if s.strip()] for g in re.findall(r'\(([^)]*)\)', groups)]
+
+
+CONN_PREFIX = 'conn:'   # 'conn:<E,I>:<pair tag,…>'; no pair tags = every significant pair
+
+
+def conn_source(conn_types: list, groups: list) -> str:
+    return f"{CONN_PREFIX}{','.join(conn_types)}:{','.join(groups)}"
+
+
+def parse_conn(source: str) -> tuple:
+    types, groups = source[len(CONN_PREFIX):].split(':', 1)
+    return [t for t in types.split(',') if t], [g for g in groups.split(',') if g]
 
 
 def tag_value_source(name: str) -> str:
@@ -226,16 +239,18 @@ class NeuronTagSet(JsonSavable):
     _custom_types = {'specs': NeuronTagSpec}
 
     def __init__(self, save_dir: str = ''):
-        JsonSavable.__init__(self, ignored_attrs=['cd'])
+        JsonSavable.__init__(self, ignored_attrs=['cd', 'sd'])
         self.specs: dict[str, NeuronTagSpec] = {}
         self.cd = None
+        self.sd = None
         self._save_dir = save_dir
         self._assign_cache: dict = {}
         self._values_cache: dict = {}
         self._missing: dict = {}   # segment -> sessions lacking it, since the last take_missing()
 
-    def bind(self, cd) -> None:
+    def bind(self, cd, sd) -> None:
         self.cd = cd
+        self.sd = sd
 
     def save_path(self, **_) -> str | None:
         return os.path.join(self._save_dir, 'neuron_tags') if self._save_dir else None
@@ -281,6 +296,15 @@ class NeuronTagSet(JsonSavable):
     def _source_values(self, spec: NeuronTagSpec, key) -> np.ndarray | None:
         if spec.source.startswith(ACTIVITY_PREFIX):
             return self.activity_level(spec.source, key)
+        if spec.source == PLACEFIELD:
+            pf, session = self.cd.placefields, str(key.session)
+            if not pf.has_session(session):
+                return None
+            ids = self.cd.nd.neurons_for(key.nd()).neuron_ids
+            return pf.place_cell_mask(session, [pf.conf.segment], ids).astype(float)
+        if spec.source.startswith(CONN_PREFIX):
+            return self.sd.groups.derived.neuron_conn_counts(
+                str(key.session), *parse_conn(spec.source)).astype(float)
         neurons = self.cd.nd.neurons_for(key.nd())
         if spec.source.startswith(TAG_VALUE_PREFIX):
             return self.tag_values_numeric(spec.source[len(TAG_VALUE_PREFIX):], key)
@@ -464,6 +488,16 @@ class NeuronTagSet(JsonSavable):
                 for label in spec.labels}
 
     # ── editing ─────────────────────────────────────────────────────────
+
+    def add_stable_spec(self) -> None:
+        """The recording's stability flag as a tag with its own colours and on/off; its yes/no cut is fixed."""
+        if STABLE_TAG not in self.cd.nd.tag_names:
+            return
+        spec = self.specs.get(STABLE_TAG) or NeuronTagSpec(prefix=STABLE_TAG, enabled=False)
+        spec.source, spec.cut_mode = tag_value_source(STABLE_TAG), CUT_ABSOLUTE
+        if spec.labels != ['no', 'yes']:
+            spec.cutoffs, spec.labels, spec.label_colors = [0.5], ['no', 'yes'], {}
+        self.add_spec(spec)
 
     def add_spec(self, spec: NeuronTagSpec) -> None:
         self.specs[spec.prefix] = spec

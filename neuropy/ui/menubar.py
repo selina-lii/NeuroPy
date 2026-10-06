@@ -11,8 +11,9 @@ from pyqtgraph.Qt.QtGui import QAction
 from neuropy.analyses.ms_connectivity import ProjectConfig, build_project, projects_on_disk
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.ui.app_state import _ALL_SESSION_MARKER
-from neuropy.ui.dialogs import (AddProjectDialog, CreateDerivedGroupDialog, CreateGroupDialog, CustomTagRulesDialog, ExportOptionsDialog,
+from neuropy.ui.dialogs import (AddProjectDialog, ExportOptionsDialog, ManageGroupsDialog,
                                 SettingsDialog)
+from neuropy.ui.group_ccg_overlay import GroupCCGOverlayDialog
 from neuropy.ui.jitter_ui import JitterBatchDialog, JitterQueueDialog
 from neuropy.ui.utils import AddableDropdown, chip_button, make_button
 
@@ -325,10 +326,10 @@ class ReviewMenuBar:
             self.panel_actions[attr] = act
 
         groups_menu = mb.addMenu("Groups")
-        groups_menu.addAction("Create group…", lambda: CreateGroupDialog.show(w.nav.sel_data, w.pairs_view.pair_selection, w))
-        groups_menu.addAction("Create group for comparison…", lambda: CreateDerivedGroupDialog(w.nav, w).exec())
-        groups_menu.addAction("Manage groups…", w._manage_groups)
-        groups_menu.addAction("Custom CCG tag rules…", lambda: CustomTagRulesDialog.show_for(w.nav, w))
+        groups_menu.addAction("Create group…", w._create_group)
+        manage_menu = groups_menu.addMenu("Manage groups")
+        manage_menu.addAction("Pair…", lambda: w._manage_groups(ManageGroupsDialog.PAIR))
+        manage_menu.addAction("Neuron…", lambda: w._manage_groups(ManageGroupsDialog.NEURON))
         groups_menu.addSeparator()
         groups_menu.addAction("Export groups…", lambda: w.nav.groups.save())
         groups_menu.addAction("Import groups…", lambda: w.nav.groups.load())
@@ -338,6 +339,7 @@ class ReviewMenuBar:
         sel_menu.addAction("Load…", lambda: LoadSelectionDialog.show(w.pairs_view, w.nav.cd.selections_dir, w))
         sel_menu.addSeparator()
         sel_menu.addAction("Export PNGs…", lambda: ExportOptionsDialog.show(w.nav))
+        sel_menu.addAction("Group CCG overlay…", lambda: GroupCCGOverlayDialog.show_for(w.nav, w))
         sel_menu.addSeparator()
         panel = w.pairs_view.pair_selection
         sel_menu.addAction("Bookmark current pair (Ctrl+B)",

@@ -1169,11 +1169,11 @@ class CCGTask:
     resolution: str = 'lowres'
     session_key: Key | None = None
     extend: dict | None = None      # {name, window_ms, bin_ms}: an extend unit, not a segment
-    aux: dict | None = None         # {segment, tests, overrides, pairs}: an aux-rule sweep
+    rule_sweep: dict | None = None  # {segment, plan, keep, pairs}: a significance-rule sweep
 
     @property
     def whole_session(self) -> bool:
-        return self.spec is None and self.extend is None and self.aux is None
+        return self.spec is None and self.extend is None and self.rule_sweep is None
 
     def ccg_key(self) -> Key:
         base = self.session_key if self.spec is None else self.spec.key
@@ -1203,18 +1203,18 @@ class CustomCCGWorker:
 
     def enqueue_task(self, *, spec: CCGSourceConfig = None, load_into_ui: bool = False,
                      batch_id: int | None = None, resolution: str = 'lowres',
-                     session_key: Key = None, extend: dict = None, aux: dict = None) -> bool:
-        """Queue a segment compute (*spec*), a whole-session one, an extend unit, or an aux sweep."""
+                     session_key: Key = None, extend: dict = None, rule_sweep: dict = None) -> bool:
+        """Queue a segment compute (*spec*), a whole-session one, an extend unit, or a rule sweep."""
         task = CCGTask(spec=spec, load_into_ui=bool(load_into_ui),
                        batch_id=batch_id, resolution=resolution,
-                       session_key=session_key, extend=extend, aux=aux)
+                       session_key=session_key, extend=extend, rule_sweep=rule_sweep)
         return self._runner.enqueue(task)
 
     def on_done(self, completed_task, _result):
         ui, mgr = self._ui, self._mgr
         r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
         name = ('whole session' if completed_task.whole_session
-                else f"aux {completed_task.aux['segment']}" if completed_task.aux
+                else f"rules {completed_task.rule_sweep['segment']}" if completed_task.rule_sweep
                 else f"extend {completed_task.extend['name']}" if completed_task.extend
                 else completed_task.spec.name)
         print(f"[CCGq] on_done {name} {completed_task.resolution} "
@@ -1230,7 +1230,7 @@ class CustomCCGWorker:
             else:
                 QMessageBox.critical(None, "Custom CCG",
                     f"Computation failed:\n{err}")
-        elif completed_task.aux is not None:
+        elif completed_task.rule_sweep is not None:
             if meta is not None:
                 meta['rows'].append((r.session, name, 'ok', r.value))
             if r.session == str(ui.nav.key.session):
@@ -1275,7 +1275,7 @@ class CustomCCGWorker:
             seg_key = task.ccg_key()
 
             name = ('whole session' if task.whole_session
-                    else f"aux {task.aux['segment']}" if task.aux
+                    else f"rules {task.rule_sweep['segment']}" if task.rule_sweep
                     else f"extend {task.extend['name']}" if task.extend
                     else str(task.spec.name))
 
@@ -1284,14 +1284,14 @@ class CustomCCGWorker:
                 import time as _t; _t0 = _t.time()
                 print(f"[CCGq] START {sess} {task.resolution} '{name}'", flush=True)
                 try:
-                    if task.aux is not None:
-                        a = task.aux
-                        results, on = nav.cd.sweep_aux_tests(
-                            task.session_key.change(segment=a['segment']),
-                            tests=a['tests'], overrides=a['overrides'])
-                        store = nav.sd.aux_results(task.session_key, a['segment'])
-                        store.set_results(results, on)
-                        store.save()
+                    if task.rule_sweep is not None:
+                        a = task.rule_sweep
+                        results, swept = nav.cd.sweep_rule_sets(
+                            task.session_key.change(segment=a['segment']), a['plan'])
+                        store = nav.sd.rule_results(task.session_key, a['segment'])
+                        store.set_results(results, a['keep'])
+                        nav.sd.store_results(task.session_key, a['segment'], store)
+                        on = store.arrays[store.ON]
                         idx = tuple(np.array(a['pairs']).T)
                         tally = f"{int(on[idx].sum())}/{len(a['pairs'])} on ({task.session_key.type_label()})"
                         self._thread_result.append(CCGTaskResult(tally, None, sess))
@@ -1536,23 +1536,21 @@ class CustomCCGManager(Savable):
             self.worker._custom_ccg_start_next()
         return queued
 
-    def queue_aux(self, jobs: list, tests: dict, skipped: list, on_done=None,
-                  on_progress=None) -> int:
-        """Queue aux-rule sweeps, one per ``(ptr_key, segment, overrides, pairs)``, on the custom-CCG queue."""
+    def queue_rule_sweeps(self, jobs: list, skipped: list, on_done=None, on_progress=None) -> int:
+        """Queue significance-rule sweeps, one per ``(ptr_key, segment, plan, pairs, kept sets)``, on the custom-CCG queue."""
         ts = self._ui.time_slider
         bid = ts.backend.batch_next_id
         ts.backend.batch_next_id += 1
         queued = 0
-        for key, seg, overrides, pairs in jobs:
+        for key, seg, plan, pairs, keep in jobs:
             if self.worker.enqueue_task(session_key=key, batch_id=bid,
-                                        aux=dict(segment=seg, tests=tests,
-                                                 overrides=overrides, pairs=pairs)):
+                                        rule_sweep=dict(segment=seg, plan=plan, keep=keep, pairs=pairs)):
                 queued += 1
         if queued:
             ts.backend.batch_counts[bid] = queued
             ts.backend.batch_totals[bid] = queued
             meta = ts.backend.batch_meta[bid] = {
-                'spec_name': f"aux rules: {', '.join(tests)}", 'skipped': skipped, 'rows': [],
+                'spec_name': "significance rule sets", 'skipped': skipped, 'rows': [],
                 'on_done': on_done}
             if on_progress is not None:
                 meta['on_progress'] = lambda *_: on_progress(meta['rows'])

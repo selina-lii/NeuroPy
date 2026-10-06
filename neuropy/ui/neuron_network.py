@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -22,6 +22,7 @@ from neuropy.ui.app_state import _ALL_SEGS
 from neuropy.ui.utils import (chip_button, FlowLayout, SliderWithInput,
                               small_font_pt, widget_row)
 from neuropy.analyses.neurons_dataset import Key
+from neuropy.analyses.pair_selection_data import DerivedRule
 
 def _UI_FS() -> str:
     return f'font-size: {small_font_pt()}pt;'
@@ -256,8 +257,7 @@ class NetworkView:
     deleted_inds: set
     group_pairs: set
     group_filter_active: bool
-    hide_same_channel: bool
-    hide_same_shank: bool
+    rule_kept: set | None   # pairs the gray-out rules keep; None = no rule applies
     dark: bool
     fg_muted: str
 
@@ -273,11 +273,6 @@ class NetworkView:
             return False
         return (int(shank_ids[ref]) in self.hidden_shanks
                 or int(shank_ids[tgt]) in self.hidden_shanks)
-
-    def same_shank(self, shank_ids, ref: int, tgt: int) -> bool:
-        if shank_ids is None or ref >= len(shank_ids) or tgt >= len(shank_ids):
-            return False
-        return int(shank_ids[ref]) == int(shank_ids[tgt])
 
     def excluded_by_focus(self, ref: int, tgt: int) -> bool:
         """True when a neuron or pair focus is active and this pair is not in it."""
@@ -333,8 +328,6 @@ class NetworkPanel:
         self._net_arrows:           bool  = True
         self._net_cur_pair:         bool  = True
         self._net_hide:             bool  = False
-        self._net_hide_same_channel: bool = False
-        self._net_hide_same_shank:  bool  = False
         self._net_grp_counts:       bool  = True
         self._net_hzoom:            float = 1.0
         self._net_vzoom:            float = 1.0
@@ -617,10 +610,7 @@ class NetworkPanel:
 
         lines_lay.addWidget(self._row_widget(widget_row(
             self._toggle_chip('Hide', '_net_hide', False), self._pipe(),
-            self._toggle_chip('Same channel', '_net_hide_same_channel', False,
-                              self._on_toggle_hide_same_channel),
-            self._toggle_chip('Same shank', '_net_hide_same_shank', False,
-                              self._on_toggle_hide_same_shank), spacing=4)))
+            *self._location_chips(), spacing=4)))
 
         _, _, grp_body, grp_lay, grp_hdr_lay = self._make_section(layout, 'Groups')
         cb_counts = QCheckBox('Show counts')
@@ -1051,8 +1041,7 @@ class NetworkPanel:
             selected_inds=set(selections.selected) if selections else set(),
             deleted_inds=set(selections.deleted) if selections else set(),
             group_pairs=group_pairs, group_filter_active=group_filter_active,
-            hide_same_channel=self._net_hide_same_channel,
-            hide_same_shank=self._net_hide_same_shank,
+            rule_kept=self.gray_kept(sess_nk if any_mode else ui.key),
             dark=bool(getattr(self._plot_theme, 'dark', False)),
             fg_muted=getattr(self._plot_theme, 'fg_muted', '#555'),
         )
@@ -1230,12 +1219,10 @@ class NetworkPanel:
                         nav_edges: list, same_channel: dict) -> None:
         if view.enabled_cts is not None and entry['conn_type'] not in view.enabled_cts:
             return
-        if view.hide_same_shank and view.same_shank(data.shank_ids, ref, tgt):
+        if view.rule_kept is not None and (ref, tgt) not in view.rule_kept:
             return
         is_same_channel = (data.peak_channels is not None
                            and data.peak_channels[ref] == data.peak_channels[tgt])
-        if view.hide_same_channel and is_same_channel:
-            return
 
         is_current_pair = entry['is_current'] and (ref, tgt) == view.current_pair
         rgba, alpha = self._entry_style(view, entry, ref, tgt, is_current_pair)
@@ -1550,13 +1537,45 @@ class NetworkPanel:
     def _on_zoom(self, _=None):
         self.draw()
 
-    def _on_toggle_hide_same_channel(self):
+    def _location_chips(self) -> list:
+        """Shortcuts for the gray-out rule 'pair > location > same channel/shank is no'."""
+        self._loc_chips = {}
+        for name in DerivedRule.NAMED[DerivedRule.PAIR_LOCATION]:
+            chip = self._loc_chips[name] = chip_button(name.capitalize(), checked=False)
+            chip.toggled.connect(lambda on, n=name: self._on_location_chip(n, on))
+        self._sync_location_chips()
+        return list(self._loc_chips.values())
+
+    def _on_location_chip(self, name: str, on: bool) -> None:
+        book = self.ui.cd.rule_book
+        rules = tuple(r for r in book.gray_rules
+                      if not (r.kind == DerivedRule.PAIR_LOCATION and r.name == name))
+        rules += (DerivedRule(DerivedRule.PAIR_LOCATION, name, ['no']),) if on else ()
+        boxes = book.gray_boxes + (('rules',) if on and 'rules' not in book.gray_boxes else ())
+        self.ui.cd.rule_book = replace(book, gray_rules=rules, gray_boxes=boxes)
+        self.on_gray_changed()
+
+    def on_gray_changed(self) -> None:
+        """After any gray-out edit: chips mirror the rules, then the network and lists redraw."""
+        self._sync_location_chips()
         self.draw()
         self.ui.refresh_lists()
 
-    def _on_toggle_hide_same_shank(self):
-        self.draw()
-        self.ui.refresh_lists()
+    def _sync_location_chips(self) -> None:
+        book = self.ui.cd.rule_book
+        for name, chip in self._loc_chips.items():
+            chip.blockSignals(True)
+            chip.setChecked('rules' in book.gray_boxes and any(
+                r.kind == DerivedRule.PAIR_LOCATION and r.name == name and r.values == ['no']
+                for r in book.gray_rules))
+            chip.blockSignals(False)
+
+    def gray_kept(self, key) -> set | None:
+        """Pairs of *key*'s session the gray-out rules keep; None when the rules box is off or empty."""
+        book = self.ui.cd.rule_book
+        if 'rules' not in book.gray_boxes or not book.gray_rules:
+            return None
+        return self.ui.sd.groups.derived.rule_based_filter(list(book.gray_rules), str(key.session))
 
     def _on_group_toggle(self, _g):
         self.draw()
@@ -1973,46 +1992,25 @@ class NetworkPanel:
         return f'{self._shank_label(inds[0])}→{self._shank_label(inds[1])}'
 
     def build_should_gray(self, any_mode: bool) -> callable:
-        fn = self._focused_neuron
-        fp = self._focused_pair
-        hide_shank   = self._net_hide_same_shank
-        hide_channel = self._net_hide_same_channel
-
-        def _meta(neurons):
-            return (getattr(neurons, 'peak_channels', None) if neurons else None,
-                    getattr(neurons, 'shank_ids',     None) if neurons else None)
-
-        cur_peak, cur_shank = _meta(self.ui.neurons)
-        cache: dict = {}   # nd_key → (peak_channels, shank_ids), for any_mode
+        """The one gray-out entry: a pair grays unless every checked box in Manage Pair Groups keeps it."""
+        boxes = set(self.ui.cd.rule_book.gray_boxes)
+        fn, fp = self._focused_neuron, self._focused_pair
         admitted = self.ui.root.neuron_selections.is_selected
+        kept: dict = {}   # session -> gray_kept
 
         def _gray(inds) -> bool:
-            if any_mode:
-                nd_key = inds[0].nd()
-                meta = cache.get(nd_key)
-                if meta is None:
-                    cache[nd_key] = meta = _meta(self.ui.cd.nd.neurons_for(nd_key))
-                peak_channels, shank_ids = meta
-                ref_i, tgt_i = int(inds[1]), int(inds[2])
-                key = nd_key
-            else:
-                peak_channels, shank_ids = cur_peak, cur_shank
-                ref_i, tgt_i = int(inds[0]), int(inds[1])
-                key = self.ui.key
-            pair  = (ref_i, tgt_i)
-            if not all(admitted(key.change(ref=nid))
-                       for nid in self.ui.cd.nd.ids_at(key.change(ref=ref_i, tgt=tgt_i))):
+            key = inds[0].nd() if any_mode else self.ui.key
+            pair = (int(inds[-2]), int(inds[-1]))
+            sess = str(key.session)
+            if sess not in kept:
+                kept[sess] = self.gray_kept(key)
+            if kept[sess] is not None and pair not in kept[sess]:
                 return True
-            if fn is not None and ref_i != fn and tgt_i != fn:
+            if 'network focus' in boxes and ((fn is not None and fn not in pair)
+                                             or (fp is not None and pair != fp)):
                 return True
-            if fp is not None and pair != fp:
-                return True
-            if hide_shank and shank_ids is not None:
-                if int(shank_ids[ref_i]) == int(shank_ids[tgt_i]):
-                    return True
-            if hide_channel and peak_channels is not None:
-                if int(peak_channels[ref_i]) == int(peak_channels[tgt_i]):
-                    return True
-            return False
+            return 'neuron selection' in boxes and not all(
+                admitted(key.change(ref=nid))
+                for nid in self.ui.cd.nd.ids_at(key.change(ref=pair[0], tgt=pair[1])))
 
         return _gray

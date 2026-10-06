@@ -7,19 +7,20 @@ from neuropy.analyses.neuron_tags import NeuronTagSet
 from neuropy.analyses.pair_selection_data import NeuronSelections
 
 
-def load_tags(cd) -> NeuronTagSet:
+def load_tags(cd, sd) -> NeuronTagSet:
     """The project's gradient specs, restored when they have been saved before."""
     tags = NeuronTagSet(save_dir=str(cd.nd.neuron_dir(cd.save_path)))
-    tags.bind(cd)
+    tags.bind(cd, sd)
     if os.path.isfile(tags.save_path() + '.json'):
         tags.load()
-        tags.bind(cd)
+        tags.bind(cd, sd)
+    tags.add_stable_spec()
     return tags
 
 
 def install(ui) -> NeuronTagSet:
     """Give *ui* its tag set and its neuron groups; Manage Groups holds the editors."""
-    ui.neuron_tags = load_tags(ui.nav.cd)
+    ui.neuron_tags = load_tags(ui.nav.cd, ui.nav.sd)
     ui.neuron_groups = ui.nav.sd.neuron_groups
     ui.neuron_selections = NeuronSelections(ui.nav.cd)
     return ui.neuron_tags

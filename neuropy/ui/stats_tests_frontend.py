@@ -5,6 +5,7 @@ Widgets are the source of truth; configs are snapshots taken at run/save.
 from __future__ import annotations
 
 import datetime
+from functools import partial
 import pathlib
 from typing import TYPE_CHECKING
 
@@ -14,15 +15,15 @@ from matplotlib.figure import Figure
 from pyqtgraph.Qt import QtWidgets
 from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
 from pyqtgraph.Qt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel, QLineEdit,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QCheckBox, QPlainTextEdit,
-    QScrollArea, QFrame, QMessageBox, QSizePolicy,
+    QScrollArea, QFrame, QMessageBox, QSizePolicy, QTabWidget,
 )
 from neuropy.ui.utils import (ConfigBound, ScopeField, ScopePicker, make_combo, make_button,
                               ColorLabelButton, sync_follow_column, widget_row)
-from neuropy.analyses.utils import group_display
-from neuropy.ui.ui_common import qt_dark_mode
-from neuropy.ui.dialogs import VersionSaveDialog, VersionLoadDialog
+from neuropy.ui.ui_common import qt_dark_mode, UITheme
+from neuropy.ui.dialogs import RulePickerButton, VersionSaveDialog, VersionLoadDialog
+from neuropy.analyses.pair_selection_data import DerivedRule
 from neuropy.ui.app_state import DisplayConfig
 from neuropy.ui.ccg_panel import NormSection, BaselineCSSection
 from neuropy.ui.stats_tests_backend import (
@@ -46,6 +47,7 @@ class StatsPlotWidget(QWidget, ConfigBound):
         'violin':       (lambda w: w._violin_check.isChecked(),   lambda w, v: w._violin_check.setChecked(v)),
         'outliers':     (lambda w: w._outliers_check.isChecked(), lambda w, v: w._outliers_check.setChecked(v)),
         'sig_brackets': (lambda w: w._sig_check.isChecked(),      lambda w, v: w._sig_check.setChecked(v)),
+        'show_n':       (lambda w: w._n_check.isChecked(),        lambda w, v: w._n_check.setChecked(v)),
         'wh_ratio':     (lambda w: w._wh_input.text().strip(),    lambda w, v: w._wh_input.setText(v)),
     }
 
@@ -60,8 +62,10 @@ class StatsPlotWidget(QWidget, ConfigBound):
         self._violin_check   = QCheckBox("Violin")
         self._outliers_check = QCheckBox("Show outliers")
         self._sig_check      = QCheckBox("Sig. brackets")
+        self._n_check        = QCheckBox("n in title")
         self._outliers_check.setChecked(True)
-        for chk in (self._violin_check, self._outliers_check, self._sig_check):
+        self._n_check.setChecked(True)
+        for chk in (self._violin_check, self._outliers_check, self._sig_check, self._n_check):
             chk.toggled.connect(self._replot)
             ctrl.addWidget(chk)
         self._rm_outliers_check = QCheckBox("Remove outliers")
@@ -96,7 +100,7 @@ class StatsPlotWidget(QWidget, ConfigBound):
 
     def apply_theme(self):
         """Repaint the matplotlib canvas for the current light/dark palette."""
-        self._fig.patch.set_facecolor('#2b2b2b' if qt_dark_mode() else 'white')
+        self._fig.patch.set_facecolor(UITheme.from_dark(qt_dark_mode()).plot_bg)
         if self._results:
             self._update_plot()
         else:
@@ -163,7 +167,7 @@ class StatsRow(QWidget, ConfigBound):
             [ScopeField(rkey, label, plural, getattr(backend, prov_attr),
                         single=rkey in SINGLE_PICKERS, followable=True,
                         disabled=DISABLED_METRICS if rkey in SINGLE_PICKERS else (),
-                        display=group_display if rkey == 'grp' else None)
+                        picker=partial(RulePickerButton, nav) if rkey == 'grp' else None)
              for rkey, (_fld, label, plural, prov_attr) in PICKERS.items()], labelled=False)
         self._pickers = self._scope.pickers
         for p in self._pickers.values():
@@ -195,8 +199,8 @@ class StatsRow(QWidget, ConfigBound):
             self._pickers['sess'].set_selected([key_sess])
         if ct_lbl and ct_lbl in self._pickers['ct']._items:
             self._pickers['ct'].set_selected([ct_lbl])
-        if len(grp_opts) > 1:
-            self._pickers['grp'].set_selected([grp_opts[1]])
+        if grp_opts:
+            self._pickers['grp'].set_selected([DerivedRule(values=[grp_opts[0]])])
         self._pickers['data'].set_selected([next(iter(METRICS))])
 
 
@@ -222,7 +226,9 @@ class _StatsWorker(QObject):
 
 
 class StatsTestPanel(QWidget, ConfigBound):
-    """Persistent floating stats-test panel: top controls, group rows, result plot."""
+    """One stats test: top controls, group rows, result plot."""
+
+    renamed = Signal(str)
 
     _CONFIG = StatsTestConfig
     _BIND = {
@@ -237,7 +243,7 @@ class StatsTestPanel(QWidget, ConfigBound):
     }
 
     def __init__(self, nav: 'AppState', parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+        super().__init__(parent)
         self.nav = nav
         self.backend = StatsTestBackend(nav.cd, nav.sd,
                                         display=nav.get_display_config())
@@ -247,8 +253,6 @@ class StatsTestPanel(QWidget, ConfigBound):
         self._loaded_name = ''
         self._thread = self._worker = None
 
-        self.setWindowTitle("Stats Tests")
-        self.resize(1100, 580)
         self._build()
         self._connect_nav()
         self._add_row()
@@ -315,36 +319,38 @@ class StatsTestPanel(QWidget, ConfigBound):
         res_root = QVBoxLayout(res_frame)
         res_root.setContentsMargins(4, 4, 4, 4)
 
-        self._splitter = QSplitter(Qt.Orientation.Vertical)
-        self._splitter.setChildrenCollapsible(False)
         self._result_text = QPlainTextEdit()
         self._result_text.setReadOnly(True)
         self._result_text.setFont(QtWidgets.QApplication.font())
         self._result_text.setMinimumHeight(80)
-        self._splitter.addWidget(self._result_text)
+        res_root.addWidget(self._result_text)
+        root.addWidget(res_frame, stretch=1)
+
         self._plot = StatsPlotWidget()
         self._plot.rerun_requested.connect(lambda: self.results and self._run())
-        self._splitter.addWidget(self._plot)
-        self._splitter.setStretchFactor(0, 1)
-        self._splitter.setStretchFactor(1, 3)
-        self._splitter.splitterMoved.connect(lambda *_: self._plot.refresh_plot())
-        res_root.addWidget(self._splitter)
-        root.addWidget(res_frame, stretch=1)
+        self._plot_win = QDialog(self)
+        self._plot_win.setWindowTitle("Stats plot")
+        self._plot_win.resize(1000, 800)
+        QVBoxLayout(self._plot_win).addWidget(self._plot)
 
         self._export_btn = make_button("Save…", self._export)
         self._export_btn.setEnabled(False)
-        btn_row = widget_row(make_button("Run", self._run), self._export_btn,
+        self._plot_btn = make_button("Plot…", self._on_plot_btn)
+        self._plot_btn.setEnabled(False)
+        btn_row = widget_row(make_button("Run", self._run), self._plot_btn, self._export_btn,
                              make_button("Load…", self._load_result))
         root.addLayout(btn_row)
 
     def _connect_nav(self):
-        self.nav.key_changed.connect(lambda _: self._refresh_rows())
-        self.nav.custom_segs_changed.connect(self._refresh_rows)
+        # bound methods, not lambdas: Qt drops them when a closed tab is deleted
+        for sig in (self.nav.key_changed, self.nav.custom_segs_changed,
+                    self.nav.groups.changed, self.nav.selection_changed):
+            sig.connect(self._refresh_rows)
+        self.nav.groups_rewired.connect(self._on_groups_rewired)
+
+    def _on_groups_rewired(self):
+        """A project switch replaces sd.groups, taking its connections with it."""
         self.nav.groups.changed.connect(self._refresh_rows)
-        self.nav.selection_changed.connect(self._refresh_rows)
-        # A project switch replaces sd.groups, taking its connections with it.
-        self.nav.groups_rewired.connect(
-            lambda: self.nav.groups.changed.connect(self._refresh_rows))
 
     # -- rows ----------------------------------------------------------------
     def _add_row(self, cfg: RowConfig | None = None):
@@ -368,7 +374,7 @@ class StatsTestPanel(QWidget, ConfigBound):
         for rkey in PICKERS:
             sync_follow_column([r._pickers[rkey] for r in self._rows])
 
-    def _refresh_rows(self):
+    def _refresh_rows(self, *_):
         for r in self._rows:
             r.refresh()
 
@@ -418,7 +424,7 @@ class StatsTestPanel(QWidget, ConfigBound):
         self._teardown_run()
         self._warn_missing_segments()
         self._show_result(self.backend.result_text())
-        self._plot.render(self.results)
+        self._show_plot()
         self._export_btn.setEnabled(True)
 
     def _on_run_failed(self, msg: str):
@@ -443,14 +449,22 @@ class StatsTestPanel(QWidget, ConfigBound):
     def apply_theme(self):
         self._plot.apply_theme()
 
+    def _show_plot(self):
+        self._plot.render(self.results)
+        self._plot_btn.setEnabled(True)
+        self._on_plot_btn()
+
+    def _on_plot_btn(self):
+        self._plot_win.show()
+        self._plot_win.raise_()
+
     def _show_result(self, text: str):
         self._result_text.setPlainText(text)
 
     # -- save / load ---------------------------------------------------------
     def _widget_state(self) -> dict:
         """The part of a saved result the backend cannot know: live widget geometry and nav display."""
-        return dict(splitter_sizes=list(self._splitter.sizes()),
-                    display=self.nav.get_display_config().serialize())
+        return dict(display=self.nav.get_display_config().serialize())
 
     def _apply_bundle(self, d: dict):
         """Drive the widgets from a bundle the backend has already parsed."""
@@ -468,9 +482,6 @@ class StatsTestPanel(QWidget, ConfigBound):
         self._plot.blockSignals(True)
         self._plot.apply(self.backend.view_config)
         self._plot.blockSignals(False)
-        sizes = d.get('splitter_sizes')
-        if sizes and len(sizes) == 2:
-            self._splitter.setSizes(sizes)
 
     def _export(self):
         if not self.results:
@@ -480,6 +491,7 @@ class StatsTestPanel(QWidget, ConfigBound):
             self._sync_backend()
             self.backend.save(name, **self._widget_state())
             self._loaded_name = name
+            self.renamed.emit(name)
         VersionSaveDialog.show(self, "Save Stats Result", default, on_save=_do_save)
 
     def _load_result(self):
@@ -490,10 +502,47 @@ class StatsTestPanel(QWidget, ConfigBound):
                 self.backend.test_config = self.test_config
                 self._plot.test_config = self.test_config
                 self._show_result(self.backend.result_text(self.results))
-                self._plot.render(self.results)
+                self._show_plot()
                 self._export_btn.setEnabled(True)
                 self._loaded_name = pathlib.Path(path).stem
+                self.renamed.emit(self._loaded_name)
             except Exception as exc:
                 QMessageBox.warning(self, "Load failed", str(exc))
         VersionLoadDialog.show(self, "Load Stats Result", self.backend.saved_results(),
                                on_load=_do_load, empty_msg="No saved stats results found.")
+
+
+class StatsTestTabs(QTabWidget):
+    """Floating window of stats tests as browser-style tabs: '+' opens one, x closes one."""
+
+    def __init__(self, nav: 'AppState', parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.nav = nav
+        self._opened = 0
+        self.setWindowTitle("Stats Tests")
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.setCornerWidget(make_button("+", self._on_new_tab_btn, width=28), Qt.Corner.TopRightCorner)
+        self.tabCloseRequested.connect(self._on_close_tab)
+        self._on_new_tab_btn()
+
+    def _on_new_tab_btn(self) -> None:
+        self._opened += 1
+        panel = StatsTestPanel(self.nav)
+        panel.renamed.connect(lambda name: self.setTabText(self.indexOf(panel), name))
+        self.setCurrentIndex(self.addTab(panel, f"Test {self._opened}"))
+
+    def _on_close_tab(self, i: int) -> None:
+        panel = self.widget(i)
+        if panel._thread is not None:   # a running QThread must finish before its owner dies
+            return
+        self.removeTab(i)
+        panel.deleteLater()
+        if not self.count():
+            self._on_new_tab_btn()
+
+    def apply_theme(self) -> None:
+        for i in range(self.count()):
+            self.widget(i).apply_theme()

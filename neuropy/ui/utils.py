@@ -198,7 +198,11 @@ class PairListWidget(QListWidget):
         mods = event.modifiers()   # per-event modifiers: reliable on macOS, unlike the global state
         primary = has_primary_modifier(mods)
 
+        if key == Qt.Key_Space and self._panel.slide_pick():
+            return
         if key in (Qt.Key_Up, Qt.Key_Down):
+            if self._panel.slide_thru_ccg_deck(self, key, event.isAutoRepeat()):
+                return
             super().keyPressEvent(event)
             self._panel._on_arrow_key()
             return
@@ -495,6 +499,14 @@ class MetricInput(QWidget):
             self.unit_combo.setCurrentText(unit)
 
 
+MOVE_STEPS = (('⤒', -10**6), ('▲', -1), ('▼', 1), ('⤓', 10**6))   # top, up, down, bottom
+
+
+def move_buttons(on_step) -> list:
+    """Top/up/down/bottom buttons, each calling *on_step* with its shift (pairs with analyses.utils.moved)."""
+    return [make_button(text, lambda *_, s=step: on_step(s), width=28) for text, step in MOVE_STEPS]
+
+
 def make_button(text: str, slot, width: int = None) -> 'QPushButton':
     """QPushButton wired to slot, optionally fixed-width."""
     b = QPushButton(text)
@@ -726,6 +738,7 @@ class ScopeField:
     select_all_when_empty: bool = True
     all_option: bool = False   # lead with '(all)'; it, or nothing picked, reads as every option
     display: Callable = None   # item -> (section, shown text); see ListPickerButton
+    picker: Callable = None    # ListPickerButton subclass factory, e.g. a rule picker; None = plain list
 
 
 ALL_OPTION = '(all)'
@@ -745,7 +758,7 @@ class ScopePicker(QWidget):
         self.pickers: dict = {}
         for f in fields_:
             items = self._items_of(f)
-            p = ListPickerButton(f.label, items(), plural=f.plural, refresh_provider=items,
+            p = (f.picker or ListPickerButton)(f.label, items(), plural=f.plural, refresh_provider=items,
                                  select_all_when_empty=f.select_all_when_empty,
                                  add_name=f.add_name, followable=f.followable,
                                  single=f.single, disabled_items=f.disabled, display=f.display)
@@ -844,7 +857,7 @@ _OPTION_KINDS = {
 class ConfigOptionsWidget(QGroupBox):
     """Form built from a Config subclass's _options; values() feeds its constructor."""
 
-    def __init__(self, conf_cls, title: str = None, parent=None):
+    def __init__(self, conf_cls, title: str = None, parent=None, names: tuple = None):
         super().__init__(title or conf_cls.__name__, parent)
         self.conf_cls = conf_cls
         self._rows = {}     # init-param name -> (reader, widget)
@@ -853,6 +866,8 @@ class ConfigOptionsWidget(QGroupBox):
         form = QVBoxLayout(self)
         form.setSpacing(3)
         for name, (kind, choices) in conf_cls._options.items():
+            if names is not None and name not in names:
+                continue
             make, read = _OPTION_KINDS[kind]
             w = make(choices, defaults.get(name), name)
             row = QHBoxLayout()
@@ -1233,12 +1248,13 @@ def row_chips(groups, key) -> list:
             for name, color in groups.chips_for_member(key)]
 
 
-def derived_chips(groups, key) -> list:
-    """Pills for the derived groups holding a pair, after a bare '|' that sets them apart."""
-    names = groups.derived.groups_for_pair(str(key.session), key.ref, key.tgt)
+def derived_chips(groups, key, automated: list = ()) -> list:
+    """Pills for the automated tags (derived groups, *automated* ``(name, colour)``) on a pair, after a bare '|' that sets them apart."""
+    tags = [(group_display(g)[1], '') for g in groups.derived.groups_for_pair(str(key.session), key.ref, key.tgt)]
+    tags += list(automated)
     clear = QColor(Qt.transparent)
-    return ([('|', clear, QColor('#888'), clear)] * bool(names)
-            + [(group_display(g)[1], *TagChip.tint('')) for g in names])
+    return ([('|', clear, QColor('#888'), clear)] * bool(tags)
+            + [(n, *TagChip.tint(color)) for n, color in tags])
 
 
 TRACE_COLOR = '#4a7fd4'        # the main series, light theme
@@ -1505,6 +1521,15 @@ class SideNavPanel(QWidget):
             self.nav_list.setCurrentRow(0)
         return idx
 
+    def add_action_row(self, label: str, slot) -> None:
+        """A row that runs *slot* when clicked instead of showing a page; a blank page keeps rows and pages aligned."""
+        item = QListWidgetItem(label)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setForeground(Qt.GlobalColor.gray)
+        self.nav_list.addItem(item)
+        self.stack.addWidget(QWidget())
+        self.nav_list.itemClicked.connect(lambda it: it is item and slot())
+
     def add_divider(self) -> None:
         """A non-selectable rule; the stack gets a filler so row and page stay aligned."""
         item = QListWidgetItem()
@@ -1526,10 +1551,8 @@ class SideNavPanel(QWidget):
 class ArrowChipBar(QWidget):
     """[arrowed chip bar] ◀ [chips] ▶ — horizontal scroll row for chip widgets."""
 
-    def __init__(self, parent=None, height: int = 22, on_left=None, on_right=None):
+    def __init__(self, parent=None, height: int = 22):
         super().__init__(parent)
-        self._on_left = on_left     # if set, ◀ calls this instead of scrolling
-        self._on_right = on_right   # if set, ▶ calls this instead of scrolling
         self.setMaximumHeight(height + 4)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1557,10 +1580,11 @@ class ArrowChipBar(QWidget):
         self._right.setText('▶')
         self._right.setFixedHeight(height)
         root.addWidget(self._right)
-        self._left.clicked.connect(
-            lambda: self._on_left() if self._on_left else self._scroll(-80))
-        self._right.clicked.connect(
-            lambda: self._on_right() if self._on_right else self._scroll(80))
+        self._left.clicked.connect(lambda: self._scroll(-80))
+        self._right.clicked.connect(lambda: self._scroll(80))
+
+    def ensure_visible(self, w: QWidget) -> None:
+        self._scroll_area.ensureWidgetVisible(w)
 
     def _scroll(self, delta: int):
         bar = self._scroll_area.horizontalScrollBar()

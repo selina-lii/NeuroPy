@@ -173,7 +173,6 @@ class AppState(QObject):
         self._cross_session_handles = []
         self._all_pairs_np = np.empty((0, 2), dtype=int)
         self._chip_color_source = None
-        self._aux_grid_cache = None
         self._all_session_bucket = _SelectionData()
         self.set_sd(SelectionDataset(cd))
         self._active_sig_threshold = cd.conf.alpha
@@ -188,6 +187,8 @@ class AppState(QObject):
         self._view = PAIR_VIEW
         self._view_rows: dict = {}   # each view keeps its own row across switches
         self.together_pairs: list = []
+        self.slideshow = False        # a pair list is auto-playing: draw only the CCG and baseline
+        self.show_all_pairs = False   # Available lists every pair of the conn type, not just pointer pairs
         self.bookmarked_pairs: set = set()
         self.any_expanded_group_tags: set = set()
 
@@ -437,6 +438,11 @@ class AppState(QObject):
         self._chip_color_source = fn
         self.chip_colors_changed.emit()
 
+    @property
+    def pair_ptr_key(self) -> Key:
+        """The current pair's own session/conn-type key: in all-session mode it is not nav.key."""
+        return self.current_pair[0] if self.session_any_mode and self.current_pair is not None else self.key
+
     def chip_color(self, ref: int, tgt: int, seg: int) -> str | None:
         """Chip background for one pair in one segment, or None to leave the default."""
         if self._chip_color_source is not None:
@@ -444,51 +450,28 @@ class AppState(QObject):
         manual = self.seg_manual_state(ref, tgt, seg)
         if manual is not None:
             return SEG_ON_COLOR if manual else SEG_OFF_COLOR
-        sweep = self._aux_grid(seg)
-        # an enabled p-value rule is the gate itself, so its raw/corrected choice takes effect
-        gate = (bool(sweep[0]['p_value'][1][ref, tgt]) if sweep and 'p_value' in sweep[0]
-                else self.is_significant(ref, tgt, seg))
-        if not gate:
+        if not self.is_significant(ref, tgt, seg):
             return None
-        return SIG_CHIP_COLOR if sweep is None or sweep[1][ref, tgt] else SEG_OFF_COLOR
-
-    def _aux_grid(self, seg: int):
-        """``(results, on)`` of the enabled rules for one segment, cached: one sweep serves every chip."""
         names = self.segment_names()
-        if seg >= len(names):
-            return None
-        specs = self.cd.aux_test_config.specs()
-        if not specs:
-            return None
-        seg_name = names[seg]
-        stamp = (self.key.nd(), self.data_resolution, seg_name, repr(sorted(specs.items())))
-        if self._aux_grid_cache is None or self._aux_grid_cache[0] != stamp:
-            # no overrides: seg_manual_state already outranks the rules in chip_color
-            grid = self.cd.sweep_aux_tests(self.key.change(segment=seg_name), tests=specs)
-            self._aux_grid_cache = (stamp, grid)
-        return self._aux_grid_cache[1]
+        on = self.sd.on_verdict(self.pair_ptr_key, names[seg]) if seg < len(names) else None
+        return SIG_CHIP_COLOR if on is None or on[ref, tgt] else SEG_OFF_COLOR   # the on page's last Apply
 
     def seg_manual_state(self, ref: int, tgt: int, seg: int) -> bool | None:
         """A hand-set on/off for this pair in segment *seg*, or None when the tests decide."""
         names = self.segment_names()
         if seg >= len(names):
             return None
-        return self.sd.seg_groups.pair_off(
-            self.current_session_str, names[seg], (ref, tgt))
+        return self.sd.seg_groups.pair_off(str(self.pair_ptr_key.session), names[seg], (ref, tgt))
 
     def is_significant(self, ref: int, tgt: int, seg: int) -> bool:
-        data = self.ccg_data
+        """The default screen for one pair in segment *seg*, always on lowres."""
         names = self.segment_names()
-        if data is None or seg >= len(names):
+        if seg >= len(names):
             return False
+        key = self.pair_ptr_key.change(resolution='lowres', segment=names[seg])
+        data = self.cd.ccg_for(key)
         # the UI list and this array's dim0 are built separately; go by label, not index
-        row = data.segment_index(names[seg])
-        lb = data.conf.min_lag_bin
-        ub = data.conf.max_lag_bin
-        pc = data.pval_corrected
-        if pc is not None and row < pc.shape[0] and ref < pc.shape[1] and tgt < pc.shape[2]:
-            return bool(pc[row, ref, tgt, lb:ub].min() <= self.active_sig_threshold)
-        return False
+        return bool(data.screened(data.segment_index(names[seg]), key.excitability)[ref, tgt])
 
     @property
     def data_resolution(self) -> str:
@@ -697,18 +680,22 @@ class AppState(QObject):
             if not is_special_group(g)
             and (k.ref, k.tgt) in self.groups.pairs_in_group(g, k.session)))
 
-    def selected_sections(self, sort_mode: str) -> list:
-        """Ordered (header|None, [inds]) sections of the selected pairs for a sort mode.
+    def shown_rule_sets(self, inds) -> list:
+        """``[(rule set, colour)]`` the pair passed in the swept 'all' segment, for the sets whose tag is shown."""
+        k = self.key_for_pair(inds)
+        sets = {r.name: r for r in self.cd.rule_book.later_sets() if r.shown}
+        return [(n, sets[n].color) for n in self.groups.derived.passed_rule_sets(str(k.session), (k.ref, k.tgt))
+                if n in sets]
 
-        sort_mode in {'mean','minp','group','tag','plain'}. Pure data ordering; the
-        panel only renders the returned sections.
-        """
-        selected = self.active_selections.selected
+    def pair_sections(self, pairs, sort_mode: str) -> list:
+        """Ordered (header|None, [inds]) sections of *pairs* for a sort mode in {'mean','minp','group','tag','rule','plain'}."""
+        selected = pairs
         if sort_mode in ('mean', 'minp'):
             ccg_d = self.ccg_data
             if ccg_d is not None:
                 seg = self.segment_index(self.current_segment)
-                metric = ccg_d.mean_ccg if sort_mode == 'mean' else ccg_d.min_pval
+                metric = (ccg_d.mean_ccg if sort_mode == 'mean' else
+                          lambda r, t, s: ccg_d.min_pval(r, t, s, self.key.excitability))
                 order = sorted(selected,
                                key=lambda p: metric(int(p[0]), int(p[1]), seg),
                                reverse=(sort_mode == 'mean'))
@@ -747,6 +734,16 @@ class AppState(QObject):
                 sections.append(('(untagged)', untagged))
             return sections
 
+        if sort_mode == 'rule':
+            buckets, none = _defaultdict(list), []
+            for inds in sorted(selected):
+                names = [n for n, _c in self.shown_rule_sets(inds)]
+                for n in names:
+                    buckets[n].append(inds)
+                none += [inds] * (not names)
+            order = [r.name for r in self.cd.rule_book.later_sets() if r.name in buckets]
+            return [(n, buckets[n]) for n in order] + ([('(no rule set)', none)] if none else [])
+
         return [(None, sorted(selected))]
 
     def key_for_pair(self, inds) -> 'Key':
@@ -771,7 +768,8 @@ class AppState(QObject):
 
     def _pairs_for_ptr_key(self, key) -> set:
         ptr = self.cd.ptr.get(key.ptr())
-        return ptr.pair_set if ptr is not None else set()
+        pairs = ptr.pair_set if ptr is not None else set()
+        return pairs | self.cd.type_pairs(key) if self.show_all_pairs else pairs
 
     def apply_sel_for_key(self, key=None):
         key = key or self.key

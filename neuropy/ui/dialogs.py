@@ -7,6 +7,8 @@ import os
 import pkgutil
 import shutil
 from collections import Counter
+from dataclasses import replace
+from functools import partial
 from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
@@ -21,18 +23,17 @@ from pyqtgraph.Qt.QtWidgets import (
     QScrollArea, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
     QAbstractItemView, QFrame, QComboBox, QInputDialog, QFileDialog,
 )
-from pyqtgraph.Qt.QtGui import QFont, QColor
-from neuropy.analyses.view_spec import NEURON_VIEW
+from pyqtgraph.Qt.QtGui import QFont, QColor, QCursor
 from neuropy.ui.group_manager import GroupManagerPage
 from neuropy.ui.neuron_tag_ui import NeuronTagPage
 from neuropy.ui.neuron_tags_frontend import NeuronTagsPanel
 from neuropy.ui.ui_common import area_rgb, cell_areas, _SPECIAL_PREFIX
 from neuropy.analyses.ms_connectivity import CCGConfig, ProjectConfig
-from neuropy.analyses.ccg_transforms import ConnectionStrength
-from neuropy.analyses.pair_selection_data import DerivedRule, SegmentGroups
-from neuropy.analyses.utils import DERIVED_PREFIX, group_display
+from neuropy.analyses.ccg_transforms import SignificanceRule, Rules, ConnectionStrength
+from neuropy.analyses.pair_selection_data import RuleBook, RuleSet, DerivedRule, SegmentGroups
+from neuropy.analyses.utils import DERIVED_PREFIX, group_display, moved
 
-AUX_TESTS = tuple(ConnectionStrength.AUX_TESTS)
+RULE_TESTS = tuple(ConnectionStrength.RULE_TESTS)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDatasetConfig
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io import datasets
@@ -40,8 +41,8 @@ from neuropy.io.fieldmap import Field, FieldMap, OPTIONAL
 from neuropy.io.nwbio import NWB_DEFAULT, UNITS_SCHEMA, NWBFile
 
 from neuropy.ui.utils import (ConfigOptionsWidget, FlowLayout, MetricInput, SideNavPanel,
-                              ListPickerButton, RangeListWidget, ScopeField, ScopePicker,
-                              ValueMapEditor, chip_button, make_button, ColorLabelButton,
+                              ListPickerButton, RangeListWidget, ScopeField, ScopePicker, ALL_OPTION,
+                              ValueMapEditor, chip_button, make_button, move_buttons, MOVE_STEPS, ColorLabelButton, widget_row,
                               prompt_name, regular_font_pt, small_font_pt, ExplicitCloseDialog)
 
 if TYPE_CHECKING:
@@ -95,6 +96,7 @@ class CreateGroupDialog(QDialog):
         self.sel_data = sel_data
         self._group_mgr = group_mgr
         self._groups = group_mgr.ui.groups
+        self.created = None
         self.setWindowTitle("Create Group")
         self.setFixedSize(320, 130)
         self._build()
@@ -128,56 +130,82 @@ class CreateGroupDialog(QDialog):
             return
         self._groups.get_group_metadata(full)
         self._groups.changed.emit()
+        self.created = full
         self.accept()
 
     @classmethod
     def show(cls, sel_data: 'SelectionData', group_mgr: 'PairSelectionPanel',
-             parent=None):
+             parent=None) -> str | None:
+        """The new group's name, or None when cancelled."""
         dlg = cls(sel_data, group_mgr, parent)
         dlg.exec()
+        return dlg.created
 
 
 class DerivedRuleRow(QWidget):
-    """One rule: pair tag is any of the picked tags, or a neuron tag is any of the picked labels."""
+    """One rule as cascaded combos: subject (pair/neuron), then what of it is tested."""
 
     def __init__(self, nav: 'AppState', rule: DerivedRule = None, parent=None):
         super().__init__(parent)
         self.nav = nav
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        self._kind, self._name, self._side = QComboBox(), QComboBox(), QComboBox()
-        self._kind.addItems(DerivedRule.KINDS)
-        self._name.addItems(nav.cd.nd.tag_names)
+        self._subject, self._field = QComboBox(), QComboBox()
+        self._name, self._side = QComboBox(), QComboBox()
+        self._subject.addItems(list(dict.fromkeys(DerivedRule.split(k)[0] for k in DerivedRule.KINDS)))
         self._side.addItems(DerivedRule.SIDES)
         self._values = ListPickerButton("is", plural="values", select_all_when_empty=False,
                                         display=group_display)
-        self._kind.currentTextChanged.connect(self._on_kind_combo)
+        self._subject.currentTextChanged.connect(self._on_subject_combo)
+        self._field.currentTextChanged.connect(self._on_field_combo)
         self._name.currentTextChanged.connect(self._on_name_combo)
-        for w in (self._kind, self._side, self._name, self._values):
+        for w in (self._subject, self._field, self._side, self._name, self._values):
             row.addWidget(w)
         row.addWidget(make_button("x", self.deleteLater, width=22))
-        self._on_kind_combo(self._kind.currentText())
+        self._on_subject_combo(self._subject.currentText())
         if rule is not None:
-            self._kind.setCurrentText(rule.kind)
+            subject, field = DerivedRule.split(rule.kind)
+            self._subject.setCurrentText(subject)
+            self._field.setCurrentText(field)
             self._name.setCurrentText(rule.name)
             self._side.setCurrentText(rule.side)
             self._values.set_selected(rule.values)
 
-    def _on_kind_combo(self, kind: str) -> None:
-        neuron = kind == DerivedRule.NEURON_TAG
-        self._name.setVisible(neuron)
-        self._side.setVisible(neuron)
+    @property
+    def kind(self) -> str:
+        return f"{self._subject.currentText()} {self._field.currentText()}"
+
+    def _on_subject_combo(self, subject: str) -> None:
+        self._field.blockSignals(True)
+        self._field.clear()
+        self._field.addItems([f for s, f in map(DerivedRule.split, DerivedRule.KINDS) if s == subject])
+        self._field.blockSignals(False)
+        self._side.setVisible(subject == 'neuron')
+        self._on_field_combo()
+
+    def _on_field_combo(self, *_) -> None:
+        names = {DerivedRule.NEURON_TAG: self.nav.cd.nd.tag_names,
+                 DerivedRule.PAIR_SIGNIFICANCE: [r.name for r in self.nav.cd.rule_book.later_sets()],
+                 **DerivedRule.NAMED}.get(self.kind, ())
+        self._name.blockSignals(True)
+        self._name.clear()
+        self._name.addItems(list(names))
+        self._name.blockSignals(False)
+        self._name.setVisible(bool(names))
         self._on_name_combo()
 
     def _on_name_combo(self, *_) -> None:
         groups = self.nav.sd.groups
-        self._values.set_items(self.nav.cd.nd.tag_labels(self._name.currentText())
-                               if self._kind.currentText() == DerivedRule.NEURON_TAG
-                               else groups.groups + groups.special_groups(), keep_selection=False)
+        items = {DerivedRule.PAIR_TAG: lambda: groups.groups + groups.special_groups(),
+                 DerivedRule.PAIR_LOCATION: lambda: ['yes', 'no'],
+                 DerivedRule.PAIR_CONN: lambda: list(self.nav.cd.conf.conn_type_labels),
+                 DerivedRule.PAIR_SIGNIFICANCE: lambda: list(DerivedRule.VERDICTS),
+                 DerivedRule.NEURON_TAG: lambda: self.nav.cd.nd.tag_labels(self._name.currentText()),
+                 DerivedRule.NEURON_GROUP: lambda: self.nav.sd.neuron_groups.groups}[self.kind]
+        self._values.set_items(items(), keep_selection=False)
 
     def rule(self) -> DerivedRule:
-        neuron = self._kind.currentText() == DerivedRule.NEURON_TAG
-        return DerivedRule(self._kind.currentText(), self._name.currentText() if neuron else '',
+        return DerivedRule(self.kind, self._name.currentText() if self._name.isVisibleTo(self) else '',
                            self._values.selected, self._side.currentText())
 
 
@@ -203,6 +231,46 @@ class DerivedRulesEditor(QWidget):
         """The rows that pick at least one value, as rules."""
         rules = [self._rows.itemAt(i).widget().rule() for i in range(self._rows.count())]
         return [r for r in rules if r.values]
+
+
+class RulePickerButton(ListPickerButton):
+    """ListPickerButton whose selection is a list of DerivedRules, edited as rule rows."""
+
+    def __init__(self, nav: 'AppState', title: str, *args, **kw):
+        super().__init__(title, *args, **kw)
+        self.nav = nav
+        self._selected = []
+        self._update_label()
+
+    def set_items(self, items: list, keep_selection: bool = True):
+        self._items = list(items)
+
+    def set_selected(self, selected: list):
+        self._selected = list(selected)
+        self._update_label()
+
+    def _open_dialog(self):
+        if self._leader is not None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self._title)
+        dlg.resize(560, 260)
+        lay = QVBoxLayout(dlg)
+        editor = DerivedRulesEditor(self.nav, self._selected, dlg)
+        lay.addWidget(editor)
+        lay.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.set_selected(editor.rules())
+            self.selection_changed.emit(self._selected)
+
+    def _update_label(self):
+        self.setText(' & '.join(map(str, self._selected)) or f"{self._title}: All")
+        self.setToolTip(self.text())
 
 
 class CreateDerivedGroupDialog(QDialog):
@@ -309,7 +377,7 @@ class OnOffPage(QWidget):
                 return
             built.add(i)
             lst = tabs.widget(i)
-            members = nav.sd.aux_members(sessions[i], by_sess[sessions[i]], self._want_on)
+            members = nav.sd.rule_members(sessions[i], by_sess[sessions[i]], self._want_on)
             for seg, pairs in members.items():
                 head = QListWidgetItem(seg)
                 head.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -385,109 +453,455 @@ class ExtendSaveDialog(QDialog):
         return nav.root.custom_mgr.queue_extend(dlg.name, jobs, window_ms, bin_ms, skipped)
 
 
-class CustomTagRulesDialog(QDialog):
-    """One page per custom-CCG tag rule plus the sweep that assigns tags; the Manage Groups shell."""
+def gray_out_page(nav: 'AppState') -> QWidget:
+    """The boxes deciding which pairs gray out; a pair stays clear only when every checked one keeps it."""
+    book = nav.cd.rule_book
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    lay.addWidget(QLabel("Gray out pairs unless every checked box keeps them."))
+    checks = {name: QCheckBox(name) for name in RuleBook.GRAY_BOXES}
+    rules = RulePickerButton(nav, "keep pairs where")
+    rules.set_selected(list(book.gray_rules))
+
+    def write(*_):
+        nav.cd.rule_book = replace(nav.cd.rule_book, gray_rules=tuple(rules.selected),
+                                       gray_boxes=tuple(n for n, c in checks.items() if c.isChecked()))
+        nav.root.neuron_network.on_gray_changed()
+
+    for name, check in checks.items():
+        check.setChecked(name in book.gray_boxes)
+        check.toggled.connect(write)
+        lay.addLayout(widget_row(check, rules) if name == 'rules' else widget_row(check))
+    rules.selection_changed.connect(write)
+    lay.addStretch()
+    return page
+
+
+def on_page(nav: 'AppState') -> QWidget:
+    """Which later sets make a pair on, joined by AND or OR; nothing is recomputed until Apply."""
+    book = nav.cd.rule_book
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    hint = QLabel("A pair is on when the checked rule sets pass it: all of them (AND) or any (OR). "
+                  "Segment chips and connection strength (off pairs → 0) read the last Apply.")
+    hint.setWordWrap(True)
+    lay.addWidget(hint)
+    c = nav.cd.conf
+    screen = QCheckBox(f"Default screening: lowres corrected p ≤ {c.alpha:g} within "
+                       f"{c.min_lag * 1e3:g}–{c.max_lag * 1e3:g} ms — always ANDed with the sets below")
+    screen.setChecked(True)
+    screen.setEnabled(False)
+    lay.addWidget(screen)
+    checks = {r.name: QCheckBox(r.name) for r in book.later_sets()}
+    for name, check in checks.items():
+        check.setChecked(not book.on_sets or name in book.on_sets)
+        lay.addWidget(check)
+    mode = QPushButton(book.on_mode.upper())
+    mode.clicked.connect(lambda: mode.setText('OR' if mode.text() == 'AND' else 'AND'))
+    status = QLabel()
+
+    def apply():
+        picked = tuple(n for n, c in checks.items() if c.isChecked())
+        if not picked:
+            status.setText("Check at least one rule set.")
+            return
+        nav.cd.rule_book = replace(nav.cd.rule_book, on_mode=mode.text().lower(),
+                                   on_sets=() if len(picked) == len(checks) else picked)   # () follows new sets
+        nav.sd.apply_on()
+        nav.chip_colors_changed.emit()
+        nav.root.pairs_view.pair_selection.refresh_lists()
+        status.setText(f"Applied: {f' {mode.text()} '.join(picked)}")
+
+    lay.addLayout(widget_row("combine:", mode, make_button("Apply", apply), status))
+    lay.addStretch()
+    return page
+
+
+class SignificanceRulesPanel(QWidget):
+    """Defaults, then one page per rule set (in run order) holding its ordered rules, plus the sweep that assigns tags."""
 
     _CHOICES = {'mode': ConnectionStrength.SPIKE_COUNT_MODES,
-                'correction': ConnectionStrength.P_CORRECTIONS}
+                'correction': ConnectionStrength.P_CORRECTIONS,
+                'tail_source': ConnectionStrength.TAIL_SOURCES,
+                'direction': tuple(ConnectionStrength.P_DIRECTIONS),
+                'roi_stat': tuple(ConnectionStrength.STATS), 'baseline_stat': tuple(ConnectionStrength.STATS)}
+    _HINTS = {'correction': {'none': '', 'bonferroni': 'p × number of bins in each CCG',
+                             'fdr_bh': 'Benjamini–Hochberg across the bins of each CCG'},
+              'direction': {'above baseline': 'peaks: p of the CCG exceeding its baseline (excitation)',
+                            'below baseline': 'troughs: p of the CCG falling under its baseline (inhibition)'},
+              'roi_stat': {'max': 'the largest ROI bin', 'min': 'the deepest ROI bin', 'avg': 'the mean over the ROI bins',
+                           'var': 'the variance across the ROI bins'},
+              'baseline_stat': {'max': 'the largest tail bin', 'min': 'the lowest tail bin',
+                                'avg': 'the mean over the tail bins', 'var': 'the variance across the tail bins'},
+              'tail_source': {'bins': "the CCG's own tail bins",
+                              'conv': 'the hollow-convolution fit (tail rules read it over the tail bins)'}}
+    _NEIGHBOR_ALPHA = 0.1   # neighbour cut offered when the condition is switched on
+    _DEFAULTS = ('alpha', 'min_lag', 'max_lag', 'min_spkcount',
+                 'spkcount_scope', 'multiple_correction')   # CCGConfig option rows on the Defaults page
+    _BASELINE = ('conv_window',)   # the convolution baseline the run computes
+    _ATTR = {'spkcount_scope': 'spkcnt_scope'}   # init param -> the attribute it sets
 
     def __init__(self, nav: 'AppState', parent=None):
         super().__init__(parent)
         self.nav = nav
-        self.setWindowTitle("Custom CCG tag rules")
-        self.resize(640, 420)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        side = SideNavPanel(min_width=100, nav_width=170)
-        for name in AUX_TESTS:
-            side.add_page(name, self._rule_page(name))
-        side.add_divider()
-        side.add_page("Assign tags", self._assign_page())
-        lay.addWidget(side, stretch=1)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._assign = self._assign_page()
+        self._side = None
+        self._clip = ()   # SignificanceRules last copied
+        self._rebuild()
+
+    def _rebuild(self, current: str = None, rule_row: int = 0) -> None:
+        """Relist Defaults and the rule sets, the assign page carried over to the new sidebar."""
+        if self._side is not None:
+            self._side.stack.removeWidget(self._assign)
+            self._side.deleteLater()
+        self._resolutions = self.nav.cd.complete_resolutions()
+        self._side = SideNavPanel(min_width=100, nav_width=150)
+        self._side.add_page("Defaults", self._defaults_page())
+        book = self.nav.cd.rule_book
+        initial, later = [r.name for r in book.initial_sets()], [r.name for r in book.later_sets()]
+        rows = [None, *initial, None, *later]   # Defaults, initial sets, the sash, later sets
+        rule_navs = {name: self._set_page(name) for name in initial}
+        self._side.add_divider()
+        rule_navs |= {name: self._set_page(name) for name in later}
+        self._side.add_action_row("+ New rule set", self._on_new_set_btn)
+        self._copy_menu(self._side.nav_list, lambda row: (rows[row], None) if row < len(rows) and rows[row] else None)
+        self._side.add_divider()
+        self._side.add_page("Assign tags", self._assign)
+        self._side.setCurrentIndex(rows.index(current) if current in rule_navs else 0)
+        if current in rule_navs:
+            rule_navs[current].setCurrentIndex(rule_row)
+        self._lay.addWidget(self._side, stretch=1)
+
+    # -- defaults ------------------------------------------------------------
+
+    def _defaults_page(self) -> QWidget:
+        """The significance parameters every 'follow default' reads, edited as the project config's own option rows."""
+        conf = self.nav.cd.conf
+        opts = ConfigOptionsWidget(CCGConfig, "Significance", names=self._DEFAULTS)
+        base = ConfigOptionsWidget(CCGConfig, "Baseline", names=self._BASELINE)
+        for w, names in ((opts, self._DEFAULTS), (base, self._BASELINE)):
+            for name in names:
+                w.set_value(name, getattr(conf, self._ATTR.get(name, name)))
+        tail = RangeListWidget("Baseline", conf.tail_intervals)
+        base.add_row("interval (tail)", tail)
+        note = QLabel("convolution: the run's null and p values; a new window takes a rerun.\n"
+                      "jitter: per pair from the jitter panel, not part of the run.")
+        note.setStyleSheet("color: #888;")
+        base.layout().addWidget(note)
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(opts)
+        lay.addWidget(base)
+        lay.addLayout(widget_row(make_button("Apply", lambda: self._on_defaults_apply_btn((opts, base), tail))))
+        lay.addStretch()
+        return page
+
+    def _on_defaults_apply_btn(self, widgets: tuple, tail: RangeListWidget) -> None:
+        conf = self.nav.cd.conf
+        for name, value in (kv for w in widgets for kv in w.values().items()):
+            setattr(conf, self._ATTR.get(name, name), value)
+        conf.tail_intervals = tail.intervals
+        self._write(self.nav.cd.rule_book)   # saves the config with the rule sets
+        self._rebuild()
+
+    def _follow_text(self, label: str, intervals) -> str:
+        span = ', '.join(f"{'' if a is None else f'{a * 1e3:g}'}–{'' if b is None else f'{b * 1e3:g}'}"
+                         for a, b in intervals)
+        return f"{label}: follow default ({span} ms)"
+
+    # -- rule sets -----------------------------------------------------------
+
+    def _set_page(self, name: str) -> SideNavPanel:
+        """Scope and the selected rule's order/delete buttons above the set's rule list."""
+        rule_set = self.nav.cd.rule_book.set(name)
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(QLabel("Pairs in this scope must pass every rule; each set judges its pairs on its own, "
+                             "whatever other sets decide. Empty fields mean every pair."))
+        fields = pair_scope_fields(self.nav)[1:3] + ([] if rule_set.initial else [   # pair tags derive from the screen
+            ScopeField('rules', "Pairs", "rules", lambda: [], picker=partial(RulePickerButton, self.nav))])
+        scope = ScopePicker(fields)
+        scope.set_selected({'sess': list(rule_set.sessions) or [ALL_OPTION],
+                            'ct': list(rule_set.conn_types) or [ALL_OPTION],
+                            **({} if rule_set.initial else {'rules': list(rule_set.rules)})})
+        scope.selection_changed.connect(lambda: self._set_scope(name, scope))
+        lay.addWidget(scope)
+        if not rule_set.initial:   # initial sets build the pointers; they tag no pair
+            swatch = ColorLabelButton(rule_set.color or '#888888', "pass tag colour", title=f"Colour for {name}")
+            swatch.color_changed.connect(lambda c: self._set_tag(name, color=c))
+            shown = QCheckBox("show tag on pairs")
+            shown.setChecked(rule_set.shown)
+            shown.toggled.connect(lambda on: self._set_tag(name, shown=on))
+            lay.addLayout(widget_row(swatch, shown))
+        rules = SideNavPanel(min_width=100, nav_width=170)
+        lay.addLayout(widget_row(*move_buttons(lambda step: self._on_rule_step(name, rules, step)),
+                                 make_button("Delete", lambda: self._on_rule_step(name, rules, None))))
+        for i, title in enumerate(rule_set.tests.titles().values()):
+            rules.add_page(title, self._rule_page(name, i))
+        rules.add_action_row("+ Add rule", lambda: self._on_add_rule_row(name, rules))
+        n = len(rule_set.tests.rules)
+        self._copy_menu(rules.nav_list, lambda row: (name, row) if row < n else None)
+        lay.addWidget(rules, stretch=1)
+        if not rule_set.initial:
+            admit = QHBoxLayout()
+            admit.addStretch()
+            admit.addWidget(make_button("Clear tag", lambda: self._on_clear_tag_btn(name)))
+            admit.addWidget(make_button("Admit all tagged pairs to Selected", lambda: self._on_admit_btn(name)))
+            admit.addWidget(make_button("Save tag as group", lambda: self._on_group_btn(name)))
+            lay.addLayout(admit)
+        self._side.add_page(f"{name}  · initial" if rule_set.initial else name, page)
+        return rules
+
+    def _write(self, book: RuleBook, current: str = None, rule_row: int = 0) -> None:
+        self.nav.cd.rule_book = book
+        self.nav.chip_colors_changed.emit()
+        if current is not None:
+            self._rebuild(current, rule_row)
+
+    def _set_scope(self, name: str, scope: ScopePicker) -> None:
+        pick = {k: [v for v in p.selected if v != ALL_OPTION] for k, p in scope.pickers.items()}
+        book = self.nav.cd.rule_book
+        self._write(book.with_set(replace(book.set(name), sessions=tuple(pick['sess']),
+                                          conn_types=tuple(pick['ct']), rules=tuple(pick.get('rules', ())))))
+
+    def _on_new_set_btn(self) -> None:
+        book = self.nav.cd.rule_book
+        name = prompt_name(self, "New rule set", "Name:")
+        if name and name not in [r.name for r in book.sets]:
+            self._write(book.with_set(RuleSet(name)), name)
+
+    def _set_tag(self, name: str, **tag) -> None:
+        book = self.nav.cd.rule_book
+        self._write(book.with_set(replace(book.set(name), **tag)))
+        self.nav.root.pairs_view.pair_selection.refresh_lists()
+
+    def _on_admit_btn(self, name: str) -> None:
+        self.nav.root.pairs_view.pair_selection.admit_rule_set(name)
+
+    def _on_clear_tag_btn(self, name: str) -> None:
+        if QMessageBox.question(self, "Clear tag", f"Drop every stored verdict of '{name}'? "
+                                "Assign tags rebuilds them.") != QMessageBox.StandardButton.Yes:
+            return
+        self.nav.sd.clear_rule_set(name)
+        self.nav.root.pairs_view.pair_selection.refresh_lists()
+
+    def _on_group_btn(self, name: str) -> None:
+        self.nav.root.pairs_view.pair_selection.group_rule_set(name, self)
+
+    def _on_initial_action(self, name: str, initial: bool) -> None:
+        """An initial set drops its pair-rule scope: pair tags come from the pointers it builds."""
+        book = self.nav.cd.rule_book
+        rule_set = book.set(name)
+        self._write(book.with_set(replace(rule_set, initial=initial, rules=() if initial else rule_set.rules)), name)
+
+    def _rename(self, name: str) -> None:
+        book, groups = self.nav.cd.rule_book, self.nav.sd.groups
+        new = prompt_name(self, "Rename rule set", "Name:", name)
+        if new is None or new == name:
+            return
+        if new in [r.name for r in book.sets]:
+            QMessageBox.information(self, "Rename rule set", f"Rule set '{new}' already exists.")
+            return
+        for g in groups.derived_groups():   # derived tags testing this set follow the new name
+            meta = groups.get_group_metadata(g)
+            meta.rules = [r.set_renamed(name, new) for r in meta.rules]
+        groups.dirty = True
+        groups.save()
+        self._write(book.renamed(name, new), new)
+
+    def _rename_rule(self, name: str, i: int) -> None:
+        """Title one rule; its test stays recorded, and a blank title shows the test again."""
+        tests = self.nav.cd.rule_book.set(name).tests
+        titles = list(tests.titles().values())
+        new, ok = QInputDialog.getText(self, "Rename rule", f"Name ({tests.rules[i].test}; blank = test name):",
+                                       text=tests.rules[i].name)
+        if not ok or new.strip() == tests.rules[i].name:
+            return
+        if new.strip() in titles[:i] + titles[i + 1:]:
+            QMessageBox.information(self, "Rename rule", f"'{new.strip()}' already names a rule in '{name}'.")
+            return
+        self._edit_rules(name, lambda rs: rs[:i] + [replace(rs[i], name=new.strip())] + rs[i + 1:], i)
+
+    def _remove(self, name: str) -> None:
+        if QMessageBox.question(self, "Remove rule set",
+                                f"Remove rule set '{name}' and its rules?") != QMessageBox.StandardButton.Yes:
+            return
+        self._write(self.nav.cd.rule_book.without(name))
+        self._rebuild()
+
+    def _copy_menu(self, nav_list: QListWidget, target) -> None:
+        """Right-click menu on a sidebar; target(row) is (set, rule index or None for the whole set)."""
+        nav_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        nav_list.customContextMenuRequested.connect(lambda pos: self._on_rules_ctx_menu(nav_list, target, pos))
+
+    def _on_rules_ctx_menu(self, nav_list: QListWidget, target, pos) -> None:
+        row = nav_list.indexAt(pos).row()
+        hit = target(row) if row >= 0 else None
+        if hit is None:
+            return
+        name, i = hit
+        tests = self.nav.cd.rule_book.set(name).tests
+        menu = QMenu(nav_list)
+        if i is None:
+            menu.addAction(f"Copy rules of '{name}'", lambda: setattr(self, '_clip', tests.rules))
+            paste = menu.addAction(f"Paste rules into '{name}'",
+                                   lambda: self._edit_rules(name, lambda rs: list(self._clip), 0))
+            menu.addSeparator()
+            for text, step in zip(("Move to top", "Move up", "Move down", "Move to bottom"), (s for _t, s in MOVE_STEPS)):
+                menu.addAction(text, lambda st=step: self._write(self.nav.cd.rule_book.moved(name, st), name))
+            menu.addSeparator()
+            initial = self.nav.cd.rule_book.set(name).initial
+            menu.addAction("Unmark initial" if initial else "Mark as initial (builds the pointers)",
+                           lambda: self._on_initial_action(name, not initial))
+            menu.addAction(f"Rename rule set '{name}'…", lambda: self._rename(name))
+            menu.addAction(f"Remove rule set '{name}'", lambda: self._remove(name))
+        else:
+            label = list(tests.titles().values())[i]
+            menu.addAction(f"Rename {label}…", lambda: self._rename_rule(name, i))
+            menu.addAction(f"Copy {label}", lambda: setattr(self, '_clip', (tests.rules[i],)))
+            paste = menu.addAction(f"Paste below {label}",
+                                   lambda: self._edit_rules(name, lambda rs: rs[:i + 1] + list(self._clip) + rs[i + 1:], i + 1))
+        paste.setEnabled(bool(self._clip))
+        menu.exec(nav_list.mapToGlobal(pos))
 
     # -- rules ---------------------------------------------------------------
 
-    def _rule_page(self, name: str) -> QWidget:
-        """Enable, cutoff, and the rule's own arguments, read straight off the registry."""
-        _fn, targ, default, below, extra = ConnectionStrength.AUX_TESTS[name]
-        cfg = self.nav.cd.aux_test_config
-        args = cfg.args.get(name) or {}
+    def _edit_rules(self, name: str, change, rule_row: int = None) -> None:
+        """Write *change* (list of rules -> list of rules) to one set; a row to show also relists the pages."""
+        book = self.nav.cd.rule_book
+        rule_set = book.set(name)
+        rules = tuple(change(list(rule_set.tests.rules)))
+        self._write(book.with_set(replace(rule_set, tests=Rules(rules))),
+                    None if rule_row is None else name, min(max(rule_row or 0, 0), max(len(rules) - 1, 0)))
+
+    def _on_rule_step(self, name: str, rules: SideNavPanel, step: int | None) -> None:
+        """Shift the selected rule *step* places, or delete it when *step* is None."""
+        i = rules.nav_list.currentRow()
+        if not 0 <= i < len(self.nav.cd.rule_book.set(name).tests.rules):   # nothing selected yet
+            return
+        if step is None:
+            self._edit_rules(name, lambda rs: rs[:i] + rs[i + 1:], i - 1)
+        else:
+            self._edit_rules(name, lambda rs: moved(rs, i, step), i + step)
+
+    def _on_add_rule_row(self, name: str, rules: SideNavPanel) -> None:
+        menu = QMenu(rules.nav_list)
+        for test in RULE_TESTS:
+            menu.addAction(test, lambda t=test: self._edit_rules(
+                name, lambda rs: rs + [SignificanceRule(t, self._resolutions[0])], 10**6))
+        menu.exec(QCursor.pos())
+
+    def _rule_page(self, name: str, i: int) -> QWidget:
+        """Enable, resolution, cutoff, and the rule's own arguments, read straight off the registry."""
+        rule = self.nav.cd.rule_book.set(name).tests.rules[i]
+        _fn, targ, default, below, extra = ConnectionStrength.RULE_TESTS[rule.test]
+        args = rule.args
+        put = lambda new: (lambda rs: rs[:i] + [new(rs[i])] + rs[i + 1:])
+        set_arg = lambda arg, value: self._edit_rules(name, put(lambda r: r.with_args(**{arg: value})))
         page = QWidget()
         lay = QVBoxLayout(page)
         on = QCheckBox("enabled")
-        on.setChecked(name in cfg.enabled)
-        on.toggled.connect(lambda v: self._set_enabled(name, v))
-        lay.addWidget(on)
+        on.setChecked(rule.enabled)
+        on.toggled.connect(lambda v: self._edit_rules(name, put(lambda r: replace(r, enabled=v))))
+        res = QComboBox()
+        res.addItems(list(dict.fromkeys(self._resolutions + [rule.resolution])))
+        res.setCurrentText(rule.resolution)
+        res.currentTextChanged.connect(lambda v: self._edit_rules(name, put(lambda r: replace(r, resolution=v)), i))
+        initial = self.nav.cd.rule_book.set(name).initial   # the screen runs at the computed resolution
+        lay.addLayout(widget_row(QLabel(f"<b>{rule.test}</b>"), on, *(() if initial else ("resolution:", res))))
 
-        def row(label: str, widget: QWidget):
-            r = QHBoxLayout()
-            r.addWidget(QLabel(label))
-            r.addWidget(widget)
-            r.addStretch()
-            lay.addLayout(r)
+        def row(label: str, widget: QWidget, *more):
+            lay.addLayout(widget_row(label, widget, *more))
 
         thr = QDoubleSpinBox()
         thr.setRange(-1e6, 1e6)
         thr.setDecimals(4)
-        # aux_test takes the cutoff as 'threshold'; targ is only the registry's label for it
+        # rule_test takes the cutoff as 'threshold'; targ is only the registry's label for it
         thr.setValue(float(args.get('threshold', default)))
-        thr.valueChanged.connect(lambda v: self._set_arg(name, 'threshold', v))
-        row(f"{targ} ({'pass ≤' if below else 'pass ≥'}):", thr)
+        thr.valueChanged.connect(lambda v: set_arg('threshold', v))
+        bound = 'max' if below else 'min'
+        flipped = args.get('bound', bound) != bound
+        side = lambda inv: f"{targ} ({'pass ≤' if below != inv else 'pass ≥'}):"
+        side_label = QLabel(side(flipped))
+        inverse = QCheckBox("inverse")
+        inverse.setChecked(flipped)
+        inverse.toggled.connect(lambda v: side_label.setText(side(v)))
+        inverse.toggled.connect(lambda v: set_arg('bound', ('min' if below else 'max') if v else bound))
+        row(side_label, thr, inverse)
 
         for arg, adef in extra.items():
-            if arg == 'resolution':
-                combo = QComboBox()
-                combo.addItems(list(self.nav.cd.available_resolutions()))
-                combo.setCurrentText(str(args.get(arg, adef)))
-                combo.currentTextChanged.connect(lambda v, a=arg: self._set_arg(name, a, v))
-                row(f"{arg}:", combo)
-            elif arg == 'tail':
+            if arg in ('tail', 'roi'):
+                conf = self.nav.cd.conf
+                label, default = (("Baseline", conf.tail_intervals) if arg == 'tail'
+                                  else ("ROI", ConnectionStrength.default_roi(rule.test, conf)))
                 own = args.get(arg)
-                follow = QCheckBox("baseline: follow the global tail window")
+                follow = QCheckBox(self._follow_text(label, default))
                 follow.setChecked(own is None)
-                ranges = RangeListWidget("Baseline", own or self.nav.cd.conf.tail_intervals)
+                ranges = RangeListWidget(label, own or default)
                 ranges.setEnabled(own is not None)
                 follow.toggled.connect(ranges.setDisabled)
-                write = lambda *_, f=follow, r=ranges: self._set_arg(
-                    name, 'tail', None if f.isChecked() else r.intervals)
+                write = lambda *_, a=arg, f=follow, r=ranges: set_arg(
+                    a, None if f.isChecked() else r.intervals)
                 follow.toggled.connect(write)
                 ranges.changed.connect(write)
                 lay.addWidget(follow)
                 lay.addWidget(ranges)
-            elif arg == 'ranges':
-                half = float(self.nav.cd.conf.spkcnt_scope) / 2
-                ranges = RangeListWidget("Scope", args.get(arg) or [(-half, half)])
-                ranges.changed.connect(lambda r=ranges: self._set_arg(name, 'ranges', r.intervals))
-                lay.addWidget(ranges)
+            elif arg == 'neighbor_alpha':
+                lay.addWidget(self._neighbor_box(args, set_arg))
+            elif arg == 'neighbors':
+                continue   # edited inside the neighbour box
             elif arg in self._CHOICES:
                 combo = QComboBox()
                 combo.addItems(self._CHOICES[arg])
                 combo.setCurrentText(str(args.get(arg, adef)))
-                combo.currentTextChanged.connect(lambda v, a=arg: self._set_arg(name, a, v))
-                row(f"{arg}:", combo)
+                combo.currentTextChanged.connect(lambda v, a=arg: set_arg(a, v))
+                hint = QLabel()
+                hint.setStyleSheet("color: #888;")
+                if arg in self._HINTS:
+                    combo.currentTextChanged.connect(lambda v, h=hint, a=arg: h.setText(self._HINTS[a][v]))
+                    hint.setText(self._HINTS[arg][combo.currentText()])
+                row(f"{arg}:", combo, hint)
             else:
-                # only an optional arg reads 0 as "unset"; a factor of 0 is a real value
-                optional = adef is None
                 box = QDoubleSpinBox()
                 box.setRange(0.0, 1e6)
                 box.setDecimals(3)
-                if optional:
-                    box.setSpecialValueText("whole CCG")
-                cur = args.get(arg, adef)
-                box.setValue(0.0 if cur is None else float(cur))
-                box.valueChanged.connect(
-                    lambda v, a=arg, o=optional: self._set_arg(name, a, (v or None) if o else v))
+                box.setValue(float(args.get(arg, adef)))
+                box.valueChanged.connect(lambda v, a=arg: set_arg(a, v))
                 row(f"{arg}:", box)
         lay.addStretch()
         return page
 
-    def _set_enabled(self, name: str, on: bool):
-        self.nav.cd.aux_test_config = self.nav.cd.aux_test_config.with_test(name, on)
-        self.nav.chip_colors_changed.emit()
-
-    def _set_arg(self, name: str, arg: str, value):
-        self.nav.cd.aux_test_config = self.nav.cd.aux_test_config.with_args(name, **{arg: value})
-        self.nav.chip_colors_changed.emit()
+    def _neighbor_box(self, args: dict, set_arg) -> QGroupBox:
+        """p_value's neighbour condition: off when neighbor_alpha is None."""
+        box = QGroupBox("Set alpha for neighboring bins")
+        box.setCheckable(True)
+        box.setChecked(args.get('neighbor_alpha') is not None)
+        alpha = QDoubleSpinBox()
+        alpha.setRange(0.0001, 1.0)
+        alpha.setDecimals(4)
+        alpha.setSingleStep(0.01)
+        alpha.setValue(args.get('neighbor_alpha') or self._NEIGHBOR_ALPHA)
+        count = QSpinBox()
+        count.setRange(1, 2)
+        count.setValue(int(args.get('neighbors', 1)))
+        hint = QLabel()
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        show = lambda: hint.setText(
+            f"A bin in the ROI counts as significant only if at least {count.value()} of its 2 adjacent bins "
+            f"also have corrected p ≤ {alpha.value():g}; isolated one-bin dips are ignored.")
+        show()
+        alpha.valueChanged.connect(show)
+        count.valueChanged.connect(show)
+        box.toggled.connect(lambda on: set_arg('neighbor_alpha', alpha.value() if on else None))
+        alpha.valueChanged.connect(lambda v: box.isChecked() and set_arg('neighbor_alpha', v))
+        count.valueChanged.connect(lambda v: set_arg('neighbors', v))
+        lay = QVBoxLayout(box)
+        lay.addLayout(widget_row("neighbor alpha:", alpha, "adjacent bins needed:", count))
+        lay.addWidget(hint)
+        return box
 
     # -- assign tags ---------------------------------------------------------
 
@@ -496,7 +910,9 @@ class CustomTagRulesDialog(QDialog):
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.addWidget(QLabel("Sweep the enabled rules over this scope; results land live."))
-        self._scope = ScopePicker(pair_scope_fields(nav))
+        self._scope = ScopePicker(pair_scope_fields(nav) + [
+            ScopeField('sets', "Rule sets", "rule sets", lambda: [r.name for r in nav.cd.rule_book.later_sets()],
+                       select_all_when_empty=False, all_option=True)])
         self._scope.set_selected({'seg': nav.visible_segments(), 'sess': [nav.current_session_str]})
         lay.addWidget(self._scope)
         run = QPushButton("Run rules")
@@ -525,14 +941,17 @@ class CustomTagRulesDialog(QDialog):
     def _on_run_btn(self):
         nav = self.nav
         sel = self._scope.selected
-        tests = nav.cd.aux_test_config.specs()
-        if not tests:
-            QMessageBox.warning(self, "Custom CCG tags", "No rule is enabled.")
+        if not any(r.tests.enabled for r in nav.cd.rule_book.later_sets() if r.name in sel['sets']):
+            QMessageBox.warning(self, "Custom CCG tags", "No rule is enabled in the picked rule sets.")
             return
         jobs, skipped = pair_scope_jobs(nav, sel)
-        jobs = [(k, seg, nav.sd.seg_overrides(str(k.session), seg), pairs) for k, seg, pairs in jobs]
+        keep = [r.name for r in nav.cd.rule_book.later_sets() if r.name not in sel['sets']]   # all else is overwritten
+        stale = lambda k, seg: any(f"{n}.passed" in nav.sd.rule_results(k, seg).arrays for n in sel['sets'])
+        jobs = [(k, seg, plan, pairs, keep)
+                for k, seg, pairs in jobs for plan in (nav.sd.rule_plan(k, sel['sets']),)
+                if plan or stale(k, seg)]   # uncovered keys run only to clear a picked set's old results
         self._jobs_per_sess = Counter(str(k.session) for k, *_ in jobs)
-        n = nav.root.custom_mgr.queue_aux(jobs, tests, skipped, on_done=self._on_sweep_done,
+        n = nav.root.custom_mgr.queue_rule_sweeps(jobs, skipped, on_done=self._on_sweep_done,
                                           on_progress=self._on_sweep_progress)
         self._status.setText(f"Queued {n} sweep(s) over {len(self._jobs_per_sess)} session(s)…")
 
@@ -544,15 +963,15 @@ class CustomTagRulesDialog(QDialog):
     def _on_sweep_done(self, failed: list):
         n = len(self._jobs_per_sess)
         self._status.setText(f"{n}/{n} sessions tagged{f', {len(failed)} failed' if failed else ''}.")
+        self.nav.root.pairs_view.pair_selection.refresh_lists()   # the pass tags on pair rows
 
     @classmethod
-    def show_for(cls, nav: 'AppState', parent):
-        """Non-modal and kept: a sweep reports back to it after it is hidden."""
-        dlg = getattr(parent, '_tag_rules_dlg', None)
-        if dlg is None:
-            dlg = parent._tag_rules_dlg = cls(nav, parent)
-        dlg.show()
-        dlg.raise_()
+    def kept_by(cls, nav: 'AppState', owner) -> 'SignificanceRulesPanel':
+        """One panel per window, outliving any dialog showing it: a sweep reports back to it later."""
+        panel = getattr(owner, '_significance_panel', None)
+        if panel is None:
+            panel = owner._significance_panel = cls(nav)
+        return panel
 
 
 class ManageGroupsDialog(ExplicitCloseDialog):
@@ -562,17 +981,20 @@ class ManageGroupsDialog(ExplicitCloseDialog):
     All edits autosaved (notes to disk) on tab switch and close.
     """
 
+    PAIR, NEURON = 'pair', 'neuron'
+
     def __init__(self, sel_data: 'SelectionData', group_mgr: 'PairSelectionPanel',
-                 pairs_by_conn_type_fn=None, parent=None):
+                 pairs_by_conn_type_fn=None, parent=None, kind: str = PAIR):
         super().__init__(parent)
+        self.kind = kind
         self.sel_data = sel_data
         self._group_mgr = group_mgr
         self._groups = group_mgr.ui.groups
         self._pairs_by_ct = pairs_by_conn_type_fn
         self._notes_widgets: dict[str, QPlainTextEdit] = {}
         self._neuron_groups_page = None
-        self.setWindowTitle("Manage Groups")
-        self.resize(600, 520)
+        self.setWindowTitle(f"Manage {kind.capitalize()} Groups")
+        self.resize(820 if kind == self.PAIR else 600, 560)   # pair: two sidebars deep
         self._build()
 
     def _build(self):
@@ -585,7 +1007,7 @@ class ManageGroupsDialog(ExplicitCloseDialog):
         gr_seg = app.sd.seg_groups
         nav = SideNavPanel(min_width=100, nav_width=160)
 
-        if app.view.name == NEURON_VIEW:
+        if self.kind == self.NEURON:
             self._neuron_groups_page = GroupManagerPage(
                 app.root.neuron_groups, member_label=lambda m: f"neuron {m[0]}",
                 session_of=lambda: app.current_session_str, parent=self)
@@ -617,7 +1039,17 @@ class ManageGroupsDialog(ExplicitCloseDialog):
                 nav.add_page("Derived", d_tabs)
 
         nav.currentChanged.connect(self._autosave_notes)
-        lay.addWidget(nav, stretch=1)
+        if self.kind == self.PAIR:
+            significance = SignificanceRulesPanel.kept_by(app, self.parentWidget())
+            self.finished.connect(lambda _r: significance.setParent(None))   # the panel outlives this dialog
+            outer = SideNavPanel(min_width=90, nav_width=110)
+            outer.add_page("groups", nav)
+            outer.add_page("significance", significance)
+            outer.add_page("gray out", gray_out_page(app))
+            outer.add_page("on", on_page(app))
+            lay.addWidget(outer, stretch=1)
+        else:
+            lay.addWidget(nav, stretch=1)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self._autosave_and_close)
@@ -821,17 +1253,12 @@ class ManageGroupsDialog(ExplicitCloseDialog):
         sd, gm, pct, par = (self.sel_data, self._group_mgr,
                              self._pairs_by_ct, self.parentWidget())
         self.accept()
-        ManageGroupsDialog.show(sd, gm, pct, par)
+        ManageGroupsDialog.show(sd, gm, pct, par, self.kind)
 
     @classmethod
     def show(cls, sel_data: 'SelectionData', group_mgr: 'PairSelectionPanel',
-             pairs_by_conn_type_fn=None, parent=None):
-        gr = group_mgr.ui.groups
-        if gr.ui.view.name != NEURON_VIEW and not gr.registry and not gr:
-            QMessageBox.information(parent, "Manage groups",
-                                    "No groups yet. Create one first.")
-            return
-        dlg = cls(sel_data, group_mgr, pairs_by_conn_type_fn, parent)
+             pairs_by_conn_type_fn=None, parent=None, kind: str = PAIR):
+        dlg = cls(sel_data, group_mgr, pairs_by_conn_type_fn, parent, kind)
         dlg.finished.connect(dlg.deleteLater)
         dlg.setVisible(True)   # modeless: the main window stays usable
 
@@ -1730,6 +2157,16 @@ class SettingsTabs:
                         ui.settings, 'list_cursor_follows_action')
         pl.addStretch()
         nav.add_page("Pair selection", pairs)
+
+        slides = QWidget()
+        sl = QVBoxLayout(slides)
+        sl.setSpacing(8)
+        self._check_row(sl, "Hold ↑/↓ for 5 s in a pair list to play it as a slideshow",
+                        ui.settings, 'slideshow_on')
+        self._spin_row(sl, "Minimum time per pair (ms):", ui.settings, 'slideshow_min_ms', 0, 10000)
+        self._check_row(sl, "Don't show the slideshow notice", ui.settings, 'slideshow_warned')
+        sl.addStretch()
+        nav.add_page("Slideshow", slides)
 
         cache = QWidget()
         cl = QVBoxLayout(cache)

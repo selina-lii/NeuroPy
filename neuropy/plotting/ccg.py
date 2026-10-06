@@ -655,6 +655,7 @@ def plot_spike_attribution_raster(
 @dataclass
 class JitterOverlay:
     j_ccg:    Optional[np.ndarray] = None
+    j_median: Optional[np.ndarray] = None
     j_pval:   Optional[np.ndarray] = None
     j_ccg_lo: Optional[np.ndarray] = None
     j_ccg_hi: Optional[np.ndarray] = None

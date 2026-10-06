@@ -18,15 +18,17 @@ import os
 import re
 import numpy as np
 from collections import defaultdict as _defaultdict
+from dataclasses import dataclass, replace
 
 from neuropy.analyses.utils import (
     JsonSavable, Autosave, BiIndex, _to_json, is_special_group, _SPECIAL_PREFIX,
     is_derived_group, group_display_name,
-    ADMITTED_PREFIX, is_shape_label, is_admitted_group, NOTHING,
+    ADMITTED_PREFIX, is_shape_label, is_admitted_group, NOTHING, is_transient_group, moved,
 )
 from neuropy.utils.data_storage_util import atomic_write_json
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.neuron_tags import STABLE_TAG
+from neuropy.analyses.ccg_transforms import Rules
 
 
 class _SelectionData(JsonSavable):
@@ -75,6 +77,14 @@ class _SelectionData(JsonSavable):
         self.tags       = _to_tuple_key_dict(state.get('tags', {}))
         self.complete   = bool(state.get('complete', False))
         self._dirty     = False   # just read from disk: nothing to write back
+        self.promote_tagged()
+
+    def promote_tagged(self) -> None:
+        """A pair carrying a group belongs in Selected; a deleted one stays deleted."""
+        for p, t in self.tags.items():
+            if p not in self.selected and p not in self.deleted \
+                    and any(not is_special_group(g) for g in t.get('groups') or ()):
+                self.set_pair_state(p, 'sel')
 
     def set_pair_state(self, pair: tuple, state: str):
         pair = tuple(pair)
@@ -149,6 +159,8 @@ class SelectionData(JsonSavable):
         if self._nd_key is not None:
             self.session = str(self._nd_key.session)
         self.saved_at = datetime.datetime.now().isoformat()
+        for b in self.selections.values():
+            b.promote_tagged()
         JsonSavable.save(self, path=path, **_)
         for b in self.selections.values():
             b._dirty = False
@@ -177,8 +189,8 @@ def _dir_token(v) -> str:
     return re.sub(r'[^A-Za-z0-9_-]', '-', str(v))
 
 
-class AuxResults:
-    """Swept auxiliary-rule arrays for one (session, conn type, segment), as ``[ref, tgt]`` npys.
+class RuleResults:
+    """Swept significance-rule arrays for one (session, conn type, segment), as ``[ref, tgt]`` npys.
 
     One unit dir per segment: a new segment is a new dir and a dropped one is an rmtree,
     so nothing reshapes when the segment set changes."""
@@ -187,7 +199,7 @@ class AuxResults:
 
     def __init__(self, save_dir: str, nd_key: Key, conn_type: str, segment: str):
         self._dir = os.path.join(
-            save_dir, 'aux_tests',
+            save_dir, 'rule_results',
             f"{_dir_token(nd_key.session)}.{_dir_token(conn_type)}.{_dir_token(segment)}")
         self.arrays: dict = {}
 
@@ -195,28 +207,57 @@ class AuxResults:
     def stored(self) -> bool:
         return os.path.isdir(self._dir)
 
-    def load(self) -> 'AuxResults':
+    def load(self) -> 'RuleResults':
         self.arrays = {f[:-4]: np.load(os.path.join(self._dir, f), mmap_mode='r')
                        for f in os.listdir(self._dir)} if self.stored else {}
         return self
 
     def save(self) -> None:
+        """Write the arrays just set and drop files no array names; kept arrays are memmaps of their own files."""
         os.makedirs(self._dir, exist_ok=True)
         for name, arr in self.arrays.items():
-            np.save(os.path.join(self._dir, name + '.npy'), arr)
+            if not isinstance(arr, np.memmap):
+                np.save(os.path.join(self._dir, name + '.npy'), arr)
+        for f in os.listdir(self._dir):
+            if f[:-4] not in self.arrays:
+                os.remove(os.path.join(self._dir, f))
 
-    def set_results(self, results: dict, on: 'np.ndarray') -> None:
-        """Whole-grid replace: value/passed per rule plus the combined on."""
-        self.arrays = {self.ON: np.asarray(on, dtype=bool)}
+    @staticmethod
+    def _set_of(array_name: str) -> str:
+        return array_name.rsplit('.', 1)[0].split(':', 1)[0]
+
+    def set_results(self, results: dict, keep: list) -> None:
+        """Overwrite with *results*, keeping only the sets in *keep* from before; ``recombine`` sets on."""
+        self.arrays = {k: v for k, v in self.arrays.items() if self._set_of(k) in keep}
         for name, (value, passed) in results.items():
             self.arrays[name + '.value'] = np.asarray(value, dtype=float)
             self.arrays[name + '.passed'] = np.asarray(passed, dtype=bool)
+
+    @staticmethod
+    def combine(arrays: dict, sets: tuple, mode: str, shape: tuple) -> np.ndarray:
+        """``[ref, tgt]`` on from the stored verdicts of *sets* (all when empty): AND, or OR among the sets judging a pair; unjudged pairs stay on."""
+        names = [k[:-7] for k in arrays if k.endswith('.passed') and ':' not in k and (not sets or k[:-7] in sets)]
+        if not names:
+            return np.ones(shape, dtype=bool)
+        judged = np.array([~np.isnan(np.asarray(arrays[n + '.value'])) for n in names])
+        passed = np.array([np.asarray(arrays[n + '.passed']) for n in names])
+        if mode == 'or':
+            return (judged & passed).any(axis=0) | ~judged.any(axis=0)
+        return (passed | ~judged).all(axis=0)
+
+    def recombine(self, sets: tuple, mode: str, shape: tuple, overrides: dict = None) -> None:
+        """on = *sets* combined by *mode*, hand-set entries winning."""
+        on = self.combine({k: v for k, v in self.arrays.items() if k != self.ON}, sets, mode, shape)
+        for (ref, tgt), state in (overrides or {}).items():
+            if ref < on.shape[0] and tgt < on.shape[1]:
+                on[ref, tgt] = state
+        self.arrays[self.ON] = on
 
     def pair(self, ref: int, tgt: int) -> dict:
         """``{rule: [value, passed], 'on': bool}`` for one pair, the shape the table reads."""
         if not self.arrays:
             return {}
-        out = {name[:-6]: [float(arr[ref, tgt]),
+        out = {name[:-6]: [None if np.isnan(arr[ref, tgt]) else float(arr[ref, tgt]),   # as the live sweep reports it
                            bool(self.arrays[name[:-6] + '.passed'][ref, tgt])]
                for name, arr in self.arrays.items() if name.endswith('.value')}
         out[self.ON] = bool(self.arrays[self.ON][ref, tgt])
@@ -224,25 +265,150 @@ class AuxResults:
 
 
 class DerivedRule(JsonSavable):
-    """One condition of a derived group: any of *values* matches; a neuron rule tests ref, tgt, either or both."""
+    """One condition on a pair: any of *values* matches; a neuron rule tests ref, tgt, either or both."""
 
-    PAIR_TAG, NEURON_TAG = 'pair tag', 'neuron tag'
-    KINDS = (PAIR_TAG, NEURON_TAG)
+    PAIR_TAG, PAIR_LOCATION, PAIR_CONN, PAIR_SIGNIFICANCE, NEURON_TAG, NEURON_GROUP = (
+        'pair tag', 'pair location', 'pair conn type', 'pair significance', 'neuron tag', 'neuron group')
+    KINDS = (PAIR_TAG, PAIR_LOCATION, PAIR_CONN, PAIR_SIGNIFICANCE, NEURON_TAG, NEURON_GROUP)
+    VERDICTS = ('on', 'off')   # a significance rule's values; its name is the rule set
+    NAMED = {PAIR_LOCATION: ('same channel', 'same shank')}   # kinds whose name picks what is compared
     SIDES = ('ref', 'tgt', 'either', 'both')
+    EXCITABILITIES = ('E', 'I')
 
     def __init__(self, kind: str = PAIR_TAG, name: str = '', values: list = None,
                  side: str = 'either'):
         JsonSavable.__init__(self)
         self.kind = kind
-        self.name = name   # the neuron tag; pair tag rules name their tags in values
+        self.name = name   # the neuron tag, or the location compared; pair tags name theirs in values
         self.values = list(values or [])
         self.side = side
 
+    @staticmethod
+    def split(kind: str) -> list:
+        """['pair', 'tag']: the subject, then what of it is tested."""
+        return kind.split(' ', 1)
+
     def __str__(self) -> str:
         values = ' or '.join(group_display_name(v) for v in self.values)
-        if self.kind == self.PAIR_TAG:
-            return f"pair tag is {values}"
-        return f"{self.side} neuron {self.name} is {values}"
+        subject = 'pair' if self.kind.startswith('pair') else f"{self.side} neuron"
+        what = self.name or self.split(self.kind)[1]
+        return f"{subject} {what} is {values}"
+        return state
+
+    def set_renamed(self, old: str, new: str) -> 'DerivedRule':
+        """This rule pointed at rule set *new* when it named *old*."""
+        if self.kind != self.PAIR_SIGNIFICANCE or self.name != old:
+            return self
+        return DerivedRule(self.kind, new, self.values, self.side)
+
+
+@dataclass(frozen=True)
+class RuleSet:
+    """Significance rules for the pairs in its scope; an empty scope field does not narrow."""
+    name: str = 'default'
+    tests: Rules = Rules()
+    sessions: tuple = ()
+    conn_types: tuple = ()
+    rules: tuple = ()   # DerivedRule, every one must hold
+    initial: bool = False   # run by the initial screen that builds the pointers, not by Assign tags
+    color: str = ''   # the pass tag's pill; '' = uncoloured
+    shown: bool = True   # whether the pass tag shows on pair rows
+
+    def covers(self, key: Key) -> bool:
+        return ((not self.sessions or str(key.session) in self.sessions)
+                and (not self.conn_types or key.type_label() in self.conn_types))
+
+    def serialize(self) -> dict:
+        return {'name': self.name, 'initial': self.initial, 'tag': {'color': self.color, 'shown': self.shown},
+                'scope': {'sessions': list(self.sessions), 'conn_types': list(self.conn_types),
+                          'pair_rules': [r.serialize() for r in self.rules]},
+                'rules': self.tests.serialize()}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'RuleSet':
+        if 'scope' not in d:   # the interim layout: scope fields flat, tests under 'tests'
+            return cls(d['name'], Rules.from_dict(d['tests']), tuple(d['sessions']),
+                       tuple(d['conn_types']), tuple(DerivedRule(**r) for r in d['rules']))
+        scope = d['scope']
+        return cls(d['name'], Rules.from_dict(d['rules']), tuple(scope['sessions']),
+                   tuple(scope['conn_types']), tuple(DerivedRule(**r) for r in scope['pair_rules']),
+                   d.get('initial', False), **d.get('tag', {}))
+
+
+@dataclass(frozen=True)
+class RuleBook:
+    """Rule sets in run order: a pair stays on only while it passes every set covering it."""
+    sets: tuple = ()
+    gray_boxes: tuple = ('rules', 'network focus', 'neuron selection')   # a pair stays clear only when every checked box keeps it
+    gray_rules: tuple = ()   # DerivedRule: the 'rules' box keeps the pairs meeting every one
+    on_sets: tuple = ()   # later sets whose verdicts make a pair on; empty = every stored set
+    on_mode: str = 'and'   # 'and' | 'or' across on_sets
+
+    GRAY_BOXES = ('rules', 'network focus', 'neuron selection')
+
+    def __post_init__(self):
+        object.__setattr__(self, 'sets', self.initial_sets() + self.later_sets())   # initial sets always run first
+
+    def initial_sets(self) -> tuple:
+        return tuple(r for r in self.sets if r.initial)
+
+    def later_sets(self) -> tuple:
+        return tuple(r for r in self.sets if not r.initial)
+
+    def set(self, name: str) -> RuleSet:
+        return next(r for r in self.sets if r.name == name)
+
+    def with_set(self, rule_set: RuleSet) -> 'RuleBook':
+        """*rule_set* in place of its namesake, or appended last."""
+        names = [r.name for r in self.sets]
+        if rule_set.name not in names:
+            return replace(self, sets=self.sets + (rule_set,))
+        return replace(self, sets=tuple(rule_set if r.name == rule_set.name else r for r in self.sets))
+
+    def moved(self, name: str, step: int) -> 'RuleBook':
+        """*name* moved by *step*; re-sectioning keeps it within initial or later sets."""
+        return replace(self, sets=tuple(moved(self.sets, [r.name for r in self.sets].index(name), step)))
+
+    def renamed(self, old: str, new: str) -> 'RuleBook':
+        """Set *old* called *new*, along with every scope or gray-out rule naming it."""
+        return replace(self, gray_rules=tuple(r.set_renamed(old, new) for r in self.gray_rules),
+                       on_sets=tuple(new if n == old else n for n in self.on_sets),
+                       sets=tuple(replace(s, name=new if s.name == old else s.name,
+                                          rules=tuple(r.set_renamed(old, new) for r in s.rules))
+                                  for s in self.sets))
+
+    def without(self, name: str) -> 'RuleBook':
+        return replace(self, sets=tuple(r for r in self.sets if r.name != name),
+                       on_sets=tuple(n for n in self.on_sets if n != name))
+
+    def conf_fields(self) -> dict:
+        """The CCGConfig fields this book is stored in."""
+        return {'rule_sets': [r.serialize() for r in self.sets],
+                'gray_out': {'boxes': list(self.gray_boxes),
+                             'pair_rules': [r.serialize() for r in self.gray_rules]},
+                'pair_on': {'sets': list(self.on_sets), 'mode': self.on_mode}}
+
+    @classmethod
+    def from_conf(cls, conf) -> 'RuleBook':
+        gray, on = conf.gray_out or {}, conf.pair_on
+        return cls(tuple(RuleSet.from_dict(r) for r in conf.rule_sets),
+                   tuple(gray.get('boxes', cls.gray_boxes)),
+                   tuple(DerivedRule(**r) for r in gray.get('pair_rules', ())),
+                   tuple(on.get('sets', ())), on.get('mode', cls.on_mode))
+
+    @classmethod
+    def from_legacy(cls, state: dict) -> 'RuleBook':
+        """A pre-rule-set config: alphabetical scoped groups then the default, or one ``aux_tests`` dict."""
+        if 'aux_tests' in state:
+            d = state['aux_tests'] or {}
+            if 'groups' not in d:
+                return cls((RuleSet(tests=Rules.from_dict(d)),))
+            return cls(tuple(RuleSet.from_dict(g) for g in d['groups']), tuple(d.get('gray_boxes', cls.gray_boxes)),
+                       tuple(DerivedRule(**r) for r in d.get('gray_rules', ())))
+        gray = state.get('gray_out') or {}
+        scoped = sorted((RuleSet.from_dict(g) for g in state.get('rule_groups') or ()), key=lambda r: r.name)
+        return cls((*scoped, RuleSet(tests=Rules.from_dict(state.get('default_significance_rules') or []))),
+                   tuple(gray.get('boxes', cls.gray_boxes)), tuple(DerivedRule(**r) for r in gray.get('pair_rules', ())))
 
 
 class Group(JsonSavable):
@@ -362,7 +528,7 @@ class GroupDataset(JsonSavable, BiIndex):
         return os.path.join(d, 'groups') if d else None
 
     def serialize(self) -> dict:
-        state = {'registry': _to_json(self.registry)}
+        state = {'registry': _to_json({n: g for n, g in self.registry.items() if not is_transient_group(n)})}
         if getattr(self, 'saved_at', None):
             state['saved_at'] = self.saved_at
         return state
@@ -641,7 +807,11 @@ class DerivedGroups:
         return [str(k.session) for k in self.cd.nd.session_keys]
 
     def members(self, gname: str, sess: str) -> set:
-        tests = [self._test(rule, sess) for rule in self.groups.get_group_metadata(gname).rules]
+        return self.rule_based_filter(self.groups.get_group_metadata(gname).rules, sess)
+
+    def rule_based_filter(self, rules: list, sess: str) -> set:
+        """The session's significant pairs meeting every rule: the one place rules are applied."""
+        tests = [self._test(rule, sess) for rule in rules]
         universe = set().union(*(self.cd.ptr[k].pair_set for k in self.cd.ptr
                                  if str(k.session) == sess))
         return {p for p in universe if all(test(p) for test in tests)}
@@ -659,18 +829,64 @@ class DerivedGroups:
         return [g for g in self.groups.derived_groups()
                 if (ref, tgt) in self.cached_members(g, sess)]
 
+    def significance(self, name: str, sess: str) -> dict:
+        """``{'on': pairs, 'off': pairs}`` rule set *name* passed or failed in *sess*'s swept 'all' segment."""
+        ck = (DerivedRule.PAIR_SIGNIFICANCE, name, sess)
+        if ck in self._memo:
+            return self._memo[ck]
+        out = {v: set() for v in DerivedRule.VERDICTS}
+        for k, ptr in self.cd.ptr.items():
+            arrays = self.sd.rule_results(k, 'all').arrays if str(k.session) == sess else {}
+            if name + '.passed' not in arrays:   # another session, or never swept with this set
+                continue
+            reached, passed = arrays[name + '.value'], arrays[name + '.passed']
+            for p in ptr.pair_set:
+                if not np.isnan(reached[p]):   # NaN: outside the set's scope
+                    out['on' if passed[p] else 'off'].add(p)
+        self._memo[ck] = out
+        return out
+
+    def passed_rule_sets(self, sess: str, pair: tuple) -> list:
+        """Rule sets the pair passed in the swept 'all' segment."""
+        return [r.name for r in self.cd.rule_book.later_sets() if pair in self.significance(r.name, sess)['on']]
+
+    def neuron_conn_counts(self, sess: str, conn_types: list, groups: list = ()) -> np.ndarray:
+        """Per position: significant *conn_types* pairs the neuron sends, within *groups* when given."""
+        counts = np.zeros(self.cd.nd.neurons_for(Key(session=sess)).n_neurons, dtype=int)
+        tagged = self._pair_tagged(groups, sess) if groups else None
+        for k, ptr in self.cd.ptr.items():
+            if str(k.session) == sess and k.excitability in conn_types:
+                pairs = ptr.pair_set if tagged is None else ptr.pair_set & tagged
+                np.add.at(counts, [ref for ref, _ in pairs], 1)
+        return counts
+
+    def _pair_tagged(self, tags: list, sess: str) -> set:
+        self.sd.ensure_groups_loaded_for([sess])   # pair tags are indexed per session on first use
+        return self.groups.members_in_groups(tags, sess)
+
     def _test(self, rule: DerivedRule, sess: str):
         """The rule as a predicate on a (ref, tgt) of *sess*; pairs index neurons by position."""
-        if rule.kind == DerivedRule.PAIR_TAG:
-            self.sd.ensure_groups_loaded_for([sess])   # pair tags are indexed per session on first use
-            return self.groups.members_in_groups(rule.values, sess).__contains__
         neurons = self.cd.nd.neurons_for(Key(session=sess))
-        ids = [int(i) for i in neurons.neuron_ids]
-        labels = neurons.tags.get(rule.name, [None] * len(ids))
-        hit = {i for i, lb in zip(ids, labels) if str(lb) in rule.values}
+        if rule.kind == DerivedRule.PAIR_TAG:
+            return self._pair_tagged(rule.values, sess).__contains__
+        if rule.kind == DerivedRule.PAIR_CONN:
+            return set().union(*(p.pair_set for k, p in self.cd.ptr.items()
+                                 if str(k.session) == sess and k.type_label() in rule.values)).__contains__
+        if rule.kind == DerivedRule.PAIR_SIGNIFICANCE:
+            sig = self.significance(rule.name, sess)
+            return set().union(*(sig[v] for v in rule.values)).__contains__
+        if rule.kind == DerivedRule.PAIR_LOCATION:
+            where = neurons.peak_channels if rule.name == 'same channel' else neurons.shank_ids
+            return lambda pair: ('yes' if where[pair[0]] == where[pair[1]] else 'no') in rule.values
+        if rule.kind == DerivedRule.NEURON_GROUP:   # members are ids, pairs positions
+            hit = np.isin(neurons.neuron_ids,
+                          [m[0] for m in self.sd.neuron_groups.members_in_groups(rule.values, sess)])
+        else:
+            labels = neurons.tags.get(rule.name, [None] * neurons.n_neurons)
+            hit = np.array([str(lb) in rule.values for lb in labels], dtype=bool)
 
         def test(pair) -> bool:
-            r, t = ids[pair[0]] in hit, ids[pair[1]] in hit
+            r, t = hit[pair[0]], hit[pair[1]]
             return {'ref': r, 'tgt': t, 'either': r or t, 'both': r and t}[rule.side]
         return test
 
@@ -703,7 +919,7 @@ class SelectionDataset(JsonSavable, Autosave):
             self.neuron_groups.load()
         self.groups.derived = DerivedGroups(cd, self)
         self.sessions: dict[Key, SelectionData] = {}
-        self.segtags: dict[tuple, AuxResults] = {}
+        self.segtags: dict[tuple, RuleResults] = {}
         self.save_dir = save_dir
         self._indexed: set = set()
 
@@ -754,6 +970,63 @@ class SelectionDataset(JsonSavable, Autosave):
             sd._nd_key = next(iter(sd.selections)).nd()
             self.sessions[sd._nd_key] = sd
 
+    def rule_set_pairs(self, name: str) -> dict:
+        """``{ptr key: pairs}`` that passed rule set *name* in the swept 'all' segment."""
+        out = {}
+        for k, ptr in self.cd.ptr.items():
+            arrays = self.rule_results(k, 'all').arrays
+            if name + '.passed' not in arrays:
+                continue
+            reached, passed = arrays[name + '.value'], arrays[name + '.passed']
+            out[k] = {p for p in ptr.pair_set if not np.isnan(reached[p]) and passed[p]}
+        return out
+
+    def clear_rule_set(self, name: str) -> None:
+        """Drop rule set *name*'s stored results in every segment, so no pair carries its tag."""
+        for k in self.cd.ptr:
+            for seg in self.rule_segments(k):
+                store = self.rule_results(k, seg)
+                sets = {RuleResults._set_of(a) for a in store.arrays if a != RuleResults.ON}
+                if name in sets:
+                    store.set_results({}, list(sets - {name}))
+                    self.store_results(k, seg, store)
+
+    def store_results(self, key: Key, segment: str, store: RuleResults) -> None:
+        """Recombine *store*'s on under the rule book's applied on-sets and mode, then write it."""
+        book = self.cd.rule_book
+        n = self.cd.nd.neurons_for(key.nd()).n_neurons
+        store.recombine(book.on_sets, book.on_mode, (n, n), self.seg_overrides(str(key.session), segment))
+        store.save()
+
+    def apply_on(self) -> None:
+        """Every stored segment's on rebuilt from its set verdicts: what Apply on the on page runs."""
+        for k in self.cd.ptr:
+            for seg in self.rule_segments(k):
+                self.store_results(k, seg, self.rule_results(k, seg))
+
+    def on_verdict(self, key: Key, segment: str) -> np.ndarray:
+        """``[ref, tgt]`` stored on for *segment*; a segment no run has reached is swept with every later set first."""
+        store = self.rule_results(key, segment)
+        if RuleResults.ON not in store.arrays:
+            store.set_results(self.cd.sweep_rule_sets(key.change(segment=segment), self.rule_plan(key))[0], [])
+            self.store_results(key, segment, store)
+        return store.arrays[RuleResults.ON]
+
+    def on_grid(self, key: Key, segment: str) -> np.ndarray:
+        """``[ref, tgt]`` on for *segment*: the applied sets and the lowres p-value screen, hand-set entries winning."""
+        data = self.cd.ccg_for(key.change(resolution='lowres', segment=segment))
+        on = self.on_verdict(key, segment) & data.screened(data.segment_index(segment), key.excitability)
+        n = on.shape[0]
+        for (ref, tgt), state in self.seg_overrides(str(key.session), segment).items():
+            if ref < n and tgt < n:
+                on[ref, tgt] = state
+        return on
+
+    def kept_pairs(self) -> dict:
+        """``{ptr key: pairs}`` selected or deleted by hand: a rebuilt pointer must still list them."""
+        return {k.ptr(): {p for p in b.selected | b.deleted if len(p) == 2}   # all-session triples live elsewhere
+                for sd in self.sessions.values() for k, b in sd.selections.items()}
+
     def get_selection_by_session(self, key: Key) -> SelectionData:
         nd = key.nd()
         sd = self.sessions.get(nd)
@@ -777,23 +1050,34 @@ class SelectionDataset(JsonSavable, Autosave):
         return {**{p: True for p in sg.pairs_tagged(sg.ON, sess, segment)},
                 **{p: False for p in sg.pairs_tagged(sg.OFF, sess, segment)}}
 
-    def aux_results(self, key: Key, segment: str) -> AuxResults:
+    def rule_plan(self, key: Key, names: list = None) -> list:
+        """``[(name, tests, mask)]`` in run order: each rule set covering *key* (of *names*, when given) with the pairs in its scope."""
+        n, plan = self.cd.nd.neurons_for(key.nd()).n_neurons, []
+        for r in self.cd.rule_book.later_sets():
+            if r.covers(key) and (names is None or r.name in names):
+                mask = np.full((n, n), not r.rules)   # no pair rules: every pair
+                for p in self.groups.derived.rule_based_filter(list(r.rules), str(key.session)) if r.rules else ():
+                    mask[p] = True
+                plan.append((r.name, r.tests.specs(), mask))
+        return plan
+
+    def rule_results(self, key: Key, segment: str) -> RuleResults:
         """Swept rule arrays for one (session, conn type, segment), memmapped on first ask."""
         ck = (key.nd(), key.type_label(), segment)
         res = self.segtags.get(ck)
         if res is None:
-            res = AuxResults(self.save_dir, key.nd(), key.type_label(), segment).load()
+            res = RuleResults(self.save_dir, key.nd(), key.type_label(), segment).load()
             self.segtags[ck] = res
         return res
 
-    def aux_segments(self, key: Key) -> list:
+    def rule_segments(self, key: Key) -> list:
         """Segments swept for *key*'s session and conn type, read off the store's dir names."""
-        root = os.path.join(self.save_dir, 'aux_tests')
+        root = os.path.join(self.save_dir, 'rule_results')
         prefix = f"{_dir_token(key.session)}.{_dir_token(key.type_label())}."
         return sorted(n[len(prefix):] for n in os.listdir(root)
                       if n.startswith(prefix)) if os.path.isdir(root) else []
 
-    def aux_members(self, sess: str, keys_pairs: list, on: bool) -> dict:
+    def rule_members(self, sess: str, keys_pairs: list, on: bool) -> dict:
         """``{segment: [(ref, tgt)]}`` whose verdict is *on*: the swept store, hand-set tags winning."""
         out: dict = {}
         for key, pair_set in keys_pairs:
@@ -801,8 +1085,8 @@ class SelectionDataset(JsonSavable, Autosave):
             if not pairs:
                 continue
             idx = tuple(np.array(pairs).T)
-            for seg in self.aux_segments(key):
-                verdict = np.asarray(self.aux_results(key, seg).arrays[AuxResults.ON])[idx]
+            for seg in self.rule_segments(key):
+                verdict = np.asarray(self.rule_results(key, seg).arrays[RuleResults.ON])[idx]
                 out.setdefault(seg, set()).update(
                     p for p, v in zip(pairs, verdict.tolist()) if v == on)
         for seg in self.seg_groups.segments_tagged(sess):

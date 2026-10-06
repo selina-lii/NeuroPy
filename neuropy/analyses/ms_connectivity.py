@@ -5,13 +5,14 @@ import math
 import os
 import copy
 import shutil
+import weakref
 import dataclasses
 from dataclasses import dataclass, field
+from functools import cached_property
 from importlib import import_module
 from pathlib import Path as _Path
 
 import numpy as np
-import pandas as pd
 import hickle as hkl
 
 try:
@@ -20,15 +21,16 @@ except ImportError:
     cp = None
 
 import neuropy.analyses.correlations as correlations
-from neuropy.analyses.utils import (_san_np, _hasvalue, Config, AnalysisDataset, JsonSavable,
+from neuropy.analyses.utils import (_san_np, Config, AnalysisDataset, JsonSavable,
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDataset, NeuronsDatasetConfig
-from neuropy.analyses.pair_selection_data import SelectionDataset
+from neuropy.analyses.pair_selection_data import RuleBook, RuleSet, SelectionDataset
+from neuropy.analyses.placefield_data import PlacefieldData
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
 from neuropy.analyses.ccg_transforms import (
-    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig, AuxTestConfig, lag_window_bins,
+    CCGNorm, ConnectionStrength, NormalizeBy, ConnStrengthConfig, lag_window_bins,
     hollow_conv, multiple_correction)
 from neuropy.utils.data_storage_util import atomic_write_json
 from neuropy.utils.data_management import (bin_token as _bin_token, read_meta,
@@ -57,9 +59,12 @@ class CCGConfig(Config):
     _groups = {
         'key': ['name', 'resolution', 'bin_size', 'duration', 'conv_window',
                 'conn_types', 'use_acceleration', 'symmetrize_ccg'],
-        'derived': ['alpha', 'alpha2', 'min_lag', 'max_lag', 'tail_intervals', 'tail_source',
-                    'min_spkcount', 'spkcnt_scope', 'multiple_correction', 'aux_tests'],
+        'derived': ['alpha', 'min_lag', 'max_lag', 'tail_intervals', 'tail_source',
+                    'min_spkcount', 'spkcnt_scope', 'multiple_correction', 'rule_sets', 'gray_out', 'pair_on'],
     }
+    # the significance parameters: stored together as the rule sets' Defaults, read as attributes
+    SIGNIFICANCE_DEFAULTS = ('alpha', 'min_lag', 'max_lag', 'tail_intervals',
+                             'min_spkcount', 'spkcnt_scope', 'multiple_correction')
 
     # "init param": ("kind", choices)  — what a builder UI exposes; defaults come from __init__
     _options = {
@@ -68,7 +73,6 @@ class CCGConfig(Config):
         'resolution':          ('choice', ['lowres', 'highres']),
         'conv_window':         ('metric', ['ms', 's']),
         'alpha':               ('float', None),
-        'alpha2':              ('float', None),
         'min_lag':             ('metric', ['ms', 's']),
         'max_lag':             ('metric', ['ms', 's']),
         'tail_source':         ('choice', ['bins', 'conv', 'jitter']),
@@ -89,14 +93,16 @@ class CCGConfig(Config):
         resolutions: dict = None,
         conv_window: float = 5e-3,
         alpha: float = 0.05,
-        alpha2: float = 0.1,
         min_lag: float = 1e-3,
         max_lag: float = 3e-3,
         tail_intervals: list = None,   # [(start, end)] in seconds; None edge = window edge
         tail_source: str = 'bins',     # 'bins' | 'conv' | 'jitter'
         min_spkcount=2.5,
         spkcount_scope=12e-3,
-        aux_tests: dict = None,   # AuxTestConfig.serialize(); which tests decide on/off
+        rule_sets: list = None,        # RuleBook.conf_fields(): rules deciding on/off
+        gray_out: dict = None,
+        pair_on: dict = None,
+        significance_defaults: dict = None,   # overrides the parameters above it names
         multiple_correction: str = 'bonferroni',  # 'bonferroni' or 'fdr_bh'
         use_acceleration=None,  # None → auto-detect CuPy; True/False to override
         symmetrize_ccg=True,
@@ -120,28 +126,42 @@ class CCGConfig(Config):
         self.conn_types = conn_types
         self.duration = duration
         self.conv_window = conv_window
+        self.tail_source = tail_source   # the CS 'tailed' baseline's; rules set their own
+        self.significance_defaults = {}
         self.alpha = alpha
-        self.alpha2 = alpha2
         self.multiple_correction = multiple_correction
         self.min_lag = min_lag
         self.max_lag = max_lag
         self.tail_intervals = (tail_intervals if tail_intervals is not None
                                else [(None, -min_lag), (max_lag, None)])
-        self.tail_source = tail_source
         self.min_spkcount = min_spkcount
         self.spkcnt_scope = spkcount_scope
-        self.aux_tests = dict(aux_tests or {})
+        for k, v in (significance_defaults or {}).items():
+            setattr(self, k, v)
+        self.rule_sets = list(rule_sets or [])
+        self.gray_out = dict(gray_out or {})
+        self.pair_on = dict(pair_on or {})
         self.use_acceleration = use_acceleration
         self.symmetrize_ccg = symmetrize_ccg
 
+    def _default(name):
+        return property(lambda self: self.significance_defaults[name],
+                        lambda self, v: self.significance_defaults.__setitem__(name, v))
+
+    alpha = _default('alpha')
+    min_lag, max_lag = _default('min_lag'), _default('max_lag')
+    multiple_correction = _default('multiple_correction')
+    min_spkcount, spkcnt_scope = _default('min_spkcount'), _default('spkcnt_scope')
+    del _default
+
     @property
     def tail_intervals(self) -> list:
-        return self._tail_intervals
+        return [tuple(iv) for iv in self.significance_defaults['tail_intervals']]
 
     @tail_intervals.setter
     def tail_intervals(self, intervals) -> None:
         """Tuples, not lists: this travels into cache keys, and JSON reads it back as lists."""
-        self._tail_intervals = [tuple(iv) for iv in (intervals or [])]
+        self.significance_defaults['tail_intervals'] = [tuple(iv) for iv in (intervals or [])]
 
     @property
     def conn_types_E(self):
@@ -192,10 +212,6 @@ class CCGConfig(Config):
         return int(self.duration / self.bin_size) + 1
 
     @property
-    def spkcnt_bins(self) -> int:
-        return int(self.spkcnt_scope / self.bin_size)
-
-    @property
     def min_lag_bin(self) -> int:
         return lag_window_bins(self.min_lag, self.max_lag,
                                self.bin_size, self.center_bin)[0]
@@ -205,14 +221,6 @@ class CCGConfig(Config):
         return lag_window_bins(self.min_lag, self.max_lag,
                                self.bin_size, self.center_bin)[1]
 
-    @property
-    def min_spkcnt_bin(self) -> int:
-        return self.center_bin - self.spkcnt_bins // 2
-
-    @property
-    def max_spkcnt_bin(self) -> int:
-        return self.center_bin + self.spkcnt_bins // 2 + 1
-
     def save_path(self, suffix='config') -> str:
         """Path under ``data/project_{name}/ccg/config/``."""
         base = os.path.join(self._root, f"project_{self.name}", "ccg", "config",
@@ -221,7 +229,18 @@ class CCGConfig(Config):
 
     def __setstate__(self, state: dict) -> None:
         """JSON has no tuples, so conn types come back as lists — they must stay hashable."""
+        state = dict(state)
+        legacy = {k: state.pop(k) for k in ('aux_tests', 'default_significance_rules', 'rule_groups')
+                  if k in state}   # configs from before rule sets
+        if legacy and 'rule_sets' not in state:
+            state.update(RuleBook.from_legacy({**state, **legacy}).conf_fields())
+        defaults = state.pop('significance_defaults', {})   # merged: a key the file lacks keeps its default
+        for d in (state, defaults):   # the retired built-in screen's I neighbour cut
+            d.pop('alpha2', None)
+        if 'tail_source' in defaults:   # no longer a rule default: rules set their own
+            state.setdefault('tail_source', defaults.pop('tail_source'))
         super().__setstate__(state)
+        self.significance_defaults.update(defaults)
         self.conn_types = [(ei, tuple(ct)) for ei, ct in self.conn_types]
 
     def __str__(self):
@@ -341,6 +360,7 @@ def open_project(name: str = None, sessions: list = None):
     cd.missing_sessions()
     sd = SelectionDataset(cd)
     sd.load_sessions()
+    cd.sync_pointers(sd.kept_pairs())
     return neurons, cd, sd
 
 
@@ -482,9 +502,13 @@ class CCGSourceConfig(Config):
         return float(self.t1)
 
 
+_PAIR_SETS = weakref.WeakKeyDictionary()   # CCGPointer -> (inds, picked, pair set): off the instance, so never saved
+
+
 class CCGPointer(HklSavable):
-    """Indices of significant pairs into ``CCGData``."""
+    """Indices of significant pairs into ``CCGData``, plus pairs picked by hand outside the screen."""
     IGNORED_KEYS = ('conf', '_root', '_ignored_attrs')
+    picked = np.empty((0, 2), dtype=int)   # class default: pointers saved before picking existed
 
     def __init__(
         self,
@@ -521,9 +545,25 @@ class CCGPointer(HklSavable):
         return SetOp.unique(self.inds[:, 1:])  # unique (ref, tgt)
 
     @property
-    def pair_set(self) -> set:
-        """Unique ``(ref, tgt)`` pairs."""
+    def screened_set(self) -> set:
+        """Unique ``(ref, tgt)`` pairs the screen passed."""
         return {(int(r), int(t)) for r, t in self.pairs}
+
+    @property
+    def pair_set(self) -> frozenset:
+        """Screened and picked ``(ref, tgt)`` pairs, rebuilt only when inds or picked are replaced."""
+        memo = _PAIR_SETS.get(self)
+        if memo is None or memo[0] is not self.inds or memo[1] is not self.picked:
+            memo = _PAIR_SETS[self] = (self.inds, self.picked, frozenset(self.screened_set | self.picked_set))
+        return memo[2]
+
+    @property
+    def picked_set(self) -> set:
+        return {(int(r), int(t)) for r, t in self.picked}
+
+    def pick(self, pairs) -> None:
+        new = sorted(set(pairs) - self.pair_set)
+        self.picked = np.vstack([self.picked, np.array(new, dtype=int).reshape(-1, 2)])
 
     @property
     def n_pairs(self):
@@ -551,6 +591,7 @@ class CCGPointer(HklSavable):
                     if isinstance(p, cls):
                         p.conf = conf
                         p._root = root
+                        p._ignored_attrs = cls.IGNORED_KEYS   # unpickling skips __init__, which sets it
                         ptr[p.key.ptr()] = p
             except Exception as exc:
                 print(f"[CCGPointer] skip {f}: {exc}")
@@ -774,22 +815,33 @@ class CCGData(NpzSavable):
         src._root = str(self._root)
         return src
 
-    def pair(self, seg_idx: int, ref: int, tgt: int) -> tuple:
-        """Per-bin traces for one pair on one segment."""
+    def p_values(self, excitability: str) -> tuple:
+        """(raw, corrected) p for *excitability*: inhibition tests the lower tail, held in qval."""
+        if excitability == 'I':
+            return self.qval, self.qval_corrected
+        return self.pval, self.pval_corrected
+
+    def pair(self, seg_idx: int, ref: int, tgt: int, excitability: str) -> tuple:
+        """Per-bin (ccg, baseline, p, p corrected) for one pair on one segment."""
         def sl(a):
             return None if a is None else a[seg_idx, ref, tgt, :]
-        return (sl(self.ccg), sl(self.ccg_null), sl(self.pval),
-                sl(self.pval_corrected), sl(self.qval))
+        return (sl(self.ccg), sl(self.ccg_null),
+                *(sl(a) for a in self.p_values(excitability)))
 
     def mean_ccg(self, ref: int, tgt: int, seg_idx: int) -> float:
         ccg = self.ccg
         return float(np.mean(ccg[seg_idx, ref, tgt, :]))
 
-    def min_pval(self, ref: int, tgt: int, seg_idx: int) -> float:
-        if self.pval is None:
+    def screened(self, seg_idx: int, excitability: str) -> np.ndarray:
+        lb, ub = int(self.conf.min_lag_bin), int(self.conf.max_lag_bin)
+        return self.p_values(excitability)[1][seg_idx, :, :, lb:ub].min(axis=-1) <= self.conf.alpha
+
+    def min_pval(self, ref: int, tgt: int, seg_idx: int, excitability: str) -> float:
+        pval = self.p_values(excitability)[0]
+        if pval is None:
             return 1.0
         lb, ub = int(self.conf.min_lag_bin), int(self.conf.max_lag_bin)
-        sl = self.pval[seg_idx, ref, tgt, lb:ub]
+        sl = pval[seg_idx, ref, tgt, lb:ub]
         if sl.size == 0:
             return 1.0
         m = float(np.nanmin(sl))
@@ -858,7 +910,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         seg = self.segment_index(key, key.segment)
         if seg >= data.ccg.shape[0]:   # segment not computed at this resolution
             return None
-        return data.pair(seg, key.ref, key.tgt)
+        return data.pair(seg, key.ref, key.tgt, key.excitability)
 
     def live_sessions(self) -> set:
         """Sessions with in-memory ``CCGData``."""
@@ -897,6 +949,14 @@ class CCGDataset(AnalysisDataset, Cacheable):
     @property
     def stats_results_dir(self):
         return os.path.join(self.save_path, "stats_results")
+
+    @property
+    def placefield_dir(self):
+        return os.path.join(self.save_path, "placefield")
+
+    @cached_property
+    def placefields(self) -> PlacefieldData:
+        return PlacefieldData.load_dir(self.placefield_dir)
 
     @property
     def custom_dir(self):
@@ -1043,10 +1103,15 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """All sessions in memory or on disk."""
         return self.live_sessions() | self.saved_sessions()
 
+    def complete_resolutions(self) -> list:
+        """Resolutions every session has CCGs at."""
+        gaps = self.check_all_sessions_have_all_resolutions()
+        return [r for r in self.available_resolutions() if not any(r in m for m in gaps.values())]
+
     def check_all_sessions_have_all_resolutions(self, sessions=None) -> dict:
         """``{session: [missing resolutions]}``."""
         if sessions is None:
-            sessions = self.available_sessions
+            sessions = self.sessions
         gaps = {}
         for s in sessions:
             missing = []
@@ -1121,13 +1186,11 @@ class CCGDataset(AnalysisDataset, Cacheable):
             if source is not None:
                 conf.tail_source = source
 
-    def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig,
-                              overrides: dict = None) -> np.ndarray:
-        """Connection-strength grid ``[seg, ref, tgt]`` after norms — batch call of the per-pair chain."""
+    def get_conn_strength_for(self, key, active_norms, cfg: ConnStrengthConfig, on: np.ndarray) -> np.ndarray:
+        """Connection-strength grid after norms — batch call of the per-pair chain; *on* decides the off pairs."""
         cs = self._conn_strength_raw(key, active_norms, cfg)
         if cfg.off_mode == 'flag':
             return cs
-        on = self.pair_on_for(key, overrides, tests=self.aux_test_config.specs())
         return np.where(on, 1.0, 0.0) if cfg.off_mode == 'binarize' else np.where(on, cs, 0.0)
 
     def _conn_strength_raw(self, key, active_norms, cfg: ConnStrengthConfig) -> np.ndarray:
@@ -1154,6 +1217,19 @@ class CCGDataset(AnalysisDataset, Cacheable):
         hkl.dump(bundle, path)
         return path
 
+    def pair_jitter_path(self) -> str:
+        return os.path.join(self.save_path, 'jitter', 'pair_cache.npy')
+
+    def save_pair_jitter(self, items: list) -> None:
+        """Persist single-pair jitter runs, oldest first: [((nd_str, ref, tgt, res_key, seg), result)]."""
+        path = self.pair_jitter_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.save(path, {'items': items}, allow_pickle=True)
+
+    def load_pair_jitter(self) -> list:
+        path = self.pair_jitter_path()
+        return np.load(path, allow_pickle=True).item()['items'] if os.path.isfile(path) else []
+
     def load_jitter(self) -> int:
         """Read saved jitter back into ``_jitter_results``; returns how many pairs landed."""
         path = self.jitter_path()
@@ -1170,13 +1246,20 @@ class CCGDataset(AnalysisDataset, Cacheable):
         return n
 
     @property
-    def aux_test_config(self) -> AuxTestConfig:
-        """Which auxiliary tests decide on/off — stored on conf, so it survives a restart."""
-        return AuxTestConfig.from_dict(self.conf.aux_tests)
+    def rule_book(self) -> RuleBook:
+        """The rule sets deciding on/off — stored on conf, so they survive a restart; parsed again only when conf's fields are replaced."""
+        c = self.conf
+        fields = (c.rule_sets, c.gray_out, c.pair_on)
+        memo = self.__dict__.get('_rule_book_memo')
+        if memo is None or any(a is not b for a, b in zip(memo[0], fields)):
+            memo = self._rule_book_memo = (fields, RuleBook.from_conf(c))
+        return memo[1]
 
-    @aux_test_config.setter
-    def aux_test_config(self, cfg: AuxTestConfig) -> None:
-        self.conf.aux_tests = cfg.serialize()
+    @rule_book.setter
+    def rule_book(self, book: RuleBook) -> None:
+        for k, v in book.conf_fields().items():
+            setattr(self.conf, k, v)
+        self.conf.save()
 
     def keys_in_scope(self, sessions: list = None, type_labels: list = None) -> list:
         """Pointer keys inside a scope; an empty or ``None`` list means no narrowing."""
@@ -1185,46 +1268,37 @@ class CCGDataset(AnalysisDataset, Cacheable):
                 if (not want_sess or str(key.session) in want_sess)
                 and (not want_type or key.type_label() in want_type)]
 
-    def aux_tests_for(self, key, tests: dict = None) -> dict:
-        """``{name: (value, passed)}``, each ``[ref, tgt]``, for *key*'s segment.
-
-        *tests* maps a name to its kwargs (``threshold``, ``factor``); None runs all, {} runs none."""
-        specs = {n: {} for n in ConnectionStrength.AUX_TESTS} if tests is None else tests
+    def rule_tests_for(self, key, tests: dict = None, pairs: tuple = None) -> dict:
+        """``{label: (value, passed)}`` per pair of *key*'s segment, or of *pairs* (an index tuple); None runs every test."""
+        specs = {n: {} for n in ConnectionStrength.RULE_TESTS} if tests is None else tests
         out = {}
-        for name, kw in specs.items():
-            kw = kw or {}
-            res = kw.get('resolution') or ConnectionStrength.AUX_TESTS[name][4].get('resolution') \
-                or key.resolution
-            rkey = key.change(resolution=res)
+        for label, kw in specs.items():
+            kw = dict(kw)
+            name = kw.pop('test', label)
+            rkey = key.change(resolution=kw.pop('resolution', None) or key.resolution)
             data = self.ccg_for(rkey)
             seg = self.segment_index(rkey, key.segment)
-            conf = data.conf
-            src = data.pval[seg] if name in ConnectionStrength.PVAL_TESTS else data.ccg[seg]
-            out[name] = ConnectionStrength.aux_test(
-                name, src, conf, conf.min_lag_bin, conf.max_lag_bin, **kw)
+            direction = kw.get('direction', ConnectionStrength.RULE_TESTS[name][4].get('direction'))
+            src = (data.p_values(ConnectionStrength.P_DIRECTIONS[direction])[0][seg]
+                   if name in ConnectionStrength.PVAL_TESTS else data.ccg[seg])
+            out[label] = ConnectionStrength.rule_test(name, src if pairs is None else src[pairs], data.conf, **kw)
         return out
 
-    def _combine_on(self, key, results: dict) -> np.ndarray:
-        """AND of every enabled test; with none enabled a pair is on until said otherwise."""
-        if results:
-            return np.logical_and.reduce([passed for _v, passed in results.values()])
-        data = self.ccg_for(key)
-        return np.ones(data.ccg.shape[1:3], dtype=bool)
-
-    def pair_on_for(self, key, overrides: dict = None, tests: dict = None) -> np.ndarray:
-        """``[ref, tgt]`` on/off in *key*'s segment: every enabled test, with manual entries winning."""
-        results = self.aux_tests_for(key, tests)
-        on = self._combine_on(key, results)
-        for (ref, tgt), state in (overrides or {}).items():
-            if ref < on.shape[0] and tgt < on.shape[1]:
-                on[ref, tgt] = state
-        return on
-
-    def sweep_aux_tests(self, key, tests: dict = None,
-                        overrides: dict = None) -> tuple:
-        """``({name: (value, passed)}, on)``, each ``[ref, tgt]``, for *key*'s segment."""
-        results = self.aux_tests_for(key, tests)
-        on = self._combine_on(key, results)
+    def sweep_rule_sets(self, key, plan: list, overrides: dict = None) -> tuple:
+        """``({label: (value, passed)}, on)``: each set judges every pair in its scope on its own, a rule only on pairs its set still passes; on = passing every covering set."""
+        shape = self.ccg_for(key).ccg.shape[1:3]
+        on, results = np.ones(shape, dtype=bool), {}
+        for name, tests, mask in plan:
+            kept = mask.copy()
+            for label, kw in tests.items():
+                idx = np.nonzero(kept)
+                value, passed = np.full(shape, np.nan), np.ones(shape, dtype=bool)
+                if len(idx[0]):
+                    value[idx], passed[idx] = self.rule_tests_for(key, {label: kw}, idx)[label]
+                results[f"{name}:{label}"] = (value, passed)
+                kept &= passed
+            results[name] = (np.where(mask, 1.0, np.nan), kept | ~mask)
+            on &= kept | ~mask
         for (ref, tgt), state in (overrides or {}).items():
             if ref < on.shape[0] and tgt < on.shape[1]:
                 on[ref, tgt] = state
@@ -1475,6 +1549,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
         if not highres:
             for sess in {str(k.session) for k in missing}:
                 self._save_pointers(session=sess)
+            if key is None:   # every session built under this config
+                atomic_write_json(self.last_run_path, self.run_snapshot())
         for k in self._ccg:
             self.cache.touch(k)
 
@@ -1551,26 +1627,31 @@ class CCGDataset(AnalysisDataset, Cacheable):
             print(f"[EranConv] {nd_key} shape={ccg.shape} W={W} → {n_sig} sig pair-segs")
             return
 
-        neurons = self.nd.neurons_for(nd_key)
-        pvals, pred, qvals, (inds_E, inds_I), printstr = conv.eranconv(
-            neurons_key=nd_key, ccg=ccg, edge_times=None,
-            neuron_type=neurons.neuron_type, conf=self.conf)
-        ccg_data.ccg_null = pred
-        ccg_data.pval = pvals
-        ccg_data.qval = qvals
+        ccg_data.pval, ccg_data.ccg_null, ccg_data.qval = conv.eranconv(ccg, self.conf)
         ccg_data.set_arrays()
-        self._attr_append(nd_key, self._build_ptrs(nd_key, inds_E, inds_I), 'ptr')
-        print(printstr)
+        self._attr_append(nd_key, self._build_ptrs(nd_key), 'ptr')
+        print(self._summary(nd_key))
 
-    def _build_ptrs(self, key, inds_E: dict, inds_I: dict) -> dict:
-        """Build ``CCGPointer`` dict from eranconv index maps."""
+    def _build_ptrs(self, key) -> dict:
+        """One ``CCGPointer`` per conn type from the initial screen, keeping each one's hand-picked pairs."""
         ptrs = {}
-        for EI, inds_map in (('E', inds_E), ('I', inds_I)):
-            for conn_type, inds in inds_map.items():
-                ccg_key = key.add(conn_type=conn_type, excitability=EI)
-                ptrs[ccg_key.ptr()] = CCGPointer(key=ccg_key, conf=self.conf,
-                                                 inds=inds, root=self.save_path)
+        for EI, conn_type in self.conf.conn_types:
+            ccg_key = key.add(conn_type=conn_type, excitability=EI)
+            ptr = CCGPointer(key=ccg_key, conf=self.conf, inds=self.screen_inds(ccg_key), root=self.save_path)
+            if ccg_key.ptr() in self.ptr:
+                ptr.picked = self.ptr[ccg_key.ptr()].picked
+            ptrs[ccg_key.ptr()] = ptr
         return ptrs
+
+    def screen_inds(self, key) -> np.ndarray:
+        """``[seg, ref, tgt]`` rows of *key*'s conn type passing every initial set covering it on 'all'; uncovered pairs all pass."""
+        on = self.type_mask(key)
+        plan = [(r.name, {label: {**kw, 'resolution': key.resolution} for label, kw in r.tests.specs().items()}, on)
+                for r in self.rule_book.initial_sets() if r.covers(key)]
+        if plan:
+            on = on & self.sweep_rule_sets(key.change(segment='all'), plan)[1]
+        idx = np.argwhere(on)
+        return np.column_stack([np.zeros(len(idx), dtype=int), idx])
 
     def _compute_and_store(self, key, conv, edge_times):
         """Compute CCG, significance, and store in ``self._ccg`` / ``self.ptr``."""
@@ -1591,9 +1672,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         if ccg.ndim == 3:  # 'all' mode (no segments) → add n_seg axis; CCGData is 4D [seg,ref,tgt,bin]
             ccg = ccg[None]
 
-        pvals, pred, qvals, (inds_E, inds_I), printstr = conv.eranconv(
-            neurons_key=key, ccg=ccg, edge_times=edge_times,
-            neuron_type=neurons.neuron_type, conf=conf)
+        pvals, pred, qvals = conv.eranconv(ccg, conf)
 
         ccg_data = CCGData(
             key=key, conf=conf,
@@ -1603,13 +1682,29 @@ class CCGDataset(AnalysisDataset, Cacheable):
         )
 
         self._ccg[key] = ccg_data
-        self._attr_append(key, self._build_ptrs(key, inds_E, inds_I), 'ptr')
+        self._attr_append(key, self._build_ptrs(key), 'ptr')
 
         print(self._summary(key))
 
     def save_path(self, suffix='') -> str:
         """Project data root for save/load paths."""
         return self.conf.save_path(suffix=suffix)
+
+    def type_mask(self, key) -> np.ndarray:
+        """``[ref, tgt]``: position pairs whose neuron types match *key*'s conn type, autocorrelations off."""
+        nt = np.asarray(self.nd.neurons_for(key.nd()).neuron_type)
+        mask = (nt == key.conn_type[0])[:, None] & (nt == key.conn_type[1])[None, :]
+        np.fill_diagonal(mask, False)
+        return mask
+
+    def type_pairs(self, key) -> set:
+        """Every ``(ref, tgt)`` position pair whose neuron types match *key*'s conn type."""
+        return {(int(r), int(t)) for r, t in np.argwhere(self.type_mask(key))}
+
+    def pick_pairs(self, key, pairs) -> None:
+        """Record *pairs* on *key*'s pointer as hand-picked and save that session's pointers."""
+        self.ptr[key.ptr()].pick(pairs)
+        self._save_pointers(key.session)
 
     def _save_pointers(self, session=None) -> None:
         if not self.ptr:
@@ -1626,6 +1721,48 @@ class CCGDataset(AnalysisDataset, Cacheable):
             hkl.dump(bundle, path)
             n += len(bundle)
         print(f"[CCGDataset] saved {n} pointers in {len(by_sess)} session file(s)")
+
+    _CCG_FIELDS = ('resolutions', 'bin_size', 'duration', 'conv_window', 'symmetrize_ccg')   # what a stored CCG and its null depend on
+
+    @property
+    def last_run_path(self) -> str:
+        """Hidden file beside the config: what the stored CCGs and pointers were built from."""
+        head, tail = os.path.split(self.conf.save_path(suffix=''))
+        return os.path.join(head, f".{tail}_last_run.json")
+
+    def run_snapshot(self) -> dict:
+        """The config as the stored data sees it: CCG compute fields, then the initial screen (sets and the defaults they follow)."""
+        c = self.conf.serialize()
+        return json.loads(json.dumps({
+            'ccg': {k: c[k] for k in self._CCG_FIELDS},
+            'screen': {'conn_types': c['conn_types'], 'defaults': c['significance_defaults'],
+                       'initial_sets': [r.serialize() for r in self.rule_book.initial_sets()]}}))
+
+    def sync_pointers(self, keep: dict) -> None:
+        """Rebuild the pointers from the stored lowres CCGs when the initial screen changed since the last run; CCGs are never recomputed here, and *keep* (ptr key -> pairs) stays as picked."""
+        now = self.run_snapshot()
+        if not os.path.exists(self.last_run_path):
+            atomic_write_json(self.last_run_path, now)
+            return
+        with open(self.last_run_path) as f:
+            last = json.load(f)
+        last['screen']['initial_sets'] = json.loads(json.dumps(   # re-read: a newer rule format alone is no change
+            [RuleSet.from_dict(r).serialize() for r in last['screen']['initial_sets']]))
+        if last['ccg'] != now['ccg']:
+            print("[CCGDataset] CCG compute settings changed since the stored CCGs were built; they are kept as they are.")
+        if last['screen'] == now['screen']:
+            return
+        print("[CCGDataset] initial screen changed: rebuilding pointers from the stored CCGs.")
+        keys = [k for k in self.nd.session_keys]
+        for k in keys:
+            self.ccg_for(k)
+        for k in keys:
+            self._attr_append(k, self._build_ptrs(k), 'ptr')
+        for pk, pairs in keep.items():
+            if pk in self.ptr:
+                self.ptr[pk].pick(pairs)
+        self._save_pointers()
+        atomic_write_json(self.last_run_path, {'ccg': last['ccg'], 'screen': now['screen']})
 
     def save(self, keys=None) -> None:
         """Save in-memory ``CCGData`` (all or ``keys``)."""
@@ -1663,12 +1800,9 @@ _multiple_correction = multiple_correction   # lives in ccg_transforms with the 
 
 
 class EranConv:
-    """Convolution baseline significance (Stark & Abeles 2009)."""
+    """Convolution baseline (Stark & Abeles 2009): the null and both tails' p per bin."""
 
     def __init__(self, conf):
-        self._pvals = []
-        self._qvals = []
-        self.significant = []  # final filtering results
         self.conf = conf
 
     @staticmethod
@@ -1676,109 +1810,7 @@ class EranConv:
         """Hollow convolution baseline; returns ``pvals``, ``pred``, ``qvals``."""
         return hollow_conv(ccg, W=W, wintype=wintype, hollow_frac=hollow_frac)
 
-    def spkcount_mask(self, ccg):
-        min_bin = self.conf.min_spkcnt_bin
-        max_bin = self.conf.max_spkcnt_bin
-        threshold = self.conf.min_spkcount
-        # Mean spike count in lag window (center bin may be zero).
-        pair_inds = np.argwhere(
-            ccg[..., min_bin:max_bin].mean(axis=-1) >= threshold)
-        # NOTE right now it's the same criteria for excitation/inhibition
-        return pair_inds
-
-    def significance_mask(self, p, excitability):
-        """Pair indices with significant peaks (E: lag window; I: trough + neighbor)."""
-        conf = self.conf
-        method = conf.multiple_correction if conf.multiple_correction is not None else 'bonferroni'
-
-        if excitability == 'E':
-            sig, self._pvals = _multiple_correction(p, conf.alpha, method=method)
-            # At least one corrected-significant bin in the excitatory test window.
-            has_valid_peak = sig[..., conf.min_lag_bin:conf.max_lag_bin].any(axis=-1)
-            pair_inds = np.argwhere(has_valid_peak)
-        elif excitability == 'I':
-            sig1, self._qvals = _multiple_correction(p, conf.alpha, method=method)
-            sig2, _ = _multiple_correction(p, conf.alpha2, method=method)
-            # Bin must be significant at alpha AND have a neighbour at alpha2.
-            neighbor = sig1 & (np.roll(sig2, 1, -1) | np.roll(sig2, -1, -1))
-            pair_inds = np.argwhere(neighbor.any(-1))
-        else:
-            raise ValueError(f"Unknown excitability: {excitability!r}")
-        # remove autocorrelations
-        return pair_inds[pair_inds[:, -2] != pair_inds[:, -1]]
-
-    def _cell_type_mask(self, pair_inds, neuron_type, conn_types):
-        if pair_inds.ndim == 1:
-            pair_inds = pair_inds.reshape(0, 2)
-        sig_pairs = {}
-        if not _hasvalue(pair_inds):
-            for ct in conn_types:
-                sig_pairs[ct] = None
-            return sig_pairs
-
-        for ct in conn_types:
-            inds = np.where(
-                np.isin(pair_inds[:, -2], np.where(neuron_type == ct[0])) &
-                np.isin(pair_inds[:, -1], np.where(neuron_type == ct[1])))[0]
-            sig_pairs[ct] = pair_inds[inds] if inds.shape[0] else None
-        return sig_pairs
-
-    def eranconv(
-        self,
-        neurons_key: Key,
-        ccg,
-        edge_times: pd.DataFrame,
-        neuron_type,
-        conf: CCGConfig,
-    ):
-        """Full EranConv pass for one neurons key."""
-        print("running eranconv (1st pass)")
-        key = neurons_key
-        self.conf = conf
-        if edge_times is None:
-            edge_times = pd.DataFrame([{
-                'start': 0.0, 'stop': 0.0,
-                'label': 'session',
-                'total_time_hours': 0.0,
-                'effective_time_hours': 0.0,
-            }])
-        self.n_segments = edge_times.shape[0]
-
-        pvals, pred, qvals = EranConv._conv(ccg,
-                                            W=self.conf.conv_window / self.conf.bin_size, # number of bins in conv window
-                                            wintype="gauss",
-                                            hollow_frac=None)
-
-        def build_inds(p, EI, conn_types):
-            rough_inds = SetOp.intersect(self.significance_mask(p, EI),
-                                         self.spkcount_mask(ccg))
-            inds = self._cell_type_mask(rough_inds, neuron_type, conn_types)
-            return rough_inds, inds
-
-        # [n_seg, n_pair, 2]
-        rough_inds_E, inds_E = build_inds(pvals, 'E', conf.conn_types_E)
-        rough_inds_I, inds_I = build_inds(qvals, 'I', conf.conn_types_I)
-
-        self.significant = np.zeros(ccg.shape[:3], dtype=bool)
-        for inds in [inds_E, inds_I]:
-            if inds is None:
-                continue
-            for k, v in inds.items():
-                if v is None:
-                    continue
-                self.significant[tuple(v.T)] = True
-
-        printstr = ''
-        for i, (_, edge_time) in enumerate(edge_times.iterrows()):
-            N_totalE = int((rough_inds_E[:, 0] == i).sum())
-            N_totalI = int((rough_inds_I[:, 0] == i).sum())
-            printstr += f"{edge_time['label']:10}: E/I pairs {N_totalE:03d} / {N_totalI:03d} | "
-            for EI, (ref, tgt) in self.conf.conn_types_labeled:
-                inds = inds_E.get((ref, tgt)) if EI == 'E' else inds_I.get((ref, tgt))
-                n = int((inds[:, 0] == i).sum()) if _hasvalue(inds) else 0
-                printstr += f"{ref}-{tgt}/{EI} {n:02d} | "
-            printstr += '\n'
-
-        print("eranconv done")
-        return pvals, pred, qvals, (inds_E, inds_I), printstr
+    def eranconv(self, ccg, conf: CCGConfig) -> tuple:
+        """``(pvals, pred, qvals)``: upper-tail p, the null, lower-tail p."""
+        return EranConv._conv(ccg, W=conf.conv_window / conf.bin_size, wintype="gauss", hollow_frac=None)
 

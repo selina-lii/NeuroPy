@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum as _Enum, auto as _auto
 import numpy as np
 from scipy.signal import windows
@@ -220,7 +220,7 @@ class ConnectionStrength:
 
     @staticmethod
     def tail_mask(n_bins, conf, bin_size_eff=None, intervals=None) -> np.ndarray:
-        """Bool mask over bins, the union of *intervals* (default conf's tail); None edges reach the window edge."""
+        """Bool mask over bins, the union of lag *intervals* (default conf's tail); None edges reach the window edge."""
         bs = bin_size_eff or (conf.duration / (n_bins - 1) if n_bins > 1 else conf.bin_size)
         half = (n_bins // 2) * bs
         mask = np.zeros(n_bins, dtype=bool)
@@ -287,96 +287,135 @@ class ConnectionStrength:
             ccg, j_avg, fr_ref, fr_tgt, conf, lo, hi, jscale))
 
     @staticmethod
-    def mean_over_max_tail(ccg, conf, lo, hi, *, bin_size_eff=None, factor=1.0, tail=None):
-        """Window mean over the largest tail bin.
+    def tail_values(c, conf, source, bin_size_eff=None):
+        """What a tail rule reads its tail off: the CCG's own bins, or its hollow-convolution fit."""
+        return c if source == 'bins' else ConnectionStrength.baseline_conv(c, None, conf, bin_size_eff=bin_size_eff)
 
-        Tail intervals rather than all non-window bins, since the zero-lag artifact sits
-        just outside the window and would otherwise veto every real connection."""
+    STATS = {'max': np.nanmax, 'min': np.nanmin, 'avg': np.nanmean, 'var': np.nanvar}
+
+    @staticmethod
+    def _vs_baseline(ccg, conf, win, bin_size_eff, roi_stat, baseline_stat, factor, tail, tail_source):
+        """ROI *roi_stat* over factor x tail *baseline_stat*; tail intervals, not every off-ROI bin, so the zero-lag artifact cannot veto."""
         c = np.asarray(ccg, dtype=float)
         mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)
         if not mask.any():
             return np.full(c.shape[:-1], np.nan)
-        return _ratio(np.nanmean(c[..., lo:hi], axis=-1),
-                      factor * np.nanmax(c[..., mask], axis=-1))
+        t = ConnectionStrength.tail_values(c, conf, tail_source, bin_size_eff)
+        stat = ConnectionStrength.STATS
+        return _ratio(stat[roi_stat](c[..., win], axis=-1), factor * stat[baseline_stat](t[..., mask], axis=-1))
 
     @staticmethod
-    def mean_over_avg_tail(ccg, conf, lo, hi, *, bin_size_eff=None, factor=1.0, tail=None):
-        """Window mean over the tail mean — the same comparison against a flat tail baseline."""
-        c = np.asarray(ccg, dtype=float)
-        mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)
-        if not mask.any():
-            return np.full(c.shape[:-1], np.nan)
-        return _ratio(np.nanmean(c[..., lo:hi], axis=-1),
-                      factor * np.nanmean(c[..., mask], axis=-1))
+    def peak_vs_baseline(ccg, conf, win, *, bin_size_eff=None, roi_stat='avg', baseline_stat='avg',
+                         factor=1.0, tail=None, tail_source='bins'):
+        """An ROI statistic over a tail one (max, min, avg or var): excitation clears the cut."""
+        return ConnectionStrength._vs_baseline(ccg, conf, win, bin_size_eff, roi_stat, baseline_stat,
+                                               factor, tail, tail_source)
 
     @staticmethod
-    def peak_percentile(ccg, conf, lo, hi, *, bin_size_eff=None, tail=None):
-        """Where the window peak sits among all bins (or *tail*'s), as a top-percent: smaller is stronger."""
-        c = np.asarray(ccg, dtype=float)
-        peak = np.nanmax(c[..., lo:hi], axis=-1)
-        ref = c if tail is None else c[..., ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)]
-        return 100.0 * np.nanmean(ref >= peak[..., None], axis=-1)
+    def trough_vs_baseline(ccg, conf, win, *, bin_size_eff=None, roi_stat='avg', baseline_stat='avg',
+                           factor=1.0, tail=None, tail_source='bins'):
+        """An ROI statistic over a tail one (max, min, avg or var): inhibition stays under the cut."""
+        return ConnectionStrength._vs_baseline(ccg, conf, win, bin_size_eff, roi_stat, baseline_stat,
+                                               factor, tail, tail_source)
 
     @staticmethod
-    def peak_to_baseline_ratio(ccg, conf, lo, hi, *, bin_size_eff=None, tail=None):
-        """Window peak over the tail-interval baseline (not the classifier's outer-thirds flank)."""
+    def _rank(ccg, conf, win, bin_size_eff, roi_stat, tail, tail_source, above: bool):
+        """Percent of all bins (or *tail*'s) at or beyond the ROI's *roi_stat*: smaller is more extreme."""
         c = np.asarray(ccg, dtype=float)
-        base = ConnectionStrength.baseline_tail(c, conf, bin_size_eff=bin_size_eff, intervals=tail)[..., 0]
-        return _ratio(np.nanmax(c[..., lo:hi], axis=-1), base)
+        x = ConnectionStrength.STATS[roi_stat](c[..., win], axis=-1)[..., None]
+        t = ConnectionStrength.tail_values(c, conf, tail_source, bin_size_eff)
+        ref = t if tail is None else t[..., ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff, tail)]
+        return 100.0 * np.nanmean(ref >= x if above else ref <= x, axis=-1)
 
     @staticmethod
-    def spike_count(ccg, conf, lo, hi, *, bin_size_eff=None, ranges=None, mode='avg'):
-        """Counts over the union of lag *ranges* (default ±spkcnt_scope/2): ``mode`` picks avg, every bin, or one."""
+    def peak_percentile(ccg, conf, win, *, bin_size_eff=None, roi_stat='max', tail=None, tail_source='bins'):
+        """Where an ROI statistic sits among the bins, as a top-percent."""
+        return ConnectionStrength._rank(ccg, conf, win, bin_size_eff, roi_stat, tail, tail_source, True)
+
+    @staticmethod
+    def trough_percentile(ccg, conf, win, *, bin_size_eff=None, roi_stat='min', tail=None, tail_source='bins'):
+        """Where an ROI statistic sits among the bins, as a bottom-percent."""
+        return ConnectionStrength._rank(ccg, conf, win, bin_size_eff, roi_stat, tail, tail_source, False)
+
+    @staticmethod
+    def feature_smoothness(ccg, conf, win, *, bin_size_eff=None, tail=None):
+        """Higher is smoother: lag-1 autocorrelation of the CCG about its tail-bin level over the ROI; ~0 for pure bin noise."""
         c = np.asarray(ccg, dtype=float)
-        half = float(conf.spkcnt_scope) / 2
-        mask = ConnectionStrength.tail_mask(c.shape[-1], conf, bin_size_eff,
-                                            [(-half, half)] if ranges is None else ranges)
-        win = c[..., mask]
-        if win.shape[-1] == 0:
+        bs = bin_size_eff or conf.duration / (c.shape[-1] - 1)
+        x = np.where(win, c - ConnectionStrength.baseline_tail(c, conf, bin_size_eff=bs, intervals=tail), 0.0)
+        return _ratio(np.sum(x[..., :-1] * x[..., 1:], axis=-1), np.sum(x * x, axis=-1))
+
+    @staticmethod
+    def spike_count(ccg, conf, win, *, bin_size_eff=None, mode='avg'):
+        """Counts over the window bins: ``mode`` picks avg, every bin, or one."""
+        c = np.asarray(ccg, dtype=float)[..., win]
+        if c.shape[-1] == 0:
             return np.full(c.shape[:-1], np.nan)
         if mode == 'every':
-            return np.nanmin(win, axis=-1)
+            return np.nanmin(c, axis=-1)
         if mode == 'one':
-            return np.nanmax(win, axis=-1)
-        return np.nanmean(win, axis=-1)
+            return np.nanmax(c, axis=-1)
+        return np.nanmean(c, axis=-1)
 
     @staticmethod
-    def p_value(pval, conf, lo, hi, *, bin_size_eff=None, correction='bonferroni'):
-        """Min p over the lag window, corrected across all bins first unless ``correction='none'``."""
+    def p_value(pval, conf, win, *, bin_size_eff=None, correction='bonferroni',
+                neighbor_alpha=None, neighbors=1, direction='above baseline'):
+        """Min corrected p over the window; with *neighbor_alpha*, only bins with >= *neighbors* adjacent bins below it; *pval* is already *direction*'s tail."""
         p = np.asarray(pval, dtype=float)
         if correction != 'none':
             _sig, p = multiple_correction(p, conf.alpha, method=correction)
-        return np.nanmin(p[..., lo:hi], axis=-1)
+        if neighbor_alpha is not None:
+            near = (p <= float(neighbor_alpha)).astype(int)
+            p = np.where(np.roll(near, 1, -1) + np.roll(near, -1, -1) >= int(neighbors), p, 1.0)
+        return np.nanmin(p[..., win], axis=-1)
 
-    # name -> (function, threshold arg, default, pass when value <= cut, tunable kwargs)
-    AUX_TESTS = {
+    # name -> (function, threshold arg, default, pass when value <= cut, tunable kwargs);
+    # every rule's 'roi' is a list of lag intervals, None = its default window (DEFAULT_ROI)
+    RULE_TESTS = {
         'p_value':                (p_value,                'alpha',     0.05, True,
-                                   {'correction': 'bonferroni'}),
-        'mean_over_max_tail':     (mean_over_max_tail,     'min_ratio', 1.0, False,
-                                   {'factor': 1.0, 'resolution': 'lowres', 'tail': None}),
-        'mean_over_avg_tail':     (mean_over_avg_tail,     'min_ratio', 1.0, False,
-                                   {'factor': 1.0, 'resolution': 'lowres', 'tail': None}),
+                                   {'roi': None, 'correction': 'bonferroni',
+                                    'neighbor_alpha': None, 'neighbors': 1, 'direction': 'above baseline'}),
+        'peak_vs_baseline':       (peak_vs_baseline,       'min_ratio', 1.0, False,
+                                   {'roi': None, 'roi_stat': 'avg', 'baseline_stat': 'avg', 'factor': 1.0,
+                                    'tail': None, 'tail_source': 'bins'}),
+        'trough_vs_baseline':     (trough_vs_baseline,     'max_ratio', 1.0, True,
+                                   {'roi': None, 'roi_stat': 'avg', 'baseline_stat': 'avg', 'factor': 1.0,
+                                    'tail': None, 'tail_source': 'bins'}),
         'peak_percentile':        (peak_percentile,        'top_pct',   5.0, True,
-                                   {'resolution': 'lowres', 'tail': None}),
-        'peak_to_baseline_ratio': (peak_to_baseline_ratio, 'min_ratio', 1.0, False,
-                                   {'resolution': 'lowres', 'tail': None}),
+                                   {'roi': None, 'roi_stat': 'max', 'tail': None, 'tail_source': 'bins'}),
+        'trough_percentile':      (trough_percentile,      'bottom_pct', 5.0, True,
+                                   {'roi': None, 'roi_stat': 'min', 'tail': None, 'tail_source': 'bins'}),
+        'feature_smoothness':     (feature_smoothness,     'min_autocorr', 0.5, False,
+                                   {'roi': None, 'tail': None}),
         'spike_count':            (spike_count,            'min_count', 2.5, False,
-                                   {'ranges': None, 'mode': 'avg'}),
+                                   {'roi': None, 'mode': 'avg'}),
     }
+
+    @staticmethod
+    def default_roi(name: str, conf) -> list:
+        """A rule's window when its 'roi' is unset: ±spkcnt_scope/2 for spike counts, else the test window."""
+        if name == 'spike_count':
+            half = float(conf.spkcnt_scope) / 2
+            return [(-half, half)]
+        return [(conf.min_lag, conf.max_lag)]
 
     SPIKE_COUNT_MODES = ('avg', 'every', 'one')
     P_CORRECTIONS = ('none', 'bonferroni', 'fdr_bh')
+    P_DIRECTIONS = {'above baseline': 'E', 'below baseline': 'I'}   # -> the excitability whose p tail it reads
+    TAIL_SOURCES = ('bins', 'conv')   # jitter means are not swept, so no rule can read them
     PVAL_TESTS = ('p_value',)   # these read the per-bin p array, not the CCG
 
     @staticmethod
-    def aux_test(name, ccg, conf, lo, hi, *, bin_size_eff=None, threshold=None, **kw):
-        """One auxiliary test as ``(value, passed)``; advisory only, never a validity test."""
-        fn, _targ, default, below, extra = ConnectionStrength.AUX_TESTS[name]
+    def rule_test(name, ccg, conf, *, bin_size_eff=None, threshold=None, **kw):
+        """One significance test as ``(value, passed)`` over the union of its ROI intervals."""
+        fn, _targ, default, below, extra = ConnectionStrength.RULE_TESTS[name]
         # None means "unset" only where the default is None; elsewhere it must not shadow it
         kw = {k: v for k, v in kw.items() if v is not None or extra.get(k, 0) is None}
         kw = {**extra, **kw}
-        kw.pop('resolution', None)   # picks which CCG the caller hands in, not a rule argument
-        value = fn.__func__(ccg, conf, lo, hi, bin_size_eff=bin_size_eff, **kw)
+        roi = kw.pop('roi') or ConnectionStrength.default_roi(name, conf)
+        win = ConnectionStrength.tail_mask(np.shape(ccg)[-1], conf, bin_size_eff, roi)
+        below = kw.pop('bound', 'max' if below else 'min') == 'max'
+        value = fn.__func__(ccg, conf, win, bin_size_eff=bin_size_eff, **kw)
         cut = default if threshold is None else float(threshold)
         return value, (value <= cut) if below else (value >= cut)
 
@@ -509,44 +548,88 @@ class ConnStrengthConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class AuxTestConfig:
-    """Which auxiliary tests decide on/off, and with what arguments."""
-    enabled: tuple = ()          # test names; empty = none contribute, every pair stays on
-    args: dict = field(default_factory=dict)   # {test_name: {threshold, factor, ...}}
+class SignificanceRule:
+    """One significance test run on the CCGs of one resolution."""
+    test: str
+    resolution: str = 'lowres'
+    enabled: bool = True
+    args: dict = field(default_factory=dict)   # {threshold, factor, ...}
+    name: str = ''   # the user's title; '' shows the test, which stays recorded either way
 
-    def specs(self) -> dict:
-        """The ``tests`` mapping pair_on_for/sweep_aux_tests take."""
-        return {name: dict(self.args.get(name) or {}) for name in self.enabled}
-
-    def with_test(self, name: str, on: bool) -> 'AuxTestConfig':
-        names = [n for n in ConnectionStrength.AUX_TESTS
-                 if (n in self.enabled or n == name) and (on or n != name)]
-        return AuxTestConfig(tuple(names), dict(self.args))
-
-    def with_args(self, name: str, **kw) -> 'AuxTestConfig':
-        args = dict(self.args)
-        args[name] = {**(args.get(name) or {}), **kw}
-        return AuxTestConfig(tuple(self.enabled), args)
-
-    def serialize(self) -> dict:
-        return {'enabled': list(self.enabled), 'args': self.args}
+    # retired ratio rules -> peak_vs_baseline with the stats they hard-coded
+    _RETIRED = {'mean_over_max_tail': {'roi_stat': 'avg', 'baseline_stat': 'max'},
+                'mean_over_avg_tail': {'roi_stat': 'avg', 'baseline_stat': 'avg'},
+                'peak_to_baseline_ratio': {'roi_stat': 'max', 'baseline_stat': 'avg'}}
 
     @classmethod
-    def from_dict(cls, d: dict) -> 'AuxTestConfig':
-        d = d or {}
-        return cls(tuple(d.get('enabled') or ()), dict(d.get('args') or {}))
+    def from_dict(cls, d: dict) -> 'SignificanceRule':
+        """A saved rule; spike_count's 'ranges' became 'roi', and the retired ratio rules load as peak_vs_baseline."""
+        args = {('roi' if k == 'ranges' else k): v for k, v in (d.get('args') or {}).items()}
+        test = d['test']
+        if test in cls._RETIRED:
+            test, args = 'peak_vs_baseline', {**args, **cls._RETIRED[test]}
+        return cls(test, d.get('resolution', 'lowres'), d.get('enabled', True), args, d.get('name', ''))
+
+    def with_args(self, **kw) -> 'SignificanceRule':
+        return replace(self, args={**self.args, **kw})
+
+    def serialize(self) -> dict:
+        """Every argument written out, defaults included: a later default change must not move a saved rule."""
+        _fn, _targ, default, _below, extra = ConnectionStrength.RULE_TESTS[self.test]
+        return {'test': self.test, 'name': self.name, 'resolution': self.resolution, 'enabled': self.enabled,
+                'args': {'threshold': default, **extra, **self.args}}
 
 
 @dataclass(frozen=True, slots=True)
-class PvalScreeningConfig:
-    """The primary peak rule, declared so it can be configured; EranConv is not routed through it."""
-    roi_start: float = 1e-3        # ROI in seconds, the one test window
-    roi_end: float = 3e-3
-    alpha: float = 0.05
-    multiple_correction: str = 'bonferroni'   # 'bonferroni' | 'fdr_bh'
+class Rules:
+    """A rule set's ordered significance rules; the same test may repeat, e.g. at another resolution."""
+    rules: tuple = ()
+
+    @property
+    def enabled(self) -> tuple:
+        return tuple(r for r in self.rules if r.enabled)
+
+    def labels(self) -> list:
+        """A unique name per rule, ``test@resolution`` with a count on repeats: the result columns."""
+        seen, out = {}, []
+        for r in self.rules:
+            base = f"{r.test}@{r.resolution}"
+            seen[base] = seen.get(base, 0) + 1
+            out.append(base if seen[base] == 1 else f"{base}-{seen[base]}")
+        return out
+
+    @staticmethod
+    def display(label: str) -> str:
+        """A label as the UI shows it: lowres is implied."""
+        return label.replace('@lowres', '')
+
+    def titles(self) -> dict:
+        """``{label: shown title}``: the user's name for a rule, else its label as displayed."""
+        return {label: r.name or self.display(label) for label, r in zip(self.labels(), self.rules)}
+
+    @staticmethod
+    def test_of(label: str) -> str:
+        """The test a result label names, past its rule set prefix and resolution."""
+        return label.split(':')[-1].split('@')[0]
+
+    def specs(self) -> dict:
+        """The ``tests`` mapping a sweep takes, keyed by label."""
+        return {label: {**r.args, 'test': r.test, 'resolution': r.resolution}
+                for label, r in zip(self.labels(), self.rules) if r.enabled}
+
+    def serialize(self) -> list:
+        return [r.serialize() for r in self.rules]
 
     @classmethod
-    def from_conf(cls, conf) -> 'PvalScreeningConfig':
-        """What a CCGConfig currently implies, so the two cannot drift apart unnoticed."""
-        return cls(roi_start=conf.min_lag, roi_end=conf.max_lag, alpha=conf.alpha,
-                   multiple_correction=conf.multiple_correction or 'bonferroni')
+    def from_dict(cls, d) -> 'Rules':
+        """A rule list; a pre-list dict (``enabled`` names + per-name ``args``) keeps its enabled tests."""
+        if isinstance(d, list):
+            return cls(tuple(SignificanceRule.from_dict(r) for r in d))
+        d = d or {}
+        if 'rules' in d:
+            return cls(tuple(SignificanceRule.from_dict(r) for r in d['rules']))
+        old = {n: dict((d.get('args') or {}).get(n) or {}) for n in d.get('enabled') or ()}
+        return cls(tuple(SignificanceRule.from_dict({'test': n, 'resolution': a.pop('resolution', 'lowres'), 'args': a})
+                         for n, a in old.items()))
+
+

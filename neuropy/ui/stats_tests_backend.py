@@ -23,7 +23,8 @@ from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS, DisplayConfig
 from neuropy.ui.pair_selection_panel import SelectionData
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.ccg_transforms import ConnStrengthConfig, NormalizeBy
-from neuropy.analyses.utils import _compact_json_str, JsonSavable
+from neuropy.analyses.utils import _compact_json_str, JsonSavable, is_derived_group
+from neuropy.analyses.pair_selection_data import DerivedRule
 from neuropy.utils.data_storage_util import atomic_write_json
 
 _BAR_COLORS = ['#8FB3FF', '#FFB3B3', '#B3FFB3', '#FFD9B3', '#E0B3FF',
@@ -38,7 +39,7 @@ PICKERS = {
     'ct':   ('conn_types', "ConnType",   "types",       'available_conn_types'),
     'seg':  ('segments',   "Segment",    "segments",    'available_segments'),
     'res':  ('resolution', "Resolution", "resolutions", 'available_resolutions'),
-    'grp':  ('groups',     "Group",      "groups",      'available_groups'),
+    'grp':  ('rules',      "Group",      "rules",       'available_groups'),
     'data': ('data_type',  "Data",       "metrics",     'available_data_types'),
 }
 PICKER_FIELD = {k: v[0] for k, v in PICKERS.items()}
@@ -55,11 +56,15 @@ class RowConfig(JsonSavable):
     conn_types: list = field(default_factory=list)
     segments: list = field(default_factory=list)
     resolution: list = field(default_factory=list)
-    groups: list = field(default_factory=list)
+    rules: list = field(default_factory=list)   # DerivedRules a pair meets all of; none = all pairs
     data_type: str = ''
     follow: int | None = None                      # row id this one mirrors
     follow_pickers: list = field(default_factory=list)   # which pickers follow; empty = all
     follow_exclude: bool = False                   # invert: these are the ones that do NOT follow
+
+    def __setstate__(self, state: dict) -> None:
+        JsonSavable.__setstate__(self, state)
+        self.rules = [DerivedRule(**r) for r in state.get('rules', [])]
 
 
 TEST_TYPES = ("Independent t-test", "Pairwise t-test",
@@ -93,6 +98,7 @@ class _ViewConfig(JsonSavable):
     violin: bool = False
     outliers: bool = True
     sig_brackets: bool = False
+    show_n: bool = True
     wh_ratio: str = '3:1'
 
 
@@ -141,6 +147,7 @@ class StatsResult(JsonSavable):
     outliers: dict = field(default_factory=dict)      # group index → outlier value indices
     orig_groups: list | None = None                   # pre-removal groups the indices refer to
     display: DisplayConfig | None = None              # settings this result was computed under
+    log_shift: float | None = None                    # values are log(v + shift); None = untransformed
 
     @property
     def flagged_groups(self) -> list:
@@ -245,7 +252,7 @@ class StatsTestBackend:
         return self.cd.conf.conn_type_labels
 
     def available_groups(self) -> list[str]:
-        return [ALL_PAIRS] + self.sd.groups.pickable_groups()
+        return self.sd.groups.groups + self.sd.groups.special_groups()
 
     def available_segments(self) -> list[str]:
         return sorted(self.cd.available_segments())
@@ -254,23 +261,30 @@ class StatsTestBackend:
     def available_data_types() -> list[str]:
         return list(METRICS)
 
-    def pairs_for_group(self, group_name: str, ptr_key) -> set:
-        """Valid (significant) pairs of a group for a ptr key; ALL_PAIRS = every valid pair."""
+    def pairs_for_rules(self, rules: list, ptr_key) -> set:
+        """Valid (significant) pairs meeting every rule for a ptr key; no rules = every valid pair."""
         valid = self.cd.ptr[ptr_key].pair_set
-        if group_name == ALL_PAIRS:
+        if not rules:
             return valid
-        return self.sd.groups.pairs_in_group(group_name, ptr_key.session) & valid
+        return self.sd.groups.derived.rule_based_filter(rules, str(ptr_key.session)) & valid
+
+    def legacy_rules(self, names: list) -> list:
+        """Rules for a row saved as group names: a derived group stands for its rules, the rest OR into one."""
+        groups = self.sd.groups
+        tags = [g for g in names if g != ALL_PAIRS and not is_derived_group(g)]
+        return ([r for g in names if is_derived_group(g) for r in groups.get_group_metadata(g).rules]
+                + ([DerivedRule(values=tags)] if tags else []))
 
     # -- rows ----------------------------------------------------------------
     def add_row(self, name: str = '', *, color: str = '', sessions=(), conn_types=(),
-                segments=(), resolution=(), groups=(), data_type: str = '',
+                segments=(), resolution=(), rules=(), data_type: str = '',
                 follow: int | None = None, pickers=(), exclude: bool = False) -> int:
         """Append a row; returns its id. *pickers* lists what `follow` applies to
-        (or, with *exclude*, what it does not). *groups* is the pair groups it draws from."""
+        (or, with *exclude*, what it does not). *rules* pick the pairs it draws from."""
         cfg = RowConfig(id=self._next_id, name=name, color=color,
                         sessions=list(sessions), conn_types=list(conn_types),
                         segments=list(segments), resolution=list(resolution),
-                        groups=list(groups), data_type=data_type,
+                        rules=list(rules), data_type=data_type,
                         follow=follow, follow_pickers=list(pickers), follow_exclude=exclude)
         self._next_id += 1
         self.rows.append(cfg)
@@ -309,18 +323,25 @@ class StatsTestBackend:
                 setattr(row, PICKER_FIELD[key], list(getattr(leader, PICKER_FIELD[key])))
 
     @staticmethod
-    def maybe_log_transform(x, log: bool) -> np.ndarray:
-        x = np.asarray(x, dtype=float)
-        if not log:
-            return x
-        shifted = x - np.nanmin(x) + 1e-9 if np.any(x <= 0) else x
-        return np.log(shifted)
+    def log_shift(rows: list) -> float:
+        """Offset making every pooled value positive: 0, 1 when the minimum is 0, else minus the minimum plus half the smallest positive gap."""
+        pooled = np.concatenate([np.asarray(g.get('vals', []), dtype=float) for g in rows])
+        lo = np.nanmin(pooled)
+        if lo >= 0:
+            return 0.0 if lo > 0 else 1.0
+        return float(0.5 * np.nanmin((pooled - lo)[pooled > lo]) - lo)
 
     @staticmethod
-    def outlier_indices(row: dict, log: bool) -> list[int]:
-        """Indices of pairs >3 SD from the row mean, on the test scale (log if enabled)."""
-        vals = StatsTestBackend.maybe_log_transform(
-            np.asarray(row.get('vals', []), dtype=float), log)
+    def log_rows(rows: list, shift: float | None) -> list:
+        """Every row's values as log(v + shift); None leaves them raw."""
+        if shift is None:
+            return rows
+        return [dict(g, vals=list(np.log(np.asarray(g.get('vals', []), dtype=float) + shift))) for g in rows]
+
+    @staticmethod
+    def outlier_indices(row: dict) -> list[int]:
+        """Indices of pairs >3 SD from the row mean, on the scale *row* is given in."""
+        vals = np.asarray(row.get('vals', []), dtype=float)
         if vals.size < 4:
             return []
         m = float(np.mean(vals))
@@ -379,10 +400,6 @@ class StatsTestBackend:
         return dict(row, vals=[row['vals'][j] for j in keep],
                     pairs=[pairs[j] for j in keep if j < len(pairs)])
 
-    @staticmethod
-    def apply_log_transform(rows: list, log: bool) -> list:
-        return [dict(g, vals=list(StatsTestBackend.maybe_log_transform(g.get('vals', []), log)))
-                for g in rows]
 
     # -- top-level -----------------------------------------------------------
     def sessions_for(self) -> list[str]:
@@ -420,9 +437,12 @@ class StatsTestBackend:
                            if resolution in (r.resolution or self.available_resolutions())]
             collected = [self.collect_row(r, resolution) for r in rows_at_res]
             cfg = self.test_config
-            log, nonparam = cfg.log_transform, cfg.nonparametric
+            nonparam = cfg.nonparametric
             tt = cfg.test_type or self.infer_test_type(len(collected), dtype)
-            outliers = {i: self.outlier_indices(g, log) for i, g in enumerate(collected)}
+            # one shift from every collected value, so outliers, test and plot share a scale
+            shift = (self.log_shift(collected) if cfg.log_transform and not METRICS[dtype].norm
+                     and any(len(g.get('vals', [])) for g in collected) else None)
+            outliers = {i: self.outlier_indices(g) for i, g in enumerate(self.log_rows(collected, shift))}
             orig = collected if cfg.remove_outliers else None
             if cfg.remove_outliers:
                 # Matched tests compare the same pair across rows: drop the whole pair everywhere,
@@ -431,21 +451,22 @@ class StatsTestBackend:
                     outliers = self.union_outlier_indices(
                         collected, outliers, by_ref_tgt=bool(METRICS[dtype].norm))
                 collected = [self.drop_indices(g, outliers[i]) for i, g in enumerate(collected)]
+            tested = self.log_rows(collected, shift)
             if (bad := self.check_test_type(tt, len(collected))):
                 res = {'error': bad}
             elif tt == "Repeated-measures ANOVA":
-                res = self.run_rm_anova(collected, nonparam, log, cfg.post_hoc)
+                res = self.run_rm_anova(tested, nonparam, cfg.post_hoc)
             elif tt == "One-way ANOVA + Tukey":
-                res = self.run_anova(collected, nonparam, log, cfg.post_hoc)
+                res = self.run_anova(tested, nonparam, cfg.post_hoc)
             elif (norm := METRICS[dtype].norm):
                 res = self.run_cs_norm(collected[0], collected[1], norm)
             else:
-                res = self.run_test(collected[0]['vals'], collected[1]['vals'],
-                                    collected[0]['pairs'], collected[1]['pairs'],
-                                    tt, cfg.alternative, nonparam, log)
+                res = self.run_test(tested[0]['vals'], tested[1]['vals'],
+                                    tested[0]['pairs'], tested[1]['pairs'],
+                                    tt, cfg.alternative, nonparam)
             sr = StatsResult(resolution=resolution, groups=collected, res=res,
                              outliers=outliers, orig_groups=orig,
-                             display=self.display)
+                             display=self.display, log_shift=shift)
             self.finalize_plot_groups(sr, dtype)
             results.append(sr)
         self.results = results
@@ -457,13 +478,13 @@ class StatsTestBackend:
         sessions  = cfg.sessions or self.available_sessions()
         conn_types = cfg.conn_types or ['']
         seg_names = cfg.segments or [_ALL_SEGS]
-        grp_names = cfg.groups or [ALL_PAIRS]
+        rules     = cfg.rules
         dtype     = cfg.data_type
         m = METRICS[dtype]
         merged: dict[Key, float] = {}
         used_sessions: set[str] = set()
         seg_configs: list[dict] = []
-        for grp_name, seg_name, conn_type in product(grp_names, seg_names, conn_types):
+        for seg_name, conn_type in product(seg_names, conn_types):
             ei, ct = self.cd.conf.parse_conn_type_label(conn_type)
             for sess in sessions:
                 ptr_key = Key(session=sess, excitability=ei, conn_type=ct)
@@ -474,21 +495,21 @@ class StatsTestBackend:
                 elif m.source == "conn_strength":
                     try:
                         vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name,
-                                                               grp_name, m.off_mode)
+                                                               rules, m.off_mode)
                     except FileNotFoundError:
                         self.missing_segments.setdefault(seg_name, set()).add(sess)
                         continue
                 elif m.source in ("ref_firing_rate", "tgt_firing_rate"):
                     try:
                         vals_map = self.get_fr_for_sess(
-                            ptr_key, resolution, seg_name, grp_name,
+                            ptr_key, resolution, seg_name, rules,
                             0 if m.source == "ref_firing_rate" else 1)
                     except FileNotFoundError:
                         self.missing_segments.setdefault(seg_name, set()).add(sess)
                         continue
                 elif m.source == "baseline":
                     try:
-                        vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, grp_name)
+                        vals_map = self.get_baseline_for_sess(ptr_key, resolution, seg_name, rules)
                     except FileNotFoundError:
                         self.missing_segments.setdefault(seg_name, set()).add(sess)
                         continue
@@ -506,14 +527,14 @@ class StatsTestBackend:
 
         sess_str = sessions[0] if len(sessions) == 1 else ','.join(sessions)
         return dict(name=cfg.name, session=sess_str, conn_type=','.join(conn_types),
-                    segment=seg_names[0], pair_groups=','.join(grp_names), data_type=dtype,
+                    segment=seg_names[0], pair_groups=' & '.join(map(str, rules)) or ALL_PAIRS, data_type=dtype,
                     pairs=list(merged), vals=list(merged.values()), color=cfg.color,
                     sessions_used=sorted(used_sessions), seg_configs=seg_configs)
 
-    def _pair_value_dict(self, ptr_key, group_name, value_fn) -> dict[Key, float]:
-        """{Key.pair(session,ref,tgt): value_fn(ref,tgt)} over a group's valid pairs."""
+    def _pair_value_dict(self, ptr_key, rules, value_fn) -> dict[Key, float]:
+        """{Key.pair(session,ref,tgt): value_fn(ref,tgt)} over the valid pairs meeting *rules*."""
         out: dict[Key, float] = {}
-        for ref, tgt in sorted(self.pairs_for_group(group_name, ptr_key)):
+        for ref, tgt in sorted(self.pairs_for_rules(rules, ptr_key)):
             out[Key.pair(ptr_key.session, int(ref), int(tgt))] = float(value_fn(int(ref), int(tgt)))
         return out
 
@@ -523,7 +544,7 @@ class StatsTestBackend:
         data = self.cd.ccg_for(data_key)
         return data_key, (data if data is not None and getattr(data, array) is not None else None)
 
-    def get_cs_values_for_sess(self, ptr_key, resolution, seg_name, group_name,
+    def get_cs_values_for_sess(self, ptr_key, resolution, seg_name, rules,
                                off_mode: str = 'flag') -> dict[Key, float]:
         data_key, data = self._seg_data(ptr_key, resolution, seg_name, 'ccg')
         if data is None:
@@ -533,13 +554,11 @@ class StatsTestBackend:
             off_mode = 'zero'
         cfg = ConnStrengthConfig(self.display.baseline_method, self.display.cs_metric,
                                  c.min_lag_bin, c.max_lag_bin, off_mode)
-        grid = self.cd.get_conn_strength_for(
-            data_key, self.norms, cfg,
-            overrides=self.sd.seg_overrides(str(ptr_key.session), seg_name))
-        return self._pair_value_dict(ptr_key, group_name,
+        grid = self.cd.get_conn_strength_for(data_key, self.norms, cfg, self.sd.on_grid(ptr_key, seg_name))
+        return self._pair_value_dict(ptr_key, rules,
                                      lambda r, t: grid[r, t])
 
-    def get_fr_for_sess(self, ptr_key, resolution, seg_name, group_name, role) -> dict[Key, float]:
+    def get_fr_for_sess(self, ptr_key, resolution, seg_name, rules, role) -> dict[Key, float]:
         """A neuron counts once, so its key is the self-pair rather than every pair it joins."""
         _, data = self._seg_data(ptr_key, resolution, seg_name, 'ccg')
         src = data.sources.get(seg_name) if data is not None else None
@@ -547,24 +566,24 @@ class StatsTestBackend:
         if rates is None:   # the whole-session segment declares none of its own
             rates = self.cd.nd.neurons_for(ptr_key).firing_rate
         out: dict[Key, float] = {}
-        for ref, tgt in sorted(self.pairs_for_group(group_name, ptr_key)):
+        for ref, tgt in sorted(self.pairs_for_rules(rules, ptr_key)):
             idx = int((ref, tgt)[role])
             out.setdefault(Key.pair(ptr_key.session, idx, idx), float(rates[idx]))
         return out
 
-    def get_baseline_for_sess(self, ptr_key, resolution, seg_name, group_name) -> dict[Key, float]:
+    def get_baseline_for_sess(self, ptr_key, resolution, seg_name, rules) -> dict[Key, float]:
         data_key, data = self._seg_data(ptr_key, resolution, seg_name, 'ccg_null')
         if data is None:
             return {}
         seg = self.cd.segment_index(data_key, seg_name)
         # Normalized null (same active_norms as the CCG shown in the UI; BASELINE excluded there too).
         _, null = self.cd.apply_ccg_transform_for(data_key, self.norms)
-        return self._pair_value_dict(ptr_key, group_name,
+        return self._pair_value_dict(ptr_key, rules,
                                      lambda r, t: np.mean(null[seg, r, t, :]))
 
     # -- statistical tests ---------------------------------------------------
-    def run_anova(self, test_rows: list, nonparam: bool, log: bool, post_hoc: bool = True) -> dict:
-        arrays = [self.maybe_log_transform(g.get('vals', []), log) for g in test_rows]
+    def run_anova(self, test_rows: list, nonparam: bool, post_hoc: bool = True) -> dict:
+        arrays = [np.asarray(g.get('vals', []), dtype=float) for g in test_rows]
         if any(a.size < 2 for a in arrays):
             return {'error': "Need ≥2 values per group (got "
                              + ", ".join(str(a.size) for a in arrays) + ")."}
@@ -582,12 +601,12 @@ class StatsTestBackend:
                             for r in tukey.summary().data[1:]]
         return out
 
-    def run_rm_anova(self, test_rows: list, nonparam: bool, log: bool, post_hoc: bool = True) -> dict:
+    def run_rm_anova(self, test_rows: list, nonparam: bool, post_hoc: bool = True) -> dict:
         """Repeated-measures test: pairs common to every row are the within-subject units; conditions = rows."""
         pair_maps = []
         for g in test_rows:
             pairs = [SelectionData.as_pair_key(p) for p in (g.get('pairs') or [])]
-            vals  = self.maybe_log_transform(g.get('vals', []), log)
+            vals  = np.asarray(g.get('vals', []), dtype=float)
             pair_maps.append({p: v for p, v in zip(pairs, vals)})
         common = sorted(set.intersection(*(set(pm) for pm in pair_maps)),
                         key=lambda k: k.pair_sort_key())
@@ -596,19 +615,21 @@ class StatsTestBackend:
         row_names = [g.get('name', f'G{i+1}') for i, g in enumerate(test_rows)]
         arrays = [np.array([pm[p] for p in common], dtype=float) for pm in pair_maps]
         n_comp = max(1, len(test_rows) * (len(test_rows) - 1) // 2)
+        pair_test = (lambda a, b: _sp.wilcoxon(a, b, zero_method='wilcox')) if nonparam else _sp.ttest_rel
+        posthoc = []
+        for i in range(len(test_rows) if post_hoc else 0):
+            for j in range(i + 1, len(test_rows)):
+                w, wp = pair_test(arrays[i], arrays[j])
+                posthoc.append(dict(a=row_names[i], b=row_names[j],
+                                    stat=float(w), p_raw=float(wp),
+                                    p_adj=min(float(wp)*n_comp, 1.0),
+                                    reject=float(wp)*n_comp < 0.05))
+        method = 'Wilcoxon (Bonferroni)' if nonparam else 'Paired t-test (Bonferroni)'
         if nonparam:
             stat, p = _sp.friedmanchisquare(*arrays)
-            posthoc = []
-            for i in range(len(test_rows) if post_hoc else 0):
-                for j in range(i + 1, len(test_rows)):
-                    w, wp = _sp.wilcoxon(arrays[i], arrays[j], zero_method='wilcox')
-                    posthoc.append(dict(a=row_names[i], b=row_names[j],
-                                        stat=float(w), p_raw=float(wp),
-                                        p_adj=min(float(wp)*n_comp, 1.0),
-                                        reject=float(wp)*n_comp < 0.05))
             return dict(test='Friedman test', stat=float(stat), p_val=float(p),
                         n_subjects=len(common), n_conditions=len(test_rows),
-                        posthoc=posthoc, posthoc_method='Wilcoxon (Bonferroni)',
+                        posthoc=posthoc, posthoc_method=method,
                         common_pairs=common)
         records = [{'subject': str(p), 'condition': gn, 'val': pm[p]}
                    for gn, pm in zip(row_names, pair_maps) for p in common]
@@ -621,12 +642,13 @@ class StatsTestBackend:
                     f_stat=float(cr['F']), p_val=float(cr['p-unc']),
                     df=f"{df_num:.0f},{df_denom:.0f}",
                     n_subjects=len(common), n_conditions=len(test_rows),
+                    posthoc=posthoc, posthoc_method=method,
                     common_pairs=common)
 
     def run_test(self, a_vals, b_vals, a_pairs, b_pairs,
-                 test_type, alternative='two-sided', nonparametric=False, log=False) -> dict:
-        a = self.maybe_log_transform(a_vals, log)
-        b = self.maybe_log_transform(b_vals, log)
+                 test_type, alternative='two-sided', nonparametric=False) -> dict:
+        a = np.asarray(a_vals, dtype=float)
+        b = np.asarray(b_vals, dtype=float)
         if a.size < 2 or b.size < 2:
             return {'error': f"Need ≥2 values per group (got {a.size}, {b.size})."}
         paired = (test_type == "Pairwise t-test")
@@ -684,7 +706,7 @@ class StatsTestBackend:
     def finalize_plot_groups(self, sr: StatsResult, dtype: str):
         """Derive sr.plot_groups (and paired/one-sample flags) for one resolution."""
         cfg = self.test_config
-        groups = sr.groups
+        groups = self.log_rows(sr.groups, sr.log_shift)
         if cfg.test_type == "Repeated-measures ANOVA":
             common = (sr.res.get('common_pairs')
                       if sr.res and 'error' not in sr.res else None)
@@ -711,7 +733,7 @@ class StatsTestBackend:
                                        pairs=list(sr.res.get('norm_pairs', [])),
                                        data_type=dtype)]
         else:
-            sr.plot_groups = self.apply_log_transform(groups, cfg.log_transform)
+            sr.plot_groups = groups
 
     # -- result text (one function per section) --------------------------------
     _RES_LBL = {'lowres': 'lo-res', 'highres': 'hi-res'}
@@ -741,8 +763,9 @@ class StatsTestBackend:
                f"({'two-sided' if alt == 'two-sided' else alt}) --",
                f"   dtype={dtype}"]
         for sr in results:
-            out.append(f"   {self._res(sr)}:")
-            out += self._fmt_res(sr.res, sr.groups)
+            scale = '' if sr.log_shift is None else f" (values as log(v + {sr.log_shift:.4g}))"
+            out.append(f"   {self._res(sr)}{scale}:")
+            out += self._fmt_res(sr.res, self.log_rows(sr.groups, sr.log_shift))
         return '\n'.join(out)
 
     @staticmethod
@@ -856,6 +879,9 @@ class StatsTestBackend:
         self.rows = []
         for rd in d.get('rows') or []:
             rc = RowConfig(); rc.__setstate__(rd)
+            if 'groups' in rd:
+                rc.rules = self.legacy_rules(rd['groups'])
+                del rc.groups
             if not rc.id:
                 rc.id = self._next_id
             self._next_id = max(self._next_id, rc.id) + 1

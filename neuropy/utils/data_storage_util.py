@@ -73,6 +73,10 @@ class LRUCache(Generic[K, V]):
     def pop(self, key: K, default=None):
         return self._cache.pop(key, default)
 
+    def items(self) -> list:
+        """(key, value) pairs, least recently used first; reading does not reorder."""
+        return list(self._cache.items())
+
     def clear(self) -> None:
         self._cache.clear()
 
