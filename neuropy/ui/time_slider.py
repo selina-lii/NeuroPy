@@ -33,6 +33,7 @@ from neuropy.analyses.neurons_dataset import Key
 _FULL_SEG = 'all'   # reserved label for the permanent whole-session segment (dim0[0])
 from neuropy.analyses.utils import JsonSavable, Savable
 from neuropy.core.intervals import IntervalOp as _SetOp
+from neuropy.ui.app_state import FAMILY_PREFIX as _FAMILY_PREFIX
 from neuropy.ui.ui_common import BackgroundTaskRunner
 from neuropy.ui.utils import (
     AddableDropdown, chip_button, CollapsibleSection, ListPickerButton, MetricInput,
@@ -55,7 +56,6 @@ _CUSTOM_COLORS = [
     '#AAFFC3', '#FABED4', '#FFE119', '#A9A9A9', '#E6BEFF',
 ]
 _CUSTOM_ALPHA = 110
-_FAMILY_PREFIX = '⊞ '
 _CUSTOM_COLS = ["name", "start", "end", "active", "filters", "overlap"]
 _MODE_ICONS = {'epoch': ('⏱', "Behavioral epochs"), 'custom': ('◆', "Custom CCG windows")}
 
@@ -1179,6 +1179,16 @@ class CCGTask:
         base = self.session_key if self.spec is None else self.spec.key
         return base.change(resolution=self.resolution)
 
+    @property
+    def name(self) -> str:
+        return ('whole session' if self.whole_session
+                else f"rules {self.rule_sweep['segment']}" if self.rule_sweep
+                else f"extend {self.extend['name']}" if self.extend
+                else self.spec.name)
+
+    def __str__(self) -> str:
+        return f"{self.name}   {self.resolution}   {self.ccg_key().session}"
+
 
 @dataclass
 class CCGTaskResult:
@@ -1213,10 +1223,7 @@ class CustomCCGWorker:
     def on_done(self, completed_task, _result):
         ui, mgr = self._ui, self._mgr
         r: CCGTaskResult = self._thread_result.pop() if self._thread_result else None
-        name = ('whole session' if completed_task.whole_session
-                else f"rules {completed_task.rule_sweep['segment']}" if completed_task.rule_sweep
-                else f"extend {completed_task.extend['name']}" if completed_task.extend
-                else completed_task.spec.name)
+        name = completed_task.name
         print(f"[CCGq] on_done {name} {completed_task.resolution} "
               f"result={'none' if r is None else ('ok' if r.ok else r.error)}", flush=True)
         bid = completed_task.batch_id
@@ -1233,7 +1240,7 @@ class CustomCCGWorker:
         elif completed_task.rule_sweep is not None:
             if meta is not None:
                 meta['rows'].append((r.session, name, 'ok', r.value))
-            if r.session == str(ui.nav.key.session):
+            if r.session == str(ui.nav.pair_ptr_key.session):
                 ui.nav.chip_colors_changed.emit()
         elif completed_task.whole_session or completed_task.extend is not None:
             # both wrote their own storage: dim0[0] via get_ccg, or an extend unit dir.
@@ -1251,7 +1258,7 @@ class CustomCCGWorker:
                 print(f"[CustomCCG] attach failed '{nm}'/{r.session}: {exc}")
             try:
                 mgr.state._emit_inventory_event()
-                if r.session == str(ui.nav.key.session):
+                if r.session == str(ui.nav.pair_ptr_key.session):
                     ui.nav.custom_segs_changed.emit()
                     ui.mainview.request_render()
             except Exception:

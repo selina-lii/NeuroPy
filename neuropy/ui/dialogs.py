@@ -2175,6 +2175,8 @@ class SettingsTabs:
                        ui.nav, 'max_ccg_queue', 0, 100000)
         self._spin_row(cl, "Max jitter queue size:", ui.nav, 'max_jitter_queue', 1, 500)
         self._spin_row(cl, "Max jitter cache size:", ui.nav, 'max_jitter_cache', 1, 5000)
+        self._check_row(cl, "Load saved batch jitter results (slow; read once per project)",
+                        ui.settings, 'load_saved_jitter')
         cl.addStretch()
         nav.add_page("Cache", cache)
 

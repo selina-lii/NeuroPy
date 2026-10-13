@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 # Whole-session view == the permanent dim0[0]='all' segment (no virtual sum view any more).
 _ALL_SEGS = "all"
+FAMILY_PREFIX = '⊞ '   # marks a segment family among plain segments in pickers
 ALL_PAIRS = '(all pairs)'   # stats-panel "every valid pair" group choice
 SIG_CHIP_COLOR = '#90EE90'  # default chip background when no other source supplies one
 SEG_ON_COLOR   = '#4E9A4E'  # hand-set on: darker than the p-value green it overrides
@@ -94,6 +95,7 @@ class DisplayConfig(JsonSavable):
     tail_source: str = 'bins'
     cs_nonneg: bool = False
     cs_offzero: bool = False
+    cs_tail_extend: str = ''   # extend set the tailed baseline reads; '' = the native window
     show_test_window: bool = True
     show_tail_window: bool = False
     show_p: bool = True
@@ -147,6 +149,7 @@ class AppState(QObject):
     cs_overlay_active    = NavField("cs_overlay_active", coerce=bool)
     cs_nonneg            = NavField("cs_nonneg", coerce=bool, on_display="cs_nonneg")
     cs_offzero           = NavField("cs_offzero", coerce=bool, on_display="cs_offzero")
+    cs_tail_extend       = NavField("cs_tail_extend", on_display="cs_tail_extend")
     show_test_window     = NavField("show_test_window", coerce=bool, on_display="show_test_window")
     show_tail_window     = NavField("show_tail_window", coerce=bool, on_display="show_tail_window")
     show_p               = NavField("show_p", coerce=bool, on_display="show_p")
@@ -374,6 +377,9 @@ class AppState(QObject):
     def set_cs_overlay(self, active: bool):
         type(self).cs_overlay_active.set(self, bool(active), self.cs_overlay_changed)
 
+    def set_tail_extend(self, name: str):
+        type(self).cs_tail_extend.set(self, name, self.display_changed)
+
     def set_display_flag(self, name: str, value: bool):
         getattr(type(self), name).set(self, bool(value), self.display_changed)
 
@@ -393,6 +399,7 @@ class AppState(QObject):
         self.set_cs_params(cfg.baseline_method, cfg.cs_metric)
         self.cd.set_significance_window(*cfg.test_window)
         self.cd.set_tail_window(cfg.tail_window, cfg.tail_source)
+        self.set_tail_extend(cfg.cs_tail_extend)
         for f in DisplayConfig._FLAGS:
             getattr(type(self), f).set(self, bool(getattr(cfg, f)), self.display_changed)
         self.display_changed.emit(None)
@@ -479,8 +486,8 @@ class AppState(QObject):
         return 'highres' if self.resolution in ("hi", "lo_hi") else 'lowres'
 
     def get_key_with_resolution(self) -> Key:
-        """CCG store key: session + the resolution the view mode requests."""
-        return Key(session=self.key.session, resolution=self.data_resolution)
+        """CCG store key: the current pair's session + the resolution the view mode requests."""
+        return Key(session=self.pair_ptr_key.session, resolution=self.data_resolution)
 
     def get_complete_key(self) -> Key:
         """Complete Key for the current view: the selected pair's session + resolution,

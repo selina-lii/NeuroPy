@@ -12,6 +12,12 @@ from neuropy import core
 from neuropy.io import BinarysignalIO, NeuroscopeIO
 
 
+def _legacy_position(d: dict) -> core.Position:
+    """Older sessions saved tracking as an X/Y/time dict."""
+    return core.Position(traces=np.vstack([d["X"], d["Y"]]), t_start=d["time"][0],
+                         sampling_rate=float(d.get("pos_sRate", 120)))
+
+
 class ProcessData:
     def __init__(self, basepath, tag=None, use_realigned_pos=False):
         basepath = Path(basepath)
@@ -102,7 +108,7 @@ class ProcessData:
 
         if (f := self.filePrefix.with_suffix(".position.npy")).is_file():
             d = np.load(f, allow_pickle=True).item()
-            self.position = core.Position.from_dict(d)
+            self.position = core.Position.from_dict(d) if "traces" in d else _legacy_position(d)
 
         if not use_realigned_pos:
             if (f := self.filePrefix.with_suffix(".maze.linear.npy")).is_file():

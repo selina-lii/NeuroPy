@@ -29,10 +29,13 @@ if os.path.isdir(plugins):
 from pyqtgraph.Qt.QtWidgets import QApplication
 from neuropy.ui.ccg_ui import CCGReviewUI, UIStates
 from neuropy.ui.dialogs import AddProjectDialog
+from neuropy.ui import explore
+from placefields_exploratory import export_group_ccgs   # TEMPORARY: stats-test CCG export button
 
 # Guard required: jitter spawns worker processes, and spawn re-imports __main__.
 # Without it every jitter task re-runs this file — reloading sessions and a second UI.
 if __name__ == '__main__':
+    export_group_ccgs.install()
     sess = subjects.nsd.allsess + subjects.sd.allsess
     app = QApplication.instance() or QApplication([])   # the empty-project dialog needs one
     if not projects_on_disk():
@@ -42,5 +45,7 @@ if __name__ == '__main__':
         _, cd, _ = build_project(*spec)
     else:
         _, cd, _ = open_project(CONFIG or UIStates.last_project() or None, sess)
-    CCGReviewUI.launch(cd, SESSION).raise_()
+    ui = CCGReviewUI.launch(cd, SESSION)
+    explore.install(ui)
+    ui.raise_()
     app.exec()

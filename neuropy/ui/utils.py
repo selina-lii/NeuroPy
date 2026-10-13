@@ -563,6 +563,10 @@ class ListPickerButton(QPushButton):
         self.clicked.connect(self._open_dialog)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    def set_disabled(self, items) -> None:
+        """Options still listed but unpickable."""
+        self._disabled = set(items)
+
     def set_items(self, items: list[str], keep_selection: bool = True):
         prev = list(self._selected) if keep_selection else []
         self._items = list(items)
@@ -970,6 +974,72 @@ class ExplicitCloseDialog(QDialog):
 
     def closeEvent(self, event):
         event.ignore()
+
+
+class QueueDialog(QDialog):
+    """Pending tasks of a BackgroundTaskRunner; selected ones, or their whole batch, can be removed."""
+
+    def __init__(self, runner, title: str, label: Callable = str, batch_of: Callable = None,
+                 on_removed: Callable = None, parent=None):
+        super().__init__(parent)
+        self._runner, self._label, self._batch_of = runner, label, batch_of
+        self._on_removed = on_removed or (lambda _task: None)
+        self.setWindowTitle(title)
+        self.resize(480, 320)
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        row = QHBoxLayout()
+        for text, slot, shown in (("Remove selected", self._on_remove_btn, True),
+                                  ("Remove batch", self._on_remove_batch_btn, batch_of is not None),
+                                  ("Refresh", self._refresh, True)):
+            if shown:
+                btn = QPushButton(text)
+                btn.clicked.connect(slot)
+                row.addWidget(btn)
+        row.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self._list)
+        lay.addLayout(row)
+        self._refresh()
+
+    @property
+    def _first(self) -> int:
+        """Index of the first removable task: the running one heads the deque."""
+        return 1 if self._runner.is_running() and self._runner._pending else 0
+
+    def _refresh(self):
+        self._list.clear()
+        for i, task in enumerate(self._runner._pending):
+            item = QListWidgetItem(f"{'[running] ' if i < self._first else ''}{self._label(task)}")
+            if i < self._first:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self._list.addItem(item)
+        if self._list.count() == 0:
+            self._list.addItem("(queue empty)")
+
+    def _remove(self, drop):
+        """Drop tasks matching *drop* from the queue, past the running one."""
+        pending, first = self._runner._pending, self._first
+        tasks = list(pending)
+        gone = [t for i, t in enumerate(tasks) if i >= first and drop(i, t)]
+        pending.clear()
+        pending.extend(t for t in tasks if not any(t is g for g in gone))
+        for t in gone:
+            self._on_removed(t)
+        self._refresh()
+
+    def _on_remove_btn(self):
+        rows = {self._list.row(it) for it in self._list.selectedItems()}
+        self._remove(lambda i, _t: i in rows)
+
+    def _on_remove_batch_btn(self):
+        tasks = list(self._runner._pending)
+        batches = {self._batch_of(tasks[self._list.row(it)]) for it in self._list.selectedItems()
+                   if self._list.row(it) < len(tasks)} - {None}
+        self._remove(lambda _i, t: self._batch_of(t) in batches)
 
 
 class ResultsDialog(QDialog):

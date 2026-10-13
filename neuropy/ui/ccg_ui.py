@@ -77,6 +77,7 @@ class UISettings(JsonSavable):
     # Fewest tagged pairs a label needs before the classifier will train on it.
     classifier_min_count = Tunable(20)
     jump_to_next_after_select = Tunable(False)
+    load_saved_jitter = Tunable(False)   # the saved batch file is slow to read
     slideshow_on = Tunable(True)        # holding an arrow 5 s in a pair list plays it
     slideshow_min_ms = Tunable(200)     # least time each pair stays on screen
     slideshow_warned = Tunable(False)   # the first-use notice was dismissed for good
@@ -117,6 +118,7 @@ class UIStates(JsonSavable):
         self.extend_rows: list = []       # CorrelogramSection extend views
         self.active_extend = ''           # stored extend set the rows read from
         self.slider_filters: dict = {}    # TimeSliderBackend filter_checks + per_theme_label_state
+        self.stats_docks = ''             # stats-test dock arrangement, base64
 
     def __setstate__(self, state: dict) -> None:
         """settings is one nested object, not a dict of them — rebuild it here."""
@@ -168,6 +170,8 @@ class BottomStatusBar:
         nav.pair_changed.connect(self.refresh)
         nav.key_changed.connect(self.refresh)
         nav.selection_changed.connect(self.refresh)
+        nav.segment_changed.connect(self.refresh)
+        nav.stacked_segments_changed.connect(self.refresh)
 
     def start_task(self, text: str, total: int = 0):
         """Show the task bar; ``total`` 0 leaves it busy-looping for unknown work."""
@@ -220,10 +224,10 @@ class BottomStatusBar:
         return nav.neurons.firing_rate if rates is None else rates
 
     def _frates_str(self, ref: int, tgt: int) -> str:
-        """One FR field per stacked segment; the session's rates when none are stacked."""
+        """One FR field per stacked segment; the current segment's rates when none are stacked."""
         segments = list(self.nav.stacked_segments)
         if not segments:
-            return self._frate_str(self.nav.neurons.firing_rate, ref, tgt)
+            return self._frate_str(self._seg_frates(self.nav.current_segment, ref, tgt), ref, tgt)
         parts = []
         for seg in segments:
             rates = self._seg_frates(seg, ref, tgt)
@@ -445,7 +449,7 @@ class CCGReviewUI(QMainWindow):
 
         ReviewMenuBar(self).build()
         self.status_bar = BottomStatusBar(self.nav, self.statusBar(), self)
-        self.stats_panel = StatsTestTabs(self.nav)
+        self.stats_panel = StatsTestTabs(self.nav, self.ui_states.stats_docks)
         self.stats_panel.resize(1100, 750)
 
     def _offer_save_before_switch(self) -> bool:
@@ -680,7 +684,8 @@ class CCGReviewUI(QMainWindow):
         if len(inds) > 0:
             self.nav.set_current_pair(min(self.nav.current_pair_idx, len(inds) - 1))
         self.pairs_view.pair_selection.refresh_lists()
-        self.jitter_mgr.load_from_cd()
+        if self.settings.load_saved_jitter:
+            self.jitter_mgr.load_from_cd()
         self.nav.groups.changed.emit()
         self.neuron_network.refresh_ct_buttons()
         self.neuron_network.draw()
@@ -827,6 +832,7 @@ class CCGReviewUI(QMainWindow):
         s.extend_rows = self.mainview.corr_section.extend_state()
         s.active_extend = self.nav.active_extend
         s.slider_filters = self.time_slider.backend.filter_snapshot()
+        s.stats_docks = self.stats_panel.dock_state()
         s.collapsed_panels = [a for a in self._panel_splitter_map
                               if not self._panel_target(a).isVisible()]
         s.save()   # settings / panel_sizes already live on s

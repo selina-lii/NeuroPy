@@ -382,14 +382,20 @@ class NeuronRatePanel(QWidget):
         self.wf_btn = chip_button("waveform", checkable=True)
         self.wf_btn.toggled.connect(self._on_wf_btn)
         self.pf_btn = chip_button("placefields", checkable=True)
-        self.pf_btn.setToolTip("Swap firing rates for place-field peaks; needs placefield data for the session")
-        self.pf_btn.toggled.connect(lambda _on: self.render())
+        self.pf_btn.setToolTip("Swap firing rates for the saved tuning curves; needs them for the session")
+        self.pf_csv_btn = chip_button("placefields (csv)", checkable=True)   # TEMPORARY: compare with the CSV peaks
+        self.pf_csv_btn.setToolTip("The old CSV place-field peaks, to compare with the curves")
+        for btn, other in ((self.pf_btn, self.pf_csv_btn), (self.pf_csv_btn, self.pf_btn)):
+            btn.toggled.connect(lambda on, o=other: (on and o.setChecked(False), self.render()))
+        self.pf_seg_combo = AddableDropdown('segment', width=90)
+        self.pf_seg_combo.setToolTip("Place-field segment")
+        self.pf_seg_combo.currentTextChanged.connect(lambda _t: self.render())
         row = QWidget()
         row.setLayout(widget_row("Theme:", self.theme_combo, None,
                                  self.bounds_btn, self.rate_btn, None,
                                  "Bin:", self.bin_spin, None,
                                  "Y:", self.y_slider, self.log_btn, None,
-                                 self.wf_btn, self.pf_btn))
+                                 self.wf_btn, self.pf_btn, self.pf_csv_btn, self.pf_seg_combo))
         return row
 
     def _on_wf_btn(self, on: bool) -> None:
@@ -419,8 +425,10 @@ class NeuronRatePanel(QWidget):
         lo = min(max(cur - n // 2, 0), max(len(items) - n, 0))
         window = list(range(lo, min(lo + n, len(items))))
         dark = qt_dark_mode()
-        self.pf_btn.setEnabled(any(self.nav.cd.placefields.has_session(str(self.nav.view.key_of(items[i]).session))
-                                   for i in window))   # all-session mode mixes sessions
+        sessions = {str(self.nav.view.key_of(items[i]).session) for i in window}   # all-session mode mixes sessions
+        self.pf_btn.setEnabled(any(self.nav.cd.placefield_curves.has_session(s) for s in sessions))
+        self.pf_csv_btn.setEnabled(any(self.nav.cd.placefields.has_session(s) for s in sessions))
+        self._sync_pf_seg_combo()
         groups = [] if self._show_pf else self._bound_groups()
         first = None
         for row, i in enumerate(window):
@@ -450,8 +458,10 @@ class NeuronRatePanel(QWidget):
         if current and self.wf_panel.isVisible():
             self.wf_panel.render(neurons, index)
         title = self._title(key, neurons, index)
-        if self._show_pf:
+        if self._show_pf_csv:
             title += self._draw_placefields(plot, str(key.session), int(key.ref))
+        elif self._show_pf:
+            title += self._draw_pf_curves(plot, str(key.session), int(key.ref))
         else:
             self._draw_rate_strip(plot, neurons, index, dark, groups)
         words = ''.join(
@@ -459,14 +469,54 @@ class NeuronRatePanel(QWidget):
             for w, rgb in self.nav.root.neuron_tags.neuron_words(key, int(key.ref)))
         return (f"<b>▶ {title}</b>" if current else title) + (f"<br>{words}" if words else '')
 
+    def _sync_pf_seg_combo(self) -> None:
+        """Offer the loaded placefield segments; a project switch can change them."""
+        pf, combo = self.nav.cd.placefields, self.pf_seg_combo
+        segs = pf.segments() if self._show_pf_csv else self.nav.cd.placefield_curves.blocks()
+        if [combo.itemText(i) for i in range(combo.count())] != segs:
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.set_items(segs)
+            combo.setCurrentText(current if current in segs else pf.conf.segment)
+            combo.blockSignals(False)
+        combo.setEnabled(self._show_pf or self._show_pf_csv)
+
     @property
     def _show_pf(self) -> bool:
-        return self.pf_btn.isEnabled() and self.pf_btn.isChecked()
+        """Either place-field view replaces the rate strips."""
+        return (self.pf_btn.isEnabled() and self.pf_btn.isChecked()) or self._show_pf_csv
+
+    @property
+    def _show_pf_csv(self) -> bool:
+        return self.pf_csv_btn.isEnabled() and self.pf_csv_btn.isChecked()
+
+    def _draw_pf_curves(self, plot, session: str, nid: int) -> str:
+        """Each direction's tuning curve, up above zero and down mirrored below; returns the stats line."""
+        curves, conf = self.nav.cd.placefield_curves, self.nav.cd.placefields.conf
+        block = self.pf_seg_combo.currentText()
+        weak = '#888888'
+        plot.setXRange(0, curves.n_bins(session), padding=0.02)   # strips are x-linked: an empty one must not set the range
+        drawn = False
+        for direction in curves.DIRECTIONS:
+            here = curves.curve(session, block, direction, nid, conf.sigma_bin)
+            if here is None:
+                continue
+            tc = here[0] * (-1 if direction == 'down' else 1)   # mirrored: up and down fields often coincide
+            color = PF_DIRECTION_COLORS[direction] if np.nanmax(here[0]) >= conf.frmax_threshold else weak
+            plot.addItem(pg.PlotDataItem(np.arange(len(tc)), tc, fillLevel=0, pen=plot_pen(color), connect='finite',
+                                         brush=pg.mkBrush(pg.mkColor(color).getRgb()[:3] + (90,))))
+            drawn = True
+        plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=plot_pen(weak)))
+        if not drawn:
+            return '<br><i>no tuning curve</i>'
+        stats = curves.neuron_stats(session, block, nid, conf.sigma_bin)
+        return f"<br>{block}: " + '  '.join(f"{k} {v:.2f}" for k, v in stats.items())
 
     def _draw_placefields(self, plot, session: str, nid: int) -> str:
         """Each peak as a triangle from its edges to its height, up above zero and down below; returns the stats line."""
         pf = self.nav.cd.placefields
-        rows = pf.neuron_rows(session, nid)
+        segment = self.pf_seg_combo.currentText()
+        rows = pf.neuron_rows(session, nid, segment)
         weak = '#888888'
         plot.setXRange(0, pf.n_bins, padding=0.02)   # strips are x-linked: an empty one must not set the range
         for c, h, prom, w, le, re, frmax, direction in zip(
@@ -482,8 +532,8 @@ class NeuronRatePanel(QWidget):
         plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=plot_pen(weak)))
         if not len(rows['cell_id']):
             return '<br><i>no place fields</i>'
-        stats = '  '.join(f"{stat} {pf.neuron_stat(session, nid, stat):.2f}" for stat in PlacefieldData.NEURON_STATS)
-        return f"<br>{pf.conf.segment}: {stats}"
+        stats = '  '.join(f"{stat} {pf.neuron_stat(session, nid, stat, segment):.2f}" for stat in PlacefieldData.NEURON_STATS)
+        return f"<br>{segment}: {stats}"
 
     def _draw_rate_strip(self, plot, neurons, index: int, dark: bool, groups: list) -> None:
         bin_size = self.bin_spin.value()

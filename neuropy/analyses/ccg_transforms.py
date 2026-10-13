@@ -234,6 +234,13 @@ class ConnectionStrength:
         return mask
 
     @staticmethod
+    def tail_range(mask: np.ndarray, bin_size: float) -> str:
+        """The lags a tail mask covers, as '−300…−5, 5…300 ms' (bin centres)."""
+        lags = (np.arange(len(mask)) - len(mask) // 2) * bin_size * 1e3
+        edges = np.flatnonzero(np.diff(np.r_[0, mask.astype(int), 0]))
+        return ', '.join(f"{lags[a]:g}…{lags[b - 1]:g}" for a, b in zip(edges[::2], edges[1::2])) + ' ms'
+
+    @staticmethod
     def baseline_tail(ccg, conf, *, bin_size_eff=None, source=None, intervals=None):
         """Flat baseline at the tail-interval mean, of the CCG itself or of *source*."""
         ccg = np.asarray(ccg, dtype=float)
@@ -545,6 +552,7 @@ class ConnStrengthConfig:
     min_lag_bin: int | None = None
     max_lag_bin: int | None = None
     off_mode: str = 'flag'   # 'flag' (CS untouched) | 'zero' | 'binarize'
+    tail_extend: str = ''    # extend set whose wider window the tailed baseline reads; '' = native
 
 
 @dataclass(frozen=True, slots=True)

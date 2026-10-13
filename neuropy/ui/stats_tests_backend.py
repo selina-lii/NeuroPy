@@ -19,7 +19,7 @@ from scipy import stats as _sp
 import pingouin as pg
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
-from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS, DisplayConfig
+from neuropy.ui.app_state import _ALL_SEGS, ALL_PAIRS, FAMILY_PREFIX, DisplayConfig
 from neuropy.ui.pair_selection_panel import SelectionData
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.ccg_transforms import ConnStrengthConfig, NormalizeBy
@@ -37,7 +37,7 @@ _BAR_COLORS = ['#8FB3FF', '#FFB3B3', '#B3FFB3', '#FFD9B3', '#E0B3FF',
 PICKERS = {
     'sess': ('sessions',   "Session",    "sessions",    'available_sessions'),
     'ct':   ('conn_types', "ConnType",   "types",       'available_conn_types'),
-    'seg':  ('segments',   "Segment",    "segments",    'available_segments'),
+    'seg':  ('segments',   "Segment",    "segments",    'available_segment_items'),
     'res':  ('resolution', "Resolution", "resolutions", 'available_resolutions'),
     'grp':  ('rules',      "Group",      "rules",       'available_groups'),
     'data': ('data_type',  "Data",       "metrics",     'available_data_types'),
@@ -185,11 +185,13 @@ class Metric:
     highres: bool = False
     norm: NormMode | None = None
     off_mode: str = 'flag'   # 'binarize' reports the on/off label rather than the CS value
+    changes: bool = False    # count pairs rising / falling between consecutive rows instead of testing
 
 
 METRICS: dict[str, Metric] = {
     "Conn Strength":          Metric("conn_strength", highres=True),
     "CS binarized (on/off)":  Metric("conn_strength", highres=True, off_mode='binarize'),
+    "CS increase/decrease":   Metric("conn_strength", highres=True, changes=True),
     "CS norm (% change)":     Metric("conn_strength", highres=True, norm="pct"),
     "CS norm (geometric)":    Metric("conn_strength", highres=True, norm="geom"),
     "Ref Firing Rate":        Metric("ref_firing_rate"),
@@ -230,6 +232,7 @@ class StatsTestBackend:
         self.results: list[StatsResult] = []
         self.text: str = ''
         self.missing_segments: dict[str, set] = {}   # segment → sessions it was never computed for
+        self.tail_sources: dict[tuple, tuple] = {}   # (session, segment, resolution) → (n extended, n native, extend range)
 
     @property
     def norms(self) -> set:
@@ -256,6 +259,13 @@ class StatsTestBackend:
 
     def available_segments(self) -> list[str]:
         return sorted(self.cd.available_segments())
+
+    def segment_families(self) -> dict:
+        """``{family: [segments in order]}``: picking one spreads its members over consecutive rows."""
+        return self.cd.custom_families(self.available_segments())
+
+    def available_segment_items(self) -> list[str]:
+        return [FAMILY_PREFIX + f for f in sorted(self.segment_families())] + self.available_segments()
 
     @staticmethod
     def available_data_types() -> list[str]:
@@ -391,14 +401,15 @@ class StatsTestBackend:
 
     @staticmethod
     def drop_indices(row: dict, idx: list[int]) -> dict:
-        """Row with the given value indices removed (vals and pairs stay aligned)."""
+        """Row with the given value indices removed (every per-pair list stays aligned)."""
         if not idx:
             return row
         drop = set(idx)
         keep = [j for j in range(len(row.get('vals', []))) if j not in drop]
         pairs = row.get('pairs') or []
         return dict(row, vals=[row['vals'][j] for j in keep],
-                    pairs=[pairs[j] for j in keep if j < len(pairs)])
+                    pairs=[pairs[j] for j in keep if j < len(pairs)],
+                    **{f: [row[f][j] for j in keep] for f in ('on', 'raw') if f in row})
 
 
     # -- top-level -----------------------------------------------------------
@@ -425,6 +436,7 @@ class StatsTestBackend:
         self.resolve_follows()
         dtype = rows[0].data_type
         self.missing_segments = {}
+        self.tail_sources = {}
         all_sessions = self.sessions_for()
         self.sd.ensure_groups_loaded_for(all_sessions)
         self.ensure_loaded()
@@ -452,7 +464,9 @@ class StatsTestBackend:
                         collected, outliers, by_ref_tgt=bool(METRICS[dtype].norm))
                 collected = [self.drop_indices(g, outliers[i]) for i, g in enumerate(collected)]
             tested = self.log_rows(collected, shift)
-            if (bad := self.check_test_type(tt, len(collected))):
+            if METRICS[dtype].changes:
+                res = {}
+            elif (bad := self.check_test_type(tt, len(collected))):
                 res = {'error': bad}
             elif tt == "Repeated-measures ANOVA":
                 res = self.run_rm_anova(tested, nonparam, cfg.post_hoc)
@@ -482,6 +496,7 @@ class StatsTestBackend:
         dtype     = cfg.data_type
         m = METRICS[dtype]
         merged: dict[Key, float] = {}
+        verdicts: dict[Key, tuple] = {}
         used_sessions: set[str] = set()
         seg_configs: list[dict] = []
         for seg_name, conn_type in product(seg_names, conn_types):
@@ -496,6 +511,8 @@ class StatsTestBackend:
                     try:
                         vals_map = self.get_cs_values_for_sess(ptr_key, resolution, seg_name,
                                                                rules, m.off_mode)
+                        for k, v in self.cs_verdicts_for_sess(ptr_key, resolution, seg_name, rules).items():
+                            verdicts.setdefault(k, v)
                     except FileNotFoundError:
                         self.missing_segments.setdefault(seg_name, set()).add(sess)
                         continue
@@ -529,7 +546,9 @@ class StatsTestBackend:
         return dict(name=cfg.name, session=sess_str, conn_type=','.join(conn_types),
                     segment=seg_names[0], pair_groups=' & '.join(map(str, rules)) or ALL_PAIRS, data_type=dtype,
                     pairs=list(merged), vals=list(merged.values()), color=cfg.color,
-                    sessions_used=sorted(used_sessions), seg_configs=seg_configs)
+                    sessions_used=sorted(used_sessions), seg_configs=seg_configs,
+                    **(dict(on=[verdicts[k][0] for k in merged], raw=[verdicts[k][1] for k in merged])
+                       if verdicts else {}))
 
     def _pair_value_dict(self, ptr_key, rules, value_fn) -> dict[Key, float]:
         """{Key.pair(session,ref,tgt): value_fn(ref,tgt)} over the valid pairs meeting *rules*."""
@@ -553,10 +572,50 @@ class StatsTestBackend:
         if off_mode == 'flag' and self.display.cs_offzero:
             off_mode = 'zero'
         cfg = ConnStrengthConfig(self.display.baseline_method, self.display.cs_metric,
-                                 c.min_lag_bin, c.max_lag_bin, off_mode)
+                                 c.min_lag_bin, c.max_lag_bin, off_mode, self.display.cs_tail_extend)
         grid = self.cd.get_conn_strength_for(data_key, self.norms, cfg, self.sd.on_grid(ptr_key, seg_name))
+        self._note_tail_source(ptr_key, data_key, rules)
         return self._pair_value_dict(ptr_key, rules,
                                      lambda r, t: grid[r, t])
+
+    def _note_tail_source(self, ptr_key, data_key, rules) -> None:
+        """Count this session's pairs whose tailed baseline came from the extend, and those left native."""
+        name = self.display.cs_tail_extend
+        if not self.cd.uses_extend_tail(self.display.baseline_method, name):
+            return
+        ext = self.cd.extend_tail(data_key, name, self.norms)
+        pairs = self.pairs_for_rules(rules, ptr_key)
+        n_ext = 0 if ext is None else sum(bool(np.isfinite(ext[0][r, t])) for r, t in pairs)
+        k = (str(ptr_key.session), data_key.segment, data_key.resolution)
+        prev = self.tail_sources.get(k, (0, 0, ''))
+        self.tail_sources[k] = (prev[0] + n_ext, prev[1] + len(pairs) - n_ext, ext[1] if ext else prev[2])
+
+    def tail_fallbacks(self) -> list:
+        """``[(session, segment, resolution, n native, n total)]`` where the tailed baseline stayed native for some pairs."""
+        return [(s, seg, res, n_nat, n_ext + n_nat)
+                for (s, seg, res), (n_ext, n_nat, _) in sorted(self.tail_sources.items()) if n_nat]
+
+    def section_tail(self) -> str:
+        if not self.tail_sources:
+            return ''
+        out = [f"-- Tail baseline: '{self.display.cs_tail_extend}' where available --"]
+        for (s, seg, res), (n_ext, n_nat, rng) in sorted(self.tail_sources.items()):
+            out.append(f"   {res} {s} {seg}: {n_ext} extended" + (f" ({rng})" if n_ext else "")
+                       + f", {n_nat} native")
+        return '\n'.join(out)
+
+    def cs_verdicts_for_sess(self, ptr_key, resolution, seg_name, rules) -> dict[Key, tuple]:
+        """``{pair: (on, unthresholded CS)}``: the verdict that can zero a pair, and the CS it has before that."""
+        data_key, data = self._seg_data(ptr_key, resolution, seg_name, 'ccg')
+        if data is None:
+            return {}
+        c = self.cd.conf.at(resolution)
+        cfg = ConnStrengthConfig(self.display.baseline_method, self.display.cs_metric,
+                                 c.min_lag_bin, c.max_lag_bin, 'flag', self.display.cs_tail_extend)
+        on = self.sd.on_grid(ptr_key, seg_name)
+        raw = self.cd.get_conn_strength_for(data_key, self.norms, cfg, on)
+        return {Key.pair(ptr_key.session, int(r), int(t)): (bool(on[r, t]), float(raw[r, t]))
+                for r, t in sorted(self.pairs_for_rules(rules, ptr_key))}
 
     def get_fr_for_sess(self, ptr_key, resolution, seg_name, rules, role) -> dict[Key, float]:
         """A neuron counts once, so its key is the self-pair rather than every pair it joins."""
@@ -756,6 +815,8 @@ class StatsTestBackend:
         alt = cfg.alternative if cfg else 'two-sided'
         dtype = (results[0].groups[0].get('data_type', '')
                  if results and results[0].groups else '')
+        if dtype in METRICS and METRICS[dtype].changes:
+            return ''
         # the test that ran, not the one picked: nonparametric turns a t-test into Wilcoxon
         ran = next((sr.res['test'] for sr in results if sr.res.get('test')),
                    cfg.test_type if cfg else '')
@@ -796,6 +857,28 @@ class StatsTestBackend:
             lines.append(f"    {row.get('a','?')} vs {row.get('b','?')}: "
                          f"p_adj={row.get('p_adj',1.0):.4g}")
         return lines
+
+    @staticmethod
+    def pair_changes(sr: StatsResult) -> list:
+        """``[(name_a, name_b, up, down, same, n_b)]`` per consecutive row, over the pairs both rows hold; n_b = row b's pairs."""
+        names = [g.get('name') or chr(65 + i) for i, g in enumerate(sr.groups)]
+        out = []
+        for (na, a), (nb, b) in zip(zip(names, sr.groups), zip(names[1:], sr.groups[1:])):
+            va, vb = dict(zip(a['pairs'], a['vals'])), dict(zip(b['pairs'], b['vals']))
+            d = np.array([vb[p] - va[p] for p in va.keys() & vb.keys()])
+            out.append((na, nb, int((d > 0).sum()), int((d < 0).sum()), int((d == 0).sum()), len(b['pairs'])))
+        return out
+
+    def section_pair_changes(self, results: list[StatsResult] = None) -> str:
+        results = self.results if results is None else results
+        if not (results and results[0].groups and METRICS[results[0].groups[0]['data_type']].changes):
+            return ''
+        out = ["-- Pair changes --"]
+        for sr in results:
+            out += [f"   {self._res(sr)} {na} → {nb}: ↑ {up}  ↓ {down}  = {same}  / {n}  "
+                    f"{'more increase' if up > down else 'more decrease' if down > up else 'even'}"
+                    for na, nb, up, down, same, n in self.pair_changes(sr)]
+        return '\n'.join(out)
 
     def section_segments(self, results: list[StatsResult] = None) -> str:
         """Which window each segment contributed, sorted by segment then session."""
@@ -844,7 +927,9 @@ class StatsTestBackend:
         """Every section in display order; missing segments lead so they are never buried."""
         results = self.results if results is None else results
         return '\n'.join(s for s in (self.section_missing(),
+                                     self.section_tail(),
                                      self.section_stats(results),
+                                     self.section_pair_changes(results),
                                      self.section_segments(results),
                                      self.section_outliers(results),
                                      self.section_raw(results)) if s)
@@ -859,6 +944,8 @@ class StatsTestBackend:
         metric = METRICS[dtype]
         if not metric.enabled:
             return f"Data type '{dtype}' is not yet implemented."
+        if metric.changes:
+            return None
         if metric.norm and len(rows) != 2:
             return f"'{dtype}' requires exactly 2 groups."
         if self.test_config.test_type is not None:

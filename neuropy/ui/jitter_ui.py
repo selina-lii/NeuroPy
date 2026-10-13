@@ -16,7 +16,7 @@ from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import group_display
 from neuropy.ui.ui_common import BackgroundTaskRunner, LRUCache
 from pyqtgraph.Qt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
     QComboBox, QLabel, QCheckBox, QProgressDialog, QApplication)
 from pyqtgraph.Qt.QtCore import QObject, QTimer, Qt, Signal as _Signal
 from pyqtgraph.Qt.QtWidgets import QMessageBox
@@ -208,12 +208,16 @@ class JitterManager(QObject):
     def set_cd(self, cd):
         """Adopt *cd*'s project: its saved single-pair runs replace the previous project's."""
         self.cd = cd
+        self._saved_loaded = False
         self.jitter_worker._cache.clear()
         for (nd_str, *rest), val in cd.load_pair_jitter():
             self.jitter_worker._cache.put((Key.from_str(nd_str), *rest), val)
 
     def load_from_cd(self):
-        """Read saved batch results; get_result falls back to them after the pair cache."""
+        """Read saved batch results once per project; get_result falls back to them after the pair cache."""
+        if self._saved_loaded:
+            return
+        self._saved_loaded = True
         self.cd.load_jitter()
         self.colors_changed.emit(None)
 
@@ -310,65 +314,6 @@ class JitterManager(QObject):
                 f"Jitter [{task.ref},{task.tgt}] {seg_name}…{suffix}")
         else:
             self.status_changed.emit('')
-
-
-class JitterQueueDialog(QDialog):
-    """Shows pending jitter tasks; allows deleting from queue."""
-
-    def __init__(self, jitter_mgr, parent=None):
-        super().__init__(parent)
-        self._ctrl = jitter_mgr
-        self.setWindowTitle("Jitter Queue")
-        self.resize(420, 280)
-        layout = QVBoxLayout(self)
-
-        self._list = QListWidget()
-        layout.addWidget(self._list)
-
-        row = QHBoxLayout()
-        del_btn = QPushButton("Delete selected")
-        del_btn.clicked.connect(self._delete_selected)
-        ref_btn = QPushButton("Refresh")
-        ref_btn.clicked.connect(self._refresh)
-        cls_btn = QPushButton("Close")
-        cls_btn.clicked.connect(self.accept)
-        row.addWidget(del_btn); row.addWidget(ref_btn)
-        row.addStretch(); row.addWidget(cls_btn)
-        layout.addLayout(row)
-        self._refresh()
-
-    def _refresh(self):
-        self._list.clear()
-        w = self._ctrl.jitter_worker
-        pending = list(w._runner._pending)
-        if w.is_running() and pending:
-            self._list.addItem(f"[running] {pending[0]}")
-            for t in pending[1:]:
-                self._list.addItem(str(t))
-        else:
-            for t in pending:
-                self._list.addItem(str(t))
-        if self._list.count() == 0:
-            self._list.addItem("(queue empty)")
-
-    def _delete_selected(self):
-        row = self._list.currentRow()
-        if row < 0:
-            return
-        w = self._ctrl.jitter_worker
-        pending = w._runner._pending
-        # row 0 = running task if running — skip it
-        offset = 1 if (w.is_running() and pending) else 0
-        del_idx = row - offset
-        if 0 <= del_idx < len(pending) - (1 if w.is_running() else 0):
-            lst = list(pending)
-            if w.is_running():
-                lst = [lst[0]] + lst[1:del_idx + 1] + lst[del_idx + 2:]
-            else:
-                lst = lst[:del_idx] + lst[del_idx + 1:]
-            pending.clear()
-            pending.extend(lst)
-        self._refresh()
 
 
 class JitterBatchDialog(QDialog):

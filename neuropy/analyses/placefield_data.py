@@ -5,6 +5,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import gaussian_filter1d
 
 from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.utils import JsonSavable
@@ -125,3 +126,77 @@ class PlacefieldData:
                 strong = table['cell_id'][table['FRmax'] >= self.conf.frmax_threshold]
                 hit |= np.isin(neuron_ids, strong)
         return hit
+
+
+class PlacefieldCurveData:
+    """Saved unthresholded 1D tuning curves per (session, block, direction), one ``<session>.npz`` each."""
+
+    FIELDS = ('neuron_ids', 'coords', 'tuning_curves', 'split_curves')
+    DIRECTIONS = ('up', 'down')
+    UNOCCUPIED_HZ = 1e9   # Pf1D pads occupancy by 1e-16 s, so a spike in a bin never run through reads ~1e16 Hz
+
+    def __init__(self, curves: dict = None):
+        self.curves: dict = curves or {}
+
+    @classmethod
+    def load_dir(cls, root: str) -> 'PlacefieldCurveData':
+        curves = {}
+        for path in sorted(glob.glob(os.path.join(root, '*.npz'))):
+            session = os.path.basename(path)[:-len('.npz')]
+            with np.load(path) as z:
+                for block, direction in {tuple(k.split('.')[:2]) for k in z.files}:
+                    curves[(session, block, direction)] = {f: z[f"{block}.{direction}.{f}"] for f in cls.FIELDS}
+        return cls(curves)
+
+    def blocks(self) -> list:
+        return sorted({b for _, b, _ in self.curves})
+
+    def has_session(self, session: str) -> bool:
+        return any(s == session for s, _, _ in self.curves)
+
+    def n_bins(self, session: str) -> int:
+        return max((len(c['coords']) for (s, _, _), c in self.curves.items() if s == session), default=1)
+
+    def curve(self, session: str, block: str, direction: str, nid: int, sigma_bin: float):
+        """``(curve, (even, odd))`` of one neuron, smoothed by *sigma_bin* bins; None when it was not computed."""
+        c = self.curves.get((session, block, direction))
+        if c is None or nid not in c['neuron_ids']:
+            return None
+        i = int(np.flatnonzero(c['neuron_ids'] == nid)[0])
+        return self._smooth(c['tuning_curves'][i], sigma_bin), tuple(self._smooth(h[i], sigma_bin) for h in c['split_curves'])
+
+    @classmethod
+    def _smooth(cls, rate: np.ndarray, sigma_bin: float) -> np.ndarray:
+        """Gaussian-smoothed over occupied bins only; unoccupied bins stay NaN."""
+        seen = rate < cls.UNOCCUPIED_HZ
+        if sigma_bin <= 0:
+            return np.where(seen, rate, np.nan)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            out = gaussian_filter1d(np.where(seen, rate, 0.0), sigma_bin) / gaussian_filter1d(seen.astype(float), sigma_bin)
+        return np.where(seen, out, np.nan)
+
+    def neuron_stats(self, session: str, block: str, nid: int, sigma_bin: float) -> dict:
+        """FRmax, r_odd_even and r_maze_remaze, each the max over directions; NaN where nothing was computed."""
+        other = {'maze': 'remaze', 'remaze': 'maze'}.get(block)
+        out = {'FRmax': [], 'r_odd_even': [], 'r_maze_remaze': []}
+        for d in self.DIRECTIONS:
+            here = self.curve(session, block, d, nid, sigma_bin)
+            if here is None:
+                continue
+            tc, (even, odd) = here
+            out['FRmax'].append(np.nanmax(tc))
+            out['r_odd_even'].append(self._corr(even, odd))
+            there = self.curve(session, other, d, nid, sigma_bin) if other else None
+            if there is not None:   # blocks bin their own track span: resample onto this one's bins
+                out['r_maze_remaze'].append(self._corr(
+                    tc, np.interp(np.linspace(0, 1, len(tc)), np.linspace(0, 1, len(there[0])), there[0])))
+        with np.errstate(invalid='ignore'):
+            return {k: float(np.nanmax(v)) if v and not np.all(np.isnan(v)) else np.nan for k, v in out.items()}
+
+    @staticmethod
+    def _corr(a: np.ndarray, b: np.ndarray) -> float:
+        """Pearson r over bins both curves occupy; NaN when either is flat there."""
+        ok = np.isfinite(a) & np.isfinite(b)
+        if ok.sum() < 3 or a[ok].std() == 0 or b[ok].std() == 0:
+            return np.nan
+        return float(np.corrcoef(a[ok], b[ok])[0, 1])

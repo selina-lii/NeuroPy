@@ -1,0 +1,150 @@
+{
+  "ccg": {
+    "resolutions": {
+      "lowres": 0.001,
+      "highres": 0.0001
+    },
+    "bin_size": 0.001,
+    "duration": 0.02,
+    "conv_window": 0.005,
+    "symmetrize_ccg": true
+  },
+  "screen": {
+    "conn_types": [
+      [
+        "E",
+        [
+          "pyr",
+          "pyr"
+        ]
+      ],
+      [
+        "E",
+        [
+          "pyr",
+          "inter"
+        ]
+      ],
+      [
+        "I",
+        [
+          "inter",
+          "inter"
+        ]
+      ],
+      [
+        "I",
+        [
+          "inter",
+          "pyr"
+        ]
+      ]
+    ],
+    "defaults": {
+      "alpha": 0.05,
+      "multiple_correction": "bonferroni",
+      "min_lag": 0.0008,
+      "max_lag": 0.0028,
+      "tail_intervals": [
+        [
+          null,
+          -0.002
+        ],
+        [
+          0.007,
+          null
+        ]
+      ],
+      "min_spkcount": 2.5,
+      "spkcnt_scope": 0.012
+    },
+    "initial_sets": [
+      {
+        "name": "I",
+        "initial": true,
+        "tag": {
+          "color": "",
+          "shown": true
+        },
+        "scope": {
+          "sessions": [],
+          "conn_types": [
+            "I INT\u2192INT",
+            "I INT\u2192PYR"
+          ],
+          "pair_rules": []
+        },
+        "rules": [
+          {
+            "test": "p_value",
+            "name": "",
+            "resolution": "lowres",
+            "enabled": true,
+            "args": {
+              "threshold": 0.05,
+              "roi": null,
+              "correction": "bonferroni",
+              "neighbor_alpha": null,
+              "neighbors": 1,
+              "direction": "below baseline"
+            }
+          },
+          {
+            "test": "spike_count",
+            "name": "",
+            "resolution": "lowres",
+            "enabled": true,
+            "args": {
+              "threshold": 2.5,
+              "roi": null,
+              "mode": "avg"
+            }
+          }
+        ]
+      },
+      {
+        "name": "E",
+        "initial": true,
+        "tag": {
+          "color": "",
+          "shown": true
+        },
+        "scope": {
+          "sessions": [],
+          "conn_types": [
+            "E PYR\u2192PYR",
+            "E PYR\u2192INT"
+          ],
+          "pair_rules": []
+        },
+        "rules": [
+          {
+            "test": "p_value",
+            "name": "",
+            "resolution": "lowres",
+            "enabled": true,
+            "args": {
+              "threshold": 0.05,
+              "roi": null,
+              "correction": "bonferroni",
+              "neighbor_alpha": null,
+              "neighbors": 0.0,
+              "direction": "above baseline"
+            }
+          },
+          {
+            "test": "spike_count",
+            "name": "",
+            "resolution": "lowres",
+            "enabled": true,
+            "args": {
+              "threshold": 2.5,
+              "roi": null,
+              "mode": "avg"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

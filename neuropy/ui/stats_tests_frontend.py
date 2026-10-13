@@ -4,6 +4,7 @@ Widgets are the source of truth; configs are snapshots taken at run/save.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
 from functools import partial
 import pathlib
@@ -11,20 +12,24 @@ from typing import TYPE_CHECKING
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+import numpy as np
+import pyqtgraph as pg
 
 from pyqtgraph.Qt import QtWidgets
-from pyqtgraph.Qt.QtCore import QObject, Qt, QThread, Signal
+from pyqtgraph.Qt.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QThread, QTimer, Signal
 from pyqtgraph.Qt.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QCheckBox, QPlainTextEdit,
-    QScrollArea, QFrame, QMessageBox, QSizePolicy, QTabWidget,
+    QScrollArea, QFrame, QMessageBox, QSizePolicy, QTabWidget, QComboBox, QSpinBox,
+    QDockWidget, QMainWindow,
 )
-from neuropy.ui.utils import (ConfigBound, ScopeField, ScopePicker, make_combo, make_button,
-                              ColorLabelButton, sync_follow_column, widget_row)
+from neuropy.ui.utils import (ALL_OPTION, ConfigBound, ListPickerButton, ScopeField, ScopePicker, make_combo, make_button,
+                              ColorLabelButton, chip_button, sync_follow_column, widget_row)
 from neuropy.ui.ui_common import qt_dark_mode, UITheme
-from neuropy.ui.dialogs import RulePickerButton, VersionSaveDialog, VersionLoadDialog
+from neuropy.ui.dialogs import RulePickerButton, VersionSaveDialog, VersionLoadDialog, pair_scope_fields
+from neuropy.analyses.neurons_dataset import Key
 from neuropy.analyses.pair_selection_data import DerivedRule
-from neuropy.ui.app_state import DisplayConfig
+from neuropy.ui.app_state import FAMILY_PREFIX, DisplayConfig
 from neuropy.ui.ccg_panel import NormSection, BaselineCSSection
 from neuropy.ui.stats_tests_backend import (
     _BAR_COLORS, DISABLED_METRICS, METRICS, PICKERS, PICKER_FIELD, SINGLE_PICKERS,
@@ -120,7 +125,210 @@ class StatsPlotWidget(QWidget, ConfigBound):
         self._canvas.draw()
 
 
+class PairLinesPlot(QWidget):
+    """One line per pair across the rows, from the values the test ran on; a zero breaks the line, a lone point is enlarged."""
+
+    _GRAY = (150, 150, 150)
+
+    def __init__(self, nav: 'AppState', parent=None):
+        super().__init__(parent)
+        self.nav = nav
+        self._results: list[StatsResult] = []
+        self._pairs, self._curves, self._colors, self._attrs = [], [], [], []
+        self._y = np.zeros((0, 0))
+        self._drawn = self._off = np.zeros((0, 0), dtype=bool)
+        self._members: dict = {}
+        self._res_combo = QComboBox()
+        self._res_combo.currentIndexChanged.connect(lambda _i: self._draw())
+        self._scope = ScopePicker(pair_scope_fields(nav) + [
+            ScopeField('nrn', "Neurons", "neurons", self._all_neurons, select_all_when_empty=False,
+                       all_option=True, display=lambda n: tuple(n.split(' · ')) if ' · ' in n else ('', n))])
+        self._scope.setToolTip("Highlight the pairs matching every pick; Segments picks the columns shown")
+        self._scope.selection_changed.connect(self._draw)
+        self._on_lo_spin, self._on_hi_spin = QSpinBox(), QSpinBox()
+        for spin in (self._on_lo_spin, self._on_hi_spin):
+            spin.valueChanged.connect(lambda _v: self._draw())
+        self._unthr_check = QCheckBox("unthresholded")
+        self._unthr_check.setToolTip("Off segments at their raw CS, as gray dots the line runs through")
+        self._unthr_check.toggled.connect(lambda _on: self._draw())
+        self._info = QLabel("")
+        clear_btn = make_button("Clear selection", self._on_clear_btn)
+        clear_btn.setToolTip("Drop the picked and clicked highlights")
+        self._plot = pg.PlotWidget()
+        self._points = pg.ScatterPlotItem(pen=None)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addLayout(widget_row("Resolution:", self._res_combo, self._scope, clear_btn))
+        lay.addLayout(widget_row("On in", self._on_lo_spin, "–", self._on_hi_spin, "segments",
+                                 self._unthr_check, self._info))
+        lay.addWidget(self._plot, stretch=1)
+
+    def _all_neurons(self) -> list:
+        nd = self.nav.cd.nd
+        return [f"{s} · {i}" for s in sorted({str(k.session) for k in self.nav.cd.ptr})
+                for i in nd.neurons_for(Key(session=s)).neuron_ids]
+
+    def render(self, results: list[StatsResult]) -> None:
+        self._results = results
+        self._scope.refresh()
+        self._res_combo.blockSignals(True)
+        self._res_combo.clear()
+        self._res_combo.addItems([sr.resolution for sr in results])
+        self._res_combo.blockSignals(False)
+        groups = results[0].groups if results else []
+        for spin in (self._on_lo_spin, self._on_hi_spin):
+            spin.blockSignals(True)
+            spin.setRange(0, len(groups))
+        self._on_lo_spin.setValue(0)
+        self._on_hi_spin.setValue(len(groups))
+        for spin in (self._on_lo_spin, self._on_hi_spin):
+            spin.blockSignals(False)
+        self._index_pairs()
+        self._draw()
+
+    def _index_pairs(self) -> None:
+        """Each test pair's session, conn type and neurons, the groups holding it, and what the picker can offer."""
+        cd, sd = self.nav.cd, self.nav.sd
+        self._pairs = list(dict.fromkeys(p for sr in self._results for g in sr.groups for p in g['pairs']))
+        ptr_of = {}
+        for label in cd.conf.conn_type_labels:
+            ei, ct = cd.conf.parse_conn_type_label(label)
+            for s in {str(p.session) for p in self._pairs}:
+                if (k := Key(session=s, excitability=ei, conn_type=ct)) in cd.ptr:
+                    for ref, tgt in cd.ptr[k].pair_set:
+                        ptr_of.setdefault((s, int(ref), int(tgt)), (label, k))
+        self._attrs = []
+        for p in self._pairs:
+            label, key = ptr_of[(str(p.session), int(p.ref), int(p.tgt))]
+            self._attrs.append(dict(sess=str(p.session), ct=label, key=key,
+                                    nrn={f"{p.session} · {i}" for i in cd.nd.ids_at(p)}))
+        keys = {a['key'] for a in self._attrs}
+        self._members = {g: {i for i, a in enumerate(self._attrs)
+                             if (int(self._pairs[i].ref), int(self._pairs[i].tgt)) in held.get(a['key'], ())}
+                         for g in sd.groups.pickable_groups()
+                         for held in [{k: sd.pairs_for_group_key(g, k) for k in keys}]}
+        segs = {c['segment'] for sr in self._results for g in sr.groups for c in g.get('seg_configs') or []}
+        in_range = dict(seg=segs, sess={a['sess'] for a in self._attrs}, ct={a['ct'] for a in self._attrs},
+                        grp={g for g, m in self._members.items() if m},
+                        nrn=set().union(*(a['nrn'] for a in self._attrs)))
+        for k, picker in self._scope.pickers.items():
+            picker.set_disabled(set(self._scope._items_of(self._scope._fields[k])()) - in_range[k] - {ALL_OPTION})
+
+    def _picked(self, key: str) -> set | None:
+        """A field's picks; None when it constrains nothing."""
+        sel = self._scope.pickers[key].selected
+        return None if not sel or ALL_OPTION in sel else set(sel)
+
+    def _hits(self, shown: list) -> set:
+        """Shown pairs (row indices into *shown*) matching every constraining pick."""
+        picks = {k: self._picked(k) for k in ('sess', 'ct', 'grp', 'nrn')}
+        if all(v is None for v in picks.values()):
+            return set()
+        grp = set().union(*(self._members.get(g, set()) for g in picks['grp'])) if picks['grp'] else None
+        return {r for r, i in enumerate(shown)
+                if (picks['sess'] is None or self._attrs[i]['sess'] in picks['sess'])
+                and (picks['ct'] is None or self._attrs[i]['ct'] in picks['ct'])
+                and (grp is None or i in grp)
+                and (picks['nrn'] is None or self._attrs[i]['nrn'] & picks['nrn'])}
+
+    def _table(self, groups: list, field: str) -> np.ndarray:
+        """(pair, row) values of one per-pair field; NaN where a row lacks the pair."""
+        row = {p: i for i, p in enumerate(self._pairs)}
+        out = np.full((len(self._pairs), len(groups)), np.nan)
+        for j, g in enumerate(groups):
+            for p, v in zip(g['pairs'], g[field]):
+                out[row[p], j] = v
+        return out
+
+    def _draw(self) -> None:
+        plot = self._plot
+        plot.clear()
+        plot.setBackground(UITheme.from_dark(qt_dark_mode()).plot_bg)
+        if not self._results:
+            return
+        sr = self._results[self._res_combo.currentIndex()]
+        segs = self._picked('seg')
+        cols = [j for j, g in enumerate(sr.groups) if segs is None or g['segment'] in segs]
+        groups = [sr.groups[j] for j in cols]   # what the test ran on: outliers already dropped
+        has_on = all('on' in g for g in groups)
+        for w in (self._on_lo_spin, self._on_hi_spin, self._unthr_check):
+            w.setEnabled(has_on)
+        raw = self._table(groups, 'vals')
+        vals = self._table(StatsTestBackend.log_rows(groups, sr.log_shift), 'vals')
+        present = np.isfinite(raw)
+        on = self._table(groups, 'on') == 1 if has_on else present
+        n_on = on.sum(axis=1) if has_on else np.zeros(len(self._pairs))
+        keep = ((n_on >= self._on_lo_spin.value()) & (n_on <= self._on_hi_spin.value())) if has_on \
+            else np.ones(len(self._pairs), dtype=bool)
+        keep &= present.any(axis=1)
+        shown = list(np.flatnonzero(keep))
+        if has_on and self._unthr_check.isChecked():
+            unthr = self._table(StatsTestBackend.log_rows([dict(g, vals=g['raw']) for g in groups], sr.log_shift), 'vals')
+            self._y = np.where(on, vals, unthr)[keep]
+            self._drawn = np.isfinite(self._y)
+            self._off = self._drawn & ~on[keep]
+        else:
+            self._y = vals[keep]
+            self._drawn = present[keep] & (raw[keep] != 0)
+            self._off = np.zeros_like(self._drawn)
+        self._shown = shown
+        plot.setLabel('left', 'value' if sr.log_shift is None else f"log(v + {sr.log_shift:.4g})")
+        plot.getAxis('bottom').setTicks([[(x, g.get('name') or chr(65 + j))
+                                          for x, (j, g) in enumerate(zip(cols, groups))]])
+        rng = np.random.default_rng(0)   # seeded: a pair keeps its colour across redraws
+        self._colors = [pg.hsvColor(h, 0.8, 0.85).getRgb()[:3] for h in rng.random(len(self._pairs))]
+        x = np.arange(len(groups), dtype=float)
+        self._curves = []
+        for r, i in enumerate(shown):
+            curve = pg.PlotCurveItem(x, np.where(self._drawn[r], self._y[r], np.nan), connect='finite')
+            curve.setClickable(True, width=6)
+            curve.sigClicked.connect(partial(self._on_curve_clicked, r))
+            plot.addItem(curve)
+            self._curves.append(curve)
+        plot.addItem(self._points)
+        hits = self._hits(shown)
+        self._highlight(hits)
+        self._info.setText(f"{len(shown)} pair(s)" + (f", {len(hits)} highlighted" if hits else ""))
+
+    def _lone(self) -> np.ndarray:
+        """Drawn points whose neighbours are both undrawn: no line reaches them."""
+        pad = np.pad(self._drawn, ((0, 0), (1, 1)))
+        return self._drawn & ~pad[:, :-2] & ~pad[:, 2:]
+
+    def _rgba(self, r: int, hit: set, gray: bool = False) -> tuple:
+        """A shown pair's colour: solid when highlighted, faint while others are."""
+        rgb = self._GRAY if gray else self._colors[self._shown[r]]
+        return (*rgb, 255 if r in hit else 40 if hit else 150)
+
+    def _highlight(self, hit: set) -> None:
+        for r, curve in enumerate(self._curves):
+            curve.setPen(pg.mkPen(self._rgba(r, hit), width=3 if r in hit else 1))
+            curve.setZValue(10 if r in hit else 0)
+        lone = self._lone()
+        rr, jj = np.nonzero(self._drawn)
+        self._points.setData(x=jj.astype(float), y=self._y[rr, jj],
+                             size=np.where(lone[rr, jj], 11, 4),
+                             brush=[pg.mkBrush(self._rgba(r, hit, self._off[r, j])) for r, j in zip(rr, jj)])
+        self._points.setZValue(20)
+
+    def _on_clear_btn(self) -> None:
+        for picker in self._scope.pickers.values():
+            picker.set_selected([ALL_OPTION])
+        self._draw()
+
+    def _on_curve_clicked(self, r: int, *_):
+        p = self._pairs[self._shown[r]]
+        ref, tgt = self.nav.cd.nd.ids_at(p)
+        self._highlight({r})
+        self._info.setText(f"{p.session} {ref}→{tgt}")
+
+
 # ─────────────────────────── row widget (frontend) ───────────────────────────
+
+def _segment_display(item: str) -> tuple:
+    """Families above plain segments in the picker."""
+    return ('Families', item) if item.startswith(FAMILY_PREFIX) else ('Segments', item)
+
 
 class StatsRow(QWidget, ConfigBound):
     """One group row: color, name, four multi-select pickers, data-type combo, delete.
@@ -128,6 +336,7 @@ class StatsRow(QWidget, ConfigBound):
 
     deleted = Signal(object)
     follow_toggled = Signal()
+    family_picked = Signal(object, list)   # (row, member segments in order)
 
     # RowConfig field -> (getter reading the widget, setter writing the widget);
     # the picker fields are generated, so PICKERS stays the only list of them
@@ -167,11 +376,13 @@ class StatsRow(QWidget, ConfigBound):
             [ScopeField(rkey, label, plural, getattr(backend, prov_attr),
                         single=rkey in SINGLE_PICKERS, followable=True,
                         disabled=DISABLED_METRICS if rkey in SINGLE_PICKERS else (),
-                        picker=partial(RulePickerButton, nav) if rkey == 'grp' else None)
+                        picker=partial(RulePickerButton, nav) if rkey == 'grp' else None,
+                        display=_segment_display if rkey == 'seg' else None)
              for rkey, (_fld, label, plural, prov_attr) in PICKERS.items()], labelled=False)
         self._pickers = self._scope.pickers
         for p in self._pickers.values():
             p.follow_toggled.connect(self.follow_toggled)
+        self._pickers['seg'].selection_changed.connect(self._on_seg_picker)
         rw.addWidget(self._scope)
 
         del_btn = QPushButton("x")
@@ -189,6 +400,16 @@ class StatsRow(QWidget, ConfigBound):
     def refresh(self):
         self._scope.refresh()
 
+    def _on_seg_picker(self, picked: list):
+        """A picked family hands its members to the panel, which deals them out from this row down."""
+        fam = next((p for p in picked if p.startswith(FAMILY_PREFIX)), None)
+        if fam is not None:
+            self.family_picked.emit(self, self.backend.segment_families()[fam.removeprefix(FAMILY_PREFIX)])
+
+    def set_segment(self, segment: str):
+        self._pickers['seg'].set_selected([segment])
+        self._swatch.set_name(segment)
+
     def _seed_defaults(self):
         """New row: default to current session + conn-type + first real group."""
         key_sess = str(self.nav.key.session)
@@ -205,6 +426,16 @@ class StatsRow(QWidget, ConfigBound):
 
 
 # ─────────────────────────── panel (frontend orchestration) ───────────────────────────
+
+def _hscroll(widget: QWidget) -> QScrollArea:
+    """*widget* filling a dock's height but scrolling sideways: a narrow dock clips nothing."""
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return area
+
 
 class _StatsWorker(QObject):
     """Runs the test off the GUI thread: gathering values may load CCGs for every session."""
@@ -242,9 +473,10 @@ class StatsTestPanel(QWidget, ConfigBound):
                             lambda p, v: p._plot._rm_outliers_check.setChecked(v)),
     }
 
-    def __init__(self, nav: 'AppState', parent=None):
+    def __init__(self, nav: 'AppState', dock_state: str = '', parent=None):
         super().__init__(parent)
         self.nav = nav
+        self._dock_state = dock_state   # base64 QMainWindow.saveState: where the docks sit
         self.backend = StatsTestBackend(nav.cd, nav.sd,
                                         display=nav.get_display_config())
         self._mute_missing_warning = False   # per-GUI-instance, never persisted
@@ -279,65 +511,111 @@ class StatsTestPanel(QWidget, ConfigBound):
                          self._nonparam, self._log, self._post_hoc)
         root.addLayout(top)
 
+        rows_pane = QWidget()
+        rows_root = QVBoxLayout(rows_pane)
+        rows_root.setContentsMargins(0, 0, 0, 0)
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 2, 0, 2)
         _hdr_fixed = {"Group row": 94, "": 22}
         # PICKERS is the only list of picker columns, so the header cannot drift from the row
-        for col in ("Group row", *(v[1] for v in PICKERS.values()), ""):
-            lbl = QLabel(col, styleSheet="font-weight:bold; padding: 4px 4px;")
+        self._lock_btns: dict[str, QPushButton] = {}
+        for col in ("Group row", *PICKERS, ""):
+            lbl = QLabel(PICKERS[col][1] if col in PICKERS else col, styleSheet="font-weight:bold; padding: 4px 4px;")
             if col in _hdr_fixed:
                 lbl.setFixedWidth(_hdr_fixed[col])
-            else:
-                lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            hdr.addWidget(lbl)
-        root.addLayout(hdr)
+                hdr.addWidget(lbl)
+                continue
+            cell = QHBoxLayout()
+            cell.addWidget(lbl)
+            if col == 'seg':
+                self._fold_btn = chip_button('⊞', checked=True)
+                self._fold_btn.setToolTip('Fold rows filled from a family into one block')
+                self._fold_btn.toggled.connect(lambda _on: self._rebuild_blocks())
+                cell.addWidget(self._fold_btn)
+            lock = self._lock_btns[col] = chip_button('🔒')
+            lock.setToolTip('Lock: every row shares the top row\'s value')
+            lock.toggled.connect(partial(self._on_lock_btn, col))
+            cell.addWidget(lock)
+            cell.addStretch(1)
+            box = QWidget()
+            box.setLayout(cell)
+            cell.setContentsMargins(0, 0, 0, 0)
+            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            hdr.addWidget(box)
+        rows_root.addLayout(hdr)
 
         self._rows_area = QVBoxLayout()
         self._rows_area.setSpacing(2)
-        rows_widget = QWidget()
-        rows_widget.setLayout(self._rows_area)
-        scroll = QScrollArea()
-        scroll.setWidget(rows_widget)
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(200)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        root.addWidget(scroll)
+        self._rows_area.addStretch(1)
+        self._rows_widget = QWidget()
+        self._rows_widget.setLayout(self._rows_area)
+        self._rows_widget.installEventFilter(self)
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(self._rows_widget)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.verticalScrollBar().valueChanged.connect(lambda _v: self._place_blocks())
+        self._scroll.viewport().installEventFilter(self)
+        self._blocks: list[tuple] = []   # (block, column, first row, last row, family or None)
+        rows_root.addWidget(self._scroll, stretch=1)
 
         add_btn = QPushButton("+ Add group")
         add_btn.clicked.connect(lambda: self._add_row())
         add_btn.setFixedWidth(100)
-        root.addWidget(add_btn)
+        family_btn = make_button("＋ Family…", self._on_family_btn)
+        family_btn.setToolTip("Name an ordered set of segments; picking it on a row fills the rows below in order")
+        rows_root.addLayout(widget_row(add_btn, family_btn))
 
         # same classes as the CCG panel, on the same nav: both copies track each other
         self._norm_mirror = NormSection(self.nav, expanded=False)
         self._cs_mirror = BaselineCSSection(self.nav, expanded=False)
-        mirror = widget_row(self._norm_mirror, self._cs_mirror, stretch=False)
-        root.addLayout(mirror)
-
-        res_frame = QFrame()
-        res_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        res_root = QVBoxLayout(res_frame)
-        res_root.setContentsMargins(4, 4, 4, 4)
+        mirror = QWidget()
+        mirror_root = QVBoxLayout(mirror)
+        mirror_root.addLayout(widget_row(self._norm_mirror, self._cs_mirror, stretch=False))
+        mirror_root.addStretch(1)
 
         self._result_text = QPlainTextEdit()
         self._result_text.setReadOnly(True)
         self._result_text.setFont(QtWidgets.QApplication.font())
         self._result_text.setMinimumHeight(80)
-        res_root.addWidget(self._result_text)
-        root.addWidget(res_frame, stretch=1)
 
         self._plot = StatsPlotWidget()
         self._plot.rerun_requested.connect(lambda: self.results and self._run())
-        self._plot_win = QDialog(self)
-        self._plot_win.setWindowTitle("Stats plot")
-        self._plot_win.resize(1000, 800)
-        QVBoxLayout(self._plot_win).addWidget(self._plot)
+        self._lines = PairLinesPlot(self.nav)
+        self._plot_tabs = QTabWidget()
+        self._plot_tabs.addTab(self._plot, "Distribution")
+        self._plot_tabs.addTab(self._lines, "Pair lines")
+        self._plot_tabs.setCornerWidget(make_button("⤢", self._on_fullscreen_btn, 30))
+        self._full_win: QDialog | None = None
+        self._plot_tabs.setMinimumHeight(150)
+
+        # a nested main window, so each part is a dock its header drags to any side
+        self._docks = QMainWindow()
+        self._docks.setWindowFlags(Qt.WindowType.Widget)
+        self._docks.setDockNestingEnabled(True)
+        docks = {}
+        for name, title, widget, area in (('rows', "Group rows", rows_pane, Qt.DockWidgetArea.LeftDockWidgetArea),
+                                          ('norm', "Normalization / Baseline", mirror, Qt.DockWidgetArea.LeftDockWidgetArea),
+                                          ('plot', "Plot", self._plot_tabs, Qt.DockWidgetArea.RightDockWidgetArea),
+                                          ('text', "Result", self._result_text, Qt.DockWidgetArea.RightDockWidgetArea)):
+            dock = docks[name] = QDockWidget(title)
+            dock.setObjectName(f"stats_{name}")   # saveState matches docks by name
+            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+            dock.setWidget(_hscroll(widget))
+            self._docks.addDockWidget(area, dock)
+        self._plot_dock = docks['plot']
+        if self._dock_state:
+            self._docks.restoreState(QByteArray.fromBase64(self._dock_state.encode()))
+        else:   # sizes only take once the window has a size
+            QTimer.singleShot(0, lambda: (
+                self._docks.resizeDocks([docks['rows'], docks['plot']], [1, 1], Qt.Orientation.Horizontal),
+                self._docks.resizeDocks([docks['rows'], docks['norm']], [3, 1], Qt.Orientation.Vertical),
+                self._docks.resizeDocks([docks['plot'], docks['text']], [5, 2], Qt.Orientation.Vertical)))
+        root.addWidget(self._docks, stretch=1)
 
         self._export_btn = make_button("Save…", self._export)
         self._export_btn.setEnabled(False)
-        self._plot_btn = make_button("Plot…", self._on_plot_btn)
-        self._plot_btn.setEnabled(False)
-        btn_row = widget_row(make_button("Run", self._run), self._plot_btn, self._export_btn,
+        btn_row = widget_row(make_button("Run", self._run), self._export_btn,
                              make_button("Load…", self._load_result))
         root.addLayout(btn_row)
 
@@ -359,20 +637,130 @@ class StatsTestPanel(QWidget, ConfigBound):
         self.backend._next_id = max(self.backend._next_id, row.row_id) + 1
         row.deleted.connect(self._del_row)
         row.follow_toggled.connect(self._sync_follows)
+        row.family_picked.connect(self._on_family_picked)
+        row._pickers['seg'].selection_changed.connect(lambda _p: self._rebuild_blocks())
+        for p in row._pickers.values():
+            p.selection_changed.connect(self._place_blocks)
+            sp = p.sizePolicy()
+            sp.setRetainSizeWhenHidden(True)   # a block covers the slot, so the columns keep their place
+            p.setSizePolicy(sp)
+        if cfg is None and self._rows:
+            for k in self._locked_cols():
+                row._pickers[k].set_following(True)
         self._rows.append(row)
-        self._rows_area.addWidget(row)
+        self._rows_area.insertWidget(len(self._rows) - 1, row)
         self._sync_follows()
+
+    def _on_family_picked(self, row: StatsRow, members: list):
+        """Row k gets the k-th member, counting from the picking row; missing rows copy its other pickers."""
+        start = self._rows.index(row)
+        while len(self._rows) < start + len(members):
+            self._add_row(dataclasses.replace(row.config, id=0, name='', color=''))
+        for r, seg in zip(self._rows[start:], members):
+            r.set_segment(seg)
+
+    def _on_family_btn(self):
+        """Name an ordered set of segments; it joins the segment pickers as a family."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("New segment family")
+        name = QLineEdit()
+        picker = ListPickerButton("Segments", self.backend.available_segments(), plural="segments",
+                                  select_all_when_empty=False, ordered=True)
+        ok = make_button("Save", dlg.accept)
+        lay = QVBoxLayout(dlg)
+        lay.addLayout(widget_row("Name:", name))
+        lay.addLayout(widget_row("Members, in pick order:", picker))
+        lay.addLayout(widget_row(None, ok))
+        if dlg.exec() and name.text().strip() and picker.selected:
+            self.nav.cd.save_custom_family(name.text().strip(), picker.selected)
+            self._refresh_rows()
 
     def _del_row(self, row: StatsRow):
         if row in self._rows:
             self._rows.remove(row)
         row.deleteLater()
+        self._rebuild_blocks()   # before re-binding: a re-bound picker re-places blocks that may span the gone row
         self._sync_follows()
 
     def _sync_follows(self):
         """Re-bind every picker column; row order is the follow order."""
         for rkey in PICKERS:
             sync_follow_column([r._pickers[rkey] for r in self._rows])
+        locked = self._locked_cols()
+        for k, btn in self._lock_btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(k in locked)
+            btn.blockSignals(False)
+        self._rebuild_blocks()
+
+    def _locked_cols(self) -> set:
+        """Columns where every row below the top follows it."""
+        return {k for k in PICKERS
+                if len(self._rows) > 1 and all(r._pickers[k].following for r in self._rows[1:])}
+
+    def _on_lock_btn(self, col: str, on: bool):
+        for r in self._rows[1:]:
+            r._pickers[col].set_following(on)
+        self._sync_follows()
+
+    def _family_runs(self) -> list:
+        """(family, first row, last row) for consecutive rows holding a family's members in order."""
+        fams = self.backend.segment_families()
+        segs = [r._pickers['seg'].selected for r in self._rows]
+        runs, i = [], 0
+        while i < len(segs):
+            best = max(((f, next((n for n in range(len(m)) if i + n >= len(segs) or segs[i + n] != [m[n]]), len(m)))
+                        for f, m in fams.items()), key=lambda fn: fn[1], default=(None, 0))
+            if best[1] >= 2:
+                runs.append((best[0], i, i + best[1] - 1))
+            i += max(best[1], 1)
+        return runs
+
+    def _rebuild_blocks(self):
+        """One block per locked column over every row, and per folded family over its rows."""
+        for b, *_ in self._blocks:
+            b.deleteLater()
+        self._blocks = []
+        for r in self._rows:
+            for p in r._pickers.values():
+                p.setVisible(True)
+        spans = [(k, 0, len(self._rows) - 1) for k in PICKERS if k in self._locked_cols()]
+        if self._fold_btn.isChecked() and 'seg' not in self._locked_cols():
+            spans += [('seg', a, b, f) for f, a, b in self._family_runs()]
+        for col, a, b, *fam in spans:
+            top = self._rows[a]._pickers[col]
+            if fam:
+                block = QPushButton(f"{FAMILY_PREFIX}{fam[0]} · {b - a + 1} rows", self._rows_widget)
+                block.setToolTip('Click to unfold')
+                block.clicked.connect(lambda: self._fold_btn.setChecked(False))
+            else:
+                block = QPushButton(top.text(), self._rows_widget)
+                block.clicked.connect(top._open_dialog)
+            block.setStyleSheet("QPushButton { border: 1px solid #4a7fd4; border-radius: 4px; }")
+            for r in self._rows[a:b + 1]:
+                r._pickers[col].setVisible(False)
+            block.show()
+            self._blocks.append((block, col, a, b, fam[0] if fam else None))
+        QTimer.singleShot(0, self._place_blocks)
+
+    def _place_blocks(self):
+        """Fit each block over its cells, clipped to the visible part of the list so its label stays in view."""
+        vis0 = -self._rows_widget.y()
+        vis1 = vis0 + self._scroll.viewport().height()
+        for block, col, a, b, fam in self._blocks:
+            cell = self._rows[a]._pickers[col]
+            x = cell.mapTo(self._rows_widget, QPoint(0, 0)).x()
+            y0 = max(self._rows[a].y(), vis0)
+            y1 = min(self._rows[b].geometry().bottom(), vis1)
+            block.setGeometry(x, y0, cell.width(), max(y1 - y0, cell.height()))
+            if fam is None:
+                block.setText(cell.text())
+            block.raise_()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            QTimer.singleShot(0, self._place_blocks)
+        return super().eventFilter(obj, ev)
 
     def _refresh_rows(self, *_):
         for r in self._rows:
@@ -423,6 +811,7 @@ class StatsTestPanel(QWidget, ConfigBound):
     def _on_run_done(self):
         self._teardown_run()
         self._warn_missing_segments()
+        self._warn_tail_fallbacks()
         self._show_result(self.backend.result_text())
         self._show_plot()
         self._export_btn.setEnabled(True)
@@ -430,6 +819,15 @@ class StatsTestPanel(QWidget, ConfigBound):
     def _on_run_failed(self, msg: str):
         self._teardown_run()
         self._show_result(f"Run failed: {msg}")
+
+    def _warn_tail_fallbacks(self):
+        """Sessions whose tailed baseline used the native window for some or all pairs."""
+        rows = self.backend.tail_fallbacks()
+        if rows:
+            QMessageBox.information(
+                self, "Tail baseline fell back",
+                f"These used the native window instead of '{self.backend.display.cs_tail_extend}':\n\n"
+                + '\n'.join(f"{res} {s} {seg}: {n} of {total} pairs" for s, seg, res, n, total in rows))
 
     def _warn_missing_segments(self):
         """A segment never computed for a session silently shrinks the run to the sessions that have it."""
@@ -448,15 +846,30 @@ class StatsTestPanel(QWidget, ConfigBound):
 
     def apply_theme(self):
         self._plot.apply_theme()
+        self._lines._draw()
 
     def _show_plot(self):
         self._plot.render(self.results)
-        self._plot_btn.setEnabled(True)
-        self._on_plot_btn()
+        self._lines.render(self.results)
 
-    def _on_plot_btn(self):
-        self._plot_win.show()
-        self._plot_win.raise_()
+    def _on_fullscreen_btn(self):
+        """Lift the plot tabs into a full-screen window; closing it puts them back."""
+        if self._full_win is not None:
+            self._full_win.close()
+            return
+        self._full_win = QDialog(self)
+        self._full_win.setWindowTitle("Stats plot")
+        QVBoxLayout(self._full_win).addWidget(self._plot_tabs)
+        self._full_win.finished.connect(self._on_full_win_finished)
+        self._full_win.showFullScreen()
+
+    def _on_full_win_finished(self, _result: int):
+        self._plot_dock.setWidget(_hscroll(self._plot_tabs))
+        self._full_win.deleteLater()
+        self._full_win = None
+
+    def dock_state(self) -> str:
+        return bytes(self._docks.saveState().toBase64()).decode()
 
     def _show_result(self, text: str):
         self._result_text.setPlainText(text)
@@ -477,9 +890,9 @@ class StatsTestPanel(QWidget, ConfigBound):
             self._add_row(rc)
         while len(self._rows) < 2:
             self._add_row()
-        self.apply(self.backend.test_config)
         # a loaded result is shown as saved; restoring its toggles must not trigger a rerun
         self._plot.blockSignals(True)
+        self.apply(self.backend.test_config)
         self._plot.apply(self.backend.view_config)
         self._plot.blockSignals(False)
 
@@ -515,10 +928,11 @@ class StatsTestPanel(QWidget, ConfigBound):
 class StatsTestTabs(QTabWidget):
     """Floating window of stats tests as browser-style tabs: '+' opens one, x closes one."""
 
-    def __init__(self, nav: 'AppState', parent=None):
+    def __init__(self, nav: 'AppState', dock_state: str = '', parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Window)
         self.nav = nav
+        self._dock_state = dock_state
         self._opened = 0
         self.setWindowTitle("Stats Tests")
         self.setTabsClosable(True)
@@ -530,9 +944,13 @@ class StatsTestTabs(QTabWidget):
 
     def _on_new_tab_btn(self) -> None:
         self._opened += 1
-        panel = StatsTestPanel(self.nav)
+        panel = StatsTestPanel(self.nav, self.dock_state())
         panel.renamed.connect(lambda name: self.setTabText(self.indexOf(panel), name))
         self.setCurrentIndex(self.addTab(panel, f"Test {self._opened}"))
+
+    def dock_state(self) -> str:
+        """The open tab's arrangement, else the one this window was opened with."""
+        return self.currentWidget().dock_state() if self.count() else self._dock_state
 
     def _on_close_tab(self, i: int) -> None:
         panel = self.widget(i)

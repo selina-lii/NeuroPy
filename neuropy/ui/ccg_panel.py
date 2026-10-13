@@ -197,7 +197,7 @@ class SegmentBar(QWidget):
 
     def _refresh(self, *_):
         nav = self.nav
-        if len(self._chips) != len(nav.segment_names()):  # lazy-load attached a segment
+        if [b.text() for b in self._chips.values()] != nav.segment_names():  # a lazy load, or another session's pair
             self.rebuild()
             return
         active_idx = nav.segment_index(nav.current_segment)
@@ -540,6 +540,9 @@ class BaselineCSSection(CollapsibleSection):
                           (self.test_window_btn, 'show_test_window'),
                           (self.tail_window_btn, 'show_tail_window')):
             set_checked_quietly(btn, getattr(self.nav, flag))
+        self.tail_extend_combo.blockSignals(True)
+        self.tail_extend_combo.setCurrentText(self.nav.cs_tail_extend or 'native')
+        self.tail_extend_combo.blockSignals(False)
         conf = self.nav.cd.conf
         for box, sec in ((self.win_start, conf.min_lag), (self.win_end, conf.max_lag)):
             if not box.input.hasFocus():       # never fight the field being typed in
@@ -605,12 +608,19 @@ class BaselineCSSection(CollapsibleSection):
         self.tail_source_combo = QComboBox()
         self.tail_source_combo.addItems(['bins', 'conv', 'jitter'])
         self.tail_source_combo.setMinimumWidth(80)
-        self._tail_head = widget_row("Average of:", self.tail_source_combo,
+        self.tail_extend_combo = QComboBox()
+        self.tail_extend_combo.addItems(['native'] + sorted({e[0] for e in self.nav.cd.saved_extends()}))
+        self.tail_extend_combo.setToolTip("Read the tails from a wider extend of the same bin size; "
+                                          "pairs or sessions without one fall back to the native window")
+        self.tail_extend_combo.textActivated.connect(self._on_tail_extend_combo)
+        self._tail_head = widget_row("Average of:", self.tail_source_combo, "from:", self.tail_extend_combo,
                                      None, self.tail_window_btn)
         layout.addLayout(self._tail_head)
         self._tail_ranges = RangeListWidget("Tail", self.nav.cd.conf.tail_intervals)
         self._tail_ranges.changed.connect(self._on_tail_input)
         layout.addWidget(self._tail_ranges)
+        self._tail_range_lbl = QLabel("")
+        layout.addWidget(self._tail_range_lbl)
         self.tail_source_combo.currentTextChanged.connect(lambda _: self._on_tail_input())
 
         self._update_pval_row_visibility('conv')
@@ -620,6 +630,18 @@ class BaselineCSSection(CollapsibleSection):
         self.nav.cd.set_tail_window(self._tail_ranges.intervals,
                                     self.tail_source_combo.currentText())
         self.nav.display_changed.emit(None)
+
+    def _on_tail_extend_combo(self, text: str):
+        """Point the tailed baseline at an extend, then say where it cannot reach."""
+        name = '' if text == 'native' else text
+        self.nav.set_tail_extend(name)
+        fallbacks = self.nav.cd.extend_tail_fallbacks(name, self.nav.current_segment) if name else []
+        if fallbacks:
+            QMessageBox.information(
+                self, "Tail baseline falls back",
+                f"'{name}' cannot feed the tail here; these use the native window "
+                f"(segment '{self.nav.current_segment}'):\n\n"
+                + '\n'.join(f"{s} {res}: {why}" for s, res, why in fallbacks))
 
     def _on_cs_overlay_changed(self, active: bool):
         set_checked_quietly(self.cs_show_check, active)
@@ -642,7 +664,8 @@ class BaselineCSSection(CollapsibleSection):
         show = method in ('conv', 'jitter')
         self.p_btn.setVisible(show)
         self.pc_btn.setVisible(show)
-        for w in (self.tail_window_btn, self.tail_source_combo, self._tail_ranges):
+        for w in (self.tail_window_btn, self.tail_source_combo, self.tail_extend_combo,
+                  self._tail_ranges, self._tail_range_lbl):
             w.setVisible(method == 'tailed')
 
     def set_jitter_baseline_enabled(self, enabled: bool):
@@ -720,6 +743,23 @@ class BaselineCSSection(CollapsibleSection):
 
         segments = list(nav.stacked_segments) or [nav.current_segment]
         self.set_cs_rows([_row(s) for s in segments])
+        self._tail_range_lbl.setText(self._tail_range_text(ref, tgt))
+
+    def _tail_range_text(self, ref: int, tgt: int) -> str:
+        """The lags the current pair's tail actually averages, and where they come from."""
+        nav = self.nav
+        res = 'highres' if nav.resolution in ('hi', 'lo_hi') else 'lowres'
+        conf = nav.cd.conf.at(res)
+        n_bins = int(round(conf.duration / conf.bin_size)) + 1
+        native = ConnectionStrength.tail_range(ConnectionStrength.tail_mask(n_bins, conf, conf.bin_size), conf.bin_size)
+        if not nav.cd.uses_extend_tail(nav.baseline_method, nav.cs_tail_extend):
+            return f"tail {res}: {native} (native)"
+        key = nav.get_complete_key().change(resolution=res, segment=nav.current_segment)
+        ext = nav.cd.extend_tail(key, nav.cs_tail_extend, nav.active_norms)
+        if ext is None or not np.isfinite(ext[0][ref, tgt]):
+            return (f"tail {res}: {native} (native — '{nav.cs_tail_extend}' has no "
+                    f"{'extend at this segment and bin' if ext is None else 'data for this pair'})")
+        return f"tail {res}: {ext[1]} ({nav.cs_tail_extend})"
 
     def _extend_contexts(self) -> list:
         """The context each enabled extend row last rendered."""
@@ -1098,6 +1138,7 @@ class CCGSource:
     neurons: object
     time_hours: float | None
     refit_after_deconv: bool
+    tail_level: float | None = None   # the extend's tail mean, standing in for the tailed fit
 
 
 @dataclass
@@ -1203,15 +1244,25 @@ class CCGContextBuilder:
         fr_ref = fr_tgt = None
         if metric == 'JBSI':
             fr_ref, fr_tgt = CCGContextBuilder._firing_rates(nav, ref, tgt)
-        if nav.cs_offzero and not nav.sd.on_grid(key, key.segment)[ref, tgt]:
+        if nav.cs_offzero and not nav.sd.on_grid(nav.pair_ptr_key, key.segment)[ref, tgt]:
             return 0.0
+        level = CCGContextBuilder._extend_tail_level(nav, key, ref, tgt)
         return ConnectionStrength.conn_strength(
             ccg_raw, null_raw, ref, tgt, nav.cd.ccg_for(key).conf,
             metric=metric, method=method, active_norms=nav.active_norms,
             neurons=nav.neurons,
             custom_time_hours=CCGContextBuilder._time_hours_for_seg(nav, seg_idx),
+            baseline=None if level is None else np.full(len(ccg_raw), level),
             fr_ref=fr_ref, fr_tgt=fr_tgt, j_avg=j_avg, nonneg=nonneg,
             excitability=nav.key.excitability)
+
+    @staticmethod
+    def _extend_tail_level(nav, key, ref, tgt) -> float | None:
+        """The extend's tail mean for this pair when the tailed baseline reads one; None keeps the native fit."""
+        if not nav.cd.uses_extend_tail(nav.baseline_method, nav.cs_tail_extend):
+            return None
+        ext = nav.cd.extend_tail(key, nav.cs_tail_extend, nav.active_norms)
+        return None if ext is None or not np.isfinite(ext[0][ref, tgt]) else float(ext[0][ref, tgt])
 
     @staticmethod
     def _neuron_meta(neurons, ref: int, tgt: int):
@@ -1329,6 +1380,7 @@ class CCGContextBuilder:
             duration=conf.duration or 1.0, neurons=neurons,
             time_hours=self._time_hours_for_seg(nav, seg_idx),
             refit_after_deconv=True,
+            tail_level=self._extend_tail_level(nav, data_key.change(segment=seg_label), ref, tgt),
         )
         return self._finish(
             source, ref, tgt,
@@ -1442,9 +1494,9 @@ class CCGContextBuilder:
         bin_size_eff = (src.duration / (len(ccg) - 1) if len(ccg) > 1
                         else src.bin_size)
         if tg.baseline.show or cs_overlay:
-            baseline = ConnectionStrength.baseline(
-                ccg, baseline, src.conf, self.nav.baseline_method,
-                bin_size_eff=bin_size_eff)
+            baseline = (np.full(len(ccg), src.tail_level) if src.tail_level is not None
+                        else ConnectionStrength.baseline(ccg, baseline, src.conf, self.nav.baseline_method,
+                                                         bin_size_eff=bin_size_eff))
         return RenderContext(
             ccg=ccg, bin_size_eff=bin_size_eff, window_size_eff=src.duration,
             alpha=self.nav.active_sig_threshold, seg_id_display=seg_display,

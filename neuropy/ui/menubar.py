@@ -14,8 +14,8 @@ from neuropy.ui.app_state import _ALL_SESSION_MARKER
 from neuropy.ui.dialogs import (AddProjectDialog, ExportOptionsDialog, ManageGroupsDialog,
                                 SettingsDialog)
 from neuropy.ui.group_ccg_overlay import GroupCCGOverlayDialog
-from neuropy.ui.jitter_ui import JitterBatchDialog, JitterQueueDialog
-from neuropy.ui.utils import AddableDropdown, chip_button, make_button
+from neuropy.ui.jitter_ui import JitterBatchDialog
+from neuropy.ui.utils import AddableDropdown, QueueDialog, chip_button, make_button
 
 if TYPE_CHECKING:
     from neuropy.ui.ccg_ui import CCGReviewUI
@@ -351,8 +351,14 @@ class ReviewMenuBar:
         stats_menu.addAction("Run stats test…", w._show_stats_panel)
         jitter_menu = mod_menu.addMenu("Jitter")
         jitter_menu.addAction("Run batch…", lambda: JitterBatchDialog(w.nav, w).exec())
-        jitter_menu.addAction("View queue…", lambda: JitterQueueDialog(w.jitter_mgr, w).exec())
+        jitter_menu.addAction("View queue…", lambda: QueueDialog(
+            w.jitter_mgr.jitter_worker._runner, "Jitter Queue", parent=w).exec())
         jitter_menu.addAction("Clear queue", w.jitter_mgr.clear_queue)
+        ccg_menu = mod_menu.addMenu("Custom CCG")
+        worker = w.custom_mgr.worker
+        ccg_menu.addAction("View queue…", lambda: QueueDialog(
+            worker._runner, "Custom CCG Queue", batch_of=lambda t: t.batch_id,
+            on_removed=worker._on_chunk_done, parent=w).exec())
         mod_menu.addSeparator()
         classify_menu = mod_menu.addMenu("Classify")
         classify_menu.addAction("Run classifier", w._run_classifier)

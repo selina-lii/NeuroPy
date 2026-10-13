@@ -92,8 +92,8 @@ class IntervalOp:
 
     @staticmethod
     def split_name(base_name: str, i: int, n_splits: int) -> str:
-        """Zero-padded to the split count, so 2..10 sort as 02..10 rather than 10 before 2."""
-        return f"{base_name}{i + 1:0{len(str(n_splits))}d}"
+        """Zero-padded to at least two digits, so every split sorts as text and reads 01, 02, …."""
+        return f"{base_name}{i + 1:0{max(2, len(str(n_splits)))}d}"
 
     @staticmethod
     def partition(t0: float, t1: float, n_splits: int, overlap_sec: float = 0.0,
@@ -109,6 +109,16 @@ class IntervalOp:
         chunk_len = stride if stride == total / n_splits else chunk_len
         return [(t0 + i * stride,
                  min(t0 + i * stride + chunk_len, t1),
+                 IntervalOp.split_name(base_name, i, n_splits))
+                for i in range(n_splits)]
+
+    @staticmethod
+    def partition_fixed(t0: float, t1: float, seg_len: float, n_splits: int,
+                        base_name: str = '') -> list[tuple[float, float, str]]:
+        """n_splits back-to-back chunks exactly seg_len long from t0, the last cut at t1 → [(t0, t1, name), ...]."""
+        if n_splits == 1:
+            return [(t0, min(t1, t0 + seg_len), base_name)]
+        return [(t0 + i * seg_len, min(t0 + (i + 1) * seg_len, t1),
                  IntervalOp.split_name(base_name, i, n_splits))
                 for i in range(n_splits)]
 

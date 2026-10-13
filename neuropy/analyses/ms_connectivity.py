@@ -25,7 +25,7 @@ from neuropy.analyses.utils import (_san_np, Config, AnalysisDataset, JsonSavabl
                                     NpzSavable, HklSavable, Cacheable, SetOp, SessionMemoryCache)
 from neuropy.analyses.neurons_dataset import Key, NeuronsDataset, NeuronsDatasetConfig
 from neuropy.analyses.pair_selection_data import RuleBook, RuleSet, SelectionDataset
-from neuropy.analyses.placefield_data import PlacefieldData
+from neuropy.analyses.placefield_data import PlacefieldCurveData, PlacefieldData
 from neuropy.core.nwb_session import NWBDataset
 from neuropy.io.fieldmap import FieldMap
 from neuropy.io.nwbio import UNITS_SCHEMA
@@ -878,6 +878,7 @@ class CCGDataset(AnalysisDataset, Cacheable):
         self._applied_norm_methods: list[str] | None = None
         self._custom_keys_cache: tuple | None = None
         self._jitter_results: dict = {}   # nd_key -> {(ref, tgt, res_key, seg): jitter tuple}
+        self._extend_tails: dict = {}     # (unit dir, norms, tail intervals) -> extend_tail result
         self.conn_strength_config: ConnStrengthConfig | None = None
         self.conn_strength: dict = {}
         if src_conf is not None:
@@ -958,6 +959,10 @@ class CCGDataset(AnalysisDataset, Cacheable):
     def placefields(self) -> PlacefieldData:
         return PlacefieldData.load_dir(self.placefield_dir)
 
+    @cached_property
+    def placefield_curves(self) -> PlacefieldCurveData:
+        return PlacefieldCurveData.load_dir(os.path.join(self.save_path, "placefields"))
+
     @property
     def custom_dir(self):
         return os.path.join(self.save_path, "custom_ccg")
@@ -993,6 +998,27 @@ class CCGDataset(AnalysisDataset, Cacheable):
             return None
         return (np.load(os.path.join(d, 'ccg.npy'), mmap_mode='r'),
                 np.load(os.path.join(d, 'computed.npy')))
+
+    def extend_tail(self, key, name: str, active_norms) -> tuple | None:
+        """``(tail mean [ref, tgt], NaN where not computed; tail range)`` from extend *name* at *key*'s session, segment and bin; None when no unit matches."""
+        seg = key.segment or 'all'
+        conf = self.conf.at(key.resolution)
+        unit = next(((w, b) for n, s, w, b, _, sg in self.saved_extends()
+                     if n == name and s == str(key.session) and sg == seg
+                     and np.isclose(b / 1000.0, conf.bin_size)), None)
+        if unit is None:
+            return None
+        memo = (self.extend_unit_dir(name, key.change(segment=seg), *unit),
+                tuple(sorted(n.name for n in active_norms)), tuple(map(tuple, conf.tail_intervals)))
+        if memo not in self._extend_tails:
+            ext, computed = self.extend_ccg_for(name, key.change(segment=seg), *unit)
+            refs, tgts = self.ccg_for(key)._ref_tgt_grid()
+            ext, _ = CCGNorm.apply(np.asarray(ext, dtype=float), None, refs, tgts, active_norms,
+                                   self.nd.neurons_for(key), custom_time_hours=self.time_hours_for(key, seg))
+            mask = ConnectionStrength.tail_mask(ext.shape[-1], conf, conf.bin_size)
+            self._extend_tails[memo] = (np.where(computed, ext[..., mask].mean(axis=-1), np.nan),
+                                        ConnectionStrength.tail_range(mask, conf.bin_size))
+        return self._extend_tails[memo]
 
     def compute_extend(self, name: str, key, window_ms: float, bin_ms: float, pairs) -> str:
         """Extend every combination of the neurons *pairs* touch, ACGs included, and merge it into the unit."""
@@ -1061,11 +1087,13 @@ class CCGDataset(AnalysisDataset, Cacheable):
         return os.path.join(self.custom_dir, 'families.json')
 
     def custom_families(self, segments) -> dict:
-        """Name-stem families (≥2 members) merged with the manual ones in ``families.json``."""
+        """Numbered name-stem families (≥2 members, in name order) merged with the manual ones in ``families.json``."""
         fam = defaultdict(list)
-        for seg in segments:
-            fam[seg.rstrip('0123456789')].append(seg)
-        fam = {f: m for f, m in fam.items() if len(m) > 1 and f not in m}
+        for seg in sorted(segments):
+            stem = seg.rstrip('0123456789')
+            if stem != seg:   # 'sd' stays a segment while sd01, sd02 make the family
+                fam[stem].append(seg)
+        fam = {f: m for f, m in fam.items() if len(m) > 1}
         if os.path.exists(self.custom_families_path):
             with open(self.custom_families_path) as f:
                 manual = json.load(f)
@@ -1197,13 +1225,45 @@ class CCGDataset(AnalysisDataset, Cacheable):
         data = self.ccg_for(key)
         refs, tgts = data._ref_tgt_grid()
         seg = self.segment_index(key, key.segment)
+        neurons, hours = self.nd.neurons_for(key), self.time_hours_for(key, key.segment)
         return ConnectionStrength.conn_strength(
             data.ccg[seg], data.ccg_null[seg], refs, tgts, data.conf,
             metric=cfg.cs_metric, method=cfg.baseline_method, active_norms=active_norms,
-            lo=cfg.min_lag_bin, hi=cfg.max_lag_bin,
-            neurons=self.nd.neurons_for(key),
-            custom_time_hours=self.time_hours_for(key, key.segment),
+            lo=cfg.min_lag_bin, hi=cfg.max_lag_bin, neurons=neurons, custom_time_hours=hours,
+            baseline=self._extended_tail_baseline(key, data, seg, active_norms, cfg, neurons, hours),
             excitability=key.excitability)
+
+    def extend_tail_fallbacks(self, name: str, segment: str) -> list:
+        """``[(session, resolution, why)]`` where extend *name* leaves the tailed baseline native, wholly or for some pairs."""
+        units = {(s, sg): (b, n) for nm, s, _w, b, n, sg in self.saved_extends() if nm == name}
+        out = []
+        for k in self.nd.session_keys:
+            sess, unit = str(k.session), units.get((str(k.session), segment))
+            n_all = self.nd.neurons_for(k).n_neurons ** 2
+            for res in self.conf.resolutions:
+                bin_ms = self.conf.at(res).bin_size * 1e3
+                why = (f"no extend for segment '{segment}'" if unit is None
+                       else f"extend bin {unit[0]:g} ms ≠ {bin_ms:g} ms" if not np.isclose(unit[0], bin_ms)
+                       else f"{n_all - unit[1]} of {n_all} pairs not extended" if unit[1] < n_all else None)
+                if why:
+                    out.append((sess, res, why))
+        return out
+
+    def uses_extend_tail(self, baseline_method: str, tail_extend: str) -> bool:
+        """Whether an extend can feed the baseline: only the tailed mean of the CCG's own bins reads tails."""
+        return bool(tail_extend) and baseline_method == 'tailed' and self.conf.tail_source == 'bins'
+
+    def _extended_tail_baseline(self, key, data, seg, active_norms, cfg, neurons, hours):
+        """Tailed baseline grid with the extend's tail mean wherever it was computed; None leaves the native fit."""
+        ext = (self.extend_tail(key, cfg.tail_extend, active_norms)
+               if self.uses_extend_tail(cfg.baseline_method, cfg.tail_extend) else None)
+        if ext is None:
+            return None
+        refs, tgts = data._ref_tgt_grid()
+        ccg, null = CCGNorm.apply(data.ccg[seg], data.ccg_null[seg], refs, tgts, active_norms,
+                                  neurons, custom_time_hours=hours)
+        native = ConnectionStrength.baseline(ccg, null, data.conf, 'tailed')
+        return np.where(np.isfinite(ext[0])[..., None], ext[0][..., None], native)
 
     def jitter_path(self) -> str:
         return os.path.join(self.save_path, 'jitter', 'jitter_results.hkl')
@@ -1212,9 +1272,10 @@ class CCGDataset(AnalysisDataset, Cacheable):
         """Persist jitter percentile bands; the raw njitter draws are never stored."""
         path = self.jitter_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        bundle = {str(nd): {'_'.join(str(p) for p in ck): v for ck, v in pairs.items()}
-                  for nd, pairs in self._jitter_results.items() if pairs}
-        hkl.dump(bundle, path)
+        bundle = hkl.load(path) if os.path.isfile(path) else {}
+        for nd, pairs in self._jitter_results.items():
+            bundle.setdefault(str(nd), {}).update({'_'.join(str(p) for p in ck): v for ck, v in pairs.items()})
+        hkl.dump({nd: pairs for nd, pairs in bundle.items() if pairs}, path)
         return path
 
     def pair_jitter_path(self) -> str:
@@ -1397,7 +1458,8 @@ class CCGDataset(AnalysisDataset, Cacheable):
                 n = spec.splits_for((active[-1][1] - active[0][0]) if active else t1 - t0)
                 if active:   # raw_span with a filter: split the filtered span, not the full window
                     t0, t1 = active[0][0], active[-1][1]
-                chunks = IntervalOp.partition(t0, t1, n, overlap, name)
+                chunks = (IntervalOp.partition_fixed(t0, t1, spec.seg_len_sec, n, name) if spec.seg_len_sec > 0
+                          else IntervalOp.partition(t0, t1, n, overlap, name))
             for c0, c1, cname in chunks:  # keep chunks that have real active intervals
                 src = CCGSourceConfig(key=key.change(segment=cname), t0=c0, t1=c1,
                                       overlap_sec=overlap, filter_state=fs)
